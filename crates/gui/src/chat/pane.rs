@@ -42,8 +42,6 @@ enum Pending {
     /// A queued message taken back into the draft, by its ID (see
     /// `ChatView::take_back`).
     TakeBack(u64),
-    /// What's typed in the box, told (see `chat::prompts`).
-    Draft,
     /// Older turns, before the one numbered so.
     History(u32),
 }
@@ -294,7 +292,6 @@ impl ChatPane {
             let pending = match action {
                 ChatAction::SendTo { .. } | ChatAction::Submit { .. } => Pending::Handoff,
                 ChatAction::TakeBack { queued } => Pending::TakeBack(queued),
-                ChatAction::Draft { .. } => Pending::Draft,
                 ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. } => Pending::Control,
                 _ => Pending::Other,
             };
@@ -316,10 +313,10 @@ impl ChatPane {
     /// since it changed, or whenever it's changed if `now`, as the window
     /// closes (see `chat::prompts`). Returns whether it told it.
     pub(crate) fn send_draft(&mut self, now: bool) -> bool {
-        let Some((text, by)) = self.view.take_draft(now) else {
+        let Some(text) = self.view.take_draft(now) else {
             return false;
         };
-        self.ask(ChatAction::Draft { text, by }, Pending::Draft);
+        self.ask(ChatAction::Draft { text }, Pending::Other);
         true
     }
 
@@ -611,7 +608,6 @@ impl ChatPane {
             }
             (Some(Pending::Control), response) => self.view.queue_answer(response),
             (Some(Pending::TakeBack(id)), response) => self.view.taken_back(id, response),
-            (Some(Pending::Draft), response) => self.view.draft_answered(&response),
 
             (Some(Pending::Handoff), response) => self.view.handoff_answer(response),
             (Some(Pending::Original(serial)), response) => {

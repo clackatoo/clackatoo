@@ -2,9 +2,10 @@
 //! and taking one back into the box to edit, as Claude Code's Up does:
 //! the daemon moves it out of the queue into the chat's draft in one step
 //! (`ChatAction::TakeBack`), before what the box told it was typed, and
-//! every box that hasn't changed since takes it, as any draft. Nothing of
-//! it lives only in a window.
-use clackatoo_protocol::{ChatAction, ChatTarget, QueuedMessage, Response};
+//! answers with the draft that makes, which goes in the box. Nothing of it
+//! lives only in a window: with the window gone, the next to open the
+//! chat starts with it.
+use clackatoo_protocol::{ChatAction, ChatTarget, QueuedMessage};
 
 use super::{ChatView, Settled, handoff};
 
@@ -98,38 +99,21 @@ impl super::ChatView {
         if self.memory.taking_back.is_some() {
             return;
         }
-        if let Some((text, by)) = self.take_draft(true) {
-            settled.actions.push(ChatAction::Draft { text, by });
+        let text = message.text.clone();
+        if let Some(typed) = self.take_draft(true) {
+            settled.actions.push(ChatAction::Draft { text: typed });
         }
-        self.memory.taking_back = Some(id);
+        self.memory.taking_back = Some(super::prompts::TakingBack {
+            id,
+            text,
+            told: self.memory.synced.clone(),
+        });
         settled.actions.push(ChatAction::TakeBack { queued: id });
     }
 
     /// Whether the message `id` is being taken back into the box.
     #[cfg(test)]
     pub(crate) fn taking_back(&self, id: u64) -> bool {
-        self.memory.taking_back == Some(id)
-    }
-
-    /// Takes the daemon's answer to taking the message `id` back: once
-    /// it's done, the draft it made comes as any draft does.
-    pub(crate) fn taken_back(&mut self, id: u64, response: Response) {
-        if self
-            .memory
-            .taking_back
-            .take_if(|taking| *taking == id)
-            .is_none()
-        {
-            return;
-        }
-        match response {
-            Response::Done => {}
-            Response::Error(error) => {
-                self.say(error.to_string());
-            }
-            _ => {
-                self.say("The message wasn't taken back: check the queue".into());
-            }
-        }
+        (self.memory.taking_back.as_ref()).is_some_and(|taking| taking.id == id)
     }
 }

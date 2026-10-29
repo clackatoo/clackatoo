@@ -16,26 +16,23 @@
 //! and on the phone, and through upgrades. In normal mode, `k` and `j`
 //! still move through the conversation.
 //!
-//! What's typed is kept by the daemon, by one rule, the same on the phone
-//! (see `chat/draft.rs` in the daemon):
+//! What's typed is kept by the daemon, as the chat's draft, the same way
+//! on the phone (see `chat/draft.rs` in the daemon):
 //!
-//! - The window tells it as typing pauses, and at once as the box empties,
-//!   as on sending, with a number of its own for itself, which the
-//!   daemon's patch carries back: a window never takes its own draft.
-//! - It takes a draft that comes, an empty one too, only if its box hasn't
-//!   changed since the last draft it took or told. So what someone is
-//!   typing is never replaced, and a box nobody has touched follows:
-//!   sending in one window empties the box in another.
-//! - Every draft told comes back from the daemon, and one another client
-//!   told that comes before it was told before it, so it's passed over.
-//! - A draft told that hasn't come back (gone with the connection, or
-//!   refused by an older daemon) stands against the one a snapshot
-//!   brings, and is told again.
+//! - The window tells it as typing pauses, at once as the box empties,
+//!   and as it closes. The daemon keeps the last told, from any client.
+//! - A box takes the daemon's draft only while it's empty and untouched
+//!   here: as the window first shows the chat, so a window opened again,
+//!   after an upgrade, or elsewhere starts with it. A box once typed in
+//!   is never changed by what's typed elsewhere: typing isn't mirrored
+//!   from box to box.
+//! - A message sent from any box empties every other box holding just
+//!   that (`ChatPatch::DraftCleared`), and leaves one holding anything
+//!   else as it is.
 //!
 //! Text only: images pasted stay in the window. A daemon that keeps no
 //! drafts is told none; the box is the window's alone then.
 
-use std::hash::{BuildHasher as _, Hasher as _};
 use std::time::Duration;
 
 use clackatoo_protocol::{DRAFT_LONGEST, Response, recent_prompts};
@@ -52,53 +49,32 @@ pub(crate) const DRAFT_PAUSE: Duration = Duration::from_millis(600);
 pub(crate) const DRAFT_MOST: Duration = Duration::from_secs(3);
 
 /// What the box remembers, beside what's in it.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct Memory {
     /// Where Up and Down have gone through the messages sent, and the text
     /// they showed: typing anything else forgets it.
     pub(super) recall: Option<(Walk, String)>,
-    /// The queued message being taken back into the box, by its ID, until
-    /// the daemon answers.
-    pub(super) taking_back: Option<u64>,
-    /// The last draft the box took or told: while what's typed is this,
-    /// the box hasn't changed, and takes the next draft that comes.
+    /// The queued message being taken back into the box, until the daemon
+    /// answers: its ID and text, and what the box told it was typed as it
+    /// asked.
+    pub(super) taking_back: Option<TakingBack>,
+    /// What the daemon was last told is typed, or the draft the box took.
     pub(super) synced: String,
     /// When what's typed first changed since, and last changed, as turns
     /// count time.
     pub(super) changed: Option<(u64, u64)>,
-    /// The window's own number for this box, random, which drafts it told
-    /// carry back.
-    pub(super) by: u64,
-    /// Drafts told that haven't come back yet.
-    pub(super) awaiting: u32,
-    /// A draft told may not have reached the daemon: the connection went
-    /// with it unanswered, or the daemon refused it.
-    pub(super) lost: bool,
+    /// The box has been typed in here: it never takes the daemon's draft
+    /// again.
+    pub(super) touched: bool,
 }
 
-impl Default for Memory {
-    fn default() -> Self {
-        Self {
-            recall: None,
-            taking_back: None,
-            synced: String::new(),
-            changed: None,
-            by: own_number(),
-            awaiting: 0,
-            lost: false,
-        }
-    }
-}
-
-/// A random number, other than 0, which is the daemon's, for a box to
-/// know its own drafts by.
-fn own_number() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
-    hasher.write_u32(std::process::id());
-    hasher.finish().max(1)
+/// A queued message being taken back into the box (see
+/// [`Memory::taking_back`]).
+#[derive(Debug)]
+pub(super) struct TakingBack {
+    pub(super) id: u64,
+    pub(super) text: String,
+    pub(super) told: String,
 }
 
 /// A duration as turns count time, in milliseconds.
@@ -106,57 +82,57 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `message`, taken back, before `typed`, on a line of its own.
+fn joined(message: &str, typed: &str) -> String {
+    if typed.is_empty() {
+        message.to_owned()
+    } else {
+        format!("{message}\n{typed}")
+    }
+}
+
 impl ChatView {
     /// Takes in the chat whole, as first seen or seen again: the messages
     /// sent, worked out from its turns if an older daemon didn't send
-    /// them, and the draft, which the box takes if it hasn't changed since
-    /// the last it took or told, unless a draft it told may be lost, which
-    /// stands, and is told again.
+    /// them, and the draft, which the box takes only while it's empty and
+    /// untouched here.
     pub(super) fn came_whole(&mut self) {
         if self.node.prompts.is_empty() {
             self.node.prompts = recent_prompts(&self.node.turns);
         }
-        let draft = self.node.draft.clone();
-        let lost = self.memory.lost || self.memory.awaiting > 0;
-        if !lost && self.editor.raw_text() == self.memory.synced {
-            self.put_draft(&draft);
+        let draft = &self.node.draft;
+        if !self.memory.touched
+            && self.editor.raw_text().is_empty()
+            && self.images.is_empty()
+            && !draft.is_empty()
+        {
+            let draft = draft.clone();
+            self.editor.set_text(&draft);
+            self.queued.push(Input::CaretToEnd);
+            self.memory.synced = draft;
         }
-        // What's typed here, if it isn't that, is told it.
-        self.memory.synced = draft;
-        self.memory.lost = false;
-        self.memory.awaiting = 0;
-        self.note_draft();
     }
 
-    /// Takes in a draft another window, or the phone, or the daemon told,
-    /// numbered `rev`: into the box, if it hasn't changed since the last
-    /// draft it took or told. Its own, it notes came back; one told before
-    /// its own came back, or replaced since, it passes over.
-    pub(super) fn draft_came(&mut self, text: &str, rev: u64, by: u64) {
-        if by == self.memory.by {
-            self.memory.awaiting = self.memory.awaiting.saturating_sub(1);
-            return;
-        }
-        if rev == 0 || self.memory.awaiting > 0 || self.editor.raw_text() != self.memory.synced {
-            return;
-        }
-        self.put_draft(text);
-        text.clone_into(&mut self.memory.synced);
-    }
-
-    /// Makes the box `text`, with the caret at its end, if it isn't.
-    fn put_draft(&mut self, text: &str) {
-        if self.editor.raw_text() != text {
-            self.editor.set_text(text);
+    /// A message, `sent`, was sent from a box, which emptied the daemon's
+    /// draft: this box empties too if it holds just that, ignoring white
+    /// space at its ends, and anything else typed here is told again.
+    pub(super) fn draft_sent(&mut self, sent: &str) {
+        let sent = sent.trim();
+        if !sent.is_empty() && self.editor.raw_text().trim() == sent {
+            self.editor.set_text("");
             self.memory.recall = None;
             self.queued.push(Input::CaretToEnd);
         }
+        self.memory.synced.clear();
+        self.note_draft();
     }
 
-    /// Notes whether what's typed has changed since the last draft taken
-    /// or told, and when, for it to be told as typing pauses.
+    /// Notes whether what's typed has changed since the daemon was last
+    /// told, and when, for it to be told as typing pauses.
     pub(super) fn note_draft(&mut self) {
-        if !self.drafts_supported || self.editor.raw_text() == self.memory.synced {
+        let changed = self.editor.raw_text() != self.memory.synced;
+        self.memory.touched |= changed;
+        if !changed || !self.drafts_supported {
             self.memory.changed = None;
             return;
         }
@@ -166,8 +142,7 @@ impl ChatView {
     }
 
     /// When what's typed is to be told the daemon, if it's to be: as
-    /// typing pauses, or at once once the box is empty, as after sending,
-    /// so other boxes empty too and none opened next starts with it.
+    /// typing pauses, or at once once the box is empty, as after sending.
     pub(super) fn draft_due(&self) -> Option<u64> {
         let (first, last) = self.memory.changed?;
         if self.editor.raw_text().is_empty() {
@@ -177,8 +152,8 @@ impl ChatView {
     }
 
     /// What's typed, to tell the daemon, if it's due, or whenever it's
-    /// changed if `now`, as the window closes; and the box's number.
-    pub(crate) fn take_draft(&mut self, now: bool) -> Option<(String, u64)> {
+    /// changed if `now`, as the window closes.
+    pub(crate) fn take_draft(&mut self, now: bool) -> Option<String> {
         if now {
             self.note_draft();
         }
@@ -189,30 +164,67 @@ impl ChatView {
         self.memory.changed = None;
         let mut text = self.editor.raw_text().to_owned();
         self.memory.synced.clone_from(&text);
-        self.memory.awaiting += 1;
         if text.len() > DRAFT_LONGEST {
             text.truncate(text.floor_char_boundary(DRAFT_LONGEST));
         }
-        Some((text, self.memory.by))
+        Some(text)
     }
 
-    /// Takes the daemon's answer to a draft told: refused, as by an older
-    /// daemon, it won't come back.
-    pub(crate) fn draft_answered(&mut self, response: &Response) {
-        if !matches!(response, Response::Done) {
-            self.memory.awaiting = self.memory.awaiting.saturating_sub(1);
-            self.memory.lost = true;
+    /// Takes the daemon's answer to taking the queued message `id` back:
+    /// the draft it made, the message before what the box told it was
+    /// typed, goes in the box, before anything typed since.
+    pub(crate) fn taken_back(&mut self, id: u64, response: Response) {
+        let Some(taking) = self.memory.taking_back.take_if(|taking| taking.id == id) else {
+            return;
+        };
+        match response {
+            Response::Text(made) => {
+                let typed = self.editor.raw_text().to_owned();
+                let text = if typed == taking.told {
+                    made.clone()
+                } else {
+                    let message = (made.strip_suffix(&taking.told))
+                        .filter(|_| !taking.told.is_empty())
+                        .and_then(|rest| rest.strip_suffix('\n'))
+                        .unwrap_or(&made);
+                    joined(message, &typed)
+                };
+                self.put_taken_back(&text);
+                self.memory.synced = made;
+                self.note_draft();
+            }
+            Response::Error(error) => {
+                self.say(error.to_string());
+            }
+            _ => {
+                self.say("The message wasn't taken back: check the queue".into());
+            }
         }
     }
 
-    /// The daemon went out of reach: drafts told that haven't come back
-    /// may be lost.
-    pub(super) fn drafts_offline(&mut self) {
-        if self.memory.awaiting > 0 {
-            self.memory.lost = true;
-        }
-        self.memory.awaiting = 0;
-        self.memory.taking_back = None;
+    /// The daemon went out of reach while a queued message was being taken
+    /// back, so whether it's out of the queue isn't known: its text goes in
+    /// the box all the same, rather than be lost, and the bar says to check
+    /// the queue.
+    pub(super) fn take_back_lost(&mut self) {
+        let Some(taking) = self.memory.taking_back.take() else {
+            return;
+        };
+        let text = joined(&taking.text, self.editor.raw_text());
+        self.put_taken_back(&text);
+        self.note_draft();
+        self.say(
+            "Disconnected while taking a queued message back: check the queue, as it may still be there"
+                .into(),
+        );
+    }
+
+    /// Makes the box `text`, a message taken back, with the caret at its
+    /// end.
+    fn put_taken_back(&mut self, text: &str) {
+        self.editor.set_text(text);
+        self.memory.recall = None;
+        self.queued.push(Input::CaretToEnd);
     }
 
     /// Up or Down, in insert mode: the message sent before or after, on
@@ -417,15 +429,24 @@ mod tests {
         }
     }
 
-    /// A patch saying the draft is now `text`, numbered `rev`, set by `by`.
-    fn draft(text: &str, rev: u64, by: u64) -> clackatoo_protocol::ViewUpdate {
+    /// A patch saying `sent` was sent from a box.
+    fn sent_from_a_box(sent: &str) -> clackatoo_protocol::ViewUpdate {
         clackatoo_protocol::ViewUpdate::Patch(vec![clackatoo_protocol::Patch::Chat(
-            clackatoo_protocol::ChatPatch::Draft {
-                text: text.into(),
-                rev,
-                by,
-            },
+            clackatoo_protocol::ChatPatch::DraftCleared { sent: sent.into() },
         )])
+    }
+
+    /// The chat whole again, its draft `draft`, as after a reconnect.
+    fn whole(view: &mut ChatView, draft: &str) {
+        let mut node = view.node.clone();
+        node.draft = draft.into();
+        view.apply(&clackatoo_protocol::ViewUpdate::Snapshot(
+            clackatoo_protocol::View {
+                title: "chat".into(),
+                cwd: None,
+                root: clackatoo_protocol::Node::Chat(Box::new(node)),
+            },
+        ));
     }
 
     /// A chat whose daemon keeps drafts.
@@ -436,14 +457,14 @@ mod tests {
         view
     }
 
-    /// Tells the daemon what's typed, as the window closing would, and has
-    /// it answer, and come back.
-    fn told(view: &mut ChatView) -> String {
-        let (text, by) = view.take_draft(true).expect("something to tell");
-        assert_eq!(by, view.memory.by);
-        view.draft_answered(&Response::Done);
-        view.draft_came(&text, 1, by);
-        text
+    /// A window opening a chat whose daemon keeps `draft`.
+    fn opening(draft: &str, fonts: &mut Fonts) -> ChatView {
+        let mut node = talk(&[("fix the tests", "Done.")]);
+        node.draft = draft.into();
+        let mut view = ChatView::new("chat".into(), node);
+        view.drafts_supported = true;
+        view.settle(fonts);
+        view
     }
 
     #[test]
@@ -454,51 +475,66 @@ mod tests {
         let settled = named(&mut view, &mut fonts, NamedKey::ArrowUp);
         assert_eq!(settled.actions, [ChatAction::TakeBack { queued: 2 }]);
         assert!(view.taking_back(2));
-        // The daemon moved it into the draft: the box, unchanged, takes it.
-        view.apply(&draft("second", 1, 0));
-        view.taken_back(2, Response::Done);
+        // The daemon answers with the draft it made, which goes in the box.
+        view.taken_back(2, Response::Text("second".into()));
         view.settle(&mut fonts);
         assert_eq!(shown(&view), "second");
         assert!(!view.taking_back(2));
-        // With something typed, the pencil tells it first, for the
-        // message to go before it.
-        view.editor.set_text("");
-        told(&mut view);
-        typed(&mut view, &mut fonts, "and");
-        let mut settled = Settled::default();
-        view.take_back(1, &mut settled);
-        let by = view.memory.by;
-        assert_eq!(
-            settled.actions,
-            [
-                ChatAction::Draft {
-                    text: "and".into(),
-                    by
-                },
-                ChatAction::TakeBack { queued: 1 }
-            ]
-        );
-        view.draft_answered(&Response::Done);
-        // Its own comes back, then the daemon's.
-        view.apply(&draft("and", 2, by));
-        view.apply(&draft("first\nand", 3, 0));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "first\nand");
-        // Refused, it says why.
-        view.taken_back(
-            1,
-            Response::Error(clackatoo_protocol::Error::Other("already sent".into())),
-        );
+        assert_eq!(view.take_draft(true), None, "the daemon has it already");
+        // Refused, it says why, and the box is as it was.
         let mut settled = Settled::default();
         view.take_back(1, &mut settled);
         view.taken_back(
             1,
             Response::Error(clackatoo_protocol::Error::Other("already sent".into())),
         );
+        assert_eq!(shown(&view), "second");
         assert!(
             view.said
                 .as_deref()
                 .is_some_and(|said| said.contains("already sent"))
+        );
+    }
+
+    #[test]
+    fn a_queued_message_taken_back_while_typing_goes_before_whats_typed() {
+        let mut fonts = fonts();
+        let mut view = keeping();
+        view.node.delivery.queued = vec![queued(1, "first", 0)];
+        typed(&mut view, &mut fonts, "and");
+        // The pencil tells what's typed first, for the message to go
+        // before it.
+        let mut settled = Settled::default();
+        view.take_back(1, &mut settled);
+        assert_eq!(
+            settled.actions,
+            [
+                ChatAction::Draft { text: "and".into() },
+                ChatAction::TakeBack { queued: 1 }
+            ]
+        );
+        // Typed on before the answer comes, that stays too.
+        typed(&mut view, &mut fonts, " now");
+        view.taken_back(1, Response::Text("first\nand".into()));
+        view.settle(&mut fonts);
+        assert_eq!(shown(&view), "first\nand now");
+        assert_eq!(view.take_draft(true).as_deref(), Some("first\nand now"));
+    }
+
+    #[test]
+    fn a_message_being_taken_back_as_the_daemon_goes_out_of_reach_isnt_lost() {
+        let mut fonts = fonts();
+        let mut view = keeping();
+        view.node.delivery.queued = vec![queued(4, "the lint too", 0)];
+        named(&mut view, &mut fonts, NamedKey::ArrowUp);
+        assert!(view.taking_back(4));
+        view.set_offline(true);
+        view.settle(&mut fonts);
+        assert_eq!(shown(&view), "the lint too");
+        assert!(
+            view.said
+                .as_deref()
+                .is_some_and(|said| said.contains("check the queue"))
         );
     }
 
@@ -510,16 +546,14 @@ mod tests {
         view.node.delivery.queued = vec![queued(1, "first", 0)];
         let settled = named(&mut view, &mut fonts, NamedKey::ArrowUp);
         assert!(settled.actions.is_empty());
+        typed(&mut view, &mut fonts, "x");
         assert_eq!(view.take_draft(true), None, "nor is told what's typed");
     }
 
     #[test]
     fn a_queued_message_taken_back_with_no_window_open_is_the_next_windows_draft() {
         let mut fonts = fonts();
-        let mut node = talk(&[("fix the tests", "Done.")]);
-        node.draft = "review the tests\nand the lint".into();
-        let mut view = ChatView::new("chat".into(), node);
-        view.settle(&mut fonts);
+        let view = opening("review the tests\nand the lint", &mut fonts);
         assert_eq!(shown(&view), "review the tests\nand the lint");
     }
 
@@ -578,14 +612,13 @@ mod tests {
     fn whats_typed_is_told_the_daemon_as_typing_pauses_and_at_once_once_sent() {
         let mut fonts = fonts();
         let mut view = keeping();
-        let by = view.memory.by;
         view.clock = Some(10_000);
         typed(&mut view, &mut fonts, "half");
         assert_eq!(view.take_draft(false), None, "typing hasn't paused");
         view.clock = Some(10_599);
         assert_eq!(view.take_draft(false), None);
         view.clock = Some(10_600);
-        assert_eq!(view.take_draft(false), Some(("half".into(), by)));
+        assert_eq!(view.take_draft(false).as_deref(), Some("half"));
         assert_eq!(view.take_draft(false), None, "told once");
         // Typing on and on is told every few seconds all the same.
         let mut told = Vec::new();
@@ -595,118 +628,71 @@ mod tests {
             told.extend(view.take_draft(false).map(|_| step));
         }
         assert_eq!(told, [6]);
-        // Sent, the box is empty at once, everywhere.
+        // Sent, the box is empty at once.
         named(&mut view, &mut fonts, NamedKey::Enter);
         assert_eq!(shown(&view), "");
-        assert_eq!(view.take_draft(false), Some((String::new(), by)));
+        assert_eq!(view.take_draft(false).as_deref(), Some(""));
         // As the window closes, whatever changed goes.
         typed(&mut view, &mut fonts, "bye");
-        assert_eq!(view.take_draft(true), Some(("bye".into(), by)));
+        assert_eq!(view.take_draft(true).as_deref(), Some("bye"));
     }
 
     #[test]
-    fn a_draft_from_elsewhere_goes_only_in_a_box_unchanged_since_the_last_taken_or_told() {
+    fn a_window_opening_a_chat_starts_with_its_draft_and_then_its_own_box_is_its_own() {
         let mut fonts = fonts();
-        let mut node = talk(&[("fix the tests", "Done.")]);
-        node.draft = "and then".into();
-        let mut view = ChatView::new("chat".into(), node);
-        view.drafts_supported = true;
-        view.settle(&mut fonts);
+        let mut view = opening("and then", &mut fonts);
         assert_eq!(shown(&view), "and then");
-        // The caret is at its end, to type on.
+        assert_eq!(view.take_draft(true), None, "nothing to tell back");
+        // Typed on: the caret is at its end.
         typed(&mut view, &mut fonts, " the docs");
         assert_eq!(shown(&view), "and then the docs");
-        // Typed here, what's typed elsewhere doesn't replace it.
-        view.apply(&draft("on the phone", 2, 99));
+        // A reconnect never replaces what's here.
+        whole(&mut view, "on the phone");
         view.settle(&mut fonts);
         assert_eq!(shown(&view), "and then the docs");
-        // Told, the box is unchanged since: the next draft replaces it.
-        told(&mut view);
-        view.apply(&draft("on the phone", 4, 99));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "on the phone");
-        assert_eq!(view.take_draft(true), None, "nothing to tell back");
-        // One replaced since is passed over.
-        view.apply(&draft("", 0, 0));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "on the phone");
-    }
-
-    #[test]
-    fn a_window_never_takes_back_its_own_draft_after_clearing() {
-        let mut fonts = fonts();
-        let mut view = keeping();
-        let mine = view.memory.by;
-        typed(&mut view, &mut fonts, "abc");
-        told(&mut view);
-        // Cleared, and its own draft's patch comes after.
+        // Nor fills a box emptied here.
         view.editor.set_text("");
         view.settle(&mut fonts);
-        view.apply(&draft("abc", 1, mine));
+        whole(&mut view, "on the phone");
         view.settle(&mut fonts);
         assert_eq!(shown(&view), "");
-        // Told; another's, told before its own, comes before its own
-        // comes back: it's passed over.
-        let (text, _) = view.take_draft(true).unwrap();
-        assert_eq!(text, "");
-        view.apply(&draft("abc", 2, 41));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "");
-        view.apply(&draft("", 3, mine));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "");
-        // One told after its own comes in, as the box hasn't changed.
-        view.apply(&draft("from the phone", 4, 41));
-        view.settle(&mut fonts);
-        assert_eq!(shown(&view), "from the phone");
     }
 
     #[test]
-    fn a_box_unchanged_empties_once_another_window_sends() {
+    fn a_box_holding_a_message_another_window_sent_empties() {
         let mut fonts = fonts();
-        // Window B took what A typed, and nobody typed in B since.
-        let mut node = talk(&[("fix the tests", "Done.")]);
-        node.draft = "and then".into();
-        let mut b = ChatView::new("chat".into(), node);
-        b.drafts_supported = true;
-        b.settle(&mut fonts);
-        assert_eq!(shown(&b), "and then");
-        // A sends it, and tells the empty draft.
-        b.apply(&draft("", 3, 41));
+        let mut b = opening("fix the lint", &mut fonts);
+        b.apply(&sent_from_a_box("fix the lint\n"));
         b.settle(&mut fonts);
         assert_eq!(shown(&b), "");
-        assert_eq!(b.take_draft(true), None);
+        assert_eq!(b.take_draft(true), None, "the daemon's is empty too");
     }
 
     #[test]
-    fn an_empty_draft_lost_with_the_connection_isnt_undone_by_the_snapshot_after() {
+    fn a_box_holding_something_else_keeps_it_when_another_window_sends() {
         let mut fonts = fonts();
-        let mut view = keeping();
-        typed(&mut view, &mut fonts, "abc");
-        told(&mut view);
-        // Cleared and told, but the connection goes before the answer.
+        let mut b = opening("fix the lint", &mut fonts);
+        typed(&mut b, &mut fonts, " and the docs");
+        assert!(b.take_draft(true).is_some());
+        b.apply(&sent_from_a_box("fix the lint"));
+        b.settle(&mut fonts);
+        assert_eq!(shown(&b), "fix the lint and the docs");
+        // The daemon's draft is empty now: what's here is told again.
+        assert_eq!(
+            b.take_draft(true).as_deref(),
+            Some("fix the lint and the docs")
+        );
+    }
+
+    #[test]
+    fn nothing_typed_elsewhere_comes_into_a_box_live() {
+        let mut fonts = fonts();
+        let mut view = opening("old words", &mut fonts);
+        // Cleared here; another box's message sent isn't this.
         view.editor.set_text("");
         view.settle(&mut fonts);
-        let (text, _) = view.take_draft(true).unwrap();
-        assert_eq!(text, "");
-        view.set_offline(true);
-        // Back, the daemon still has the old draft: the box stays empty,
-        // and tells it again.
-        let mut node = view.node.clone();
-        node.draft = "abc".into();
-        view.set_offline(false);
-        view.apply(&clackatoo_protocol::ViewUpdate::Snapshot(
-            clackatoo_protocol::View {
-                title: "chat".into(),
-                cwd: None,
-                root: clackatoo_protocol::Node::Chat(Box::new(node)),
-            },
-        ));
+        view.apply(&sent_from_a_box("other words"));
         view.settle(&mut fonts);
         assert_eq!(shown(&view), "");
-        assert_eq!(
-            view.take_draft(true).map(|(text, _)| text).as_deref(),
-            Some("")
-        );
     }
 }
