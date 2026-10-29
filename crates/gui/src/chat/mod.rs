@@ -265,10 +265,11 @@ pub(crate) struct ChatView {
     /// Whether the daemon can send a failed message again
     /// (`ChatAction::Resend`).
     resend_supported: bool,
-    /// When the bar said the last turn already ran commands or changed
-    /// files, as it was asked to be sent again, in milliseconds since the
-    /// Unix epoch: asked again soon after, it's sent anyway.
-    resend_armed: Option<u64>,
+    /// When the bar said the last turn already started tools that may
+    /// have done something, as it was asked to be sent again, in
+    /// milliseconds since the Unix epoch, and how many turns there were:
+    /// asked again soon after, with no turn since, it's sent anyway.
+    resend_armed: Option<(u64, usize)>,
     /// Whether what a turn spent and what the session cost are shown
     /// (`chatcost`).
     show_cost: bool,
@@ -2649,54 +2650,65 @@ impl ChatView {
 
     /// The last turn's message is asked to be sent again, by `R` or its
     /// button: `Some(true)` if it's to go now; `Some(false)` if, as the
-    /// turn already ran commands or changed files, which would be done
-    /// again, the bar says so, and it goes only if asked again within
-    /// [`RESEND_AGAIN`]; `None` if it can't be.
+    /// turn already started tools that may have done something, which
+    /// would be done again, the bar says so, and it goes only if asked
+    /// again within [`RESEND_AGAIN`] while that's still the last turn;
+    /// `None` if it can't be.
     fn resend_asked(&mut self) -> Option<bool> {
         if !self.can_resend() {
             return None;
         }
-        let now = self.now();
-        let again =
-            (self.resend_armed.take()).is_some_and(|at| now.saturating_sub(at) < RESEND_AGAIN);
-        let done = |kinds: &[clackatoo_protocol::ToolKind]| {
-            (self.node.turns.last().into_iter())
-                .flat_map(|turn| &turn.items)
-                .filter(|item| {
-                    matches!(item, clackatoo_protocol::Item::Tool(tool)
-                        if tool.status == clackatoo_protocol::ToolStatus::Done && kinds.contains(&tool.kind))
-                })
-                .count()
-        };
-        let commands = done(&[clackatoo_protocol::ToolKind::Execute]);
-        let files = done(&[
-            clackatoo_protocol::ToolKind::Edit,
-            clackatoo_protocol::ToolKind::Delete,
-            clackatoo_protocol::ToolKind::Move,
-        ]);
-        if again || commands + files == 0 {
+        let (now, turns) = (self.now(), self.node.turns.len());
+        let again = (self.resend_armed.take())
+            .is_some_and(|(at, of)| of == turns && now.saturating_sub(at) < RESEND_AGAIN);
+        // Every tool it started, however it went, that may change
+        // something: commands, changes to files, and any other, as an
+        // MCP server's; not reads, searches, fetches or thinking, nor the
+        // rows clackatoo adds itself.
+        let (mut commands, mut files, mut others) = (0, 0, 0);
+        let tools = (self.node.turns.last().into_iter())
+            .flat_map(|turn| &turn.items)
+            .filter_map(|item| match item {
+                clackatoo_protocol::Item::Tool(tool) if !tool.id.starts_with("clackatoo-") => {
+                    Some(tool.kind)
+                }
+                _ => None,
+            });
+        for kind in tools {
+            use clackatoo_protocol::ToolKind;
+            match kind {
+                ToolKind::Execute => commands += 1,
+                ToolKind::Edit | ToolKind::Delete | ToolKind::Move => files += 1,
+                ToolKind::Other => others += 1,
+                ToolKind::Read | ToolKind::Search | ToolKind::Fetch | ToolKind::Think => {}
+            }
+        }
+        if again || commands + files + others == 0 {
             return Some(true);
         }
-        let count = |count: usize, one: &str, many: &str| {
-            if count == 1 {
-                format!("1 {one}")
-            } else {
-                format!("{count} {many}")
-            }
+        let count = |count: usize, one: &str, many: &str| match count {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            count => Some(format!("{count} {many}")),
         };
-        let did = match (commands, files) {
-            (0, files) => format!("changed {}", count(files, "file", "files")),
-            (commands, 0) => format!("ran {}", count(commands, "command", "commands")),
-            (commands, files) => format!(
-                "ran {} and changed {}",
-                count(commands, "command", "commands"),
-                count(files, "file", "files")
-            ),
+        let did: Vec<String> = [
+            count(commands, "command", "commands").map(|ran| format!("ran {ran}")),
+            count(files, "change to files", "changes to files").map(|made| format!("made {made}")),
+            count(others, "other tool", "other tools").map(|used| format!("used {used}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let did = match &did[..] {
+            [only] => only.clone(),
+            [first @ .., last] => format!("{} and {last}", first.join(", ")),
+            [] => unreachable!("some tool was started"),
         };
         self.say(format!(
-            "This turn already {did}: send it again within 5 seconds to send it anyway"
+            "This turn already {did}, which may have done something: send it again within 5 \
+             seconds to send it anyway"
         ));
-        self.resend_armed = Some(now);
+        self.resend_armed = Some((now, turns));
         Some(false)
     }
 
@@ -4409,24 +4421,49 @@ mod tests {
     fn a_failed_turn_that_ran_commands_is_sent_again_only_when_asked_twice() {
         let mut fonts = fonts();
         let mut view = failed("the connection dropped", None);
-        view.node.turns[0]
-            .items
-            .push(clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
-                id: "t".into(),
-                title: "touch a".into(),
-                status: clackatoo_protocol::ToolStatus::Done,
-                kind: clackatoo_protocol::ToolKind::Execute,
+        let tool = |id: &str, kind, status| {
+            clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
+                id: id.into(),
+                title: id.into(),
+                status,
+                kind,
                 content: Vec::new(),
                 locations: Vec::new(),
-                exit: Some(0),
-            }));
+                exit: None,
+            })
+        };
+        // A command that failed may have done something all the same; an
+        // MCP tool may too; a read can't, nor can a row of clackatoo's.
+        view.node.turns[0].items.extend([
+            tool(
+                "rm build && make",
+                clackatoo_protocol::ToolKind::Execute,
+                clackatoo_protocol::ToolStatus::Failed,
+            ),
+            tool(
+                "mcp.github.create_issue",
+                clackatoo_protocol::ToolKind::Other,
+                clackatoo_protocol::ToolStatus::Running,
+            ),
+            tool(
+                "Read a.rs",
+                clackatoo_protocol::ToolKind::Read,
+                clackatoo_protocol::ToolStatus::Done,
+            ),
+            tool(
+                "clackatoo-agent-image:0",
+                clackatoo_protocol::ToolKind::Other,
+                clackatoo_protocol::ToolStatus::Done,
+            ),
+        ]);
         view.set_clock(1_000_000);
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
         assert!(
             view.said
                 .as_deref()
-                .is_some_and(|said| said.contains("already ran 1 command")),
+                .is_some_and(|said| said
+                    .starts_with("This turn already ran 1 command and used 1 other tool")),
             "{:?}",
             view.said
         );
@@ -4438,9 +4475,16 @@ mod tests {
         view.set_clock(1_100_000);
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
-        view.set_clock(1_200_000);
+        // Asked again soon, but about another turn, it asks again.
+        let mut next = view.node.turns[0].clone();
+        next.prompt = "again".into();
+        view.node.turns.push(next);
+        view.set_clock(1_101_000);
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
+        view.set_clock(1_102_000);
+        fixtures::read(&mut view, "R");
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Resend]);
         // Nor while the chat is answering.
         view.node.state = ChatState::Answering;
         fixtures::read(&mut view, "R");
