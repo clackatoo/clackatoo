@@ -17926,6 +17926,43 @@ fn claude_transcript_text_with(cwd: &Path, needle: &str) -> Option<String> {
     found
 }
 
+/// Lines a message mentions reach the real Claude Code as their text, in
+/// the message (CLACKA-193): it says what's on them without reading the
+/// file, which has other words on its other lines.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_claude_sees_the_lines_a_message_mentions() {
+    let Some(Live {
+        daemon,
+        mut client,
+        chat,
+        trace,
+    }) = live_claude("mentions")
+    else {
+        return;
+    };
+    let dir = daemon.dir.path();
+    std::fs::write(
+        dir.join("words.txt"),
+        "decoy-one\nzephyrine-forty-two\ndecoy-three\n",
+    )
+    .unwrap();
+    let text = "Without using any tools, reply with only the word on the line \
+                @words.txt#L2 gives you.";
+    let node = live_send(&mut client, chat, text, Duration::from_mins(2));
+    assert_eq!(node.turns.last().unwrap().prompt, text);
+    assert!(live_tools(&node).is_empty(), "{node:#?}");
+    assert!(
+        last_words(&node).contains("zephyrine-forty-two"),
+        "{node:#?}"
+    );
+    // It went as the line's text, embedded, not as a link to read.
+    let traced: String = (std::fs::read_dir(&trace).unwrap())
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert!(traced.contains(r#""type":"resource""#), "no resource sent");
+}
+
 /// Six turns with Read, a search, Edit and Bash, as a session runs: every
 /// turn ends, the chat waits again after each, every tool's row finishes
 /// with what it found, and the words are whole, as Claude Code's own
