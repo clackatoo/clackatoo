@@ -1,0 +1,46 @@
+# The box's memory (CLACKA-192): Up recalls the messages sent, Ctrl+R
+# finds one in the finder, and a queued message comes back to edit with
+# Up, or its pencil.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type Fix the failing tests in crates/gui.
+keys <CR>
+wait-for echo: Fix the failing tests
+type Then update the docs
+keys <S-CR>
+type and add a NEWS line.
+keys <CR>
+wait-for echo: Then update the docs
+keys <Up>
+sleep 300
+shot recall-newest
+keys <Up><Up>
+sleep 300
+shot recall-older
+keys <Down><Down>
+sleep 300
+shot recall-back-to-empty
+keys <C-r>
+sleep 300
+shot recall-finder
+type failing
+sleep 300
+shot recall-finder-narrowed
+keys <CR>
+sleep 300
+shot recall-picked
+keys <C-a><BS>
+type wait
+keys <CR>
+sleep 300
+type Review the tests after this turn.
+keys <CR>
+sleep 300
+shot queue-with-pencil
+keys <Up>
+sleep 500
+shot queue-taken-back
+type  And the lint.
+sleep 300
+shot queue-edited
