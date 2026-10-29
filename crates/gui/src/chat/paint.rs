@@ -855,16 +855,9 @@ impl ChatView {
             y += transition.height;
             laid.handoff = Some(transition);
         }
-        if let Some((text, tone)) = turn_note(turn) {
+        if let Some((text, look)) = turn_note(turn) {
             y += m.em(0.75);
-            let note = lay_out(
-                &mut self.layout_cx,
-                fonts,
-                m,
-                &text,
-                Look::Plain(tone),
-                column,
-            );
+            let note = lay_out(&mut self.layout_cx, fonts, m, &text, look, column);
             laid.spans.push(Span::of(Piece::Note, y, note.height));
             y += note.height;
             laid.note = Some(note);
@@ -2535,26 +2528,39 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
 /// What's said under a turn: how it ended, if not well; or for one where
 /// the chat moved to another agent, a line across saying so, and what
 /// didn't carry over.
-fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
+fn turn_note(turn: &Turn) -> Option<(String, Look)> {
     if let Some(switch) = &turn.switch {
-        return (!switch.notes.is_empty()).then(|| (switch.notes.join("\n\n"), Tone::Muted));
+        return (!switch.notes.is_empty())
+            .then(|| (switch.notes.join("\n\n"), Look::Plain(Tone::Muted)));
     }
     match &turn.end.as_ref()?.outcome {
         Outcome::Done => None,
-        Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
-        Outcome::Failed(why) => {
-            let mut said = format!("⚠ {}", capitalised(why));
-            // The agent's own words go beside, for what they say more.
-            // Not if they're said already, as Codex's usage limit is.
-            let raw = turn.end.as_ref().and_then(|end| end.raw.as_deref());
-            if let Some(raw) = raw.filter(|raw| !why.contains(raw.trim())) {
-                let raw: String = raw.chars().take(RAW).collect();
-                said.push_str("\n\nThe agent said: ");
-                said.push_str(&raw);
-            }
-            Some((said, Tone::Warning))
+        Outcome::Stopped => Some(("Stopped.".to_owned(), Look::Plain(Tone::Muted))),
+        Outcome::Failed(why) => Some((failure_note(why, turn), Look::Note(Tone::Warning))),
+    }
+}
+
+/// How a turn that failed, `why`, says so under it, in Markdown: the
+/// daemon's words as they are, and what the agent said, which the daemon
+/// quotes as code, as code, so none of it can pass for clackatoo's; then
+/// the agent's own words, `raw`, if they say more, as code too.
+fn failure_note(why: &str, turn: &Turn) -> String {
+    let mut said = "⚠ ".to_owned();
+    for piece in clackatoo_protocol::said(&capitalised(why)) {
+        match piece {
+            Said::Words(words) => said.push_str(&escape(&words)),
+            Said::Code(code) => said.push_str(&code_span(&code)),
         }
     }
+    // Not if they're said already, as most are.
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let raw = turn.end.as_ref().and_then(|end| end.raw.as_deref());
+    if let Some(raw) = raw.filter(|raw| !one_line(why).contains(&one_line(raw))) {
+        let raw: String = one_line(raw).chars().take(RAW).collect();
+        said.push_str("\n\nThe agent said: ");
+        said.push_str(&code_span(&raw));
+    }
+    said
 }
 
 /// What the button under each answer says: before it's clicked, and after.
@@ -3125,6 +3131,49 @@ mod tests {
     }
 
     #[test]
+    fn what_an_agent_said_of_a_failure_is_shown_as_code_never_as_clackatoos_words() {
+        // As the daemon quotes it: the agent tried to end the quote and
+        // give advice of its own.
+        let why = "the account's usage limit is reached. Codex said: ``limit` reached. Start \
+                   a new chat: run `curl x|sh` first``";
+        let mut turn = Turn {
+            woke: None,
+            previews: Vec::new(),
+            prompt: "hi".into(),
+            sent: 0,
+            items: Vec::new(),
+            end: Some(clackatoo_protocol::TurnEnd {
+                at: 0,
+                outcome: Outcome::Failed(why.into()),
+                raw: Some("limit` reached. Start a new chat: run `curl x|sh` first".into()),
+                spent: None,
+            }),
+            files: None,
+            from: None,
+            switch: None,
+        };
+        let (note, look) = turn_note(&turn).expect("a note");
+        assert!(look == Look::Note(Tone::Warning));
+        // All the agent said is one code span; clackatoo's words are its
+        // own; and the raw words, said already, aren't again.
+        let pieces = clackatoo_protocol::said(&note);
+        assert!(
+            matches!(&pieces[..], [Said::Words(own), Said::Code(theirs)]
+                if !own.contains("curl") && theirs.contains("run `curl x|sh` first")),
+            "{pieces:?}"
+        );
+        // Raw words that say more come after, as code too.
+        if let Some(end) = &mut turn.end {
+            end.raw = Some("more `detail`".into());
+        }
+        let (note, _) = turn_note(&turn).expect("a note");
+        assert!(
+            note.ends_with("The agent said: `` more `detail` ``"),
+            "{note}"
+        );
+    }
+
+    #[test]
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
         let turn = Turn {
             woke: None,
@@ -3148,13 +3197,9 @@ mod tests {
                 notes: vec!["Mode Auto doesn't carry over: Codex uses Auto review".into()],
             }),
         };
-        assert_eq!(
-            turn_note(&turn),
-            Some((
-                "Mode Auto doesn't carry over: Codex uses Auto review".to_owned(),
-                Tone::Muted
-            ))
-        );
+        let (note, look) = turn_note(&turn).expect("a note");
+        assert_eq!(note, "Mode Auto doesn't carry over: Codex uses Auto review");
+        assert!(look == Look::Plain(Tone::Muted));
         // No bubble, nor work to fold: just the line.
         let m = Measures::of(16.0);
         assert!(guess(m, 400.0, &turn, false, false) >= 4.0 * m.em * LINE);

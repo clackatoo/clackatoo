@@ -265,6 +265,10 @@ pub(crate) struct ChatView {
     /// Whether the daemon can send a failed message again
     /// (`ChatAction::Resend`).
     resend_supported: bool,
+    /// When the bar said the last turn already ran commands or changed
+    /// files, as it was asked to be sent again, in milliseconds since the
+    /// Unix epoch: asked again soon after, it's sent anyway.
+    resend_armed: Option<u64>,
     /// Whether what a turn spent and what the session cost are shown
     /// (`chatcost`).
     show_cost: bool,
@@ -522,6 +526,7 @@ impl ChatView {
             handoff_supported: cfg!(test),
             queue_supported: false,
             resend_supported: cfg!(test),
+            resend_armed: None,
             show_cost: true,
             queue_page: 0,
             plan_open: false,
@@ -2363,7 +2368,7 @@ impl ChatView {
                 }
             }
             Some(Hit::Resend) => {
-                if self.can_resend() {
+                if self.resend_asked() == Some(true) {
                     settled.actions.push(ChatAction::Resend);
                 }
             }
@@ -2634,27 +2639,83 @@ impl ChatView {
 
 impl ChatView {
     /// Whether the last turn's message can be sent again: it failed, it
-    /// was the user's, and the daemon can.
+    /// was the user's, the chat is waiting for a message or couldn't
+    /// start, and the daemon can.
     pub(crate) fn can_resend(&self) -> bool {
         self.resend_supported
-            && self.node.state != ChatState::Answering
-            && self
-                .node
-                .turns
-                .last()
-                .is_some_and(|last| resendable(last, true))
+            && matches!(self.node.state, ChatState::Ready | ChatState::Failed(_))
+            && (self.node.turns.last()).is_some_and(|last| resendable(last, true))
     }
 
-    /// Sends the last turn's message again, if it can be: returns whether
-    /// it was.
+    /// The last turn's message is asked to be sent again, by `R` or its
+    /// button: `Some(true)` if it's to go now; `Some(false)` if, as the
+    /// turn already ran commands or changed files, which would be done
+    /// again, the bar says so, and it goes only if asked again within
+    /// [`RESEND_AGAIN`]; `None` if it can't be.
+    fn resend_asked(&mut self) -> Option<bool> {
+        if !self.can_resend() {
+            return None;
+        }
+        let now = self.now();
+        let again =
+            (self.resend_armed.take()).is_some_and(|at| now.saturating_sub(at) < RESEND_AGAIN);
+        let done = |kinds: &[clackatoo_protocol::ToolKind]| {
+            (self.node.turns.last().into_iter())
+                .flat_map(|turn| &turn.items)
+                .filter(|item| {
+                    matches!(item, clackatoo_protocol::Item::Tool(tool)
+                        if tool.status == clackatoo_protocol::ToolStatus::Done && kinds.contains(&tool.kind))
+                })
+                .count()
+        };
+        let commands = done(&[clackatoo_protocol::ToolKind::Execute]);
+        let files = done(&[
+            clackatoo_protocol::ToolKind::Edit,
+            clackatoo_protocol::ToolKind::Delete,
+            clackatoo_protocol::ToolKind::Move,
+        ]);
+        if again || commands + files == 0 {
+            return Some(true);
+        }
+        let count = |count: usize, one: &str, many: &str| {
+            if count == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{count} {many}")
+            }
+        };
+        let did = match (commands, files) {
+            (0, files) => format!("changed {}", count(files, "file", "files")),
+            (commands, 0) => format!("ran {}", count(commands, "command", "commands")),
+            (commands, files) => format!(
+                "ran {} and changed {}",
+                count(commands, "command", "commands"),
+                count(files, "file", "files")
+            ),
+        };
+        self.say(format!(
+            "This turn already {did}: send it again within 5 seconds to send it anyway"
+        ));
+        self.resend_armed = Some(now);
+        Some(false)
+    }
+
+    /// Sends the last turn's message again, as [`resend_asked`] says:
+    /// returns whether that was taken, sent or said why not yet.
+    ///
+    /// [`resend_asked`]: Self::resend_asked
     pub(crate) fn resend(&mut self) -> bool {
-        let can = self.can_resend();
-        if can {
+        let asked = self.resend_asked();
+        if asked == Some(true) {
             self.queued.push(Input::Act(ChatAction::Resend));
         }
-        can
+        asked.is_some()
     }
 }
+
+/// How long after the bar says a turn already did something that asking
+/// to send it again sends it anyway, in milliseconds.
+const RESEND_AGAIN: u64 = 5_000;
 
 /// Whether `turn` is one whose message can be sent again: the chat's
 /// `last`, which failed, with a message of the user's own.
@@ -4340,6 +4401,49 @@ mod tests {
         view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         assert_eq!(drawn_at(&view, &Hit::Resend), None);
         let mut view = with_files(&[clackatoo_protocol::TurnFilesState::Made]);
+        fixtures::read(&mut view, "R");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+    }
+
+    #[test]
+    fn a_failed_turn_that_ran_commands_is_sent_again_only_when_asked_twice() {
+        let mut fonts = fonts();
+        let mut view = failed("the connection dropped", None);
+        view.node.turns[0]
+            .items
+            .push(clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
+                id: "t".into(),
+                title: "touch a".into(),
+                status: clackatoo_protocol::ToolStatus::Done,
+                kind: clackatoo_protocol::ToolKind::Execute,
+                content: Vec::new(),
+                locations: Vec::new(),
+                exit: Some(0),
+            }));
+        view.set_clock(1_000_000);
+        fixtures::read(&mut view, "R");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert!(
+            view.said
+                .as_deref()
+                .is_some_and(|said| said.contains("already ran 1 command")),
+            "{:?}",
+            view.said
+        );
+        // Asked again soon after, it goes.
+        view.set_clock(1_002_000);
+        fixtures::read(&mut view, "R");
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Resend]);
+        // Much later, it asks again.
+        view.set_clock(1_100_000);
+        fixtures::read(&mut view, "R");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        view.set_clock(1_200_000);
+        fixtures::read(&mut view, "R");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        // Nor while the chat is answering.
+        view.node.state = ChatState::Answering;
+        fixtures::read(&mut view, "R");
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
     }

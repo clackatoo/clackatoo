@@ -209,6 +209,9 @@ pub(crate) enum Look {
     /// agent's words are, with larger headings further apart, task lists'
     /// boxes for their items' markers, and images said as such.
     Page,
+    /// Markdown of clackatoo's own, in `Tone`, as how a turn failed is
+    /// said under it: what the agent said in it is quoted as code.
+    Note(Tone),
 }
 
 /// The fills and glyphs being drawn, and what they're cut off outside.
@@ -495,7 +498,7 @@ pub(crate) fn lay_out_coloured(
     colours: Option<&mut Colours>,
 ) -> Laid {
     let blocks = match look {
-        Look::Words | Look::Thought | Look::Page => markdown::blocks(text),
+        Look::Words | Look::Thought | Look::Page | Look::Note(_) => markdown::blocks(text),
         Look::Plain(_) | Look::Mono(_) => vec![markdown::Block {
             kind: BlockKind::Paragraph,
             text: text.to_owned(),
@@ -527,7 +530,7 @@ pub(crate) fn lay_out_blocks(
     mut colours: Option<&mut Colours>,
 ) -> Laid {
     let tone = match look {
-        Look::Plain(tone) | Look::Mono(tone) => tone,
+        Look::Plain(tone) | Look::Mono(tone) | Look::Note(tone) => tone,
         Look::Words | Look::Thought | Look::Page => Tone::Plain,
     };
     let mut laid = Laid {
@@ -824,7 +827,7 @@ pub(crate) fn lay_out_block(
     let tone = match look {
         Look::Words | Look::Page => Tone::Plain,
         Look::Thought => Tone::Muted,
-        Look::Plain(tone) | Look::Mono(tone) => tone,
+        Look::Plain(tone) | Look::Mono(tone) | Look::Note(tone) => tone,
     };
     let (body, mono) = (body_style(fonts, size), mono_family(fonts));
     let mut builder = layout_cx.ranged_builder(&mut fonts.font_cx, &block.text, 1.0, true);
@@ -833,7 +836,7 @@ pub(crate) fn lay_out_block(
     }
     // Plain messages can contain long URLs, identifiers or adapter text.
     // Break an otherwise unbreakable word rather than widening its bubble.
-    if matches!(look, Look::Plain(_)) {
+    if matches!(look, Look::Plain(_) | Look::Note(_)) {
         builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::Anywhere));
     }
     builder.push_default(StyleProperty::Brush(Brush {
