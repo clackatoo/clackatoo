@@ -14530,6 +14530,12 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
     );
     // The loop is cut once: one of the two is under the other.
     assert_eq!((of(fifth).parent, of(sixth).parent), (None, Some(fifth)));
+    // It says why it's on its own.
+    let notice = chat_now(&mut client, orphan).notice.unwrap_or_default();
+    assert!(
+        notice.contains("wasn't kept through the restart"),
+        "{notice}"
+    );
     // Limits it doesn't know are the strictest: it can't message a chat
     // in the mode it was in, Claude Code's new chats' Auto, that may do
     // more.
@@ -14542,6 +14548,61 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
         Duration::from_secs(10),
     ));
     assert!(words.contains("may do more than this one"), "{words}");
+}
+
+#[test]
+fn a_subagent_that_finished_before_a_cold_restart_tells_its_parent_nothing_again() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let chat = |id: u32, session: &str, started: Option<serde_json::Value>| {
+        let mut chat = serde_json::json!({
+            "id": id,
+            "agent": "claude",
+            "session": session,
+            "cwd": kept.path(),
+            "tools": "allow",
+        });
+        if let Some(started) = started {
+            chat["started"] = started;
+        }
+        serde_json::json!({ "pane": { "chat": chat } })
+    };
+    let started = serde_json::json!({
+        "parent": 10, "depth": 1, "turn": 0, "profile": "general", "limits": "none",
+        "mode": { "setting": "mode", "value": "auto" },
+    });
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"split": {
+            "left_to_right": true,
+            "parts": [chat(10, "past-2", None), chat(11, "past-1", Some(started))],
+            "shares": [1, 1],
+        }}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = keeping_with_tools(&file);
+    let mut client = daemon.client();
+    let [Content::Terminal(parent), Content::Terminal(kid)] = tab_contents(&mut client)[..] else {
+        panic!("not the two chats: {:?}", tab_contents(&mut client));
+    };
+    // Shown, it tells its conversation again, which finishes, as it had.
+    client.attach(kid).unwrap();
+    wait_for_log(&daemon, "agent.log", "told past-1");
+    wait_for_chat(&mut client, kid, |node| {
+        node.state == ChatState::Ready && !node.turns.is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    // Its parent hears nothing of it: what's told again answers no one.
+    let node = chat_now(&mut client, parent);
+    assert!(
+        node.turns.iter().all(|turn| turn.from.is_none()),
+        "{node:#?}"
+    );
+    let card = card_of(&mut client, parent);
+    assert_eq!(
+        (card[0].chat, &card[0].status),
+        (kid, &SubagentStatus::Done)
+    );
 }
 
 #[test]
