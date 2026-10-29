@@ -21,6 +21,7 @@
 //! | `mcp NAME ARGS`, a line each | Calls each of clackatoo's tools `NAME` with the JSON `ARGS`, in turn, and says what each answered |
 //! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
 //! | `disk-spaces PATH`, a line's end, then text | As `disk`, but says the change as Claude Code's adapter says one to a tab-indented file: each line's leading tabs as two spaces, as the tool finishes |
+//! | `disk-swap PATH`, a line's end, a line, then text | As `disk`, but the file's text is its own, with the first line's text, where it's first found, replaced by the text after it: a small change to a big file, which the change said still carries whole |
 //! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
 //! | `stream N`, and anything after a space | Says the numbers from 0 to N − 1, each followed by a space, in N updates, all in one write, as an agent streaming fast; then `done` |
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
@@ -2115,8 +2116,8 @@ impl Fake {
     }
 
     /// Answers a message about a file by the scripts that change it in ways
-    /// other than `disk`'s, if its words choose one: `run` and
-    /// `disk-spaces`. Returns whether they did.
+    /// other than `disk`'s, if its words choose one: `run`, `disk-spaces`
+    /// and `disk-swap`. Returns whether they did.
     fn file_otherwise(id: &Value, session: &str, command: &str, rest: &str) -> bool {
         if let Some(path) = command.strip_prefix("run ") {
             // As a command the agent runs, such as `sed -i`, changes a file:
@@ -2134,6 +2135,20 @@ impl Fake {
                          "status": "completed" }),
             );
             say(session, "ran\n");
+            done(id, "end_turn");
+            return true;
+        }
+        if let Some(path) = command.strip_prefix("disk-swap ") {
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "td",
+                         "title": format!("Edit {path}"), "kind": "edit",
+                         "status": "pending", "locations": [{ "path": path }] }),
+            );
+            let (from, to) = rest.split_once('\n').unwrap_or((rest, ""));
+            let text = std::fs::read_to_string(path).unwrap().replacen(from, to, 1);
+            write_itself(session, path, &text);
+            say(session, "done\n");
             done(id, "end_turn");
             return true;
         }

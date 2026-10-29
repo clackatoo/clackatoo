@@ -18700,8 +18700,10 @@ fn a_real_agents_long_output_leaves_the_daemon_answering() {
 /// carries the whole file, as Claude Code's adapter sends it, leaves the
 /// daemon answering another client quickly, with the file `open` in a
 /// buffer or not. Only `client` watches the chat, slowly, so the daemon
-/// isn't kept busy sending the diff. Returns the slowest answer.
-fn slowest_answer_while_a_big_file_is_rewritten(open: bool) -> Duration {
+/// isn't kept busy sending the diff. The file is rewritten as `small`, or
+/// with only its first line changed, as the live test does. Returns the
+/// slowest answer.
+fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Duration {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
@@ -18711,12 +18713,12 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool) -> Duration {
         writeln!(text, "line {n}").unwrap();
     }
     std::fs::write(&big, &text).unwrap();
-    if open {
+    let buffer = open.then(|| {
         let pane = client
             .new_workspace(None, open_file(daemon.dir.path(), "big.txt"))
             .unwrap();
-        buffer_in(&mut client, pane);
-    }
+        buffer_in(&mut client, pane)
+    });
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher = {
         let done = done.clone();
@@ -18732,12 +18734,13 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool) -> Duration {
             slowest
         })
     };
-    client
-        .chat(
-            chat,
-            ChatAction::Send(format!("disk {}\nsmall\n", big.display())),
-        )
-        .unwrap();
+    let (message, made) = if small {
+        (format!("disk {}\nsmall\n", big.display()), "small\n".to_owned())
+    } else {
+        let message = format!("disk-swap {}\nline 1\nline one", big.display());
+        (message, text.replacen("line 1", "line one", 1))
+    };
+    client.chat(chat, ChatAction::Send(message)).unwrap();
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -18752,22 +18755,33 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool) -> Duration {
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let slowest = watcher.join().unwrap();
     eprintln!("slowest other answer: {slowest:?}");
-    assert_eq!(std::fs::read_to_string(&big).unwrap(), "small\n");
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), made);
+    if let Some(buffer) = buffer {
+        // The buffer has the change, and nothing not saved.
+        let snapshot = attach_buffer(&mut client, buffer);
+        assert!(snapshot.text == made && !snapshot.modified);
+    }
     slowest
 }
 
 #[test]
 fn an_agents_rewrite_of_a_big_file_not_open_leaves_the_daemon_answering() {
     // About 20 ms in a debug build; half a second before CLACKA-200.
-    let slowest = slowest_answer_while_a_big_file_is_rewritten(false);
-    assert!(slowest < Duration::from_millis(150), "{slowest:?}");
+    let slowest = slowest_answer_while_a_big_file_is_rewritten(false, true);
+    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
 }
 
 #[test]
-#[ignore = "CLACKA-201: a multi-megabyte rewrite of an open buffer stalls the loop (fails)"]
 fn an_agents_rewrite_of_a_big_file_open_leaves_the_daemon_answering() {
-    let slowest = slowest_answer_while_a_big_file_is_rewritten(true);
-    assert!(slowest < Duration::from_millis(150), "{slowest:?}");
+    // About 20 ms in a debug build; 360 ms before CLACKA-201.
+    let slowest = slowest_answer_while_a_big_file_is_rewritten(true, true);
+    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
+}
+
+#[test]
+fn an_agents_edit_to_a_big_file_open_leaves_the_daemon_answering() {
+    let slowest = slowest_answer_while_a_big_file_is_rewritten(true, false);
+    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
 }
 
 /// Changes to a big file not open are worked out off the daemon's loop,
