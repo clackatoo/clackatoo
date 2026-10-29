@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.10.99 (2026-10-29)
+
+### Features
+
+- what agents say of a turn beyond its words, in the daemon (CLACKA-196) (46bbb8fc)
+- **gui:** retries, compaction lines, exit codes, cost and resend in the chat (CLACKA-196) (b86ef1ae)
+
+### Fixes
+
+- **daemon:** a compaction said finished twice stays one line, and an unknown failure on an answer fails the turn (CLACKA-196) (7ba1e1d4)
+- **protocol:** what a turn spent leaves out a cost of nothing (CLACKA-196) (1c88df25)
+- **protocol:** an older window shown only unknown answers can still say no (CLACKA-196) (96034e30)
+- **daemon:** review of failures, resending, compaction and agent images (CLACKA-196) (5244d148)
+- **gui:** resending asks first after commands ran, and a failure quotes the agent as code (CLACKA-196) (c9d15c67)
+- **daemon:** a failure said by itself and on the answer shows once, and a role goes again only if never heard (CLACKA-196) (f29754c3)
+- **gui:** resending asks first after any tool that may have done something, for that turn alone (CLACKA-196) (e3588157)
+
 ## 2026.10.98 (2026-10-29)
 
 ### Features
