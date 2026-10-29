@@ -738,13 +738,15 @@ impl Buffer {
         author: Author,
     ) -> Result<Vec<(Option<Made>, PreparedStep)>, Refused> {
         let mut made = Vec::with_capacity(prepared.steps.len());
-        for step in prepared.steps {
+        for mut step in prepared.steps {
             if step.edit.is_noop() {
                 made.push((None, step));
                 continue;
             }
             let version = self.version();
-            let one = (self.edit(step.edit.clone(), version, step.step, author))
+            // The edit made comes back with what it made.
+            let edit = std::mem::take(&mut step.edit);
+            let one = (self.edit(edit, version, step.step, author))
                 .map_err(|err| self.unprepared(Unprepared::Failed(err.to_string())))?;
             made.push((Some(one), step));
         }

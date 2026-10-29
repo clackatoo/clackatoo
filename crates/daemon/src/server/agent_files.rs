@@ -650,8 +650,12 @@ impl Daemon {
                 if slot.buffer.version() == merging.version
                     && slot.buffer.disk() == merging.known =>
             {
-                self.land(merging, prepared);
-                self.disk_maybe_changed(id);
+                // Looked at again, as it may have changed since it was
+                // read; not a file whose change was refused, as the user
+                // has been told of it already.
+                if self.land(merging, prepared) {
+                    self.disk_maybe_changed(id);
+                }
                 self.after_diffing(diffing);
             }
             // Changed meanwhile: merged again from the buffer as it is.
@@ -673,7 +677,6 @@ impl Daemon {
                 Source::Commands { turn } => self.commands_into(chat, turn, open.id, tries),
             }
         }
-        self.disk_maybe_changed(open.id);
         self.carry_on(diffing);
     }
 
@@ -937,15 +940,18 @@ impl Daemon {
         } else {
             merging
         };
-        let prepared = merging.prepare();
-        self.land(merging, prepared);
+        let (id, prepared) = (merging.id, merging.prepare());
+        if self.land(merging, prepared) {
+            self.disk_maybe_changed(id);
+        }
     }
 
     /// Makes `merging`'s change, merged into its buffer, which is as it
     /// was merged into, as `prepared` says: each step as the agent's own
     /// edit, or if one touches a line changed and not saved, none, and the
-    /// user is told.
-    fn land(&mut self, merging: Merging, prepared: Result<Prepared, Unprepared>) {
+    /// user is told. Returns whether it was made, so the buffer knows its
+    /// file as it is now.
+    fn land(&mut self, merging: Merging, prepared: Result<Prepared, Unprepared>) -> bool {
         let Merging {
             chat,
             path,
@@ -958,7 +964,7 @@ impl Daemon {
         } = merging;
         self.agent_files.forget_reports(&covered);
         let Some(slot) = self.buffers.get_mut(&id) else {
-            return;
+            return false;
         };
         let author = Author::Agent(chat);
         let made = prepared
@@ -971,10 +977,12 @@ impl Daemon {
                 }
                 self.note_modified(id);
                 self.saved_in_server(id);
+                return true;
             }
             Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, &path, true),
             Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
         }
+        false
     }
 
     /// Takes the change found on disk to buffer `id`'s file into it, as a
