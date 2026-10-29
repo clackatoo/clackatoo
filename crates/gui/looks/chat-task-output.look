@@ -1,0 +1,18 @@
+# Following what a background shell printed: the shelf's line lit under
+# the mouse, then a click on it opening a terminal below the chat that
+# follows the task's output file (CLACKA-199).
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type background-out $PROJECT
+keys <CR>
+wait-for started
+sleep 600
+# Serve the docs says where it prints, so its line lights; Watch doesn't.
+move 400 677
+shot output-shelf
+# A click on it follows it, as :taskoutput does.
+click 400 677
+wait-for listening on :3000
+sleep 300
+shot output-followed

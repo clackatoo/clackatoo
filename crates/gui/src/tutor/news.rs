@@ -1097,6 +1097,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Type @ in a chat to mention a project file; <Space>a or :Ask sends an editor's selection to the chat beside",
     },
+    News {
+        id: "task-output",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Click a background shell on a chat's shelf, or :taskoutput, to follow what it prints in a terminal below the chat",
+    },
 ];
 
 impl News {

@@ -337,6 +337,18 @@ Claude Code can leave a command running in the background, such as a dev server 
 
 The square at the end of a running line stops it, through the agent. From the keyboard, `:stoptask` stops the newest running, and `:stoptask 2` the second line. A watcher can't be stopped from here; ask the agent. The shelf lists at most three, newest first, with how many more there are.
 
+#### What a background command printed
+
+Click a line on the shelf to read what its command printed, or type `:taskoutput`, for the newest that can show it, or `:taskoutput 2` for the second line. A terminal opens below the chat, on the chat's machine, showing the last 256 KiB of the output and following it as it grows. It's an ordinary terminal running `tail -F` on the output, so colours and progress lines show as they would in a shell, and it has scrollback, `/` search and yanks. Closing it, with `:q`, leaves the command running. A line that can be opened lights up under the mouse.
+
+This is as much as Claude Code shares over ACP. Its adapter never sends a background command's output: it says only where Claude Code writes it, a `tasks/ID.output` file under `$TMPDIR/claude-UID/` on the daemon's machine, which Claude Code's own TaskOutput tool reads. The agent runs where the daemon does, so the terminal can follow that file, whichever machine the window is on. clackatoo takes the path only in that shape, for that task; anything else the agent names is ignored. So there's nothing to follow:
+
+- for a task whose agent didn't say where it prints, such as a turn it took by itself, or another agent's;
+- for a task from before an upgrade, as the path isn't handed over;
+- with a daemon older than protocol 120, which the bar says.
+
+The bar says so, and the agent can still be asked to show the output itself. The phone lists the lines without opening them.
+
 A line that has ended says how: `✓ done`, `✗ failed`, or `■ stopped`, with how long it took and what Claude Code said of it. It stays until your next message. Nothing is left showing as running once it can't be: if the agent stops, what it ran stops with it, and its line says `ended with its agent`.
 
 A subagent's card says how many things its chats run in the background, and when open, has a line under each chat for what it runs. A chat with something running in the background is never let go while it's idle in the background, as that would end it.
@@ -349,7 +361,7 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 - It keeps the words and thinking of Claude Code's own subagents (its Task tool) to itself unless asked for them: clackatoo asks, and shows them [under the Task's card](#claude-code-s-own-subagents).
 - It doesn't send the same task list twice in a row, which changes nothing shown.
 - Its notices, such as a fast mode turned off, come as notices above the box rather than as words in the turn.
-- A command moved to the background doesn't go on showing its output in its row once it has moved: the shelf says how it's going, and Claude Code reads what it printed when it ends.
+- A command moved to the background doesn't go on showing its output in its row once it has moved: the shelf says how it's going, its line [follows what it prints](#what-a-background-command-printed), and Claude Code reads it when it ends.
 - A question it asks you with its own AskUserQuestion tool is titled `Asking for your input`, not by the question; the question shows under it.
 - A failed call of one of its tools for other agents, such as SendMessage, shows its error as plain text, not as code.
 - clackatoo also asks for AIR's session failures, so Claude Code says when it [tries a request again](#when-a-turn-fails), and why a turn failed by its kind. A turn that fails then ends as if well, with the failure beside, which clackatoo reads; and Claude Code's error for a failure leaves out the provider's words, which come with the failure instead.

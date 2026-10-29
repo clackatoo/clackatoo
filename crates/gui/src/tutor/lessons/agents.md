@@ -215,6 +215,12 @@ When one ends, Claude Code may go on by itself to look at it: that shows as a tu
 
 If you have a chat open, ask it to run `sleep 30` in the background, watch the shelf count, then stop it with `:stoptask`.
 
+## What a background shell printed
+
+Click a line on that shelf, or type `:taskoutput`, to read what its command printed: a terminal opens below the chat, showing the last 256 KiB of the output and following it as it grows, colours and all, with scrollback, `/` search and yanks as any terminal has. `:taskoutput 2` opens the second line's. `:q` in it closes it; the command goes on. Claude Code writes each background command's output to a file on the daemon's machine and its adapter says where, which is all the agent shares: it never sends the output itself. So an agent that doesn't say, or a task from before an upgrade, has nothing to follow, and the bar says so; ask the agent to show you the output instead.
+
+If you have a chat open, ask it to run `for i in 1 2 3 4 5; do echo $i; sleep 2; done` in the background, then click its line on the shelf and watch the numbers come.
+
 ## Slash commands
 
 Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
