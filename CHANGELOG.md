@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.100 (2026-10-29)
+
+### Features
+
+- **daemon:** agents' processes go on through upgrades (CLACKA-188) (b25f6363)
+
 ## 2026.10.99 (2026-10-29)
 
 ### Features
