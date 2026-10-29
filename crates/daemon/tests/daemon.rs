@@ -3362,6 +3362,51 @@ fn a_compactions_report_after_its_turn_ended_goes_nowhere_and_a_bad_image_shows_
     );
 }
 
+/// Where a background shell's output goes, as Claude Code's adapter says
+/// it after the spawn, reaches windows, and a terminal following it, as a
+/// window opens one, shows what the shell printed and what it prints next
+/// (CLACKA-199). A path that isn't Claude Code's own output file for the
+/// task is left out.
+#[test]
+fn a_background_shells_output_file_reaches_windows_and_a_terminal_follows_it() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let dir = daemon.dir.path();
+    let node = ask(
+        &mut client,
+        chat,
+        &format!("background-out {}", dir.display()),
+    );
+    assert_eq!(last_words(&node), "started\n");
+    let file = dir.join("tasks/t1.output");
+    let [shell, other] = node.tasks.as_slice() else {
+        panic!("two tasks: {:#?}", node.tasks);
+    };
+    assert_eq!(shell.output.as_deref(), file.to_str());
+    assert_eq!(other.id, "t2");
+    assert_eq!(other.output, None, "not Claude Code's file for it");
+
+    let terminal = client
+        .new_terminal(NewTerminal {
+            size: Size::new(60, 10).unwrap(),
+            command: shell.follow_output(),
+            cwd: None,
+            record_to: None,
+        })
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| {
+        text.contains("listening on :3000")
+    });
+    let mut appending = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    std::io::Write::write_all(&mut appending, b"GET / 200\n").unwrap();
+    let text = wait_for_screen(&mut client, terminal, |text| text.contains("GET / 200"));
+    assert!(text.contains("listening on :3000"), "{text}");
+}
+
 #[test]
 fn a_shell_claude_runs_in_the_background_shows_until_it_ends_and_can_be_stopped() {
     let daemon = TestDaemon::start();

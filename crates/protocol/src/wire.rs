@@ -310,6 +310,9 @@ gates! {
     /// Where a chat works, made absolute, for a window to mention files
     /// from it (CLACKA-193): `ChatNode`'s `paths`.
     CHAT_PATHS = 119,
+    /// Where what an agent's background task prints goes, a file on the
+    /// daemon's machine that a window can follow: `AgentTask`'s `output`.
+    TASK_OUTPUT = 120,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

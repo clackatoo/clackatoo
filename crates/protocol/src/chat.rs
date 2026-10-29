@@ -384,6 +384,17 @@ pub struct AgentTask {
     pub ended: Option<u64>,
     /// Whether the agent can be asked to stop it.
     pub can_stop: bool,
+    /// The file on the daemon's machine its output is written to, as the
+    /// agent said, if it did: Claude Code writes each background shell's
+    /// output to a `tasks/ID.output` file, which its own `TaskOutput` tool
+    /// reads. ACP carries no output itself, only this path, so a window
+    /// follows the file in a terminal on that machine.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::TASK_OUTPUT }, _>",
+        deserialize_with = "wire::since::<{ wire::TASK_OUTPUT }, _, _>"
+    )]
+    pub output: Option<String>,
 }
 
 impl AgentTask {
@@ -395,7 +406,24 @@ impl AgentTask {
             AgentTaskState::Running | AgentTaskState::Paused | AgentTaskState::Stopping
         )
     }
+
+    /// The program a terminal on the daemon's machine runs to follow its
+    /// output, if the agent said where that goes: `tail`, from the last
+    /// [`TASK_OUTPUT_TAIL`] bytes, following the file as it grows, and
+    /// waiting for it if it isn't there yet. The terminal reads what it
+    /// prints as it would any program's, colours and all.
+    #[must_use]
+    pub fn follow_output(&self) -> Option<Vec<String>> {
+        let path = self.output.as_ref()?;
+        let tail = TASK_OUTPUT_TAIL.to_string();
+        Some(["tail", "-c", &tail, "-F", "--", path].map(str::to_owned).to_vec())
+    }
 }
+
+/// The most of a background task's output a terminal following it shows
+/// to begin with, in bytes (see [`AgentTask::follow_output`]): what came
+/// before is in the file, which the agent reads whole.
+pub const TASK_OUTPUT_TAIL: u64 = 256 * 1024;
 
 /// What kind of background work an [`AgentTask`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

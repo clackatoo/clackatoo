@@ -1425,6 +1425,16 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             }),
         })),
     ));
+    // Where a background task's output goes (CLACKA-199).
+    let mut task = agent_task(crate::AgentTaskKind::Shell, crate::AgentTaskState::Running);
+    task.output = Some("/tmp/claude-1000/-home-jack-app/0d9c/tasks/bh1jmizrr.output".into());
+    samples.push((
+        crate::wire::TASK_OUTPUT,
+        Server(ServerMessage::Event(Event::View {
+            terminal: TerminalId(3),
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Tasks(vec![task]))]),
+        })),
+    ));
     samples
 }
 
@@ -3714,6 +3724,7 @@ fn agent_task(kind: crate::AgentTaskKind, state: crate::AgentTaskState) -> crate
         started: 1_760_000_000,
         ended: None,
         can_stop: true,
+        output: None,
     }
 }
 

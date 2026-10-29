@@ -2044,6 +2044,7 @@ mod tests {
             description: None,
             can_stop: true,
             tool: None,
+            output: None,
         };
         assert_eq!(daemon.chat(chat).unwrap().task_said(task), None);
         assert!(daemon.chat_ref(chat).unwrap().has_tasks_going());

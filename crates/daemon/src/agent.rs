@@ -296,18 +296,25 @@ pub(crate) enum Task {
         can_stop: bool,
         /// The tool call that started it, if one did.
         tool: Option<String>,
+        /// The file its output goes to, if the agent said (see
+        /// [`output_file`]).
+        output: Option<String>,
     },
-    /// What it's for changed, if `description`.
+    /// What it's for changed, if `description`, or where its output
+    /// goes, if `output`.
     Progress {
         id: String,
         description: Option<String>,
+        output: Option<String>,
     },
     /// It's `state` now: `running`, `paused`, `completed`, `failed` or
-    /// `stopped`, with what the agent said of it.
+    /// `stopped`, with what the agent said of it, and where its output
+    /// went, if the agent says only now.
     State {
         id: String,
         state: String,
         summary: Option<String>,
+        output: Option<String>,
     },
 }
 
@@ -1793,6 +1800,9 @@ fn task(params: &Value) -> Option<(String, Task)> {
         let text = update.get(key)?.as_str()?;
         Some(one_line(text, MOST_TASK_TEXT)).filter(|text| !text.is_empty())
     };
+    let output = (update.get("outputFilePath").and_then(Value::as_str))
+        .and_then(|path| output_file(path, id))
+        .map(str::to_owned);
     let task = match kind {
         "async_task_spawned" => Task::Spawned {
             id: id.to_owned(),
@@ -1801,19 +1811,44 @@ fn task(params: &Value) -> Option<(String, Task)> {
             description: text("description"),
             can_stop: update.get("canStop") == Some(&Value::Bool(true)),
             tool: text("toolCallId"),
+            output,
         },
         "async_task_progress" => Task::Progress {
             id: id.to_owned(),
             description: text("description"),
+            output,
         },
         "async_task_state_update" => Task::State {
             id: id.to_owned(),
             state: text("state")?,
             summary: text("summary"),
+            output,
         },
         _ => return None,
     };
     Some((session.to_owned(), task))
+}
+
+/// The longest path to a task's output kept, in bytes: longer is no
+/// agent's.
+const MOST_OUTPUT_PATH: usize = 1024;
+
+/// `path`, if it can be where task `id`'s output goes, as Claude Code's
+/// adapter says in `outputFilePath`: an absolute path, with no `..` or
+/// control characters, to a file named for the task in a `tasks`
+/// directory, `…/tasks/ID.output`, which is where Claude Code writes a
+/// background command's output, and the only path its adapter takes for
+/// one. Windows open that file to follow it, on the agent's machine, so
+/// anything else the agent might name is left out.
+fn output_file<'a>(path: &'a str, id: &str) -> Option<&'a str> {
+    let file = path.strip_suffix(".output")?.strip_suffix(id)?;
+    let ok = path.len() <= MOST_OUTPUT_PATH
+        && path.starts_with('/')
+        && file.ends_with("/tasks/")
+        && !path.contains(char::is_control)
+        && !path.split('/').any(|part| part == ".." || part == ".")
+        && !id.contains('/');
+    ok.then_some(path)
 }
 
 /// `text` on one line, its runs of spaces, line breaks and other controls
@@ -1990,5 +2025,55 @@ mod handover_tests {
             [TerminalId(4), TerminalId(5)]
         );
         agent.stop().kill_group();
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    /// Where a background task's output goes is taken from any of its
+    /// updates, as Claude Code's adapter says it on whichever comes once it
+    /// knows (CLACKA-199), but only as the file Claude Code writes for that
+    /// task: anything else the agent names is left out.
+    #[test]
+    fn a_tasks_output_file_is_taken_only_as_claude_codes_own_for_it() {
+        let path = "/tmp/claude-1000/-home-jack-app/0d9c/tasks/b1.output";
+        let said = |update: Value| task(&json!({"sessionId": "s", "update": update}));
+        let spawned = said(json!({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b1",
+            "name": "npm test", "taskType": "shell", "outputFilePath": path}));
+        assert!(
+            matches!(spawned, Some((_, Task::Spawned { output: Some(output), .. })) if output == path)
+        );
+        let progress = said(json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
+            "outputFilePath": path}));
+        assert!(
+            matches!(progress, Some((_, Task::Progress { output: Some(output), .. })) if output == path)
+        );
+        let ended = said(json!({"sessionUpdate": "async_task_state_update", "asyncTaskId": "b1",
+            "state": "completed", "outputFilePath": path}));
+        assert!(
+            matches!(ended, Some((_, Task::State { output: Some(output), .. })) if output == path)
+        );
+        let other = said(json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
+            "outputFilePath": "/etc/passwd"}));
+        assert!(matches!(other, Some((_, Task::Progress { output: None, .. }))));
+
+        assert_eq!(output_file(path, "b1"), Some(path));
+        for wrong in [
+            "/tmp/x/tasks/b2.output",
+            "tmp/x/tasks/b1.output",
+            "/tmp/x/b1.output",
+            "/tmp/x/tasks/b1.out",
+            "/tmp/x/../tasks/b1.output",
+            "/tmp/./tasks/b1.output",
+            "/tmp/x/tasks/\nb1.output",
+            "/etc/passwd",
+        ] {
+            assert_eq!(output_file(wrong, "b1"), None, "{wrong}");
+        }
+        let long = format!("/{}/tasks/b1.output", "a".repeat(MOST_OUTPUT_PATH));
+        assert_eq!(output_file(&long, "b1"), None);
+        assert_eq!(output_file("/tmp/tasks/a/b.output", "a/b"), None);
     }
 }

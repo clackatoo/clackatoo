@@ -5675,11 +5675,13 @@ mod tests {
             description: None,
             can_stop: true,
             tool: None,
+            output: None,
         });
         chat.task_said(crate::agent::Task::State {
             id: "t1".into(),
             state: "completed".into(),
             summary: None,
+            output: None,
         });
         chat.answered(Ok(StopReason::EndTurn));
         // Another chat's agent's message: the user hasn't seen them yet.
@@ -5795,6 +5797,7 @@ mod tests {
             description: None,
             can_stop: true,
             tool: None,
+            output: None,
         };
         assert_eq!(c.task_said(task), None);
         let continuation = c.prepare_upgrade().expect("active turn");
@@ -6458,6 +6461,7 @@ mod tests {
             description: None,
             can_stop: true,
             tool: None,
+            output: None,
         });
         // Letting it go would end Claude Code's process, and the shell.
         assert_eq!(chat.park(), None);
@@ -6468,10 +6472,65 @@ mod tests {
             id: "t1".into(),
             state: "completed".into(),
             summary: None,
+            output: None,
         });
         assert!(chat.outdates(&card, false), "the card says it's going");
         assert!(chat.as_subagent(0, false).tasks.is_empty());
         assert_eq!(chat.park().as_deref(), Some("s"));
+    }
+
+    /// Where a task's output goes is kept from whichever update says it,
+    /// the spawn, a progress beat, or a state update after it ended, as
+    /// Claude Code's adapter sends it once the tool call's result names
+    /// the file (CLACKA-199); one saying nothing of it keeps it.
+    #[test]
+    fn where_a_tasks_output_goes_is_kept_from_whichever_update_says_it() {
+        let file = "/tmp/c/tasks/t1.output";
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        let spawn = |output: Option<&str>| crate::agent::Task::Spawned {
+            id: "t1".into(),
+            kind: "shell".into(),
+            name: "Serve the docs".into(),
+            description: None,
+            can_stop: true,
+            tool: None,
+            output: output.map(Into::into),
+        };
+        chat.task_said(spawn(None));
+        assert_eq!(chat.node.tasks[0].output, None);
+        chat.task_said(crate::agent::Task::Progress {
+            id: "t1".into(),
+            description: None,
+            output: Some(file.into()),
+        });
+        assert_eq!(chat.node.tasks[0].output.as_deref(), Some(file));
+        chat.task_said(crate::agent::Task::Progress {
+            id: "t1".into(),
+            description: Some("Serving".into()),
+            output: None,
+        });
+        assert_eq!(chat.node.tasks[0].output.as_deref(), Some(file));
+
+        // Told only after it ended.
+        let mut chat = super::tests::chat();
+        connect(&mut chat, "s");
+        chat.task_said(spawn(None));
+        let ended = |output: Option<&str>| crate::agent::Task::State {
+            id: "t1".into(),
+            state: "completed".into(),
+            summary: None,
+            output: output.map(Into::into),
+        };
+        chat.task_said(ended(None));
+        chat.task_said(ended(Some(file)));
+        let task = &chat.node.tasks[0];
+        assert_eq!(task.state, clackatoo_protocol::AgentTaskState::Done);
+        assert_eq!(task.output.as_deref(), Some(file));
+        assert!(
+            matches!(chat.journal.patches.back(), Some(ChatPatch::Tasks(tasks)) if tasks[0].output.is_some()),
+            "viewers are told"
+        );
     }
 
     #[test]
@@ -6485,6 +6544,7 @@ mod tests {
             description: None,
             can_stop: true,
             tool: None,
+            output: None,
         });
         let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
         chat.switch(&codex, None, None, handoff::BUDGET);
@@ -6656,6 +6716,7 @@ mod tests {
         let ended = chat.task_said(crate::agent::Task::Progress {
             id: "autonomous-turn-1".into(),
             description: Some("A scheduled wakeup fired.".into()),
+            output: None,
         });
         assert_eq!(ended, None);
         assert!(chat.woken_says_when_it_ends());
@@ -6668,6 +6729,7 @@ mod tests {
             id: "autonomous-turn-1".into(),
             state: "completed".into(),
             summary: None,
+            output: None,
         });
         assert_eq!(ended, Some(StopReason::EndTurn));
     }

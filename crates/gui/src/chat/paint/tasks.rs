@@ -160,6 +160,7 @@ mod tests {
             started: 100_000,
             ended: None,
             can_stop: true,
+            output: None,
         }
     }
 

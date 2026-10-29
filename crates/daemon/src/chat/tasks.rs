@@ -39,6 +39,7 @@ impl HostedChat {
                 description,
                 can_stop,
                 tool,
+                output,
             } => {
                 let kind = task_kind(&kind);
                 let command = (tool.as_deref())
@@ -55,6 +56,7 @@ impl HostedChat {
                     started: now(),
                     ended: None,
                     can_stop,
+                    output,
                 };
                 self.tasks_session.clone_from(&self.session);
                 if let Some(known) = tasks.iter_mut().find(|task| task.id == id) {
@@ -64,35 +66,50 @@ impl HostedChat {
                     bound(&mut tasks);
                 }
             }
-            Task::Progress { id, description } => {
+            Task::Progress {
+                id,
+                description,
+                output,
+            } => {
                 let task = tasks.iter_mut().find(|task| task.id == id)?;
+                task.output = output.or(task.output.take());
                 if let Some(description) = description
                     && task.kind != AgentTaskKind::Turn
                 {
                     task.title = description;
                 }
             }
-            Task::State { id, state, summary } => {
+            Task::State {
+                id,
+                state,
+                summary,
+                output,
+            } => {
                 let task = tasks.iter_mut().find(|task| task.id == id)?;
+                // Where its output went can come after it ended, as the
+                // result of the tool call that started it can.
+                task.output = output.or(task.output.take());
                 let state = match state.as_str() {
-                    "running" => AgentTaskState::Running,
-                    "paused" => AgentTaskState::Paused,
-                    "completed" => AgentTaskState::Done,
-                    "failed" => AgentTaskState::Failed,
-                    "stopped" => AgentTaskState::Stopped,
-                    _ => return None,
+                    "running" => Some(AgentTaskState::Running),
+                    "paused" => Some(AgentTaskState::Paused),
+                    "completed" => Some(AgentTaskState::Done),
+                    "failed" => Some(AgentTaskState::Failed),
+                    "stopped" => Some(AgentTaskState::Stopped),
+                    _ => None,
                 };
                 // Once it has ended, it stays as it ended.
-                if !task.going() {
-                    return None;
-                }
-                // A stop asked for stays in hand until the agent says it ended.
-                if !(task.state == AgentTaskState::Stopping && state == AgentTaskState::Running) {
-                    task.state = state;
-                }
-                task.summary = summary.or(task.summary.take());
-                if !task.going() {
-                    task.ended = Some(now());
+                if let Some(state) = state.filter(|_| task.going()) {
+                    // A stop asked for stays in hand until the agent says
+                    // it ended.
+                    if !(task.state == AgentTaskState::Stopping
+                        && state == AgentTaskState::Running)
+                    {
+                        task.state = state;
+                    }
+                    task.summary = summary.or(task.summary.take());
+                    if !task.going() {
+                        task.ended = Some(now());
+                    }
                 }
             }
         }
@@ -109,7 +126,7 @@ impl HostedChat {
             id.starts_with(TURN_TASK) && chat.woke_by_task.as_deref() != Some(id)
         };
         match said {
-            Task::Progress { id, description } if unseen(id, self) => {
+            Task::Progress { id, description, .. } if unseen(id, self) => {
                 if !self.woken() {
                     self.wake(description.clone());
                 }
@@ -353,6 +370,9 @@ fn task_in(task: handover::ChatTask) -> Option<AgentTask> {
         started: task.started,
         ended: task.ended,
         can_stop: task.can_stop,
+        // Not handed over: a task the upgrade ended is lost, and one going
+        // on is told of again only when its output moves.
+        output: None,
     })
 }
 
