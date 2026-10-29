@@ -946,6 +946,18 @@ impl State {
             self.dirty.footer = true;
             return;
         }
+        // A command only the agent's own interface has would reach the
+        // model as words: the window does those (CLACKA-189).
+        let offered = (self.open.as_ref())
+            .and_then(|open| open.view.as_ref()?.chat())
+            .map_or(&[][..], |node| node.commands.as_slice());
+        if let Some(name) = clackatoo_protocol::interface_command(&text, offered) {
+            self.note = Some(format!(
+                "/{name} is the agent's own interface's, so it isn't sent: use it in the clackatoo window."
+            ));
+            self.dirty.footer = true;
+            return;
+        }
         self.submitting.insert(terminal);
         self.note = None;
         self.request(
@@ -1749,6 +1761,20 @@ mod tests {
             .insert(TerminalId(4), "typed while waiting".into());
         state.receive(ServerMessage::Response(Response::Done));
         assert_eq!(state.drafts[&TerminalId(4)], "typed while waiting");
+    }
+
+    #[test]
+    fn a_command_only_the_agents_own_interface_has_is_kept_not_sent() {
+        let mut state = sending_state();
+        state.drafts.insert(TerminalId(4), "/clear".into());
+        state.submit(false);
+        assert!(state.take_outbox().is_empty());
+        assert_eq!(state.drafts[&TerminalId(4)], "/clear");
+        assert!(state.note.as_deref().unwrap().contains("/clear"));
+        // The agent's own commands go as any message does.
+        state.drafts.insert(TerminalId(4), "/compact".into());
+        state.submit(false);
+        assert_eq!(state.take_outbox().len(), 1);
     }
 
     #[test]

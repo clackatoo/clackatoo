@@ -151,10 +151,12 @@ impl ChatPage {
     ) -> bool {
         let node = open.view.as_ref().and_then(|v| v.chat());
         self.photos.draw(document, state, open.id);
+        let draft = state.drafts.get(&open.id).cloned().unwrap_or_default();
         let queue = node.map_or_else(
             || el("div"),
             |n| {
                 el("div")
+                    .child(view::commands(n, &draft))
                     .child(view::plan(n))
                     .child(view::background(n))
                     .child(view::queue(n, state.online))
@@ -164,7 +166,6 @@ impl ChatPage {
             dom::replace_children(document, &self.queue, &el("div").child(queue.clone()));
             self.shown_queue = queue;
         }
-        let draft = state.drafts.get(&open.id).cloned().unwrap_or_default();
         let changed = self.textarea.value() != draft;
         if changed {
             self.textarea.set_value(&draft);
@@ -2047,6 +2048,7 @@ impl App {
                 "delivering queued message",
             ),
             Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
+            Action::Command(at) => self.put_command(at),
             Action::AttachPhotos => self.attach_photos(),
             Action::RemovePhoto(id) => self.remove_photo(id),
             Action::Send | Action::Steer => {
@@ -2206,6 +2208,25 @@ impl App {
                 app.draw_soon();
             });
         });
+    }
+
+    /// Puts the agent's slash command at `at` in the open chat's list in
+    /// the message being typed, with a space after it, as a tap on it in
+    /// the list `/` shows does.
+    fn put_command(&mut self, at: usize) {
+        let Some(open) = &self.state.open else {
+            return;
+        };
+        let id = open.id;
+        let name = (open.view.as_ref().and_then(|view| view.chat()))
+            .and_then(|node| node.commands.get(at))
+            .map(|command| command.name.clone());
+        if let Some(name) = name {
+            self.state.drafts.insert(id, format!("/{name} "));
+            self.save_draft(id);
+            self.state.dirty.footer = true;
+            self.draw_soon();
+        }
     }
 
     fn save_draft(&self, chat: TerminalId) {

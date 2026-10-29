@@ -74,6 +74,9 @@ pub enum Action {
     Decline(u64),
     /// Answers question `0`'s link as opened, as the link itself opens.
     OpenLink(u64),
+    /// Puts the agent's slash command at this place in the chat's list in
+    /// the message being typed.
+    Command(usize),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -227,6 +230,7 @@ impl Action {
             Self::Fill(question) => format!("fill:{question}"),
             Self::Decline(question) => format!("decline:{question}"),
             Self::OpenLink(question) => format!("open-link:{question}"),
+            Self::Command(at) => format!("command:{at}"),
         }
     }
 
@@ -282,6 +286,7 @@ impl Action {
             ("fill", question) => Self::Fill(question.parse().ok()?),
             ("decline", question) => Self::Decline(question.parse().ok()?),
             ("open-link", question) => Self::OpenLink(question.parse().ok()?),
+            ("command", at) => Self::Command(at.parse().ok()?),
             _ => return None,
         })
     }
@@ -355,6 +360,7 @@ mod tests {
             Action::OpenTerminal(TerminalId(3)),
             Action::Bring(TabId(4)),
             Action::Dismiss(TabId(5)),
+            Action::Command(3),
             Action::Fit,
             Action::Unfit,
             Action::Type,

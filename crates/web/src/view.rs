@@ -1250,6 +1250,57 @@ fn sheet(title: &str, close: Action, content: Element) -> Element {
         )
 }
 
+/// The agent's slash commands whose names start with what's typed after
+/// the `/` the message starts with, while it's only a `/` and a name:
+/// each its name, what to type after it and what it does, a tap putting
+/// it in the message.
+#[must_use]
+pub fn commands(node: &ChatNode, draft: &str) -> Element {
+    let mut list = el("div").class("queue");
+    let Some(typed) = draft
+        .strip_prefix('/')
+        .filter(|typed| !typed.contains(char::is_whitespace))
+    else {
+        return list;
+    };
+    let typed = typed.to_lowercase();
+    let matching: Vec<(usize, &clackatoo_protocol::AgentCommand)> = (node.commands.iter())
+        .enumerate()
+        .filter(|(_, command)| command.name.to_lowercase().starts_with(&typed))
+        .take(MOST_COMMANDS_SHOWN)
+        .collect();
+    if matching.is_empty() {
+        return list;
+    }
+    list = list.child(el("div").class("queue-heading").text("Commands"));
+    for (at, command) in matching {
+        let hint = command
+            .hint
+            .as_ref()
+            .map_or_else(String::new, |hint| format!(" ‹{hint}›"));
+        list = list.child(
+            el("button")
+                .class("queued-message")
+                .attr("type", "button")
+                .action(&Action::Command(at))
+                .child(
+                    el("div")
+                        .class("queued-text")
+                        .text(format!("/{}{hint}", command.name)),
+                )
+                .child(
+                    el("div")
+                        .class("queued-text muted")
+                        .text(command.description.clone()),
+                ),
+        );
+    }
+    list
+}
+
+/// The most of the agent's commands the list `/` shows lists.
+const MOST_COMMANDS_SHOWN: usize = 12;
+
 /// The agent's plan, its to-do list: how many steps are done, then each
 /// step, ☐ to do, ◐ being worked on, ☑ done and dimmed. The list scrolls
 /// within the card, as the queue's does.
@@ -1729,6 +1780,35 @@ mod tests {
             .map(|element| element.all_text())
             .collect();
         assert_eq!(dimmed, ["☑ Read it"]);
+    }
+
+    #[test]
+    fn a_slash_lists_the_agents_commands_that_start_with_what_is_typed() {
+        use clackatoo_protocol::AgentCommand;
+        let command = |name: &str, hint: Option<&str>| AgentCommand {
+            name: name.into(),
+            description: format!("Does {name}"),
+            hint: hint.map(str::to_owned),
+        };
+        let node = ChatNode {
+            commands: vec![command("compact", None), command("review", Some("what"))],
+            ..ChatNode::default()
+        };
+        assert_eq!(
+            commands(&node, "/").all_text(),
+            "Commands/compactDoes compact/review ‹what›Does review"
+        );
+        assert_eq!(
+            commands(&node, "/re").all_text(),
+            "Commands/review ‹what›Does review"
+        );
+        for draft in ["", "hello", "/review ", "/zzz"] {
+            assert!(commands(&node, draft).all_text().is_empty(), "{draft:?}");
+        }
+        let taps: Vec<String> = (commands(&node, "/re").find_all("data-action").iter())
+            .filter_map(|element| element.get("data-action").map(str::to_owned))
+            .collect();
+        assert_eq!(taps, ["command:1"]);
     }
 
     fn open() -> OpenChat {
