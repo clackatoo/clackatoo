@@ -125,6 +125,7 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .tool .mark { color: var(--muted); }.tool.done .mark { color: var(--ok); }.tool.failed .mark { color: var(--danger); }
 .tool-title { font: 12px/1.5 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.tool[open] .tool-title { white-space: normal; overflow-wrap: anywhere; }
 .tool > :not(summary) { margin: 8px 0 0; }.diff .path { font: 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }.diff .del { background: var(--removed); display: block; }.diff .ins { background: var(--added); display: block; }
+.nested { margin: -4px 0 8px 14px; }.nested > summary { color: var(--muted); font-size: 12px; padding: 6px 0; min-height: 32px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.nested[open] { border-left: 1px solid var(--line); padding-left: 12px; }
 .card { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; }.card.needs { border-color: var(--accent); }.card .task { font-size: 14px; font-weight: 500; }
 .notice { color: var(--muted); font-size: 13px; }
 .question { background: var(--panel); border: 1px solid #65552e; border-radius: var(--radius); padding: 18px; margin: 12px 0; box-shadow: 0 4px 24px #0003; }

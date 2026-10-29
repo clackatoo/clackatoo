@@ -29,7 +29,7 @@
 use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
 use clackatoo_protocol::{ChatState, Outcome, ResumeSession, Turn};
 
-use super::{Action, HostedChat, Link, TITLE, Wanted, clean, clean_text, now};
+use super::{Action, HostedChat, Link, TITLE, Wanted, clean, clean_text, nested, now};
 
 /// What Claude Code keeps, as a message from the user, where a turn was
 /// stopped: at a tool's question, or otherwise. Codex's adapter tells no
@@ -149,6 +149,10 @@ impl HostedChat {
     pub(crate) fn replay(&mut self, update: SessionUpdate) {
         self.told.replayed = true;
         match update {
+            // What a subagent was told, as Claude Code's adapter tells it
+            // again: the tool call that started it shows it already, and
+            // it's no message of the user's.
+            SessionUpdate::UserMessageChunk(chunk) if nested::told_a_subagent(&chunk) => {}
             SessionUpdate::UserMessageChunk(chunk) => {
                 let text = match chunk.content {
                     ContentBlock::Text(text) => without_inline_images(clean_text(&text.text)),

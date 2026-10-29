@@ -508,14 +508,10 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         if opened {
             work = work.attr("open", "");
         }
-        for (at, item) in turn.items[..answer].iter().enumerate() {
-            work = work.child(item_view(item, open, index, at));
-        }
+        work = work.children(items_view(turn, 0..answer, open, index));
         section = section.child(work);
     }
-    for (at, item) in turn.items.iter().enumerate().skip(answer) {
-        section = section.child(item_view(item, open, index, at));
-    }
+    section = section.children(items_view(turn, answer..turn.items.len(), open, index));
     for (at, activity) in node
         .activities
         .iter()
@@ -613,12 +609,79 @@ pub fn next_second(node: &ChatNode, online: Online, now: u64) -> Option<u64> {
     Some(sent + (now.saturating_sub(sent) / 1000 + 1) * 1000)
 }
 
+/// The items of `turn`, turn `index`, in `range`: each the agent's own,
+/// and under each tool call that started a subagent, what the subagent
+/// did, folded under a line saying what it does now and how many tools
+/// it used. What a subagent of no tool of the turn did shows as the
+/// agent's own.
+fn items_view(
+    turn: &Turn,
+    range: std::ops::Range<usize>,
+    open: &OpenChat,
+    index: usize,
+) -> Vec<Element> {
+    let work = turn.nested_work();
+    let tools: std::collections::HashSet<&str> = if work.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        (turn.items.iter())
+            .filter_map(|item| item.tool().map(|tool| tool.id.as_str()))
+            .collect()
+    };
+    let mut shown = Vec::new();
+    for at in range {
+        let item = &turn.items[at];
+        if item.parent().is_some_and(|parent| tools.contains(parent)) {
+            continue;
+        }
+        shown.push(item_view(item.inner(), open, index, at));
+        if let Some(tool) = item.tool() {
+            shown.extend(nested_view(turn, tool, (&work, DEEPEST), open, index));
+        }
+    }
+    shown
+}
+
+/// How deep subagents' subagents are shown: a peer could say each is
+/// the other's.
+const DEEPEST: usize = 8;
+
+/// What the subagent the tool call `tool` started did in `turn`, turn
+/// `index`, folded under a line saying what it does now: nothing if it
+/// did nothing. Its own subagents' work goes under their tools inside,
+/// `depth` deep at most.
+fn nested_view(
+    turn: &Turn,
+    tool: &Tool,
+    (work, depth): (
+        &std::collections::HashMap<&str, clackatoo_protocol::NestedWork>,
+        usize,
+    ),
+    open: &OpenChat,
+    index: usize,
+) -> Option<Element> {
+    let sum = work.get(tool.id.as_str()).filter(|_| depth > 0)?;
+    let summary = el("summary").text(turn.nested_line(tool, sum));
+    let mut details = folded(open, format!("t{index}n{}", tool.id), "nested", summary);
+    for (at, item) in turn.items.iter().enumerate().take(sum.last + 1) {
+        if item.parent() == Some(tool.id.as_str()) {
+            details = details.child(item_view(item.inner(), open, index, at));
+            if let Some(inner) = item.tool() {
+                let deeper = nested_view(turn, inner, (work, depth - 1), open, index);
+                details = details.children(deeper);
+            }
+        }
+    }
+    Some(details)
+}
+
 /// One thing the agent did.
 fn item_view(item: &Item, open: &OpenChat, turn: usize, at: usize) -> Element {
     match item {
         Item::Compacted(details) => el("div")
             .class("compacted")
             .text(Item::compacted_label(details)),
+        Item::Nested { item, .. } => item_view(item, open, turn, at),
         Item::Words(words) | Item::Other(words) => {
             el("div").class("words").children(markdown::render(words))
         }
@@ -1924,6 +1987,61 @@ mod tests {
         open.folds.insert("t0".into(), true);
         let section = turn(&node, &open, 0, 50_000);
         assert_eq!(section.find_all("data-fold")[0].get("open"), Some(""));
+    }
+
+    #[test]
+    fn a_task_subagents_work_folds_under_its_tool_saying_what_it_does_now() {
+        let tool = |id: &str, title: &str, status| Tool {
+            id: id.into(),
+            title: title.into(),
+            status,
+            kind: clackatoo_protocol::ToolKind::Read,
+            content: Vec::new(),
+            locations: Vec::new(),
+            exit: None,
+        };
+        let nested = |item| Item::nested("task".into(), item);
+        let mut node = ChatNode::default();
+        node.turns.push(Turn {
+            woke: None,
+            previews: Vec::new(),
+            prompt: "look".into(),
+            sent: 1_000,
+            items: vec![
+                Item::Tool(tool("task", "Find the parser", ToolStatus::Running)),
+                nested(Item::Words("I'll look.".into())),
+                Item::Words("Meanwhile, mine.".into()),
+                nested(Item::Tool(tool(
+                    "r",
+                    "Read src/parse.rs",
+                    ToolStatus::Running,
+                ))),
+                Item::nested("elsewhere".into(), Item::Words("Of no tool here.".into())),
+            ],
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+        });
+        let section = turn(&node, &open(), 0, 50_000);
+        let folds = section.find_all("data-fold");
+        let nested = (folds.iter())
+            .find(|fold| fold.get("data-fold") == Some("t0ntask"))
+            .expect("the subagent's fold");
+        assert_eq!(nested.get("open"), None, "folded");
+        let text = nested.all_text();
+        assert!(
+            text.starts_with("↳ Reading src/parse.rs · 1 tool use"),
+            "{text}"
+        );
+        assert!(text.contains("I'll look.") && !text.contains("Meanwhile"));
+        // Each item once: the subagent's only under its tool, and what
+        // names no tool of the turn as the agent's own.
+        let all = section.all_text();
+        assert_eq!(all.matches("I'll look.").count(), 1);
+        let task = all.find("Find the parser").unwrap();
+        assert!(all.find("I'll look.").unwrap() > task);
+        assert!(all.contains("Meanwhile, mine.") && all.contains("Of no tool here."));
     }
 
     #[test]

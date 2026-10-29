@@ -2337,6 +2337,7 @@ impl ChatView {
                 if !self.open_cards.remove(&tool) {
                     self.open_cards.insert(tool);
                 }
+                self.cursor_off_folded_work();
             }
             Some(Hit::Undo(turn)) => settled.actions.push(ChatAction::Undo {
                 turn: u32::try_from(turn).unwrap_or(u32::MAX),

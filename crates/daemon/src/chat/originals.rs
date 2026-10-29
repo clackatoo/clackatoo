@@ -10,7 +10,7 @@ impl HostedChat {
                 }
             }
             for item in &value.items {
-                if let Item::Tool(tool) = item {
+                if let Some(tool) = item.tool() {
                     for (index, image) in tool
                         .content
                         .iter()
@@ -45,17 +45,17 @@ impl HostedChat {
                 continue;
             };
             let image = if let Some(name) = tool {
-                turn.items.iter_mut().find_map(|item| match item {
-                    Item::Tool(tool) if &tool.id == name => tool
-                        .content
-                        .iter_mut()
-                        .filter_map(|c| match c {
-                            ToolContent::Image(image) => Some(image),
-                            _ => None,
-                        })
-                        .nth(*index as usize),
-                    _ => None,
-                })
+                (turn.items.iter_mut())
+                    .filter_map(Item::tool_mut)
+                    .find(|tool| &tool.id == name)
+                    .and_then(|tool| {
+                        (tool.content.iter_mut())
+                            .filter_map(|c| match c {
+                                ToolContent::Image(image) => Some(image),
+                                _ => None,
+                            })
+                            .nth(*index as usize)
+                    })
             } else {
                 turn.previews.get_mut(*index as usize)
             };

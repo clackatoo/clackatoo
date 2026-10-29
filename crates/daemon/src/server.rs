@@ -1176,6 +1176,7 @@ impl Daemon {
                 .map(|previews| (previews.chat, previews))
                 .collect();
         let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
+        let nested = std::mem::take(&mut handover.state.nested);
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let mut continuations: std::collections::HashMap<_, _> =
@@ -1264,6 +1265,7 @@ impl Daemon {
             let images = previews.remove(&chat.id);
             let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
+            chat.resume_nesting(&nested);
             if let Some(images) = images {
                 chat.resume_previews(images);
             }
@@ -1481,6 +1483,7 @@ impl Daemon {
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
+        let mut nested = Vec::new();
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
         let mut chat_continuations = Vec::new();
@@ -1516,6 +1519,7 @@ impl Daemon {
                     chat.hand_over_standing(&mut standing);
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
+                    nested.extend(chat.hand_over_nesting());
                     image_originals.push(chat.hand_over_originals());
                     chat_queues.push(chat.hand_over_queue());
                     if live {
@@ -1594,6 +1598,7 @@ impl Daemon {
                 undelivered: self.hand_over_talk(),
                 talk: Some(self.hand_over_counts(standing)),
                 live,
+                nested,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,

@@ -39,6 +39,7 @@ mod facts;
 pub(crate) mod failure;
 mod limits;
 mod live;
+mod nested;
 mod originals;
 mod plan;
 pub(crate) mod queue;
@@ -2273,15 +2274,18 @@ impl HostedChat {
             return false;
         }
         if let Some(whole) = whole {
-            self.set_tool(Tool {
-                id: format!("clackatoo-{call}"),
-                title: "What the agent asks to type, in full".to_owned(),
-                status: ToolStatus::Done,
-                kind: ToolKind::Other,
-                content: vec![ToolContent::Text(format!("```\n{whole}\n```"))],
-                locations: Vec::new(),
-                exit: None,
-            });
+            self.set_tool(
+                Tool {
+                    id: format!("clackatoo-{call}"),
+                    title: "What the agent asks to type, in full".to_owned(),
+                    status: ToolStatus::Done,
+                    kind: ToolKind::Other,
+                    content: vec![ToolContent::Text(format!("```\n{whole}\n```"))],
+                    locations: Vec::new(),
+                    exit: None,
+                },
+                None,
+            );
         }
         let choices: &[(&str, &str, ChoiceKind)] = match offered {
             Choices::Tool => &TOOL_CHOICES,
@@ -2397,11 +2401,13 @@ impl HostedChat {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 self.progressed();
                 self.message_image(&chunk.content);
-                self.write(&chunk.content, false);
+                let parent = self.parent_here(chunk.meta.as_ref(), None);
+                self.write(&chunk.content, false, parent);
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.progressed();
-                self.write(&chunk.content, true);
+                let parent = self.parent_here(chunk.meta.as_ref(), None);
+                self.write(&chunk.content, true, parent);
             }
             SessionUpdate::ToolCall(call) => {
                 self.progressed();
@@ -2425,7 +2431,8 @@ impl HostedChat {
                     native_output(&mut tool, call.raw_output.as_ref());
                 }
                 let (id, wrote) = (tool.id.clone(), self.wrote(&tool));
-                self.set_tool(tool);
+                let parent = self.parent_here(call.meta.as_ref(), Some(&id));
+                self.set_tool(tool, parent);
                 self.add_output(&id, call.meta.as_ref());
                 self.compaction(&id, call.meta.as_ref(), call.raw_output.as_ref());
                 return wrote;
@@ -2492,9 +2499,13 @@ impl HostedChat {
                     || fields.locations.is_some();
                 let wrote = says.then(|| self.wrote(&tool)).flatten();
                 // A piece of output alone changes nothing else, and goes
-                // as an append, not the tool again.
-                if known.as_ref() != Some(&tool) {
-                    self.set_tool(tool);
+                // as an append, not the tool again. Claude Code's adapter
+                // can name a call's subagent first in an update, as for
+                // one it asked about before it streamed.
+                let parent = self.parent_here(update.meta.as_ref(), Some(&id));
+                let nests = parent.is_some() && !self.is_nested(&id);
+                if known.as_ref() != Some(&tool) || nests {
+                    self.set_tool(tool, parent);
                 }
                 self.add_output(&id, update.meta.as_ref());
                 self.compaction(&id, update.meta.as_ref(), raw);
@@ -2577,7 +2588,7 @@ impl HostedChat {
             };
             let mut tool = tool.clone();
             tool.content.push(ToolContent::Text(clean_text(&text)));
-            self.set_tool(tool);
+            self.set_tool(tool, None);
         }
     }
 
@@ -2628,7 +2639,7 @@ impl HostedChat {
         let turn = self.node.turns.len().checked_sub(1)?;
         let items = &self.node.turns[turn].items;
         let order = (items.iter())
-            .position(|item| matches!(item, Item::Tool(old) if old.id == tool.id))
+            .position(|item| item.tool().is_some_and(|old| old.id == tool.id))
             .unwrap_or(items.len());
         let diffs = (self.diffs.iter())
             .find(|(id, _)| *id == tool.id)
@@ -2684,10 +2695,10 @@ impl HostedChat {
         let Some(turn) = self.answering_turn().filter(|_| !asked) else {
             return false;
         };
-        self.node.turns[turn].items.iter().any(|item| {
-            matches!(item, Item::Tool(tool)
-                if tool.status == ToolStatus::Running && writes_files(tool.kind))
-        })
+        // A subagent's edit writes as the agent's own does.
+        (self.node.turns[turn].items.iter())
+            .filter_map(Item::tool)
+            .any(|tool| tool.status == ToolStatus::Running && writes_files(tool.kind))
     }
 
     /// The agent, as it's shown: "Claude Code", "Codex"…
@@ -2727,17 +2738,18 @@ impl HostedChat {
             .answering_turn()
             .map(|turn| &self.node.turns[turn].items))
         .and_then(|items| {
-            items.iter().rev().find_map(|item| match item {
-                Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool.id.clone()),
-                _ => None,
-            })
+            (items.iter().rev())
+                .filter_map(Item::tool)
+                .find(|tool| tool.status == ToolStatus::Running)
+                .map(|tool| tool.id.clone())
         });
         (turn, running)
     }
 
     /// A piece of the agent's words, or of its thinking, on the end of the
-    /// turn answering.
-    fn write(&mut self, content: &ContentBlock, thinking: bool) {
+    /// turn answering: of the subagent the tool call `parent` started, if
+    /// it's given.
+    fn write(&mut self, content: &ContentBlock, thinking: bool, parent: Option<String>) {
         let ContentBlock::Text(text) = content else {
             return;
         };
@@ -2749,11 +2761,15 @@ impl HostedChat {
         }
         let text = clean_text(&text.text);
         let items = &mut self.node.turns[index].items;
-        let continues = match items.last() {
-            Some(Item::Words(_)) => !thinking,
-            Some(Item::Thought(_)) => thinking,
-            _ => false,
-        };
+        // A subagent's words never run on from the agent's, nor another's.
+        let continues = items.last().is_some_and(|last| {
+            last.parent() == parent.as_deref()
+                && match last.inner() {
+                    Item::Words(_) => !thinking,
+                    Item::Thought(_) => thinking,
+                    _ => false,
+                }
+        });
         if !continues {
             // A new item goes whole, empty, with the text appended after.
             let item = if thinking {
@@ -2761,12 +2777,21 @@ impl HostedChat {
             } else {
                 Item::Words(String::new())
             };
+            let item = match &parent {
+                Some(parent) => Item::nested(parent.clone(), item),
+                None => item,
+            };
             items.push(item.clone());
             let at = items.len() - 1;
             self.patch_item(index, at, item);
+            if let Some(parent) = &parent {
+                self.bound_nested(index, parent);
+            }
         }
         let items = &mut self.node.turns[index].items;
-        if let Some(Item::Words(words) | Item::Thought(words)) = items.last_mut() {
+        if let Some(Item::Words(words) | Item::Thought(words)) =
+            items.last_mut().map(Item::inner_mut)
+        {
             words.push_str(&text);
         }
         let item = items.len() - 1;
@@ -2791,19 +2816,19 @@ impl HostedChat {
             return;
         };
         let items = &mut self.node.turns[turn].items;
-        let Some((at, tool)) = (items.iter_mut().enumerate()).find_map(|(at, item)| match item {
-            Item::Tool(tool) if tool.id == id => Some((at, tool)),
-            _ => None,
-        }) else {
+        let Some(at) =
+            (items.iter()).position(|item| item.tool().is_some_and(|tool| tool.id == id))
+        else {
             return;
         };
+        let tool = items[at].tool_mut().expect("a tool");
         let text = clean_text(data);
         tool.append_output(&text);
         let output = tool.output_mut().expect("just added to");
         if output.len() > 2 * TOOL_TEXT {
             *output = tail(output, TOOL_TEXT);
-            let tool = Item::Tool(tool.clone());
-            self.patch_item(turn, at, tool);
+            let item = items[at].clone();
+            self.patch_item(turn, at, item);
         } else {
             self.journal.push(ChatPatch::Output {
                 turn: index_u32(turn),
@@ -2813,43 +2838,53 @@ impl HostedChat {
         }
     }
 
-    /// Adds `tool` to the turn answering, or changes the one with its ID.
-    fn set_tool(&mut self, tool: Tool) {
+    /// Adds `tool` to the turn answering, or changes the one with its ID:
+    /// under the tool call `parent`, whose subagent used it, if that's
+    /// given. A tool once nested stays where it is.
+    fn set_tool(&mut self, tool: Tool, parent: Option<String>) {
         let Some(index) = self.answering_turn() else {
             return;
         };
         let items = &mut self.node.turns[index].items;
-        let at =
-            (items.iter()).position(|item| matches!(item, Item::Tool(old) if old.id == tool.id));
+        let at = (items.iter()).position(|item| item.tool().is_some_and(|old| old.id == tool.id));
+        let parent = at
+            .and_then(|at| items[at].parent().map(str::to_owned))
+            .or(parent);
+        let added = at.is_none();
+        let item = match &parent {
+            Some(parent) => Item::nested(parent.clone(), Item::Tool(tool)),
+            None => Item::Tool(tool),
+        };
         let at = if let Some(at) = at {
-            items[at] = Item::Tool(tool.clone());
+            items[at] = item.clone();
             at
         } else {
-            items.push(Item::Tool(tool.clone()));
+            items.push(item.clone());
             items.len() - 1
         };
         // Only the tool goes, not its turn: a turn of many tools, each
         // with its output, would be sent again with every change.
-        self.patch_item(index, at, Item::Tool(tool));
+        self.patch_item(index, at, item);
+        if let (true, Some(parent)) = (added, &parent) {
+            self.bound_nested(index, parent);
+        }
     }
 
     /// The tool with `id`, in the turn answering.
     fn tool(&self, id: &str) -> Option<&Tool> {
         let turn = self.node.turns.get(self.answering_turn()?)?;
-        turn.items.iter().find_map(|item| match item {
-            Item::Tool(tool) if tool.id == id => Some(tool),
-            _ => None,
-        })
+        (turn.items.iter())
+            .filter_map(Item::tool)
+            .find(|tool| tool.id == id)
     }
 
     /// The tool with ID `id` in the last turn, whether or not it's still
     /// being answered.
     fn tool_anywhere(&self, id: &str) -> Option<&Tool> {
         let turn = self.node.turns.last()?;
-        turn.items.iter().find_map(|item| match item {
-            Item::Tool(tool) if tool.id == id => Some(tool),
-            _ => None,
-        })
+        (turn.items.iter())
+            .filter_map(Item::tool)
+            .find(|tool| tool.id == id)
     }
 
     // --- Changes ------------------------------------------------------------
@@ -2891,7 +2926,7 @@ impl HostedChat {
         }
         let turn = &mut self.node.turns[index];
         for item in &mut turn.items {
-            if let Item::Tool(tool) = item
+            if let Some(tool) = item.tool_mut()
                 && tool.status == ToolStatus::Running
             {
                 tool.status = ToolStatus::Failed;
@@ -2981,10 +3016,9 @@ impl HostedChat {
     pub(crate) fn image_target(&mut self, id: &str) -> Option<crate::tool_images::Target> {
         let turn = self.node.turns.len().checked_sub(1)?;
         let current = &self.node.turns[turn];
-        let tool = current.items.iter().find_map(|item| match item {
-            Item::Tool(tool) if tool.id == id => Some(tool),
-            _ => None,
-        })?;
+        let tool = (current.items.iter())
+            .filter_map(Item::tool)
+            .find(|tool| tool.id == id)?;
         Some(crate::tool_images::Target {
             terminal: self.id,
             turn,
@@ -3002,7 +3036,7 @@ impl HostedChat {
             .enumerate()
             .flat_map(|(turn, value)| {
                 value.items.iter().filter_map(move |item| {
-                    let Item::Tool(tool) = item else {
+                    let Some(tool) = item.tool() else {
                         return None;
                     };
                     let images: Vec<_> = tool
@@ -3034,10 +3068,11 @@ impl HostedChat {
             let Some(turn) = self.node.turns.get(record.turn as usize) else {
                 continue;
             };
-            let Some(content) = turn.items.iter().find_map(|item| match item {
-                Item::Tool(tool) if tool.id == record.tool => Some(tool.content.clone()),
-                _ => None,
-            }) else {
+            let Some(content) = (turn.items.iter())
+                .filter_map(Item::tool)
+                .find(|tool| tool.id == record.tool)
+                .map(|tool| tool.content.clone())
+            else {
                 continue;
             };
             let target = crate::tool_images::Target {
@@ -3068,8 +3103,18 @@ impl HostedChat {
         images: Vec<(clackatoo_protocol::ChatPreview, String)>,
     ) -> bool {
         // Validate the receipt and destination before retaining any original data.
-        if images.is_empty() || images.len() > 4 || images.iter().any(|(image, _)| !image.valid())
-            || !self.node.turns.get(target.turn).is_some_and(|turn| turn.sent == target.sent && turn.items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.id == target.tool && tool.content == target.content))) {
+        if images.is_empty()
+            || images.len() > 4
+            || images.iter().any(|(image, _)| !image.valid())
+            || !self.node.turns.get(target.turn).is_some_and(|turn| {
+                turn.sent == target.sent
+                    && turn.items.iter().any(|item| {
+                        item.tool().is_some_and(|tool| {
+                            tool.id == target.tool && tool.content == target.content
+                        })
+                    })
+            })
+        {
             return false;
         }
         if !self
@@ -3112,15 +3157,21 @@ impl HostedChat {
         else {
             return false;
         };
-        let Some(at) = turn.items.iter().position(|item| matches!(item, Item::Tool(tool) if tool.id == target.tool && tool.content == target.content)) else { return false; };
+        let Some(at) = turn.items.iter().position(|item| {
+            item.tool()
+                .is_some_and(|tool| tool.id == target.tool && tool.content == target.content)
+        }) else {
+            return false;
+        };
         self.revoke_image(&target.tool);
         self.make_preview_room(&images);
-        let Item::Tool(tool) = &mut self.node.turns[target.turn].items[at] else {
+        let item = &mut self.node.turns[target.turn].items[at];
+        let Some(tool) = item.tool_mut() else {
             return false;
         };
         tool.content
             .extend(images.into_iter().map(ToolContent::Image));
-        let item = Item::Tool(tool.clone());
+        let item = item.clone();
         self.patch_item(target.turn, at, item);
         true
     }
@@ -3164,10 +3215,8 @@ impl HostedChat {
                 turn.previews.iter().chain(
                     turn.items
                         .iter()
-                        .flat_map(|item| match item {
-                            Item::Tool(tool) => tool.content.as_slice(),
-                            _ => &[],
-                        })
+                        .filter_map(Item::tool)
+                        .flat_map(|tool| tool.content.as_slice())
                         .filter_map(|content| match content {
                             ToolContent::Image(image) => Some(image),
                             _ => None,
@@ -3184,7 +3233,7 @@ impl HostedChat {
             let turn = &mut self.node.turns[index];
             let mut changed = false;
             for item in &mut turn.items {
-                if let Item::Tool(tool) = item {
+                if let Some(tool) = item.tool_mut() {
                     tool.content.retain(|content| {
                         if let ToolContent::Image(image) = content {
                             bytes -= image.rgba.len();
@@ -3365,9 +3414,10 @@ fn merge(last: &mut ChatPatch, patch: &ChatPatch) -> bool {
     }
 }
 
-/// About how many bytes `patch` takes.
-fn weight(patch: &ChatPatch) -> usize {
-    let item = |item: &Item| match item {
+/// About how many bytes `item` takes.
+fn item_weight(item: &Item) -> usize {
+    match item {
+        Item::Nested { parent, item } => parent.len() + item_weight(item),
         Item::Words(text) | Item::Thought(text) | Item::Other(text) | Item::Compacted(text) => {
             text.len()
         }
@@ -3390,7 +3440,12 @@ fn weight(patch: &ChatPatch) -> usize {
                 .sum();
             tool.title.len() + content + locations
         }
-    };
+    }
+}
+
+/// About how many bytes `patch` takes.
+fn weight(patch: &ChatPatch) -> usize {
+    let item = item_weight;
     let size = match patch {
         ChatPatch::Turn { turn, .. } => {
             turn.prompt.len()
@@ -3789,7 +3844,9 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
         prompt: turn.prompt,
         sent: turn.sent,
         items: (turn.items.into_iter())
-            .map(|item| match item {
+            // What a subagent did goes as the agent's own: which tool started it
+            // goes apart (see `HostedChat::hand_over_nesting`).
+            .map(|item| match item.flattened() {
                 // The daemon makes no Other: it's what a newer one sends.
                 Item::Words(words) | Item::Other(words) => handover::ChatItem::Words(words),
                 // The handover keeps no line across: it goes as words,
@@ -3799,6 +3856,8 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                     handover::ChatItem::Words(format!("*{}*", Item::compacted_label(&details)))
                 }
                 Item::Thought(words) => handover::ChatItem::Thought(words),
+                // Flattened, nothing is nested.
+                Item::Nested { .. } => handover::ChatItem::Words(String::new()),
                 Item::Tool(tool) => handover::ChatItem::Tool {
                     id: tool.id,
                     title: tool.title,

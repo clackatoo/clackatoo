@@ -88,7 +88,7 @@ impl HostedChat {
         // What was taken for a notice just now was this turn's start.
         if let Some((_, text)) = taken {
             self.set_notice(None);
-            self.write(&ContentBlock::Text(TextContent::new(text)), false);
+            self.write(&ContentBlock::Text(TextContent::new(text)), false, None);
         }
         true
     }
@@ -182,7 +182,8 @@ impl HostedChat {
             return false;
         };
         (turn.items.iter())
-            .any(|item| matches!(item, Item::Tool(tool) if tool.status == ToolStatus::Running))
+            .filter_map(Item::tool)
+            .any(|tool| tool.status == ToolStatus::Running)
     }
 }
 

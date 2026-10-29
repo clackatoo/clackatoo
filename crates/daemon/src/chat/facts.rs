@@ -270,15 +270,18 @@ impl HostedChat {
             return;
         }
         self.facts.images += 1;
-        self.set_tool(Tool {
-            id,
-            title: "Image".to_owned(),
-            status: ToolStatus::Done,
-            kind: ToolKind::Other,
-            content: Vec::new(),
-            locations: Vec::new(),
-            exit: None,
-        });
+        self.set_tool(
+            Tool {
+                id,
+                title: "Image".to_owned(),
+                status: ToolStatus::Done,
+                kind: ToolKind::Other,
+                content: Vec::new(),
+                locations: Vec::new(),
+                exit: None,
+            },
+            None,
+        );
     }
 
     /// The ID the next image in the agent's words is shown as: one no

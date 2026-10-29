@@ -22,6 +22,11 @@ pub(super) struct CardLaid {
     /// The tool it was laid out from, and whether it was open: when
     /// either changes, it's laid out again.
     pub(super) tool: Tool,
+    /// What its subagent did, as said under its title, if it started one.
+    pub(super) nested: Option<String>,
+    /// How wide it was laid out: a tool a subagent turns out to have used
+    /// is indented, and narrower.
+    width: f32,
     open: bool,
     /// How the tool went: "✓".
     mark: Laid,
@@ -119,21 +124,29 @@ impl Section {
 }
 
 impl ChatView {
-    /// The card for `tool`, laid out `width` wide: `old`, if neither the
-    /// tool nor whether its card is open has changed since it was laid
-    /// out.
+    /// The card for `tool`, laid out `width` wide, with `nested` under
+    /// its title, what its subagent did, if it started one: `old`, if
+    /// none of them, nor whether its card is open, has changed since it
+    /// was laid out.
     pub(super) fn card(
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
         old: Option<CardLaid>,
-        tool: &Tool,
+        (tool, nested): (&Tool, Option<String>),
         width: f32,
     ) -> CardLaid {
         let open = self.open_cards.contains(&tool.id);
         match old {
-            Some(laid) if laid.open == open && laid.tool == *tool => laid,
-            _ => self.lay_out_card(fonts, m, tool, open, width),
+            Some(laid)
+                if laid.open == open
+                    && laid.tool == *tool
+                    && laid.nested == nested
+                    && laid.width == width =>
+            {
+                laid
+            }
+            _ => self.lay_out_card(fonts, m, (tool, nested), open, width),
         }
     }
 
@@ -141,7 +154,7 @@ impl ChatView {
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
-        tool: &Tool,
+        (tool, nested): (&Tool, Option<String>),
         open: bool,
         width: f32,
     ) -> CardLaid {
@@ -194,7 +207,7 @@ impl ChatView {
         } else {
             w.summary(&title, head_wide)
         };
-        let (body, gutter, _) = match &card {
+        let (mut body, gutter, _) = match &card {
             _ if !open && tool.status != ToolStatus::Failed => (Vec::new(), None, 0),
             Some(Card::Command {
                 purpose, output, ..
@@ -205,6 +218,12 @@ impl ChatView {
             Some(Card::Change(files)) => w.change(files),
             None => (Vec::new(), None, 0),
         };
+        // What its subagent does now, open or folded: open, what it did
+        // shows under the card.
+        if let Some(line) = &nested {
+            let line = w.summary(line, inner);
+            body.insert(0, Section::Text(line));
+        }
         let footer =
             (open && !body.is_empty()).then(|| w.text("Collapse", Look::Plain(Tone::Muted), inner));
         let head_height = mark.height.max(head.height) + 2.0 * m.em(0.35);
@@ -228,6 +247,8 @@ impl ChatView {
         height += image_height;
         CardLaid {
             tool: tool.clone(),
+            nested,
+            width,
             open,
             mark,
             head,
@@ -699,7 +720,7 @@ mod tests {
             locations: vec![],
             exit: None,
         };
-        let card = chat.card(&mut fonts, Measures::of(16.0), None, &tool, 500.0);
+        let card = chat.card(&mut fonts, Measures::of(16.0), None, (&tool, None), 500.0);
         assert!(!card.open);
         assert!(
             matches!(&card.body[0], Section::Text(text) if text.source == "Error: test failed")

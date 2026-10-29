@@ -298,6 +298,10 @@ gates! {
     /// Whether a chat's last turn went wrong, as the list of chats says
     /// it: `ChatSummary`'s `failed`.
     TURN_FAILED = 116,
+    /// What an agent's own subagents did, under the tool call that
+    /// started each, as Claude Code's Task tool starts them:
+    /// `Item::Nested`. An older peer gets each item as the agent's own.
+    NESTED_WORK = 118,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -434,6 +438,7 @@ impl Since for Item {
             Self::Words(_) | Self::Thought(_) | Self::Tool(_) => EARLIER,
             Self::Other(_) => FALLBACKS,
             Self::Compacted(_) => CHAT_FACTS,
+            Self::Nested { .. } => NESTED_WORK,
         }
     }
 }
@@ -950,6 +955,7 @@ fn newest_in_item(item: &Item) -> u32 {
             .max()
             .unwrap_or(EARLIER),
         Item::Words(_) | Item::Thought(_) | Item::Other(_) | Item::Compacted(_) => item.since(),
+        Item::Nested { item: inner, .. } => item.since().max(newest_in_item(inner)),
     }
 }
 
@@ -1093,8 +1099,9 @@ fn chat_action_since(action: &crate::ChatAction) -> u32 {
 /// Replace image pixels with a readable label for older clients, in both
 /// snapshots and incremental tool/turn updates.
 fn without_tool_images(message: &ServerMessage) -> ServerMessage {
-    fn item(item: &mut Item) {
-        if let Item::Tool(tool) = item {
+    let mut message = message.clone();
+    each_item(&mut message, &mut |item| {
+        if let Some(tool) = item.tool_mut() {
             for content in &mut tool.content {
                 if matches!(content, ToolContent::Image(_)) {
                     *content =
@@ -1102,29 +1109,53 @@ fn without_tool_images(message: &ServerMessage) -> ServerMessage {
                 }
             }
         }
-    }
-    fn turn(turn: &mut Turn) {
-        for value in &mut turn.items {
-            item(value);
+    });
+    message
+}
+
+/// What an agent's subagents did, as the agent's own, for a peer from
+/// before nesting: each item where it was, so its patches still find it.
+/// `None` if nothing in `message` is nested.
+fn without_nesting(message: &ServerMessage) -> Option<ServerMessage> {
+    let mut nested = false;
+    let mut message = message.clone();
+    each_item(&mut message, &mut |item| {
+        if let Item::Nested { item: inner, .. } = item {
+            nested = true;
+            let inner = std::mem::replace(&mut **inner, Item::Words(String::new()));
+            *item = inner;
         }
+    });
+    nested.then_some(message)
+}
+
+/// Calls `change` with every chat item in `message`: in snapshots, turns,
+/// items and pages of history.
+fn each_item(message: &mut ServerMessage, change: &mut impl FnMut(&mut Item)) {
+    fn turn(turn: &mut Turn, change: &mut impl FnMut(&mut Item)) {
+        turn.items.iter_mut().for_each(&mut *change);
     }
-    fn node(node: &mut Node) {
+    fn node(node: &mut Node, change: &mut impl FnMut(&mut Item)) {
         if let Node::Chat(chat) = node {
             for value in &mut chat.turns {
-                turn(value);
+                turn(value, change);
             }
         }
     }
-    let mut message = message.clone();
-    match &mut message {
-        ServerMessage::Response(Response::View(view)) => node(&mut view.root),
+    match message {
+        ServerMessage::Response(Response::View(view)) => node(&mut view.root, change),
         ServerMessage::Event(Event::View { update, .. }) => match update {
-            ViewUpdate::Snapshot(view) => node(&mut view.root),
+            ViewUpdate::Snapshot(view) => node(&mut view.root, change),
             ViewUpdate::Patch(patches) => {
                 for patch in patches {
                     match patch {
-                        Patch::Chat(ChatPatch::Turn { turn: value, .. }) => turn(value),
-                        Patch::Chat(ChatPatch::Item { value, .. }) => item(value),
+                        Patch::Chat(ChatPatch::Turn { turn: value, .. }) => turn(value, change),
+                        Patch::Chat(ChatPatch::Item { value, .. }) => change(value),
+                        Patch::Chat(ChatPatch::History { turns, .. }) => {
+                            for value in turns {
+                                turn(value, change);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1132,7 +1163,6 @@ fn without_tool_images(message: &ServerMessage) -> ServerMessage {
         },
         _ => {}
     }
-    message
 }
 
 /// `message` as a peer from before `CHAT_FACTS` reads it: a line across a
@@ -1282,6 +1312,14 @@ impl Downgrade for ServerMessage {
         if let Some(older) = older_chat(self, wire) {
             return match older.downgrade(wire) {
                 Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
+        }
+        if wire < NESTED_WORK
+            && let Some(flat) = without_nesting(self)
+        {
+            return match flat.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(flat),
                 other => other,
             };
         }
@@ -1594,6 +1632,138 @@ mod tests {
         assert_eq!(tool.content[0], ToolContent::Text("caption".into()));
         assert!(
             matches!(&tool.content[1], ToolContent::Text(label) if label.contains("Image preview"))
+        );
+    }
+
+    #[test]
+    fn a_subagents_work_reaches_an_older_peer_as_the_agents_own_in_its_place() {
+        let tool = |id: &str, content: Vec<ToolContent>| crate::Tool {
+            id: id.into(),
+            title: id.into(),
+            status: crate::ToolStatus::Done,
+            kind: crate::ToolKind::Read,
+            content,
+            locations: Vec::new(),
+            exit: None,
+        };
+        let image = ToolContent::Image(crate::ChatPreview {
+            original: 0,
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 255].into(),
+        });
+        let nested = |item| Item::nested("task".into(), item);
+        let items = vec![
+            Item::Words("Looking.".into()),
+            Item::Tool(tool("task", Vec::new())),
+            nested(Item::Words("I'll read it.".into())),
+            nested(Item::Thought("hmm".into())),
+            nested(Item::Tool(tool("read", vec![image]))),
+            Item::Words("Done.".into()),
+        ];
+        let turn = Turn {
+            prompt: "go".into(),
+            sent: 1,
+            items: items.clone(),
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+            previews: Vec::new(),
+            woke: None,
+        };
+        let flat: Vec<Item> = items.into_iter().map(Item::flattened).collect();
+        let message = |patches| {
+            ServerMessage::Event(Event::View {
+                terminal: crate::TerminalId(1),
+                update: ViewUpdate::Patch(patches),
+            })
+        };
+        let patches = |turn: &Turn| {
+            vec![
+                Patch::Chat(ChatPatch::Turn {
+                    index: 0,
+                    turn: Box::new(turn.clone()),
+                }),
+                Patch::Chat(ChatPatch::Item {
+                    turn: 0,
+                    item: 2,
+                    value: turn.items[2].clone(),
+                }),
+                Patch::Chat(ChatPatch::History {
+                    first: 0,
+                    before: 1,
+                    messages_before: 0,
+                    turns: vec![turn.clone()],
+                }),
+            ]
+        };
+        let now = message(patches(&turn));
+        assert_eq!(newest(&now), NESTED_WORK);
+        assert_eq!(
+            decode::<ServerMessage>(NESTED_WORK, &frame::encode(NESTED_WORK, &now).unwrap()),
+            now
+        );
+        // Just before: the same items in the same places, none nested.
+        let older = Turn {
+            items: flat.clone(),
+            ..turn.clone()
+        };
+        let read = |wire| decode::<ServerMessage>(wire, &frame::encode(wire, &now).unwrap());
+        assert_eq!(read(AGENT_COMMANDS), message(patches(&older)));
+        // Before images, the image as text too, still in its place.
+        let ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(read),
+            ..
+        }) = read(CHAT_PREVIEWS)
+        else {
+            panic!()
+        };
+        let Patch::Chat(ChatPatch::Turn { turn: read, .. }) = &read[0] else {
+            panic!()
+        };
+        assert_eq!(read.items.len(), flat.len());
+        assert_eq!(read.items[2], flat[2]);
+        let Item::Tool(read) = &read.items[4] else {
+            panic!()
+        };
+        assert!(
+            matches!(&read.content[0], ToolContent::Text(label) if label.contains("Image preview"))
+        );
+        // Nothing nested, nothing changes.
+        let plain = message(patches(&older));
+        assert_eq!(plain.downgrade(AGENT_COMMANDS), Downgraded::AsIs);
+    }
+
+    #[test]
+    fn a_nested_item_is_never_read_nested_deeper() {
+        // `Item::Nested` holding another: as a forged peer might send it.
+        #[derive(Serialize)]
+        enum Forged {
+            _Words(String),
+            _Thought(String),
+            _Tool(crate::Tool),
+            _Other(String),
+            _Compacted(String),
+            Nested { parent: String, item: Box<Forged> },
+        }
+        let mut forged = Forged::_Words("x".into());
+        for _ in 0..3 {
+            forged = Forged::Nested {
+                parent: "p".into(),
+                item: Box::new(forged),
+            };
+        }
+        let bytes = postcard::to_allocvec(&forged).unwrap();
+        assert!(postcard::from_bytes::<Item>(&bytes).is_err());
+        let one = Item::nested("p".into(), Item::Words("x".into()));
+        let bytes = postcard::to_allocvec(&one).unwrap();
+        assert_eq!(postcard::from_bytes::<Item>(&bytes).unwrap(), one);
+        // Nesting what's nested, or what can't be read nested, can't make one.
+        assert_eq!(Item::nested("q".into(), one.clone()).inner(), one.inner());
+        assert_eq!(
+            Item::nested("q".into(), Item::Other("y".into())).inner(),
+            &Item::Words("y".into())
         );
     }
 

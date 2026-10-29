@@ -1445,8 +1445,9 @@ fn turn_text(number: Option<usize>, turn: &Turn) -> String {
                 text.push_str(words.trim_end());
                 text.push('\n');
             }
-            // Its thinking is its own.
-            Item::Thought(_) => {}
+            // Its thinking is its own, and what its subagents did is in
+            // what they told it, which it says.
+            Item::Thought(_) | Item::Nested { .. } => {}
             Item::Compacted(details) => {
                 let _ = writeln!(text, "[{}]", Item::compacted_label(details));
             }

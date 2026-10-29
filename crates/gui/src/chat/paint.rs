@@ -16,6 +16,7 @@ mod form;
 mod handoff;
 mod image;
 mod models;
+pub(super) mod nested;
 mod plan;
 mod queue;
 mod select;
@@ -677,8 +678,11 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Fold, y, height));
             y += height;
         }
+        // What subagents did shows under their tools' cards, indented,
+        // while those are open.
+        let nesting = nested::Nesting::of(turn);
         for (item_index, item) in turn.items.iter().enumerate() {
-            if folded_away(shape, item_index, item) {
+            if folded_away(shape, item_index, item) || nesting.hidden(item, &self.open_cards) {
                 continue;
             }
             let key = ITEMS + item_index;
@@ -705,27 +709,33 @@ impl ChatView {
                 y += height;
                 continue;
             }
-            if let Item::Tool(tool) = item {
+            let left = m.em(nested::INDENT) * nesting.depth(item) as f32;
+            let width = (column - left).max(m.em(8.0));
+            let left = column - width;
+            if let Item::Tool(tool) = item.inner() {
                 if follows {
                     y += m.em(0.15);
                 }
-                let card = self.card(fonts, m, old_cards.remove(&key), tool, column);
+                let line = nesting.line(turn, tool);
+                let old = old_cards.remove(&key);
+                let card = self.card(fonts, m, old, (tool, line), width);
                 let height = card.height;
-                laid.spans.push(Span::of(Piece::Card(key), y, height));
+                laid.spans
+                    .push(Span::of(Piece::Card(key), y, height).left(left));
                 laid.cards.insert(key, card);
                 y += height;
                 continue;
             }
-            let (text, look) = match item {
+            let (text, look) = match item.inner() {
                 Item::Words(words) | Item::Other(words) => (words.as_str(), Look::Words),
                 Item::Thought(words) => (words.as_str(), Look::Thought),
-                // Laid out above.
-                Item::Tool(_) | Item::Compacted(_) => continue,
+                // Laid out above; and nothing nested is nested.
+                Item::Tool(_) | Item::Compacted(_) | Item::Nested { .. } => continue,
             };
             if text.trim().is_empty() {
                 continue;
             }
-            let piece = self.reuse(fonts, m, old_pieces.remove(&key), text, look, column);
+            let piece = self.reuse(fonts, m, old_pieces.remove(&key), text, look, width);
             let gap = match item {
                 _ if matches!(last, Some(Piece::Card(_))) => m.em(1.0),
                 _ if matches!(last, Some(Piece::Fold)) => m.em(0.6),
@@ -734,7 +744,8 @@ impl ChatView {
             if follows {
                 y += gap;
             }
-            laid.spans.push(Span::of(Piece::Item(key), y, piece.height));
+            laid.spans
+                .push(Span::of(Piece::Item(key), y, piece.height).left(left));
             y += piece.height;
             laid.pieces.insert(key, piece);
         }
@@ -750,7 +761,7 @@ impl ChatView {
         for (at, tool) in activities.iter().enumerate() {
             let key = ITEMS + turn.items.len() + at;
             y += m.em(0.6);
-            let card = self.card(fonts, m, old_cards.remove(&key), tool, column);
+            let card = self.card(fonts, m, old_cards.remove(&key), (tool, None), column);
             let height = card.height;
             laid.spans.push(Span::of(Piece::Card(key), y, height));
             laid.cards.insert(key, card);
@@ -1069,8 +1080,8 @@ impl ChatView {
                             m,
                             card,
                             key,
-                            [origin[0], top],
-                            column,
+                            [origin[0] + span.left, top],
+                            column - span.left,
                             (drawn, &self.previews),
                         );
                         if let Some(id) = card.tool.id.strip_prefix("clackatoo-activity:")
@@ -1132,8 +1143,14 @@ impl ChatView {
                 Piece::Item(piece) => {
                     if let Some(item) = laid.pieces.get(&piece) {
                         let scrolled = |table| self.table_scroll(index, piece, table);
-                        draw_scrolled(canvas, m, item, [origin[0], top], column, &scrolled);
-                        drawn.note_scrolled(item, [origin[0], top], (index, piece), &scrolled);
+                        let at = [origin[0] + span.left, top];
+                        if span.left > 0.0 {
+                            // A subagent's words, by a rule down their left.
+                            let rule = [at[0] - m.em(0.6), top, 1.0, span.bottom - span.top];
+                            canvas.fill(Fill::solid(rule, Paint::RaisedEdge));
+                        }
+                        draw_scrolled(canvas, m, item, at, column - span.left, &scrolled);
+                        drawn.note_scrolled(item, at, (index, piece), &scrolled);
                     }
                 }
                 Piece::Handoff => {
@@ -2308,6 +2325,9 @@ struct Span {
     piece: Piece,
     top: f32,
     bottom: f32,
+    /// How far in from the column's left it starts: a subagent's work
+    /// is indented under its tool.
+    left: f32,
 }
 
 /// What a piece of a turn is.
@@ -2350,7 +2370,13 @@ impl Span {
             piece,
             top,
             bottom: top + height,
+            left: 0.0,
         }
+    }
+
+    /// The same, `left` in from the column's left.
+    fn left(self, left: f32) -> Self {
+        Self { left, ..self }
     }
 }
 
@@ -2504,14 +2530,15 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
         height += fold::height(m) + m.em(0.6);
     }
     for (index, item) in turn.items.iter().enumerate() {
-        if index < answer && !open {
+        // A subagent's work is folded under its tool, as it starts.
+        if index < answer && !open || item.parent().is_some() {
             continue;
         }
         height += match item {
             Item::Words(text) | Item::Thought(text) | Item::Other(text) => {
                 lines(text, column) * line + m.em(0.75)
             }
-            Item::Tool(_) | Item::Compacted(_) => line + m.em(0.85),
+            Item::Tool(_) | Item::Compacted(_) | Item::Nested { .. } => line + m.em(0.85),
         };
     }
     // The line with the button that copies its answer, and what it

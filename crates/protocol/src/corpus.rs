@@ -1398,7 +1398,70 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::TURN_FAILED,
         Server(ServerMessage::Event(Event::Chats(vec![failed]))),
     ));
+    samples.extend(
+        nested_work()
+            .into_iter()
+            .map(|sample| (crate::wire::NESTED_WORK, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 117: what a Task subagent did, under the tool
+/// call that started it: its words, its thinking and a tool, in a
+/// snapshot, a turn and an item patch (CLACKA-195).
+fn nested_work() -> Vec<Sample> {
+    let terminal = TerminalId(3);
+    let task = Tool {
+        id: "toolu_task".into(),
+        title: "Find the parser".into(),
+        kind: ToolKind::Think,
+        status: ToolStatus::Running,
+        content: vec![ToolContent::Text("Find where lines are parsed.".into())],
+        locations: Vec::new(),
+        exit: None,
+    };
+    let nested = |item| Item::nested("toolu_task".into(), item);
+    let items = vec![
+        Item::Tool(task),
+        nested(Item::Words("I'll search.".into())),
+        nested(Item::Thought("grep first".into())),
+        Item::Nested {
+            parent: "toolu_task".into(),
+            item: Box::new(Item::Tool(tool())),
+        },
+    ];
+    let turn = Turn {
+        items: items.clone(),
+        end: None,
+        ..turn()
+    };
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::Turn {
+                    index: 0,
+                    turn: Box::new(turn.clone()),
+                }),
+                Patch::Chat(ChatPatch::Item {
+                    turn: 0,
+                    item: 3,
+                    value: items[3].clone(),
+                }),
+            ]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "nested".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    turns: vec![turn],
+                    ..chat()
+                })),
+            }),
+        })),
+    ]
 }
 
 /// Samples of protocol 114: the agent's slash commands, one with a hint

@@ -170,11 +170,12 @@ impl<'p> Spent<'p> {
 }
 
 /// A piece of a turn as a search looks through it: which, and what must be
-/// opened for it to show, its turn's work or its card.
+/// opened for it to show, its turn's work or cards: its own, and those of
+/// the tools whose subagents did it.
 struct Looked {
     piece: usize,
     fold: bool,
-    card: Option<String>,
+    cards: Vec<String>,
 }
 
 impl ChatView {
@@ -580,8 +581,8 @@ impl ChatView {
         if piece.fold {
             self.set_fold(turn, true);
         }
-        if let Some(id) = &piece.card {
-            self.open_cards.insert(id.clone());
+        if !piece.cards.is_empty() {
+            self.open_cards.extend(piece.cards.iter().cloned());
             self.restyled(turn);
         }
         let current = (self.cache.turns.get(turn)).is_some_and(super::paint::TurnSlot::current);
@@ -597,14 +598,14 @@ impl ChatView {
         // A card's output matched, but not as it shows: past its lines.
         let tool = piece.piece >= ITEMS && self.card_at(turn, piece.piece);
         spent.hidden |= tool && !any && !spent.ran_out;
-        if piece.fold || piece.card.is_some() {
+        if piece.fold || !piece.cards.is_empty() {
             if piece.fold {
                 match folds_before {
                     Some(open) => self.folds.insert(turn, open),
                     None => self.folds.remove(&turn),
                 };
             }
-            if let Some(id) = &piece.card {
+            for id in &piece.cards {
                 self.open_cards.remove(id);
             }
             // Not laid out again now: it keeps the height it was laid out
@@ -675,23 +676,24 @@ impl ChatView {
         let mut pieces = vec![Looked {
             piece: super::paint::PROMPT,
             fold: false,
-            card: None,
+            cards: Vec::new(),
         }];
+        let nesting = super::paint::nested::Nesting::of(at);
         for (index, item) in at.items.iter().enumerate() {
+            // What a subagent did shows once its tools' cards are open.
+            let mut cards = nesting.folded_above(item, &self.open_cards);
+            cards.extend(item.tool().and_then(closed));
             pieces.push(Looked {
                 piece: ITEMS + index,
                 fold: folded_away(shape, index, item),
-                card: match item {
-                    Item::Tool(tool) => closed(tool),
-                    _ => None,
-                },
+                cards,
             });
         }
         for (index, tool) in activities.iter().enumerate() {
             pieces.push(Looked {
                 piece: ITEMS + at.items.len() + index,
                 fold: false,
-                card: closed(tool),
+                cards: closed(tool).into_iter().collect(),
             });
         }
         pieces
@@ -712,10 +714,11 @@ impl ChatView {
             return Some(Cow::Borrowed(&at.prompt));
         }
         let index = piece.checked_sub(ITEMS)?;
-        let owned = match at.items.get(index) {
+        let owned = match at.items.get(index).map(Item::inner) {
             Some(Item::Words(text) | Item::Thought(text) | Item::Other(text)) => blocks_text(text),
             Some(Item::Compacted(details)) => Item::compacted_label(details),
             Some(Item::Tool(tool)) => card_text(tool),
+            Some(Item::Nested { .. }) => String::new(),
             None => card_text(activities.get(index - at.items.len())?),
         };
         Some(Cow::Owned(owned))
@@ -727,7 +730,11 @@ impl ChatView {
             return false;
         };
         let index = piece - ITEMS;
-        index >= at.items.len() || matches!(at.items.get(index), Some(Item::Tool(_)))
+        index >= at.items.len()
+            || at
+                .items
+                .get(index)
+                .is_some_and(|item| item.tool().is_some())
     }
 
     /// About how much of turn `turn` shows, what laying it out costs: its
@@ -765,12 +772,15 @@ impl ChatView {
                 .sum::<usize>();
             tool.title.len() + shown
         };
+        let nesting = super::paint::nested::Nesting::of(at);
         let items = (at.items.iter().enumerate())
             .filter(|&(index, item)| !folded_away(shape, index, item))
-            .map(|(_, item)| match item {
+            .filter(|(_, item)| !nesting.hidden(item, &self.open_cards))
+            .map(|(_, item)| match item.inner() {
                 Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
                 Item::Compacted(details) => Item::compacted_label(details).len(),
                 Item::Tool(found) => tool(found),
+                Item::Nested { .. } => 0,
             })
             .sum::<usize>();
         let activities = self.activities_of(turn).iter().map(tool).sum::<usize>();

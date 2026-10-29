@@ -937,7 +937,34 @@ impl ChatView {
                 self.picked = None;
             }
         }
+        self.cursor_off_folded_work();
         self.reveal = true;
+    }
+
+    /// Puts the cursor, if it's on what a subagent did that's folded away
+    /// under its tool's card, onto the card that shows in its place.
+    pub(super) fn cursor_off_folded_work(&mut self) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let Some(turn) = self.node.turns.get(cursor.text.turn) else {
+            return;
+        };
+        let item = (cursor.text.piece.checked_sub(ITEMS)).and_then(|item| turn.items.get(item));
+        let card = item.and_then(|item| {
+            super::paint::nested::Nesting::of(turn).shown_above(item, &self.open_cards)
+        });
+        if let Some(card) = card {
+            self.cursor = Some(Position {
+                text: TextKey {
+                    piece: ITEMS + card,
+                    part: 0,
+                    ..cursor.text
+                },
+                byte: 0,
+            });
+            self.picked = None;
+        }
     }
 
     /// Opens the tool under the reading cursor, keeping the cursor on its
@@ -949,11 +976,21 @@ impl ChatView {
         let Some(item) = cursor.text.piece.checked_sub(ITEMS) else {
             return false;
         };
-        let Some(Item::Tool(tool)) = self
-            .node
-            .turns
-            .get(cursor.text.turn)
-            .and_then(|turn| turn.items.get(item))
+        let Some(turn) = self.node.turns.get(cursor.text.turn) else {
+            return false;
+        };
+        // In a subagent's words, it's the card of the tool that started
+        // it that opens and folds, as Vim's keys act on the fold around.
+        let card = match turn.items.get(item) {
+            Some(Item::Nested {
+                parent,
+                item: inner,
+            }) if inner.tool().is_none() => (turn.items)
+                .iter()
+                .position(|item| item.tool().is_some_and(|tool| tool.id == *parent)),
+            _ => Some(item),
+        };
+        let Some((card, tool)) = card.and_then(|card| Some((card, turn.items.get(card)?.tool()?)))
         else {
             return false;
         };
@@ -967,6 +1004,7 @@ impl ChatView {
         self.restyled(cursor.text.turn);
         self.cursor = Some(Position {
             text: TextKey {
+                piece: ITEMS + card,
                 part: 0,
                 ..cursor.text
             },
@@ -1020,12 +1058,13 @@ impl ChatView {
                 };
                 Some(alone.text().trim_end().to_owned())
             }
-            piece => match turn.items.get(piece - ITEMS)? {
+            piece => match turn.items.get(piece - ITEMS)?.inner() {
                 Item::Words(text) | Item::Thought(text) | Item::Other(text) => Some(text.clone()),
                 Item::Compacted(details) => Some(Item::compacted_label(details)),
                 Item::Tool(tool) => {
                     Some(Card::of(tool).map_or_else(|| tool.title.clone(), |card| card.text()))
                 }
+                Item::Nested { .. } => None,
             },
         }
     }

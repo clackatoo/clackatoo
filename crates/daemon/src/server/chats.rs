@@ -2497,6 +2497,41 @@ mod tests {
     use crate::server::stopping::tests::example;
 
     #[test]
+    fn what_a_subagent_did_stays_under_its_task_through_an_upgrade() {
+        use clackatoo_protocol::Item;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = daemon_with_chat(dir.path());
+        let from = serde_json::json!({ "claudeCode": { "parentToolUseId": "task" } });
+        for update in [
+            serde_json::json!({ "sessionUpdate": "tool_call", "toolCallId": "task",
+                                "title": "Find the parser", "kind": "think" }),
+            serde_json::json!({ "sessionUpdate": "agent_message_chunk", "_meta": from,
+                                "content": { "type": "text", "text": "Looking." } }),
+            serde_json::json!({ "sessionUpdate": "tool_call", "toolCallId": "read",
+                                "title": "Read a.rs", "kind": "read", "_meta": from }),
+        ] {
+            let update = serde_json::from_value(update).unwrap();
+            daemon.chat(id).unwrap().update(update);
+        }
+        let before = daemon.chat(id).unwrap().node().turns[0].items.clone();
+        assert_eq!(before[1].parent(), Some("task"));
+        assert_eq!(before[2].parent(), Some("task"));
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(Instant::now()).unwrap();
+        assert_eq!(handover.state.nested.len(), 2);
+        drop(daemon);
+        let mut resumed = Daemon::resume(handover, config).unwrap();
+        // As they were, but for the tools the upgrade cut off.
+        let items = &resumed.chat(id).unwrap().node().turns[0].items;
+        let parents: Vec<_> = items[..3].iter().map(Item::parent).collect();
+        assert_eq!(parents, [None, Some("task"), Some("task")]);
+        assert_eq!(items[1], before[1]);
+        assert!(matches!(&items[0], Item::Tool(tool) if tool.id == "task"));
+        assert!(items[2].tool().is_some_and(|tool| tool.id == "read"));
+        resumed.stop_agents(&[]);
+    }
+
+    #[test]
     fn an_upgrade_restarts_the_interrupted_agent_without_a_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, id) = daemon_with_chat(dir.path());

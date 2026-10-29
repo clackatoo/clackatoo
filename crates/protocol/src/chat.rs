@@ -988,9 +988,110 @@ pub enum Item {
     /// turn, with what the agent says of it, as "automatic · 182k → 31k
     /// tokens", or nothing.
     Compacted(String),
+    /// Something a subagent the agent started itself did, as Claude
+    /// Code's Task tool starts one: its words, its thinking or a tool it
+    /// used, inside the tool call that started it. Items stay in the
+    /// order they came, so patches keep their places; clients show each
+    /// under its tool. Never a nested item itself: a subagent's own
+    /// subagent names the tool call that started it.
+    Nested {
+        /// The ID of the tool call that started the subagent.
+        parent: String,
+        /// What it did: words, thinking or a tool, never anything else.
+        #[serde(deserialize_with = "nestable")]
+        item: Box<Item>,
+    },
+}
+
+/// What a nested item can hold, read as `Item`'s first three variants
+/// are written: reading one never goes deeper, so a peer can't send a
+/// nesting deep enough to overflow the stack.
+#[derive(Deserialize)]
+enum Nestable {
+    Words(String),
+    Thought(String),
+    Tool(Tool),
+}
+
+fn nestable<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Box<Item>, D::Error> {
+    Ok(Box::new(match Nestable::deserialize(reader)? {
+        Nestable::Words(words) => Item::Words(words),
+        Nestable::Thought(words) => Item::Thought(words),
+        Nestable::Tool(tool) => Item::Tool(tool),
+    }))
 }
 
 impl Item {
+    /// `item`, as something the subagent the tool call `parent` started
+    /// did. What's already nested is nested under `parent` instead, and
+    /// anything but words, thinking or a tool goes as words, as only
+    /// those can be read nested.
+    #[must_use]
+    pub fn nested(parent: String, item: Self) -> Self {
+        let item = match item.flattened() {
+            Self::Other(text) => Self::Words(text),
+            Self::Compacted(details) => Self::Words(Self::compacted_label(&details)),
+            item => item,
+        };
+        Self::Nested {
+            parent,
+            item: Box::new(item),
+        }
+    }
+
+    /// The ID of the tool call whose subagent did it, if a subagent did.
+    #[must_use]
+    pub fn parent(&self) -> Option<&str> {
+        match self {
+            Self::Nested { parent, .. } => Some(parent),
+            _ => None,
+        }
+    }
+
+    /// What it is, nested or not.
+    #[must_use]
+    pub fn inner(&self) -> &Self {
+        match self {
+            Self::Nested { item, .. } => item,
+            item => item,
+        }
+    }
+
+    /// What it is, nested or not, to change.
+    pub fn inner_mut(&mut self) -> &mut Self {
+        match self {
+            Self::Nested { item, .. } => item,
+            item => item,
+        }
+    }
+
+    /// The tool it is, nested or not, if it's one.
+    #[must_use]
+    pub fn tool(&self) -> Option<&Tool> {
+        match self.inner() {
+            Self::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// The tool it is, nested or not, if it's one, to change.
+    pub fn tool_mut(&mut self) -> Option<&mut Tool> {
+        match self.inner_mut() {
+            Self::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// The same with nothing nested, as a peer from before nesting reads
+    /// it: a subagent's work as the agent's own.
+    #[must_use]
+    pub fn flattened(self) -> Self {
+        match self {
+            Self::Nested { item, .. } => *item,
+            item => item,
+        }
+    }
+
     /// What the line an [`Item::Compacted`] with `details` is shown as
     /// says.
     #[must_use]
@@ -1855,15 +1956,17 @@ impl ChatNode {
                     .turns
                     .get_mut(turn.wrapping_sub(self.first_turn) as usize)
                     .and_then(|turn| turn.items.get_mut(item as usize))
+                    .map(Item::inner_mut)
                 {
                     words.push_str(&text);
                 }
             }
             ChatPatch::Output { turn, item, text } => {
-                if let Some(Item::Tool(tool)) = self
+                if let Some(tool) = self
                     .turns
                     .get_mut(turn.wrapping_sub(self.first_turn) as usize)
                     .and_then(|turn| turn.items.get_mut(item as usize))
+                    .and_then(Item::tool_mut)
                 {
                     tool.append_output(&text);
                 }
@@ -1913,6 +2016,11 @@ impl ChatNode {
     /// The chat as plain text: each message and what the agent said.
     #[must_use]
     pub fn text(&self) -> String {
+        let mark = |status| match status {
+            ToolStatus::Running => "…",
+            ToolStatus::Done => "✓",
+            ToolStatus::Failed => "✗",
+        };
         let mut text = String::new();
         for turn in &self.turns {
             if let Some(switch) = &turn.switch {
@@ -1934,12 +2042,14 @@ impl ChatNode {
                         let _ = write!(text, "— {} —\n\n", Item::compacted_label(details));
                     }
                     Item::Tool(tool) => {
-                        let mark = match tool.status {
-                            ToolStatus::Running => "…",
-                            ToolStatus::Done => "✓",
-                            ToolStatus::Failed => "✗",
-                        };
-                        let _ = write!(text, "{mark} {}\n\n", tool.title);
+                        let _ = write!(text, "{} {}\n\n", mark(tool.status), tool.title);
+                    }
+                    // A subagent's tools, under the tool that started it.
+                    // Its words went to the agent, which says what counts.
+                    Item::Nested { item, .. } => {
+                        if let Item::Tool(tool) = &**item {
+                            let _ = write!(text, "  ↳ {} {}\n\n", mark(tool.status), tool.title);
+                        }
                     }
                 }
             }
@@ -1953,6 +2063,66 @@ impl ChatNode {
         }
         text.truncate(text.trim_end().len());
         text
+    }
+}
+
+/// What the subagent a tool call started did in a turn, as clients sum it
+/// up on that tool: see [`Turn::nested_work`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NestedWork {
+    /// How many of its items there are.
+    pub items: usize,
+    /// How many tools it used.
+    pub tools: usize,
+    /// The index in the turn of the last of its items.
+    pub last: usize,
+}
+
+impl Turn {
+    /// What the subagents of the turn's tool calls did, by the ID of the
+    /// tool call that started each: only what each did itself, not its
+    /// own subagents. Empty, and cheap, for a turn with nothing nested.
+    #[must_use]
+    pub fn nested_work(&self) -> std::collections::HashMap<&str, NestedWork> {
+        let mut work = std::collections::HashMap::new();
+        for (at, item) in self.items.iter().enumerate() {
+            if let Some(parent) = item.parent() {
+                let sum: &mut NestedWork = work.entry(parent).or_default();
+                sum.items += 1;
+                sum.tools += usize::from(item.tool().is_some());
+                sum.last = at;
+            }
+        }
+        work
+    }
+
+    /// The line a tool call whose subagent did `work` says it with:
+    /// "↳ Reading src/main.rs · 3 tool uses" while `tool`, the call, runs,
+    /// what the subagent does now; then "↳ Done · 12 tool uses".
+    #[must_use]
+    pub fn nested_line(&self, tool: &Tool, work: &NestedWork) -> String {
+        let now = match tool.status {
+            ToolStatus::Done => "Done".to_owned(),
+            ToolStatus::Failed => "Failed".to_owned(),
+            ToolStatus::Running => match self.items.get(work.last).map(Item::inner) {
+                Some(Item::Tool(tool)) => tool.doing(),
+                Some(Item::Thought(_)) => "Thinking".to_owned(),
+                Some(Item::Words(words)) => {
+                    let line = words.lines().rfind(|line| !line.trim().is_empty());
+                    let line = line.unwrap_or_default().trim();
+                    match line.char_indices().nth(LONGEST_DOING) {
+                        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+                        None => line.to_owned(),
+                    }
+                }
+                _ => "Working".to_owned(),
+            },
+        };
+        match work.tools {
+            0 => format!("↳ {now}"),
+            1 => format!("↳ {now} · 1 tool use"),
+            tools => format!("↳ {now} · {tools} tool uses"),
+        }
     }
 }
 
@@ -2043,11 +2213,12 @@ impl ChatNode {
             });
         }
         let turn = self.going()?;
-        let tool = (turn.items.iter().rev()).find_map(|item| match item {
-            Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool),
-            _ => None,
-        });
-        Some(match (tool, turn.items.last()) {
+        // A subagent's tool running says more than the tool that started
+        // the subagent, which runs as long as it does.
+        let tool = (turn.items.iter().rev())
+            .filter_map(Item::tool)
+            .find(|tool| tool.status == ToolStatus::Running);
+        Some(match (tool, turn.items.last().map(Item::inner)) {
             (Some(tool), _) => tool.doing(),
             (None, Some(Item::Thought(_))) => "Thinking".to_owned(),
             (None, Some(Item::Words(_))) => "Writing".to_owned(),
@@ -2133,6 +2304,70 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tasks_line_says_what_its_subagent_does_now_and_how_many_tools_it_used() {
+        let tool = |id: &str, title: &str, status| Tool {
+            id: id.into(),
+            title: title.into(),
+            status,
+            kind: ToolKind::Read,
+            content: Vec::new(),
+            locations: Vec::new(),
+            exit: None,
+        };
+        let nested = |item| Item::nested("task".into(), item);
+        let mut turn = Turn {
+            prompt: "go".into(),
+            sent: 0,
+            items: vec![
+                Item::Tool(tool("task", "Find it", ToolStatus::Running)),
+                nested(Item::Tool(tool("r", "Read src/main.rs", ToolStatus::Done))),
+                nested(Item::Tool(tool("inner", "Inner", ToolStatus::Running))),
+                Item::nested("inner".into(), Item::Words("deeper".into())),
+                Item::Words("mine".into()),
+            ],
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+            previews: Vec::new(),
+            woke: None,
+        };
+        let work = turn.nested_work();
+        let task = turn.items[0].tool().unwrap().clone();
+        assert_eq!(work["task"].tools, 2);
+        assert_eq!(work["inner"].items, 1);
+        assert_eq!(
+            turn.nested_line(&task, &work["task"]),
+            "↳ Inner · 2 tool uses"
+        );
+        turn.items.push(nested(Item::Words(
+            "Found it.\nIn main.rs, at line 4.\n\n".into(),
+        )));
+        let work = turn.nested_work();
+        assert_eq!(
+            turn.nested_line(&task, &work["task"]),
+            "↳ In main.rs, at line 4. · 2 tool uses"
+        );
+        let done = Tool {
+            status: ToolStatus::Done,
+            ..task
+        };
+        assert_eq!(
+            turn.nested_line(&done, &work["task"]),
+            "↳ Done · 2 tool uses"
+        );
+        assert_eq!(turn.nested_line(&done, &work["inner"]), "↳ Done");
+        assert!(
+            Turn {
+                items: Vec::new(),
+                ..turn
+            }
+            .nested_work()
+            .is_empty()
+        );
+    }
 
     #[test]
     fn a_slash_command_is_a_word_after_a_slash_at_the_start() {

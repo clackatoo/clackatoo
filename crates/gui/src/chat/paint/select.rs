@@ -249,7 +249,7 @@ impl ChatView {
             return Some(TextAt {
                 layout: &block.layout,
                 text: &block.text,
-                at: [x + block.left, span.top + y + block.top],
+                at: [span.left + x + block.left, span.top + y + block.top],
                 kind: None,
             });
         }
@@ -266,7 +266,7 @@ impl ChatView {
             layout: &block.layout,
             text: &block.text,
             at: [
-                origin[0] + block.left - scroll,
+                span.left + origin[0] + block.left - scroll,
                 span.top + origin[1] + block.top,
             ],
             kind: Some(&block.kind),
@@ -413,15 +413,18 @@ impl ChatView {
             return String::new();
         };
         let shape = self.shape(index, turn);
+        let nesting = super::nested::Nesting::of(turn);
         let items = (turn.items.iter().enumerate())
             .filter(|&(at, _)| at >= shape.answer || shape.open)
-            .map(|(_, item)| match item {
+            .filter(|(_, item)| !nesting.hidden(item, &self.open_cards))
+            .map(|(_, item)| match item.inner() {
                 Item::Words(text) | Item::Thought(text) | Item::Other(text) => blocks_text(text),
                 Item::Compacted(details) => Item::compacted_label(details),
                 Item::Tool(tool) => Card::of(tool).map_or_else(
                     || super::tool_text(tool.status, &tool.title),
                     |card| card.text(),
                 ),
+                Item::Nested { .. } => String::new(),
             });
         (std::iter::once(turn.prompt.clone()).chain(items))
             .filter(|text| !text.trim().is_empty())
