@@ -22416,9 +22416,44 @@ fn a_shell_that_starts_another_says_so_and_types_nothing() {
     assert!(!screen.contains("echo wrapped"), "{screen}");
 }
 
+/// A queued message taken back goes into the chat's draft in one step,
+/// out of the queue, with what was typed after it, for whichever client
+/// opens the chat next, the one that asked gone (CLACKA-192).
+#[test]
+fn a_queued_message_taken_back_is_the_next_clients_draft() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Answering);
+    client.chat(chat, ChatAction::Send("after".into())).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| !node.delivery.queued.is_empty());
+    let id = node.delivery.queued[0].id;
+    let text = "and the lint".to_owned();
+    client
+        .chat(chat, ChatAction::Draft { text, by: 7 })
+        .unwrap();
+    client
+        .chat(chat, ChatAction::TakeBack { queued: id })
+        .unwrap();
+    // Gone already, it's refused.
+    assert!(
+        client
+            .chat(chat, ChatAction::TakeBack { queued: id })
+            .is_err()
+    );
+    drop(client);
+    let mut client = daemon.client();
+    let view = attach(&mut client, chat);
+    let node = view.chat().expect("a chat");
+    assert_eq!(node.draft, "after\nand the lint");
+    assert!(node.delivery.queued.is_empty());
+}
+
 /// A message sent, not submitted, while the agent answers, as an older
 /// window or another caller sends it, is queued as the window's are, not
 /// dropped.
+
 #[test]
 fn a_message_sent_while_the_agent_answers_is_queued() {
     let daemon = TestDaemon::start();

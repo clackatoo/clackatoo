@@ -1431,17 +1431,30 @@ fn prompt_box() -> Vec<Sample> {
         })),
         Sample::Server(ServerMessage::Event(Event::View {
             terminal,
-            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft("half a thought".into()))]),
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft {
+                text: "half a thought".into(),
+                rev: 3,
+                by: 0x5eed_cafe,
+            })]),
         })),
         Sample::Server(ServerMessage::Event(Event::View {
             terminal,
-            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft(String::new()))]),
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft {
+                text: String::new(),
+                rev: 0,
+                by: 0,
+            })]),
         })),
         Sample::Client(ClientMessage::Request(Request::Chat {
             terminal,
             action: ChatAction::Draft {
                 text: "half a thought".into(),
+                by: 0x5eed_cafe,
             },
+        })),
+        Sample::Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::TakeBack { queued: 9 },
         })),
     ]
 }

@@ -480,7 +480,7 @@ impl Since for ChatPatch {
             Self::Tasks(_) => AGENT_TASKS,
             Self::Plan(_) => AGENT_PLAN,
             Self::Commands(_) => AGENT_COMMANDS,
-            Self::Draft(_) => PROMPT_BOX,
+            Self::Draft { .. } => PROMPT_BOX,
             Self::Retrying(_) => CHAT_FACTS,
         }
     }
@@ -1080,7 +1080,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
-        ChatAction::Draft { .. } => PROMPT_BOX,
+        ChatAction::Draft { .. } | ChatAction::TakeBack { .. } => PROMPT_BOX,
         ChatAction::Fill { .. } => ELICITATION,
         ChatAction::Resend => CHAT_FACTS,
         ChatAction::StopTask { .. } => AGENT_TASKS,
@@ -1228,15 +1228,19 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
     message
 }
 
-/// `message` as a peer of `wire`, older than `CHAT_FACTS`, reads a chat:
-/// without the chat updates it has no controls for, or else without what
-/// `CHAT_FACTS` brought. `None` if it reads it as it is.
+/// `message` as a peer of `wire`, older than `PROMPT_BOX`, reads a chat:
+/// without the chat updates it has no controls for (a draft before
+/// `PROMPT_BOX`, a retry before `CHAT_FACTS`, and the older ones), or
+/// else, before `CHAT_FACTS`, without what `CHAT_FACTS` brought. `None`
+/// if it reads it as it is. `TURN_FAILED` (116) is a field of the list of
+/// chats, gated as fields are, so it needs nothing here.
 fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
     if wire >= PROMPT_BOX {
         return None;
     }
-    without_optional_chat_updates(message, wire)
-        .or_else(|| (newest(message) == CHAT_FACTS).then(|| without_chat_facts(message)))
+    without_optional_chat_updates(message, wire).or_else(|| {
+        (wire < CHAT_FACTS && newest(message) == CHAT_FACTS).then(|| without_chat_facts(message))
+    })
 }
 
 /// Informative chat updates can be omitted for clients without their controls.
@@ -1249,7 +1253,7 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Draft(_)) if wire < PROMPT_BOX)
+        matches!(patch, Patch::Chat(ChatPatch::Draft { .. }) if wire < PROMPT_BOX)
             || matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
             || matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
             || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)

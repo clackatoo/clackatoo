@@ -6320,8 +6320,7 @@ fn an_agents_deploy_survives_the_upgrade_it_starts() {
 
 /// What's typed in a chat's box and not sent, and the messages Up
 /// recalls, are kept through a real upgrade: the draft handed over, the
-/// messages worked out again from the turns (CLACKA-192). Another client
-/// sees the draft as it's said, and sending it empties it.
+/// messages worked out again from the turns (CLACKA-192).
 #[test]
 fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
     let world = World::new();
@@ -6346,7 +6345,9 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
         });
     }
     let text = "and then NEWS".to_owned();
-    client.chat(chat, ChatAction::Draft { text }).unwrap();
+    client
+        .chat(chat, ChatAction::Draft { text, by: 7 })
+        .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| !node.draft.is_empty());
     assert_eq!(node.draft, "and then NEWS");
     assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
@@ -6358,13 +6359,18 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
     let node = wait_for_chat(&mut client, chat, |node| !node.turns.is_empty());
     assert_eq!(node.draft, "and then NEWS");
     assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
-    // Sent, from whichever client, it's no one's draft any more, and it's
-    // the newest message to recall.
+    // Sent, by the box that says it's empty now, as a window does, it's
+    // no one's draft any more, and it's the newest message to recall.
     client
         .chat(chat, ChatAction::Send("and then NEWS".into()))
         .unwrap();
-    let node = wait_for_chat(&mut client, chat, |node| node.turns.len() == 3);
-    assert_eq!(node.draft, "");
+    let text = String::new();
+    client
+        .chat(chat, ChatAction::Draft { text, by: 7 })
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 3 && node.draft.is_empty()
+    });
     assert_eq!(
         node.prompts,
         ["fix the tests", "then the docs", "and then NEWS"]

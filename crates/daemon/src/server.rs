@@ -3655,14 +3655,6 @@ impl Daemon {
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         let chat = slot.terminal.chat().ok_or(Error::NotAChat(id))?;
-        // What was typed in the box is sent: no client starts with it.
-        if let ChatAction::Send(text)
-        | ChatAction::SendImages { text, .. }
-        | ChatAction::Submit { text, .. }
-        | ChatAction::SendTo { text, .. } = &action
-        {
-            chat.sent_from_box(text);
-        }
         // Undoing is about files, so the daemon's, not the agent's.
         if let ChatAction::Undo { turn, force } | ChatAction::Redo { turn, force } = action {
             let redo = matches!(action, ChatAction::Redo { .. });
@@ -3706,6 +3698,20 @@ impl Daemon {
                 steer,
             } => {
                 return self.submit_chat(id, text, images, target, steer);
+            }
+            // What's typed in the box: the clients', which the agent never
+            // hears of. Sent to viewers at the chat's pace.
+            ChatAction::Draft { text, by } => {
+                if let Some(due) = chat.set_draft(text, by) {
+                    self.agents.held_draft(id, due);
+                }
+                self.collect_damage(id);
+                return Ok(());
+            }
+            ChatAction::TakeBack { queued } => {
+                chat.take_back(queued).map_err(Error::Other)?;
+                self.collect_damage(id);
+                return Ok(());
             }
             ChatAction::RemoveQueued { id: message } => {
                 chat.take_queued_user(message).map_err(Error::Other)?;

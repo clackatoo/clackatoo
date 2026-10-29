@@ -1711,9 +1711,21 @@ pub enum ChatPatch {
     Commands(Vec<AgentCommand>),
     /// What the agent says as it tries again is now this.
     Retrying(Option<String>),
-    /// The message being typed in the box is now this (see
-    /// [`ChatNode::draft`]).
-    Draft(String),
+    /// The message being typed in the box is now `text` (see
+    /// [`ChatNode::draft`]), as the client that said `by` set it (see
+    /// [`ChatAction::Draft`]; 0 for the daemon itself, as taking a queued
+    /// message back): that client doesn't take it, as it's its own. `rev`
+    /// counts the chat's drafts from 1. A draft with `rev` 0 was replaced
+    /// by a later one, which follows: it's to be passed over, as the
+    /// daemon keeps only the latest draft's text in what it has to send.
+    Draft {
+        /// What's typed.
+        text: String,
+        /// Its number, from 1; 0 once replaced.
+        rev: u64,
+        /// The client that set it, by the number it gave.
+        by: u64,
+    },
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1935,6 +1947,18 @@ pub enum ChatAction {
     Draft {
         /// What's typed.
         text: String,
+        /// The client's own number for itself, random, which the draft's
+        /// patch carries back, so it doesn't take its own draft again.
+        by: u64,
+    },
+    /// Take the message `queued`, waiting in the queue, out of it and into
+    /// the chat's draft, before what was typed there, in one step: every
+    /// client whose box hasn't changed since takes it. Refused for a
+    /// message with images or one that moves the chat to another agent,
+    /// which a draft can't hold. Requires `wire::PROMPT_BOX`.
+    TakeBack {
+        /// The queued message's ID.
+        queued: u64,
     },
 }
 
@@ -2123,7 +2147,11 @@ impl ChatNode {
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
-            ChatPatch::Draft(draft) => self.draft = draft,
+            ChatPatch::Draft { text, rev, .. } => {
+                if rev != 0 {
+                    self.draft = text;
+                }
+            }
             ChatPatch::History {
                 first,
                 before,
@@ -2716,7 +2744,15 @@ mod tests {
             turn: Box::new(turn("two", vec![Item::Words("done".into())])),
         });
         assert_eq!(chat.prompts, ["one", "two"]);
-        chat.apply(ChatPatch::Draft("and".into()));
+        let draft = |text: &str, rev| ChatPatch::Draft {
+            text: text.into(),
+            rev,
+            by: 7,
+        };
+        chat.apply(draft("and", 1));
+        assert_eq!(chat.draft, "and");
+        // One replaced since is passed over.
+        chat.apply(draft("", 0));
         assert_eq!(chat.draft, "and");
     }
 
