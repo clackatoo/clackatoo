@@ -1115,12 +1115,14 @@ fn chat_action_since(action: &crate::ChatAction) -> u32 {
     }
 }
 
-/// `message` without what it says was made in a turn not on the branch of
-/// its chat's conversation shown, [`TURN_NOT_SHOWN`], for a peer from
-/// before branches (CLACKA-198), which would take that for a turn's index:
-/// a buffer's agent hunks leave such a hunk out, and a review its hunks,
-/// and a file left with none. Never kept nor rejected unseen, so leaving
-/// them out is the safe side. `None` if there's none.
+/// `message` for a peer from before branches (CLACKA-198), which would
+/// take [`TURN_NOT_SHOWN`], said of a change made in a turn not on the
+/// branch of its chat's conversation shown, for a turn's index, and add 1
+/// to it to say it: turn 0 in a release build, an overflow in a debug one.
+/// It's told [`OLD_TURN_NOT_SHOWN`] instead, an index no conversation
+/// reaches, so the change, the agent's code on disk, is still shown, kept
+/// and rejected, and only says a turn the window can't find. `None` if
+/// there's none.
 ///
 /// [`TURN_NOT_SHOWN`]: crate::TURN_NOT_SHOWN
 fn without_turns_not_shown(message: &ServerMessage) -> Option<ServerMessage> {
@@ -1138,8 +1140,13 @@ fn without_turns_not_shown(message: &ServerMessage) -> Option<ServerMessage> {
                 },
         }) if hunks.iter().any(|hunk| hunk.turn == TURN_NOT_SHOWN) => {
             let hunks = (hunks.iter())
-                .filter(|hunk| hunk.turn != TURN_NOT_SHOWN)
-                .cloned()
+                .map(|hunk| {
+                    let mut hunk = hunk.clone();
+                    if hunk.turn == TURN_NOT_SHOWN {
+                        hunk.turn = OLD_TURN_NOT_SHOWN;
+                    }
+                    hunk
+                })
                 .collect();
             Some(ServerMessage::Event(Event::Buffer {
                 buffer: *buffer,
@@ -1154,10 +1161,12 @@ fn without_turns_not_shown(message: &ServerMessage) -> Option<ServerMessage> {
             if (list.files.iter()).any(|file| file.hunks.iter().any(|hunk| not_shown(hunk.by))) =>
         {
             let mut list = list.clone();
-            for file in &mut list.files {
-                file.hunks.retain(|hunk| !not_shown(hunk.by));
+            let made = (list.files.iter_mut()).flat_map(|file| &mut file.hunks);
+            for made in made.filter_map(|hunk| hunk.by.as_mut()) {
+                if made.turn == TURN_NOT_SHOWN {
+                    made.turn = OLD_TURN_NOT_SHOWN;
+                }
             }
-            list.files.retain(|file| !file.hunks.is_empty());
             Some(ServerMessage::Event(Event::Review {
                 review: *review,
                 list,
@@ -1166,6 +1175,11 @@ fn without_turns_not_shown(message: &ServerMessage) -> Option<ServerMessage> {
         _ => None,
     }
 }
+
+/// What a peer from before branches is told for a turn not on the branch
+/// shown: one below [`TURN_NOT_SHOWN`](crate::TURN_NOT_SHOWN), so saying it
+/// as a turn, one more, never overflows.
+const OLD_TURN_NOT_SHOWN: u32 = u32::MAX - 1;
 
 /// Replace image pixels with a readable label for older clients, in both
 /// snapshots and incremental tool/turn updates.
@@ -1980,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn turns_not_shown_are_left_out_for_peers_from_before_branches() {
+    fn turns_not_shown_are_an_index_no_conversation_reaches_for_peers_from_before_branches() {
         use crate::{
             AgentHunk, BufferId, Made, ReviewFile, ReviewHunk, ReviewId, ReviewList,
             TURN_NOT_SHOWN, TerminalId,
@@ -2010,7 +2024,7 @@ mod tests {
         else {
             panic!("not downgraded");
         };
-        assert_eq!(hunks, [hunk(1, 0)]);
+        assert_eq!(hunks, [hunk(1, 0), hunk(2, OLD_TURN_NOT_SHOWN)]);
         let made = |turn: u32| ReviewHunk {
             line: 1,
             before: Vec::new(),
@@ -2046,7 +2060,15 @@ mod tests {
         else {
             panic!("not downgraded");
         };
-        assert_eq!(list.files, [file(vec![made(0)])]);
+        assert_eq!(
+            list.files,
+            [
+                file(vec![made(0), made(OLD_TURN_NOT_SHOWN)]),
+                file(vec![made(OLD_TURN_NOT_SHOWN)]),
+            ]
+        );
+        // Said as a turn, as such a window does, it doesn't overflow.
+        assert_eq!(OLD_TURN_NOT_SHOWN.checked_add(1), Some(TURN_NOT_SHOWN));
     }
 
     #[test]
