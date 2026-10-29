@@ -1163,7 +1163,10 @@ impl Fake {
                     _ => {}
                 }
                 let planning = self.planning.contains(&session);
-                reply(&id, &json!({ "configOptions": self.options(&settings, planning) }));
+                reply(
+                    &id,
+                    &json!({ "configOptions": self.options(&settings, planning) }),
+                );
                 self.settings.insert(session, settings);
             }
             Some("session/close") => {

@@ -583,7 +583,10 @@ mod tests {
         settings[1].value = "plan".into();
         assert_eq!(permissions_label(&settings), "Plan · Auto review");
         // Its menu has a heading for each, Plan mode's choices under its.
-        let rows = rows(&settings, &menu(&["mode", "collaboration_mode", "clackatoo.tools"], None));
+        let rows = rows(
+            &settings,
+            &menu(&["mode", "collaboration_mode", "clackatoo.tools"], None),
+        );
         let headings: Vec<&str> = (rows.iter())
             .filter_map(|row| match row {
                 Row::Heading { name, .. } => Some(name.as_str()),
@@ -600,7 +603,11 @@ mod tests {
         );
         // Another setting of no known kind, or one without Plan, isn't it.
         settings[1].choices.pop();
-        assert!(permissions(&settings).iter().all(|s| s.kind != SettingKind::Other));
+        assert!(
+            permissions(&settings)
+                .iter()
+                .all(|s| s.kind != SettingKind::Other)
+        );
         assert_eq!(permissions_label(&settings), "Auto review");
     }
 
@@ -850,7 +857,11 @@ pub(super) fn permissions(settings: &[Setting]) -> Vec<Setting> {
     let of = |kind| settings.iter().find(|setting| setting.kind == kind);
     (of(SettingKind::Mode).into_iter())
         .chain(settings.iter().find(|setting| setting.is_plan_mode()))
-        .chain([SettingKind::Tools, SettingKind::Browser].into_iter().filter_map(of))
+        .chain(
+            [SettingKind::Tools, SettingKind::Browser]
+                .into_iter()
+                .filter_map(of),
+        )
         .cloned()
         .collect()
 }

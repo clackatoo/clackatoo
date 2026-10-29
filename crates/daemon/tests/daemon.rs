@@ -4190,10 +4190,17 @@ fn codexs_plan_mode_is_set_from_the_box_and_left_once_its_plan_is_approved() {
     let plan = plan_mode(&node);
     assert_eq!(
         (plan.id.as_str(), plan.kind, plan.value.as_str()),
-        ("collaboration_mode", clackatoo_protocol::SettingKind::Other, "default")
+        (
+            "collaboration_mode",
+            clackatoo_protocol::SettingKind::Other,
+            "default"
+        )
     );
     // Out of Plan mode, Codex just does it.
-    assert_eq!(last_words(&ask(&mut client, chat, "propose")), "changed the notes\n");
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "propose")),
+        "changed the notes\n"
+    );
 
     client
         .chat(
@@ -19623,7 +19630,9 @@ fn a_real_codex_plans_from_the_box_and_says_its_notices_as_such() {
     );
     client.chat(chat, ChatAction::Send(text.clone())).unwrap();
     let node = wait_for_chat_for(client, chat, limit, |node| {
-        node.question.as_ref().is_some_and(|question| question.plan.is_some())
+        node.question
+            .as_ref()
+            .is_some_and(|question| question.plan.is_some())
             || (node.turns.last().is_some_and(|turn| turn.prompt == text) && live_idle(node))
     });
     let question = node.question.expect("asked to implement the plan");
