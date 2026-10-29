@@ -1844,7 +1844,10 @@ impl HostedChat {
     /// couldn't.
     pub(crate) fn settings_changed(&mut self, result: Result<Vec<SessionConfigOption>, String>) {
         match result {
-            Ok(options) if !options.is_empty() => self.set_settings(settings_of(&options)),
+            Ok(options) if !options.is_empty() => {
+                self.set_settings(settings_of(&options));
+                self.follow_agents_settings();
+            }
             Ok(_) => {}
             Err(err) => self.set_notice(Some(format!("The setting couldn't be changed: {err}"))),
         }
@@ -3387,11 +3390,19 @@ impl HostedChat {
         }
     }
 
-    /// The agent changed its settings by itself, as Codex leaves Plan mode
-    /// once its plan is approved, and Claude Code's Plan mode once it may
-    /// go ahead: what the chat chose of them follows, so a session opened
-    /// again isn't put back as it was.
+    /// The agent says what its settings are now, by itself, as Codex
+    /// leaves Plan mode once its plan is approved, and Claude Code's Plan
+    /// mode once it may go ahead, or answering a change asked for: what
+    /// the chat chose of them follows, so a session opened again isn't
+    /// put back as it was. What a session told again says is long past.
+    /// An update that comes while changes asked for are on their way may
+    /// say a value from before them, as each adapter's answers to them can
+    /// (each says every setting): the last answer, to the last change
+    /// asked, puts it right.
     fn follow_agents_settings(&mut self) {
+        if self.told_again() || self.link != Link::Open {
+            return;
+        }
         for (id, value) in &mut self.chosen {
             if chat_wide(id) {
                 continue;
@@ -6236,6 +6247,21 @@ mod tests {
         );
         assert!(!chat.node.settings[0].planning());
         assert!(!chat.connected(opened("default")).contains(&set));
+        // An update from before a change asked for, come after it, is put
+        // right by the answer to it.
+        chat.act(ChatAction::Set {
+            setting: "collaboration_mode".into(),
+            value: "plan".into(),
+        });
+        update(
+            &mut chat,
+            &format!(
+                r#"{{"sessionUpdate":"config_option_update","configOptions":{}}}"#,
+                plan("default")
+            ),
+        );
+        chat.settings_changed(Ok(serde_json::from_str(&plan("plan")).unwrap()));
+        assert!(chat.connected(opened("default")).contains(&set));
     }
 
     /// A chat with Claude Code that has answered one message, `hi`, and
