@@ -57,7 +57,7 @@ use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
 use super::settling::{Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, DiskStamp, Made, Prepared, PreparedStep, Refused, Unprepared};
-use crate::chat::{RawDiff, Wrote};
+use crate::chat::{RawDiff, TurnUid, Wrote};
 
 /// How many files' text, as agents last read them, are kept, to merge
 /// their writes against. A write to a file whose read has been forgotten
@@ -324,7 +324,8 @@ struct Report {
     /// in forgets only the reports it took in.
     serial: u64,
     chat: TerminalId,
-    turn: usize,
+    /// Its turn, by its uid.
+    turn: TurnUid,
     /// Where the tool is among its turn's items.
     order: usize,
     tool: String,
@@ -979,7 +980,7 @@ impl Daemon {
             let (saved, existed) = (merging.saved.clone(), merging.existed);
             let maker = merging.makers.first().cloned().unwrap_or(Maker {
                 chat: merging.chat,
-                turn: 0,
+                turn: TurnUid::default(),
                 tool: None,
             });
             match self
@@ -1030,7 +1031,7 @@ impl Daemon {
             Err(panic) => {
                 log::warn!("buffer {id}: merging an agent's change panicked: {panic:?}");
                 self.agent_files.forget_reports(&merging.covered);
-                let turns: Vec<usize> = merging.makers.iter().map(|maker| maker.turn).collect();
+                let turns: Vec<TurnUid> = merging.makers.iter().map(|maker| maker.turn).collect();
                 for maker in &merging.makers {
                     (self.agent_files.log).note_unknown(maker, &merging.path);
                 }
@@ -1087,7 +1088,7 @@ impl Daemon {
     /// isn't, and the user is told. A file a tool of the agent has said it
     /// changed is left to what the tool said, which comes to it at the
     /// turn's end, if not before.
-    pub(super) fn take_from_commands(&mut self, chat: TerminalId, turn: usize, id: BufferId) {
+    pub(super) fn take_from_commands(&mut self, chat: TerminalId, turn: TurnUid, id: BufferId) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };
@@ -1112,7 +1113,7 @@ impl Daemon {
 
     /// As [`take_from_commands`](Self::take_from_commands), once nothing
     /// else is pending for the file, as try `tries` (see [`MERGES`]).
-    fn commands_into(&mut self, chat: TerminalId, turn: usize, id: BufferId, tries: u32) {
+    fn commands_into(&mut self, chat: TerminalId, turn: TurnUid, id: BufferId, tries: u32) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };
@@ -1580,6 +1581,12 @@ pub(super) mod tests {
 
     /// A daemon in `dir`, not running, with a chat in it whose session is
     /// `s1`, answering a message.
+    /// The uid of chat `chat`'s first turn, which what's kept of it is
+    /// keyed by.
+    pub(in crate::server) fn first_uid(daemon: &Daemon, chat: TerminalId) -> TurnUid {
+        daemon.chat_ref(chat).unwrap().turn_uid(0).unwrap()
+    }
+
     pub(in crate::server) fn daemon_with_chat(dir: &Path) -> (Daemon, TerminalId) {
         let config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
@@ -1697,7 +1704,12 @@ pub(super) mod tests {
         );
         assert_eq!(text(&daemon), "ONE\nTWO\nthree\nfour\n");
 
-        let file = &daemon.agent_files.log.turn(chat, 0).unwrap().files[0];
+        let file = &daemon
+            .agent_files
+            .log
+            .turn(chat, first_uid(&daemon, chat))
+            .unwrap()
+            .files[0];
         assert_eq!(
             (file.path.as_path(), file.tool.as_deref()),
             (path.as_path(), Some("t2"))
@@ -1738,9 +1750,10 @@ pub(super) mod tests {
         let id = daemon.open_buffer(file, None).unwrap();
         // Two tools change the file, and the second says so first.
         std::fs::write(&path, "ONE\nTWO\n").unwrap();
+        let first = first_uid(&daemon, chat);
         let wrote = |tool: &str, order, old: &str, new: &str| Wrote {
             done: true,
-            turn: 0,
+            turn: first,
             tool: tool.into(),
             order,
             paths: vec![path.display().to_string()],
@@ -1754,7 +1767,13 @@ pub(super) mod tests {
         assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "one\ntwo\n");
         daemon.take_written(chat, &wrote("t1", 0, "one", "ONE"));
         assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "ONE\nTWO\n");
-        let changes = &daemon.agent_files.log.turn(chat, 0).unwrap().files[0].changes;
+        let changes = &daemon
+            .agent_files
+            .log
+            .turn(chat, first_uid(&daemon, chat))
+            .unwrap()
+            .files[0]
+            .changes;
         assert!(matches!(
             changes[..],
             [
@@ -1774,7 +1793,7 @@ pub(super) mod tests {
         let report = |old: &str, new: &str| Report {
             serial: 0,
             chat: TerminalId(1),
-            turn: 0,
+            turn: TurnUid(0),
             order: 0,
             tool: "t".into(),
             path: "/Makefile".into(),

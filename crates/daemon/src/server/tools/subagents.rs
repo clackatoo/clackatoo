@@ -628,7 +628,7 @@ impl Daemon {
             text.push_str(&held);
             text.push('\n');
         }
-        let changed = self.agent_files.log.changed_in(to, 0..turns.len());
+        let changed = (self.agent_files.log).changed_in(to, other.turn_uids(0..turns.len()));
         if changed.is_empty() {
             text.push_str("Files changed: none.\n");
         } else {

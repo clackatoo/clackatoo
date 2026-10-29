@@ -14,7 +14,9 @@ pub(super) struct Queue {
     pub messages: VecDeque<Pending>,
     pub next: u64,
     pub restart: Option<u64>,
-    pub native: Option<(u64, usize, usize)>,
+    /// The steering message being delivered, the turn it shows in, by its
+    /// uid, and the item it's shown as there.
+    pub native: Option<(u64, super::TurnUid, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -188,7 +190,8 @@ impl HostedChat {
         ));
         self.node.turns[turn].items.push(value.clone());
         self.patch_item(turn, item, value);
-        self.user_queue.native = Some((id, turn, item));
+        let uid = self.turn_uid(turn).unwrap_or_default();
+        self.user_queue.native = Some((id, uid, item));
         self.node.delivery.sending = Some(id);
         self.show_queue();
         Ok(text)
@@ -221,6 +224,10 @@ impl HostedChat {
                 self.queue_notice("Steering was not confirmed. The message remains paused; check the conversation before retrying.".into());
                 "Steering not confirmed"
             }
+        };
+        let Some(turn) = self.turn_index(turn) else {
+            self.show_queue();
+            return;
         };
         if let Some(super::Item::Other(text)) = self
             .node

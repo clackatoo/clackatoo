@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use agent_client_protocol_schema::v1::ContentChunk;
 use serde_json::Value;
 
-use super::{HostedChat, Item, handover, index_u32, item_weight};
+use super::{HostedChat, Item, TurnUid, handover, index_u32, item_weight};
 
 /// The most items kept of what one Task's subagents did, before the
 /// oldest go.
@@ -100,9 +100,9 @@ struct Sum {
 /// Made again from the turn whenever it's changed other than through it.
 #[derive(Debug, Default)]
 pub(super) struct Index {
-    /// The turn it's of, and how many items it had: anything else, and
-    /// it's made again.
-    turn: Option<usize>,
+    /// The turn it's of, by its uid, and how many items it had: anything
+    /// else, and it's made again.
+    turn: Option<TurnUid>,
     len: usize,
     /// Set when the turn's items changed other than by being added.
     stale: bool,
@@ -121,11 +121,11 @@ impl Index {
     }
 
     /// Made again from `items`, turn `turn`'s.
-    fn rebuild(&mut self, turn: usize, items: &[Item]) {
-        if self.turn != Some(turn) {
+    fn rebuild(&mut self, turn: Option<TurnUid>, items: &[Item]) {
+        if self.turn != turn {
             self.cut.clear();
         }
-        self.turn = Some(turn);
+        self.turn = turn;
         self.len = items.len();
         self.stale = false;
         self.tools.clear();
@@ -159,9 +159,10 @@ impl HostedChat {
     fn nest_index(&mut self) -> Option<&mut Index> {
         let turn = self.answering_turn()?;
         let items = &self.node.turns[turn].items;
+        let uid = self.uids.of(turn);
         let index = &mut self.nest;
-        if index.stale || index.turn != Some(turn) || index.len != items.len() {
-            index.rebuild(turn, items);
+        if index.stale || index.turn != uid || index.len != items.len() {
+            index.rebuild(uid, items);
         }
         Some(index)
     }
@@ -232,9 +233,10 @@ impl HostedChat {
         let Some(item) = items.last() else {
             return;
         };
+        let uid = self.uids.of(turn);
         let index = &mut self.nest;
-        if index.stale || index.turn != Some(turn) || index.len + 1 != items.len() {
-            index.rebuild(turn, items);
+        if index.stale || index.turn != uid || index.len + 1 != items.len() {
+            index.rebuild(uid, items);
         } else {
             index.len += 1;
             index.note(item);
@@ -299,8 +301,9 @@ impl HostedChat {
             return;
         }
         let items = &self.node.turns[turn].items;
+        let uid = self.uids.of(turn);
         let index = &mut self.nest;
-        index.rebuild(turn, items);
+        index.rebuild(uid, items);
         // What's under the root, oldest first.
         let members: Vec<usize> = (0..items.len())
             .filter(|&at| items[at].parent().is_some_and(|p| index.root_of(p) == root))

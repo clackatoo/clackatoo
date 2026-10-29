@@ -96,7 +96,7 @@ pub(super) enum Source {
     /// `last`.
     Tools { last: bool },
     /// The chat's commands, in turn `turn`.
-    Commands { turn: usize },
+    Commands { turn: crate::chat::TurnUid },
 }
 
 impl Diffing {
@@ -562,7 +562,10 @@ mod tests {
                 .daemon
                 .agent_files
                 .log
-                .turn(TerminalId(2), 0)
+                .turn(
+                    TerminalId(2),
+                    crate::server::agent_files::tests::first_uid(&world.daemon, TerminalId(2))
+                )
                 .is_none()
         );
     }
@@ -593,7 +596,14 @@ mod tests {
         // The agent's change is made as its own; the other isn't taken.
         assert_eq!(world.text(id), second);
         assert!(world.daemon.buffers[&id].stale());
-        assert!(world.daemon.agent_files.log.turn(world.chat, 0).is_some());
+        assert!(
+            world
+                .daemon
+                .agent_files
+                .log
+                .turn(world.chat, world.first())
+                .is_some()
+        );
     }
 
     #[test]
@@ -706,10 +716,11 @@ mod tests {
     fn a_handover_takes_in_a_big_change_being_merged_first() {
         let mut world = World::new();
         let (id, _, second) = merging(&mut world);
+        let uid = world.first();
         drop(world.daemon.hand_over(std::time::Instant::now()).unwrap());
         assert!(!world.daemon.agent_files.diffing(world.chat));
         assert_eq!(world.text(id), second);
-        assert!(world.daemon.agent_files.log.turn(world.chat, 0).is_some());
+        assert!(world.daemon.agent_files.log.turn(world.chat, uid).is_some());
     }
 
     #[test]
@@ -757,7 +768,8 @@ mod tests {
         let id = world.open("big.txt");
         let second = first.replacen("line 1\n", "line #1\n", 1);
         std::fs::write(world.path("big.txt"), &second).unwrap();
-        world.daemon.take_from_commands(world.chat, 0, id);
+        let uid = world.first();
+        world.daemon.take_from_commands(world.chat, uid, id);
         assert!(world.daemon.agent_files.diffing(world.chat));
         world.daemon.settle_all_pending();
         assert_eq!(world.text(id), second);

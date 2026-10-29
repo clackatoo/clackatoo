@@ -74,7 +74,7 @@ use mio::Token;
 use serde_json::Value;
 
 use super::{Wait, Waiting};
-use crate::chat::{Cause, HostedChat, MAX_INBOX, Message};
+use crate::chat::{Cause, HostedChat, MAX_INBOX, Message, TurnUid};
 use crate::handover;
 use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
@@ -126,12 +126,12 @@ pub(super) struct Talk {
     starts: BTreeMap<TerminalId, u32>,
     /// How many turns notices that chats finished have started under each
     /// of the user's chats, and since which of the user's turns there, by
-    /// its index. Not handed over.
-    notice_turns: BTreeMap<TerminalId, (Option<usize>, u32)>,
+    /// its uid, so a turn written after a rewind counts as new.
+    notice_turns: BTreeMap<TerminalId, (Option<TurnUid>, u32)>,
     /// The chats whose notice that chats finished waits for the user,
     /// past [`MAX_NOTICE_TURNS`], and the last turn the user started in
-    /// each as it began to: writing there again lets it go.
-    held: BTreeMap<TerminalId, Option<usize>>,
+    /// each as it began to, by its uid: writing there again lets it go.
+    held: BTreeMap<TerminalId, Option<TurnUid>>,
     /// The waits for chats an upgrade cut off, by the chat that waited: it
     /// hears when they settle after it, whoever started their turns, as
     /// it would have had the wait gone on: each of them, or, for a wait
@@ -207,7 +207,7 @@ impl Daemon {
     /// way, which the upgrade cuts off, into `talk`, for the next build.
     pub(in crate::server) fn hand_over_counts(&self, mut talk: handover::Talk) -> handover::Talk {
         let talked = &self.tools.talk;
-        let turn = |at: Option<usize>| at.map(|at| at as u64);
+        let turn = |at: Option<TurnUid>| at.map(|at| u64::from(at.0));
         talk.starts = (talked.starts.iter())
             .map(|(&root, &count)| handover::Starts {
                 root: root.0,
@@ -265,7 +265,7 @@ impl Daemon {
         standing: Option<&handover::Talk>,
     ) {
         let open = |daemon: &Self, id: u32| daemon.chat_ref(TerminalId(id)).is_some();
-        let turn = |at: Option<u64>| at.and_then(|at| usize::try_from(at).ok());
+        let turn = |at: Option<u64>| at.and_then(|at| u32::try_from(at).ok()).map(TurnUid);
         if let Some(standing) = standing {
             let talked = &mut self.tools.talk;
             for starts in &standing.starts {
@@ -387,7 +387,7 @@ impl Daemon {
     /// The user's turn what the chat `chat`'s agent does now comes of.
     fn cause_of(&self, chat: TerminalId) -> Option<Cause> {
         let own = self.chat_ref(chat)?;
-        let turn = u32::try_from(own.working_on().0).unwrap_or(u32::MAX);
+        let turn = own.working_on().0.0;
         Some(own.relations().cause.unwrap_or((chat, turn)))
     }
 
@@ -1212,7 +1212,7 @@ impl Daemon {
 
     /// The user's chat the chat `id` goes back to, and the last turn the
     /// user started there, which notices' turns are counted since.
-    fn notice_count_of(&self, id: TerminalId) -> (TerminalId, Option<usize>, u32) {
+    fn notice_count_of(&self, id: TerminalId) -> (TerminalId, Option<TurnUid>, u32) {
         let root = (self.chat_ref(id))
             .and_then(|chat| chat.relations().root)
             .unwrap_or(id);
@@ -1391,8 +1391,10 @@ fn unheard(kid: &HostedChat, parent: TerminalId, child: TerminalId) -> bool {
 /// The index of the last turn the user started in `chat`, if any. A turn
 /// where the chat moved to another agent (`Turn.switch`), which no
 /// message started either, counts as the user's: the user moved it.
-fn users_last_turn(chat: &HostedChat) -> Option<usize> {
-    (chat.node().turns.iter()).rposition(|turn| turn.from.is_none() && turn.woke.is_none())
+fn users_last_turn(chat: &HostedChat) -> Option<TurnUid> {
+    let at =
+        (chat.node().turns.iter()).rposition(|turn| turn.from.is_none() && turn.woke.is_none());
+    chat.turn_uid(at?)
 }
 
 /// Whether `chat` has nothing to finish: no answer under way, and no
@@ -1623,7 +1625,7 @@ mod tests {
         // The user's first turn in a goes with the message to the chat
         // that takes it.
         let cause = daemon.cause_of(a).unwrap();
-        assert_eq!(cause, (a, 0));
+        assert_eq!(cause, (a, uid(&daemon, a, 0).0));
         let message = daemon.message_from(a, "go on").unwrap();
         assert_eq!((message.cause, message.hops), (Some(cause), 1));
         daemon.chat(b).unwrap().deliver(message).unwrap();
@@ -2051,6 +2053,11 @@ mod tests {
     }
 
     /// Hands `daemon` over to the next build, as an upgrade does.
+    /// The uid of turn `index` of chat `chat`.
+    fn uid(daemon: &Daemon, chat: TerminalId, index: usize) -> TurnUid {
+        daemon.chat_ref(chat).unwrap().turn_uid(index).unwrap()
+    }
+
     fn upgraded(mut daemon: Daemon) -> Daemon {
         let config = daemon.config.clone();
         let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
@@ -2382,7 +2389,7 @@ mod tests {
     fn notices_start_so_many_turns_at_most_between_two_of_the_users_messages() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        (daemon.tools.talk.notice_turns).insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS));
         answers(&mut daemon, a, "done");
         let b = building(&mut daemon, 2, a);
         finishes(&mut daemon, b, "built it");
@@ -2406,7 +2413,10 @@ mod tests {
         let node = daemon.chat_ref(a).unwrap().node();
         assert_eq!(node.turns.len(), 3, "{:#?}", node.turns);
         assert!(node.turns[2].prompt.starts_with("[chat 2 finished]"));
-        assert_eq!(daemon.tools.talk.notice_turns[&a], (Some(1), 1));
+        assert_eq!(
+            daemon.tools.talk.notice_turns[&a],
+            (Some(uid(&daemon, a, 1)), 1)
+        );
     }
 
     /// A chat, `id`, that `parent` started under the user's chat `root`,
@@ -2433,7 +2443,7 @@ mod tests {
     fn what_waits_behind_a_held_notice_goes_on_and_the_notice_stays_held() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        (daemon.tools.talk.notice_turns).insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS));
         let b = building(&mut daemon, 2, a);
         let c = building(&mut daemon, 3, a);
         finishes(&mut daemon, b, "built it");
@@ -2466,7 +2476,7 @@ mod tests {
     fn a_notice_held_in_a_subagent_goes_once_the_user_writes_there() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        (daemon.tools.talk.notice_turns).insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS));
         let pm = under(&mut daemon, 2, a, a);
         let builder = under(&mut daemon, 3, pm, a);
         answers(&mut daemon, pm, "started a builder");
@@ -2493,7 +2503,7 @@ mod tests {
     fn a_wait_on_a_chat_holding_a_notice_for_the_user_answers() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        (daemon.tools.talk.notice_turns).insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS));
         let pm = under(&mut daemon, 2, a, a);
         let builder = under(&mut daemon, 3, pm, a);
         answers(&mut daemon, pm, "started a builder");
@@ -2736,7 +2746,7 @@ mod tests {
     fn a_held_notice_stays_held_through_an_upgrade() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        (daemon.tools.talk.notice_turns).insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS));
         let pm = under(&mut daemon, 2, a, a);
         let builder = under(&mut daemon, 3, pm, a);
         answers(&mut daemon, pm, "started a builder");
@@ -2750,7 +2760,7 @@ mod tests {
         assert_eq!(resumed.chat_ref(pm).unwrap().node().turns.len(), 1);
         assert_eq!(
             resumed.tools.talk.notice_turns[&a],
-            (Some(0), MAX_NOTICE_TURNS)
+            (Some(uid(&resumed, a, 0)), MAX_NOTICE_TURNS)
         );
         assert_eq!(resumed.tools.talk.starts[&a], 1);
     }
@@ -2835,7 +2845,8 @@ mod tests {
         let c = building(&mut daemon, 3, a);
         runs_in_background(&mut daemon, c, "npm test");
         answers(&mut daemon, c, "testing");
-        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS - 1));
+        (daemon.tools.talk.notice_turns)
+            .insert(a, (Some(uid(&daemon, a, 0)), MAX_NOTICE_TURNS - 1));
         let mut resumed = upgraded(daemon);
         relay(&mut resumed);
         // One goes, and is counted; the other waits for the user.
@@ -2843,7 +2854,7 @@ mod tests {
         assert!(told(&resumed, b) != told(&resumed, c), "one of them");
         assert_eq!(
             resumed.tools.talk.notice_turns[&a],
-            (Some(0), MAX_NOTICE_TURNS)
+            (Some(uid(&resumed, a, 0)), MAX_NOTICE_TURNS)
         );
         let held = if told(&resumed, b) { c } else { b };
         assert!(resumed.holds_notice(held));

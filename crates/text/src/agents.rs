@@ -38,7 +38,9 @@ pub struct AgentHunk {
     pub base: String,
     /// The chat whose agent changed them last, by its terminal's number.
     pub chat: u32,
-    /// The turn of the chat it was in, counting from 0.
+    /// The turn of the chat it was in: the daemon keeps it by the turn's
+    /// uid, which stays with the turn, and tells windows its index on the
+    /// conversation shown, counting from 0.
     pub turn: u32,
     /// Whether the user has kept the change, having reviewed it. A kept
     /// hunk isn't coloured, but still says who made its lines.
@@ -90,7 +92,8 @@ impl AgentHunk {
 pub struct Maker {
     /// The chat, by its terminal's number.
     pub chat: u32,
-    /// The turn, counting from 0.
+    /// The turn, by its uid in the chat, which stays with it: its index,
+    /// counting from 0, unless the chat's conversation has been cut back.
     pub turn: u32,
 }
 

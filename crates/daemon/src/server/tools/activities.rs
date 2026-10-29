@@ -82,7 +82,9 @@ impl Daemon {
         let activity = Activity {
             id: id.into(),
             owner: chat,
-            turn: u32::try_from(turn).unwrap_or(u32::MAX),
+            // Its uid, which stays with the turn; the chat shows it on
+            // the turn's index (see `publish_activities`).
+            turn: turn.0,
             title,
             command,
             cwd,
@@ -194,12 +196,20 @@ impl Daemon {
         chat: TerminalId,
         id: Option<&str>,
     ) -> Result<String, String> {
-        let records: Vec<_> = self
+        let hosted = self.chat_ref(chat);
+        let records: Vec<Activity> = self
             .tools
             .activities
             .iter()
             .filter(|r| r.activity.owner == chat && id.is_none_or(|id| r.activity.id == id))
-            .map(|r| &r.activity)
+            .map(|r| {
+                // On the turn's index, as the agent counts turns.
+                let mut activity = r.activity.clone();
+                if let Some(hosted) = hosted {
+                    activity.turn = shown_turn(hosted, activity.turn);
+                }
+                activity
+            })
             .collect();
         if id.is_some() && records.is_empty() {
             return Err("No operation with that id belongs to this chat.".into());
@@ -351,8 +361,11 @@ impl Daemon {
         }
     }
 
+    /// Shows chat `owner` its activities, each on the turn that started
+    /// it: kept by the turn's uid, shown by its index on the conversation
+    /// shown.
     fn publish_activities(&mut self, owner: TerminalId) {
-        let records = self
+        let records: Vec<Activity> = self
             .tools
             .activities
             .iter()
@@ -360,10 +373,28 @@ impl Daemon {
             .map(|r| r.activity.clone())
             .collect();
         if let Some(chat) = self.chat(owner) {
+            let records = (records.into_iter())
+                .map(|mut activity| {
+                    activity.turn = shown_turn(chat, activity.turn);
+                    activity
+                })
+                .collect();
             chat.set_activities(records);
         }
         self.collect_damage(owner);
         self.keep_soon();
+    }
+
+    /// The activities, for the saved workspaces file: each on its turn's
+    /// index, as a cold start numbers the turns it tells again afresh.
+    pub(in crate::server) fn saved_activities(&self) -> Vec<Record> {
+        let mut records = self.tools.activities.clone();
+        for record in &mut records {
+            if let Some(chat) = self.chat_ref(record.activity.owner) {
+                record.activity.turn = shown_turn(chat, record.activity.turn);
+            }
+        }
+        records
     }
 
     pub(in crate::server) fn hand_over_activities(&self) -> Result<Vec<u8>, serde_json::Error> {
@@ -454,6 +485,14 @@ impl Daemon {
         ];
         serde_json::to_string(&rows).unwrap_or_default()
     }
+}
+
+/// Where turn `uid` of `chat` is on the conversation shown, as an
+/// activity's card says; its last turn if it isn't there.
+fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> u32 {
+    let index = (chat.turn_index(crate::chat::TurnUid(uid)))
+        .unwrap_or_else(|| chat.turns().saturating_sub(1));
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

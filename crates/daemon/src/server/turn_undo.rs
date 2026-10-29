@@ -29,6 +29,7 @@ use super::Daemon;
 use super::agent_files::line_numbers;
 use super::edit_log::{Change, FileEdits, edit_bytes};
 use crate::buffer::{Buffer, DiskStamp, Staged};
+use crate::chat::TurnUid;
 
 /// What undoing a turn does to one file, worked out before anything's
 /// done.
@@ -70,27 +71,30 @@ pub(super) struct Done {
 }
 
 impl Daemon {
-    /// Undoes, or with `redo` redoes, what turn `turn` of chat `chat`
-    /// changed in files, and says how that went in the chat. If a file
-    /// can't be, none is, unless `force`, which does the rest.
+    /// Undoes, or with `redo` redoes, what turn `turn` of chat `chat`, by
+    /// its index on the conversation shown, changed in files, and says how
+    /// that went in the chat. If a file can't be, none is, unless `force`,
+    /// which does the rest.
     pub(super) fn undo_turn(&mut self, chat: TerminalId, turn: usize, redo: bool, force: bool) {
         // Changes to big files still being worked out are taken in
         // first, so the log has them all, in order.
         self.settle_all_pending();
+        let uid = self.chat_ref(chat).and_then(|hosted| hosted.turn_uid(turn));
         let notice = self.reverse_turn(chat, turn, redo, force);
         if let Some(hosted) = self.chat(chat) {
             hosted.notify(notice);
         }
         let dropped = self.agent_files.log.trim(chat);
-        self.refresh_files(chat, dropped.into_iter().chain([turn]));
+        self.refresh_files(chat, dropped.into_iter().chain(uid));
     }
 
-    /// Tells chat `chat` what each of `turns` changed in files now, as the
-    /// log has it.
+    /// Tells chat `chat` what each of `turns`, by their uids, changed in
+    /// files now, as the log has it. A turn not on the conversation shown
+    /// isn't told.
     pub(super) fn refresh_files(
         &mut self,
         chat: TerminalId,
-        turns: impl IntoIterator<Item = usize>,
+        turns: impl IntoIterator<Item = TurnUid>,
     ) {
         let summaries: Vec<_> = (turns.into_iter())
             .map(|turn| (turn, self.agent_files.log.summary(chat, turn)))
@@ -99,7 +103,9 @@ impl Daemon {
             return;
         };
         for (turn, files) in summaries {
-            hosted.set_files(turn, files);
+            if let Some(index) = hosted.turn_index(turn) {
+                hosted.set_files(index, files);
+            }
         }
         self.collect_damage(chat);
     }
@@ -117,8 +123,9 @@ impl Daemon {
         }
     }
 
-    /// Undoes or redoes turn `turn` of `chat`, as [`undo_turn`] does, and
-    /// returns what to say of it.
+    /// Undoes or redoes turn `turn` of `chat`, by its index on the
+    /// conversation shown, as [`undo_turn`] does, and returns what to say
+    /// of it.
     ///
     /// [`undo_turn`]: Self::undo_turn
     fn reverse_turn(&mut self, chat: TerminalId, turn: usize, redo: bool, force: bool) -> String {
@@ -143,6 +150,9 @@ impl Daemon {
             return format!(
                 "That's where the chat moved to another agent: there's nothing to {undo}."
             );
+        };
+        let Some(turn) = hosted.turn_uid(turn) else {
+            return String::new();
         };
         let cwd = PathBuf::from(hosted.working_directory());
         let Some(edits) = self.agent_files.log.turn(chat, turn) else {
@@ -316,7 +326,7 @@ impl Daemon {
         &mut self,
         chat: TerminalId,
         plans: Vec<Plan>,
-        remakes: Option<usize>,
+        remakes: Option<TurnUid>,
     ) -> Result<Vec<Result<Done, String>>, String> {
         let staged = self.stage_plans(&plans)?;
         Ok(self.put_in_place(chat, plans, staged, remakes))
@@ -333,11 +343,11 @@ impl Daemon {
         chat: TerminalId,
         plans: Vec<Plan>,
         staged: Vec<Option<(Staged, Rope)>>,
-        remakes: Option<usize>,
+        remakes: Option<TurnUid>,
     ) -> Vec<Result<Done, String>> {
         let maker = remakes.map(|turn| clackatoo_text::Maker {
             chat: chat.0,
-            turn: u32::try_from(turn).unwrap_or(u32::MAX),
+            turn: turn.0,
         });
         let author = Author::Agent(chat);
         let trash = self.config.trash.clone();
@@ -715,7 +725,7 @@ pub(in crate::server) mod tests {
 
     use super::*;
     use crate::chat::{RawDiff, Wrote};
-    use crate::server::agent_files::tests::{daemon_with_chat, start_tool};
+    use crate::server::agent_files::tests::{daemon_with_chat, first_uid, start_tool};
     use crate::server::agent_files::{Capture, Seen};
     use crate::server::chats::AgentId;
 
@@ -743,6 +753,11 @@ pub(in crate::server) mod tests {
                 chat,
                 tools: 0,
             }
+        }
+
+        /// The uid of the chat's first turn.
+        pub(in crate::server) fn first(&self) -> TurnUid {
+            first_uid(&self.daemon, self.chat)
         }
 
         pub(in crate::server) fn path(&self, name: &str) -> PathBuf {
@@ -979,7 +994,7 @@ pub(in crate::server) mod tests {
         world.end_turn();
         world.daemon.buffer_closing(id);
         world.daemon.buffers.remove(&id);
-        let file = &(world.daemon.agent_files.log.turn(world.chat, 0))
+        let file = &(world.daemon.agent_files.log.turn(world.chat, world.first()))
             .unwrap()
             .files[0];
         // Two edits, one after the other: one change.
@@ -1033,8 +1048,9 @@ pub(in crate::server) mod tests {
             buffer.edits_since(1).is_none(),
             "the first write was let go"
         );
+        let uid = world.first();
         let log = &world.daemon.agent_files.log;
-        let changes = log.turn(world.chat, 0).unwrap().files[0].changes.clone();
+        let changes = log.turn(world.chat, uid).unwrap().files[0].changes.clone();
         assert!(
             matches!(changes[..], [Change::Text { .. }, Change::Buffer { .. }]),
             "only the first, which reached back, is a text"
@@ -1049,7 +1065,7 @@ pub(in crate::server) mod tests {
         let path = world.path(name).display().to_string();
         Wrote {
             done,
-            turn: 0,
+            turn: world.first(),
             tool: "e1".into(),
             order: 0,
             paths: vec![path.clone()],
@@ -1121,7 +1137,12 @@ pub(in crate::server) mod tests {
         world.write("a.txt", "ONE\n");
         world.write("b.txt", "TWO\n");
         world.end_turn();
-        let edits = world.daemon.agent_files.log.turn(world.chat, 0).unwrap();
+        let edits = world
+            .daemon
+            .agent_files
+            .log
+            .turn(world.chat, world.first())
+            .unwrap();
         let plans: Vec<Plan> = (edits.files.iter().enumerate())
             .map(|(index, file)| world.daemon.plan_undo(file, index).unwrap())
             .collect();
@@ -1238,9 +1259,10 @@ pub(in crate::server) mod tests {
         let chat = world.chat;
         let path = world.path(name).display().to_string();
         start_tool(&mut world.daemon, chat, tool);
+        let uid = world.first();
         let said = |done, diffs| Wrote {
             done,
-            turn: 0,
+            turn: uid,
             tool: tool.into(),
             order: 0,
             paths: vec![path.clone()],
@@ -1341,9 +1363,10 @@ pub(in crate::server) mod tests {
         let chat = world.chat;
         let path = world.path("big2.txt").display().to_string();
         start_tool(&mut world.daemon, chat, "t2");
+        let uid = world.first();
         let said = |done, diffs| Wrote {
             done,
-            turn: 0,
+            turn: uid,
             tool: "t2".into(),
             order: 0,
             paths: vec![path.clone()],
@@ -1367,5 +1390,82 @@ pub(in crate::server) mod tests {
             notice.contains("big.txt, what the file held before wasn't seen"),
             "{notice}"
         );
+    }
+
+    #[test]
+    fn what_a_turn_changed_is_kept_by_its_uid_and_shown_on_its_index() {
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "a\n").unwrap();
+        std::fs::write(world.path("b.txt"), "b\n").unwrap();
+        world.write("a.txt", "A\n");
+        world.end_turn();
+        // The second turn's uid isn't its index, as after a rewind.
+        let first = world.first();
+        world.daemon.chat(world.chat).unwrap().skip_uids(40);
+        world.next_turn();
+        world.write("b.txt", "B\n");
+        world.end_turn();
+        let log = &world.daemon.agent_files.log;
+        assert!(log.turn(world.chat, TurnUid(first.0 + 41)).is_some());
+        assert!(log.turn(world.chat, TurnUid(first.0 + 1)).is_none());
+        assert_eq!(world.state(1), Some(TurnFilesState::Made));
+        // Undone by its index, as `u` and `:agentundo` name it.
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: b.txt.");
+        assert_eq!(world.disk("b.txt").as_deref(), Some("b\n"));
+        assert_eq!(world.disk("a.txt").as_deref(), Some("A\n"));
+        assert_eq!(world.state(1), Some(TurnFilesState::Undone));
+        assert_eq!(world.state(0), Some(TurnFilesState::Made));
+        assert_eq!(world.undo(2, false, false), "There's no turn 3.");
+        // A digest of the turns says what each changed, by the turns'
+        // uids.
+        let uids = world
+            .daemon
+            .chat_ref(world.chat)
+            .unwrap()
+            .turn_uids(1..2)
+            .to_vec();
+        let changed = world.daemon.agent_files.log.changed_in(world.chat, &uids);
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].path.ends_with("b.txt") && changed[0].undone);
+    }
+
+    #[test]
+    fn a_turns_uids_and_what_it_changed_are_handed_over_together() {
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "a\n").unwrap();
+        world.end_turn();
+        let first = world.first().0;
+        world.daemon.chat(world.chat).unwrap().skip_uids(7);
+        world.next_turn();
+        world.write("a.txt", "A\n");
+        world.end_turn();
+        let World {
+            _dir: dir,
+            root,
+            mut daemon,
+            chat,
+            tools,
+        } = world;
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+        assert_eq!(handover.state.uids.len(), 1);
+        assert_eq!(handover.state.uids[0].uids, [first, first + 8]);
+        drop(daemon);
+        let daemon = Daemon::resume(handover, config).unwrap();
+        let mut world = World {
+            _dir: dir,
+            root,
+            daemon,
+            chat,
+            tools,
+        };
+        let chat = world.daemon.chat_ref(world.chat).unwrap();
+        assert_eq!(
+            (chat.turn_uid(1), chat.next_uid()),
+            (Some(TurnUid(first + 8)), TurnUid(first + 9))
+        );
+        assert_eq!(world.state(1), Some(TurnFilesState::Made));
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: a.txt.");
+        assert_eq!(world.disk("a.txt").as_deref(), Some("a\n"));
     }
 }

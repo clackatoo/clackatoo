@@ -67,7 +67,8 @@ impl HostedChat {
                 .filter_map(|(asker, question)| hand_over_question(asker, question))
                 .collect(),
             next_question: self.next_question,
-            native: (self.user_queue.native).map(|(id, turn, item)| (id, turn as u64, item as u64)),
+            native: (self.user_queue.native)
+                .map(|(id, turn, item)| (id, u64::from(turn.0), item as u64)),
             restart: self.user_queue.restart,
             queue_paused: self.node.delivery.paused,
         };
@@ -123,8 +124,8 @@ impl HostedChat {
         );
         self.show_question();
         self.user_queue.native = (live.native).map(|(id, turn, item)| {
-            let index = |at: u64| usize::try_from(at).unwrap_or(usize::MAX);
-            (id, index(turn), index(item))
+            let uid = super::TurnUid(u32::try_from(turn).unwrap_or(u32::MAX));
+            (id, uid, usize::try_from(item).unwrap_or(usize::MAX))
         });
         self.user_queue.restart = live.restart;
         self.pause_queue(live.queue_paused);

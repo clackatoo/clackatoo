@@ -51,6 +51,7 @@ use super::edit_log::Diffed;
 use super::turn_undo::{Disk, Plan, Target, shown, take_out};
 use crate::buffer::{self, Buffer, DiskStamp, PreparedStep};
 use crate::changes::{Compared, listed};
+use crate::chat::TurnUid;
 use crate::handover;
 
 /// The biggest file not open whose hunks a review shows, in bytes: it's
@@ -161,6 +162,8 @@ struct Comment {
 #[derive(Debug)]
 struct Review {
     chat: Option<TerminalId>,
+    /// What it lists: a turn by its uid (see `chat/uids.rs`), so it stays
+    /// with the turn; clients are told the turn's index.
     scope: ReviewScope,
     /// The project's directory, which paths are shown from.
     root: PathBuf,
@@ -218,7 +221,8 @@ struct Steps {
 
 /// A chat a review is of, and the chats under it: the subagents its agent
 /// started, and theirs, open or closed, each with the turn of the chat
-/// that it, or the subagent above it, was started in.
+/// that it, or the subagent above it, was started in, by its uid, as the
+/// chat's own hunks name their turns.
 #[derive(Debug, Default)]
 struct Family {
     chat: Option<TerminalId>,
@@ -605,10 +609,12 @@ impl Daemon {
         }
         let version = slot.buffer.version();
         // Windows get them without their bases, which they have no use
-        // for: they only move them, and are told when one goes.
+        // for: they only move them, and are told when one goes. Each says
+        // its turn by its index, as windows name turns, not its uid.
         let hunks: Vec<AgentHunk> = (slot.agents.all().iter())
             .map(|hunk| AgentHunk {
                 base: String::new(),
+                turn: self.shown_turn(Some(TerminalId(hunk.chat)), hunk.turn),
                 ..hunk.clone()
             })
             .collect();
@@ -735,7 +741,13 @@ impl Daemon {
                             .map_or(u64::MAX, |turn| turn.sent);
                         (kid, hosted.turn_at(started))
                     });
-                for (kid, started_in) in carded.chain(uncarded) {
+                // Cards say the turn's index; hunks, its uid.
+                let uid = |index: u32| {
+                    let index = usize::try_from(index).unwrap_or(usize::MAX);
+                    (hosted.turn_uid(index)).map_or(u32::MAX, |uid| uid.0)
+                };
+                let started = carded.chain(uncarded).map(|(kid, at)| (kid, uid(at)));
+                for (kid, started_in) in started {
                     if kid == chat || family.under.contains_key(&kid) {
                         continue;
                     }
@@ -767,6 +779,7 @@ impl Daemon {
                 let task = turn
                     .and_then(|_| self.card(chat))
                     .map(|card| card.task.clone());
+                let turn = turn.map(|turn| self.shown_turn(family.chat, turn));
                 ReviewChat {
                     chat,
                     name: self.chat_name(chat),
@@ -817,9 +830,10 @@ impl Daemon {
     fn hunks_named(&self, hunks: &Hunks) -> Vec<(Place, AgentHunk)> {
         let (family, scope) = match hunks {
             Hunks::Ids(_) => (Family::default(), ReviewScope::Base),
-            Hunks::Turn { chat, turn } => {
-                (self.family_of(Some(*chat)), ReviewScope::Turn(Some(*turn)))
-            }
+            Hunks::Turn { chat, turn } => (
+                self.family_of(Some(*chat)),
+                ReviewScope::Turn(Some(self.turn_uid_of(Some(*chat), *turn))),
+            ),
             Hunks::Chat(chat) => (self.family_of(Some(*chat)), ReviewScope::Chat),
         };
         let wanted = |hunk: &AgentHunk| match hunks {
@@ -1385,11 +1399,12 @@ impl Daemon {
                     .filter(|hunk| !hunk.reviewed)
                     .filter_map(|hunk| family.turn_of(hunk))
                     .max();
-                let turns =
-                    (chat.and_then(|chat| self.chat(chat))).map_or(0, |hosted| hosted.turns());
-                let last = u32::try_from(turns.saturating_sub(1)).unwrap_or(u32::MAX);
+                let last = (chat.and_then(|chat| self.chat_ref(chat)))
+                    .and_then(crate::chat::HostedChat::last_uid)
+                    .map_or(0, |uid| uid.0);
                 ReviewScope::Turn(Some(latest.unwrap_or(last)))
             }
+            ReviewScope::Turn(Some(turn)) => ReviewScope::Turn(Some(self.turn_uid_of(chat, turn))),
             scope => scope,
         };
         let root = new
@@ -1473,13 +1488,51 @@ impl Daemon {
     }
 
     /// What review `review` is of, to make it again: its chat, what it
-    /// lists, and its project's directory.
+    /// lists, a turn by its index, and its project's directory.
     pub(super) fn review_of(
         &self,
         review: ReviewId,
     ) -> Option<(Option<TerminalId>, ReviewScope, &Path)> {
         let review = self.reviews.list.get(&review)?;
-        Some((review.chat, review.scope, &review.root))
+        let scope = self.shown_scope(review.chat, review.scope);
+        Some((review.chat, scope, &review.root))
+    }
+
+    /// The uid of turn `turn`, by its index, of chat `chat`: the index
+    /// itself if the chat isn't open, or has no such turn, as a review of
+    /// a chat that closed lists nothing new.
+    fn turn_uid_of(&self, chat: Option<TerminalId>, turn: u32) -> u32 {
+        let index = usize::try_from(turn).unwrap_or(usize::MAX);
+        (chat.and_then(|chat| self.chat_ref(chat)))
+            .and_then(|hosted| hosted.turn_uid(index))
+            .map_or(turn, |uid| uid.0)
+    }
+
+    /// Where turn `uid` of chat `chat` is on the conversation it shows, as
+    /// clients name it: the uid itself if the chat isn't open, or the turn
+    /// isn't shown.
+    fn shown_turn(&self, chat: Option<TerminalId>, uid: u32) -> u32 {
+        (chat.and_then(|chat| self.chat_ref(chat)))
+            .and_then(|hosted| hosted.turn_index(TurnUid(uid)))
+            .map_or(uid, |index| u32::try_from(index).unwrap_or(u32::MAX))
+    }
+
+    /// `scope`, of chat `chat`, as clients are told it: a turn by its
+    /// index.
+    fn shown_scope(&self, chat: Option<TerminalId>, scope: ReviewScope) -> ReviewScope {
+        match scope {
+            ReviewScope::Turn(Some(uid)) => ReviewScope::Turn(Some(self.shown_turn(chat, uid))),
+            scope => scope,
+        }
+    }
+
+    /// Says which turn made each hunk of `files` by its index, as clients
+    /// name it, not its uid.
+    fn show_turns(&self, files: &mut [ReviewFile]) {
+        let hunks = files.iter_mut().flat_map(|file| &mut file.hunks);
+        for made in hunks.filter_map(|hunk| hunk.by.as_mut()) {
+            made.turn = self.shown_turn(Some(made.chat), made.turn);
+        }
     }
 
     /// Sends the reviews' lists again, if they may have changed, to every
@@ -1535,6 +1588,8 @@ impl Daemon {
             }
         };
         let chats = self.review_chats(&files, &family);
+        let mut files = files;
+        self.show_turns(&mut files);
         let lost = chat
             .and_then(|chat| self.reviews.lost.get(&chat))
             .map(|&count| {
@@ -1556,7 +1611,7 @@ impl Daemon {
         ReviewList {
             chat,
             chat_name,
-            scope: Some(scope),
+            scope: Some(self.shown_scope(chat, scope)),
             files,
             comments,
             note,
@@ -2588,6 +2643,60 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn a_turns_review_follows_its_uid_and_shows_its_index() {
+        let mut world = World::new();
+        let parent = world.chat;
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(world.path(name), "x\n").unwrap();
+        }
+        world.write("a.txt", "A\n");
+        world.end_turn();
+        // The parent's second turn's uid isn't its index, as after a
+        // rewind.
+        world.daemon.chat(parent).unwrap().skip_uids(20);
+        world.next_turn();
+        world.write("c.txt", "C\n");
+        let child = subagent(&mut world, parent, 7, "explore");
+        world.write_as(child, "s7", "b.txt", "B\n");
+
+        let turn = listed_files(&mut world, ReviewScope::Turn(Some(1)));
+        assert_eq!(turn.scope, Some(ReviewScope::Turn(Some(1))));
+        let mut listed = by_chat(&turn);
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ("b.txt".into(), "B\n".into(), child),
+                ("c.txt".into(), "C\n".into(), parent)
+            ]
+        );
+        let made: Vec<_> = (turn.files.iter())
+            .flat_map(|file| &file.hunks)
+            .map(|hunk| hunk.by.unwrap().turn)
+            .collect();
+        assert!(made.iter().all(|&turn| turn <= 1), "{made:?}");
+        let card = turn.chats.iter().find(|chat| chat.chat == child).unwrap();
+        assert_eq!(card.turn, Some(1));
+        let latest = listed_files(&mut world, ReviewScope::Turn(None));
+        assert_eq!(latest.scope, Some(ReviewScope::Turn(Some(1))));
+        let first = listed_files(&mut world, ReviewScope::Turn(Some(0)));
+        assert_eq!(by_chat(&first), [("a.txt".into(), "A\n".into(), parent)]);
+        let kept = act(
+            &mut world,
+            ReviewAction::Keep(Hunks::Turn {
+                chat: parent,
+                turn: 1,
+            }),
+        );
+        assert_eq!(kept, Ok("Kept 2 hunks.".into()));
+        // What makes the review again after a cold start names the turn
+        // by its index.
+        let review = world.daemon.reviews.list.keys().copied().next().unwrap();
+        let (_, scope, _) = world.daemon.review_of(review).unwrap();
+        assert_eq!(scope, ReviewScope::Turn(Some(1)));
     }
 
     #[test]

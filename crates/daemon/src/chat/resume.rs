@@ -472,7 +472,7 @@ impl HostedChat {
                     switch: None,
                 });
                 // As it was, images and all, to send again.
-                self.remember_prompt(self.node.turns.len() - 1, &text);
+                self.remember_prompt(&text);
                 self.end_turn(outcome);
             }
         }

@@ -362,7 +362,7 @@ impl Daemon {
         (self.keeping.places)
             .retain(|pane, (buffer, _)| shown.contains(&(*pane, Content::Buffer(*buffer))));
         let mut state = State {
-            operations: self.tools.activities.clone(),
+            operations: self.saved_activities(),
             clackatoo_workspaces: saved::VERSION,
             workspaces: Vec::new(),
             active: None,

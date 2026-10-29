@@ -76,7 +76,7 @@ pub(super) struct Disk {
 struct Noted {
     chat: TerminalId,
     /// The turn it was found in.
-    turn: usize,
+    turn: crate::chat::TurnUid,
     /// The file as the chat last left it, as far as is known: the same
     /// change heard of again, as inotify says one write more than once,
     /// isn't another.
@@ -631,7 +631,14 @@ pub(in crate::server) mod tests {
         daemon.check_disk();
         assert_eq!(text(&daemon), "> one\nTWO\nTHREE\n");
         // The turn's, in no tool call.
-        let turn = daemon.agent_files.log.turn(chat, 0).unwrap();
+        let turn = daemon
+            .agent_files
+            .log
+            .turn(
+                chat,
+                crate::server::agent_files::tests::first_uid(&daemon, chat),
+            )
+            .unwrap();
         assert_eq!(turn.files.len(), 1);
         assert_eq!(
             (turn.files[0].tool.as_deref(), turn.files[0].known),

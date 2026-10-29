@@ -817,7 +817,11 @@ impl Daemon {
                         .prompt(id, &session, (&words, &context), &text.images);
                 }
                 (Action::Carry { text, from, to }, Some(_), Some(session)) => {
-                    let files = self.agent_files.log.changed_in(id, from..to);
+                    let uids = (self.chat_ref(id)).map(|chat| chat.turn_uids(from..to).to_vec());
+                    let files = self
+                        .agent_files
+                        .log
+                        .changed_in(id, &uids.unwrap_or_default());
                     let digest = self.chat(id).and_then(|chat| chat.digest(from, to, &files));
                     let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
                     if let Some(slot) = slot {

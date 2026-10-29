@@ -24,7 +24,8 @@ pub(crate) enum Source {
 #[derive(Debug)]
 pub(crate) struct Target {
     pub terminal: TerminalId,
-    pub turn: usize,
+    /// The turn, by its uid, which stays with it.
+    pub turn: crate::chat::TurnUid,
     pub sent: u64,
     pub tool: String,
     pub content: Vec<ToolContent>,

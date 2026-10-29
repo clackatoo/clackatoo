@@ -13,8 +13,9 @@ use crate::handover;
 /// to end. Past it, a message is refused, and its sender told to wait.
 pub(crate) const MAX_INBOX: usize = 8;
 
-/// A turn of the user's, by its chat and its index there, which messages
-/// between agents and the turns they start come of.
+/// A turn of the user's, by its chat and its uid there (see
+/// `chat/uids.rs`), which messages between agents and the turns they start
+/// come of.
 pub(crate) type Cause = (TerminalId, u32);
 
 /// A message another chat's agent sent, or a notice from clackatoo itself.

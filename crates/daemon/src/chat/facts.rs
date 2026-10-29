@@ -37,7 +37,7 @@ use agent_client_protocol_schema::v1::{ContentBlock, Meta, StopReason};
 use clackatoo_protocol::{ChatPatch, Cost, Item, Outcome, Spent, Tool, ToolKind, ToolStatus};
 use serde_json::Value;
 
-use super::{Action, HostedChat, Prompt, failure, one_line_notice};
+use super::{Action, HostedChat, Prompt, TurnUid, failure, one_line_notice};
 use crate::agent::{Answer, Failure};
 
 /// What Codex's adapter says, as words, to a client that can't take a
@@ -61,10 +61,11 @@ const RETRYING: usize = 200;
 /// What a chat keeps to say these.
 #[derive(Debug, Default)]
 pub(super) struct Facts {
-    /// The last message the user sent, and the turn it started, to send
+    /// The last message the user sent, and the turn it started, by its
+    /// uid, to send
     /// again as it was, images and all, if it fails. Not handed over:
     /// after an upgrade only a message of text alone can be.
-    last_prompt: Option<(usize, Prompt)>,
+    last_prompt: Option<(TurnUid, Prompt)>,
     /// What the session had cost as the turn answering started.
     cost_before: Option<Cost>,
     /// Whether the agent has said what the session cost since.
@@ -80,16 +81,16 @@ pub(super) struct Facts {
     /// it has finished, a line across the turn.
     compactions: VecDeque<Compaction>,
     /// The role or brief the message of a turn went with, and that turn,
-    /// to send with it again if it failed.
-    briefed: Option<(usize, String)>,
+    /// by its uid, to send with it again if it failed.
+    briefed: Option<(TurnUid, String)>,
 }
 
 /// A tool call that's the agent compacting its context.
 #[derive(Debug)]
 struct Compaction {
     id: String,
-    /// The turn it's in.
-    turn: Option<usize>,
+    /// The turn it's in, by its uid.
+    turn: Option<TurnUid>,
     /// The item it's shown as, a line across the turn, once it's finished.
     line: Option<usize>,
 }
@@ -105,15 +106,15 @@ impl HostedChat {
         self.set_retrying(None);
     }
 
-    /// The user's `prompt` started turn `turn`: kept, to send again.
-    pub(super) fn remember_prompt(&mut self, turn: usize, prompt: &Prompt) {
-        self.facts.last_prompt = Some((turn, prompt.clone()));
+    /// The user's `prompt` started the last turn: kept, to send again.
+    pub(super) fn remember_prompt(&mut self, prompt: &Prompt) {
+        self.facts.last_prompt = self.last_uid().map(|turn| (turn, prompt.clone()));
     }
 
-    /// The message of turn `turn` went with `role`, the chat's role or
+    /// The message of the last turn went with `role`, the chat's role or
     /// brief: kept, to send with it again if it fails.
-    pub(super) fn remember_brief(&mut self, turn: usize, role: &str) {
-        self.facts.briefed = Some((turn, role.to_owned()));
+    pub(super) fn remember_brief(&mut self, role: &str) {
+        self.facts.briefed = self.last_uid().map(|turn| (turn, role.to_owned()));
     }
 
     pub(super) fn set_retrying(&mut self, retrying: Option<String>) {
@@ -195,7 +196,7 @@ impl HostedChat {
     /// what more is said of it goes to that line, or nowhere (see
     /// [`compaction`](Self::compaction)), never to a tool.
     pub(super) fn compacted(&self, id: &str) -> bool {
-        let turn = self.answering_turn();
+        let turn = (self.answering_turn()).and_then(|turn| self.turn_uid(turn));
         (self.facts.compactions.iter())
             .any(|known| known.id == id && (known.line.is_some() || known.turn != turn))
     }
@@ -221,10 +222,11 @@ impl HostedChat {
         let Some(turn) = self.answering_turn() else {
             return;
         };
+        let uid = self.turn_uid(turn);
         let known = (self.facts.compactions.iter()).position(|known| known.id == id);
         let known = match known {
             // A report on one of a turn that's over goes nowhere.
-            Some(known) if self.facts.compactions[known].turn != Some(turn) => return,
+            Some(known) if self.facts.compactions[known].turn != uid => return,
             Some(known) => known,
             None if air.is_some() || named || codex => {
                 if self.facts.compactions.len() == COMPACTIONS {
@@ -232,7 +234,7 @@ impl HostedChat {
                 }
                 self.facts.compactions.push_back(Compaction {
                     id: id.to_owned(),
-                    turn: Some(turn),
+                    turn: uid,
                     line: None,
                 });
                 self.facts.compactions.len() - 1
@@ -429,8 +431,9 @@ impl HostedChat {
             return;
         }
         let unheard = turn.items.is_empty();
+        let uid = self.turn_uid(index);
         let prompt = match &self.facts.last_prompt {
-            Some((at, prompt)) if *at == index => prompt.clone(),
+            Some((at, prompt)) if Some(*at) == uid => prompt.clone(),
             _ => {
                 let (words, images) = without_image_labels(&turn.prompt);
                 if words.trim().is_empty() {
@@ -454,7 +457,7 @@ impl HostedChat {
         // The role or brief it went with goes again, if the agent never
         // took it in.
         if let Some((at, role)) = self.facts.briefed.take() {
-            if at == index && unheard && self.role.is_none() {
+            if Some(at) == uid && unheard && self.role.is_none() {
                 self.role = Some(role);
             } else {
                 self.facts.briefed = Some((at, role));

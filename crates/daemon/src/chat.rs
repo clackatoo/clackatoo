@@ -48,6 +48,7 @@ pub(crate) mod queue;
 mod relations;
 mod resume;
 mod tasks;
+mod uids;
 mod upgrade;
 mod woken;
 
@@ -57,6 +58,7 @@ mod subagent;
 pub(crate) use limits::Limits;
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
 pub(crate) use subagent::{Standing, Wanted, role_for};
+pub(crate) use uids::TurnUid;
 
 /// The most characters of a title the agent gives a conversation that a
 /// chat keeps, for its tab.
@@ -303,8 +305,8 @@ pub(crate) struct Wrote {
     /// Whether the tool has finished: if not, it names files it's going
     /// to change, which it hasn't yet, or not all.
     pub(crate) done: bool,
-    /// The turn it's in.
-    pub(crate) turn: usize,
+    /// The turn it's in, by its uid.
+    pub(crate) turn: TurnUid,
     /// Its ID.
     pub(crate) tool: String,
     /// Where it is among its turn's items, so its changes can be put in
@@ -498,6 +500,9 @@ pub(crate) struct HostedChat {
     /// What it keeps to say what the agent says of a turn beyond its
     /// words (see `chat/facts.rs`).
     facts: facts::Facts,
+    /// The uid of each turn, which what's kept of a turn is keyed by
+    /// (see `chat/uids.rs`), in step with `node.turns`.
+    uids: uids::Uids,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -519,8 +524,8 @@ pub(crate) struct Parked {
 /// What a chat moved from, to set the new agent's settings to match.
 #[derive(Debug)]
 struct Carry {
-    /// The turn that shows the move.
-    turn: usize,
+    /// The turn that shows the move, by its uid.
+    turn: TurnUid,
     /// The model asked for, by its value.
     model: Option<String>,
     /// The mode and effort it had, to give the new agent the same, where
@@ -710,6 +715,7 @@ impl HostedChat {
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
+            uids: uids::Uids::default(),
         }
     }
 
@@ -811,6 +817,9 @@ impl HostedChat {
         resumed.title = chat.title;
         resumed.session = chat.session;
         resumed.node.turns = chat.turns.into_iter().map(turn_from_handover).collect();
+        // Numbered by their indexes until the server gives what was handed
+        // over of their uids, if anything (see `resume_uids`).
+        resumed.uids = uids::Uids::resume(resumed.node.turns.len(), None);
         for switch in chat.switches {
             let at = usize::try_from(switch.turn).unwrap_or(usize::MAX);
             if let Some(turn) = resumed.node.turns.get_mut(at) {
@@ -1213,8 +1222,7 @@ impl HostedChat {
         }
         // The user's own: what agents do of it comes of this turn.
         self.relations.hops = 0;
-        let turn = u32::try_from(self.node.turns.len()).unwrap_or(u32::MAX);
-        self.relations.cause = Some((self.id, turn));
+        self.relations.cause = Some((self.id, self.next_uid().0));
         self.begin(prompt.shown(), prompt, None, actions);
     }
 
@@ -1263,7 +1271,7 @@ impl HostedChat {
             switch: None,
         });
         if own {
-            self.remember_prompt(self.node.turns.len() - 1, &prompt);
+            self.remember_prompt(&prompt);
         }
         match self.link {
             Link::Open => {
@@ -1576,7 +1584,7 @@ impl HostedChat {
             return Action::Prompt(text);
         }
         if let Some(role) = self.role.take() {
-            self.remember_brief(to, &role);
+            self.remember_brief(&role);
             self.known = self.node.turns.len();
             return Action::Briefed { role, text };
         }
@@ -1757,7 +1765,7 @@ impl HostedChat {
             }),
         });
         self.carry = Some(Carry {
-            turn: self.node.turns.len() - 1,
+            turn: self.last_uid().unwrap_or_default(),
             model,
             mode: if resumed { None } else { mode },
             effort: if resumed { None } else { effort },
@@ -1879,13 +1887,16 @@ impl HostedChat {
                 .find(|choice| choice.value == *value)
                 .map_or_else(|| value.clone(), |choice| choice.name.clone())
         });
-        let turn = self.node.turns.get_mut(carry.turn);
+        let Some(index) = self.turn_index(carry.turn) else {
+            return;
+        };
+        let turn = self.node.turns.get_mut(index);
         if let Some(switch) = turn.and_then(|turn| turn.switch.as_mut()) {
             switch.notes = notes;
             if model.is_some() {
                 switch.model = model;
             }
-            self.patch_turn(carry.turn);
+            self.patch_turn(index);
         }
     }
 
@@ -2779,8 +2790,8 @@ impl HostedChat {
         }
         // A tool saying what it wrote after its turn ended still wrote it,
         // in the last turn.
-        let turn = self.node.turns.len().checked_sub(1)?;
-        let items = &self.node.turns[turn].items;
+        let items = &self.node.turns.last()?.items;
+        let turn = self.last_uid()?;
         let order = (items.iter())
             .position(|item| item.tool().is_some_and(|old| old.id == tool.id))
             .unwrap_or(items.len());
@@ -2873,10 +2884,10 @@ impl HostedChat {
     }
 
     /// Where the agent is in its work, for what it writes now: the turn
-    /// it's answering, or else the last, and the tool it's running, if one
-    /// is.
-    pub(crate) fn working_on(&self) -> (usize, Option<String>) {
-        let turn = self.node.turns.len().saturating_sub(1);
+    /// it's answering, or else the last, by its uid, and the tool it's
+    /// running, if one is.
+    pub(crate) fn working_on(&self) -> (TurnUid, Option<String>) {
+        let turn = self.last_uid().unwrap_or_default();
         let running = (self
             .answering_turn()
             .map(|turn| &self.node.turns[turn].items))
@@ -3171,8 +3182,8 @@ impl HostedChat {
     }
 
     pub(crate) fn image_target(&mut self, id: &str) -> Option<crate::tool_images::Target> {
-        let turn = self.node.turns.len().checked_sub(1)?;
-        let current = &self.node.turns[turn];
+        let current = self.node.turns.last()?;
+        let turn = self.last_uid()?;
         let tool = (current.items.iter())
             .filter_map(Item::tool)
             .find(|tool| tool.id == id)?;
@@ -3220,7 +3231,8 @@ impl HostedChat {
     pub(crate) fn resume_tool_previews(&mut self, records: &mut [handover::ToolPreviews]) {
         let id = self.id.0;
         for record in records.iter_mut().filter(|record| record.chat == id) {
-            let Some(turn) = self.node.turns.get(record.turn as usize) else {
+            let at = record.turn as usize;
+            let (Some(turn), Some(uid)) = (self.node.turns.get(at), self.turn_uid(at)) else {
                 continue;
             };
             let Some(content) = (turn.items.iter())
@@ -3232,7 +3244,7 @@ impl HostedChat {
             };
             let target = crate::tool_images::Target {
                 terminal: self.id,
-                turn: record.turn as usize,
+                turn: uid,
                 sent: turn.sent,
                 tool: record.tool.clone(),
                 content,
@@ -3261,14 +3273,16 @@ impl HostedChat {
         if images.is_empty()
             || images.len() > 4
             || images.iter().any(|(image, _)| !image.valid())
-            || !self.node.turns.get(target.turn).is_some_and(|turn| {
-                turn.sent == target.sent
-                    && turn.items.iter().any(|item| {
-                        item.tool().is_some_and(|tool| {
-                            tool.id == target.tool && tool.content == target.content
+            || !(self.turn_index(target.turn))
+                .and_then(|at| self.node.turns.get(at))
+                .is_some_and(|turn| {
+                    turn.sent == target.sent
+                        && turn.items.iter().any(|item| {
+                            item.tool().is_some_and(|tool| {
+                                tool.id == target.tool && tool.content == target.content
+                            })
                         })
-                    })
-            })
+                })
         {
             return false;
         }
@@ -3304,11 +3318,10 @@ impl HostedChat {
         {
             return false;
         }
-        let Some(turn) = self
-            .node
-            .turns
-            .get(target.turn)
-            .filter(|turn| turn.sent == target.sent)
+        let Some(index) = self.turn_index(target.turn) else {
+            return false;
+        };
+        let Some(turn) = (self.node.turns.get(index)).filter(|turn| turn.sent == target.sent)
         else {
             return false;
         };
@@ -3320,14 +3333,14 @@ impl HostedChat {
         };
         self.revoke_image(&target.tool);
         self.make_preview_room(&images);
-        let item = &mut self.node.turns[target.turn].items[at];
+        let item = &mut self.node.turns[index].items[at];
         let Some(tool) = item.tool_mut() else {
             return false;
         };
         tool.content
             .extend(images.into_iter().map(ToolContent::Image));
         let item = item.clone();
-        self.patch_item(target.turn, at, item);
+        self.patch_item(index, at, item);
         true
     }
 
@@ -3425,7 +3438,7 @@ impl HostedChat {
             clackatoo_protocol::remember_prompt(&mut self.node.prompts, prompt);
         }
         self.node.turns.push(turn);
-
+        self.uids.push();
         self.patch_turn(self.node.turns.len() - 1);
     }
 
@@ -4821,9 +4834,10 @@ mod tests {
         let mut chat = chat();
         connect(&mut chat, "s");
         send(&mut chat, "edit it");
+        let first = chat.turn_uid(0).unwrap();
         let wrote = |paths: &[&str], diffs: Vec<RawDiff>| Wrote {
             done: true,
-            turn: 0,
+            turn: first,
             tool: "e".into(),
             order: 0,
             paths: paths.iter().map(|&path| path.to_owned()).collect(),
@@ -4838,11 +4852,11 @@ mod tests {
             ..wrote(&["/a"], Vec::new())
         };
         assert_eq!(update(&mut chat, pending), Some(about_to));
-        assert_eq!(chat.working_on(), (0, Some("e".to_owned())));
+        assert_eq!(chat.working_on(), (first, Some("e".to_owned())));
         // Finished, then what it wrote, each saying so.
         let done = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#;
         assert_eq!(update(&mut chat, done), Some(wrote(&["/a"], Vec::new())));
-        assert_eq!(chat.working_on(), (0, None));
+        assert_eq!(chat.working_on(), (first, None));
         let content = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e",
                           "content":[{"type":"diff","path":"/b","oldText":"x","newText":"y"}],
                           "locations":[{"path":"/b","line":1},{"path":"/a"}]}"#;

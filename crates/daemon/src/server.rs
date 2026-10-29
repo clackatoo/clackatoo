@@ -1185,6 +1185,7 @@ impl Daemon {
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let mut drafts = std::mem::take(&mut handover.state.drafts);
+        let mut uids = std::mem::take(&mut handover.state.uids);
         let mut continuations: std::collections::HashMap<_, _> =
             std::mem::take(&mut handover.state.chat_continuations)
                 .into_iter()
@@ -1271,6 +1272,8 @@ impl Daemon {
             let images = previews.remove(&chat.id);
             let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
+            // Before anything handed over keyed by turn.
+            chat.resume_uids(&mut uids);
             chat.resume_nesting(&nested);
             if let Some(images) = images {
                 chat.resume_previews(images);
@@ -1494,6 +1497,7 @@ impl Daemon {
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
         let mut drafts = Vec::new();
+        let mut uids = Vec::new();
         let mut chat_continuations = Vec::new();
         let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
@@ -1531,6 +1535,7 @@ impl Daemon {
                     image_originals.push(chat.hand_over_originals());
                     chat_queues.push(chat.hand_over_queue());
                     drafts.extend(chat.hand_over_draft());
+                    uids.extend(chat.hand_over_uids());
                     if live {
                         let (handed, live) = chat.hand_over_live();
                         chats.push(handed);
@@ -1602,7 +1607,7 @@ impl Daemon {
                 image_originals,
                 chat_queues,
                 drafts,
-
+                uids,
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),

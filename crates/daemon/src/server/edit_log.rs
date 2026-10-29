@@ -1,6 +1,10 @@
 //! The edit log: what agents have changed in files, by chat and turn, kept
 //! so that a turn's changes can be undone and made again.
 //!
+//! Turns are named by their uids (see `chat/uids.rs`), which stay with
+//! them however the conversation shown is cut back, and are their indexes
+//! in a chat that never was: so what's handed over means the same for it.
+//!
 //! For each turn, the log keeps each file it changed and the changes, in
 //! one of two forms. A change to a buffer open now is just the version of
 //! the buffer it made: the buffer's history holds the edit, and the texts
@@ -26,6 +30,7 @@ use std::path::{Path, PathBuf};
 use clackatoo_protocol::{BufferId, Op, TerminalId, TurnFiles, TurnFilesState};
 use clackatoo_text::{ChangedLines, Edit, Rope};
 
+use crate::chat::TurnUid;
 use crate::handover;
 
 /// An agent's change to a file not open, worked out once for the edit log
@@ -69,14 +74,14 @@ pub(super) struct ChatEdits {
     turns: VecDeque<TurnEdits>,
     /// Turns that changed files but were dropped to keep to the bound, and
     /// how many files each changed.
-    dropped: Vec<(usize, u32)>,
+    dropped: Vec<(TurnUid, u32)>,
 }
 
 /// What an agent changed in files in one turn.
 #[derive(Debug)]
 pub(super) struct TurnEdits {
-    /// The turn's index in its chat.
-    pub(super) turn: usize,
+    /// The turn, by its uid in its chat.
+    pub(super) turn: TurnUid,
     /// Each file it changed, in the order it first did.
     pub(super) files: Vec<FileEdits>,
 }
@@ -147,7 +152,7 @@ pub(super) fn edit_bytes(edit: &Edit) -> usize {
 #[derive(Clone, Debug)]
 pub(super) struct Maker {
     pub(super) chat: TerminalId,
-    pub(super) turn: usize,
+    pub(super) turn: TurnUid,
     pub(super) tool: Option<String>,
 }
 
@@ -156,7 +161,7 @@ impl Maker {
     pub(super) fn hunks(&self) -> clackatoo_text::Maker {
         clackatoo_text::Maker {
             chat: self.chat.0,
-            turn: u32::try_from(self.turn).unwrap_or(u32::MAX),
+            turn: self.turn.0,
         }
     }
 }
@@ -172,7 +177,7 @@ impl ChatEdits {
 
     /// Drops the oldest turns while the chat keeps more than its bound,
     /// always keeping the newest. Returns the turns dropped.
-    fn trim(&mut self) -> Vec<usize> {
+    fn trim(&mut self) -> Vec<TurnUid> {
         let mut dropped = Vec::new();
         let mut bytes = self.bytes();
         while bytes > CHAT_BYTES && self.turns.len() > 1 {
@@ -251,7 +256,7 @@ impl EditLog {
         path: &Path,
         (buffer, version, bytes): (BufferId, u64, usize),
         existed: bool,
-    ) -> Vec<usize> {
+    ) -> Vec<TurnUid> {
         let file = self.file_mut(maker, path, existed);
         file.exists = true;
         file.changes.push(Change::Buffer {
@@ -271,7 +276,7 @@ impl EditLog {
         path: &Path,
         before: Option<&str>,
         after: Option<&str>,
-    ) -> Vec<usize> {
+    ) -> Vec<TurnUid> {
         if before == after {
             return Vec::new();
         }
@@ -288,7 +293,7 @@ impl EditLog {
         path: &Path,
         (existed, exists): (bool, bool),
         diffed: &Diffed,
-    ) -> Vec<usize> {
+    ) -> Vec<TurnUid> {
         let file = self.file_mut(maker, path, existed);
         file.exists = exists;
         file.changes.push(Change::Text {
@@ -311,7 +316,7 @@ impl EditLog {
         &self,
         chat: TerminalId,
         path: &Path,
-        turn: usize,
+        turn: TurnUid,
         tool: Option<&str>,
     ) -> bool {
         let Some(edits) = self.chats.iter().find(|edits| edits.chat == chat) else {
@@ -331,20 +336,20 @@ impl EditLog {
     }
 
     /// What turn `turn` of `chat` changed, if the log keeps it.
-    pub(super) fn turn(&self, chat: TerminalId, turn: usize) -> Option<&TurnEdits> {
+    pub(super) fn turn(&self, chat: TerminalId, turn: TurnUid) -> Option<&TurnEdits> {
         let edits = self.chats.iter().find(|edits| edits.chat == chat)?;
         edits.turns.iter().find(|edits| edits.turn == turn)
     }
 
     /// What turn `turn` of `chat` changed, to change it.
-    pub(super) fn turn_mut(&mut self, chat: TerminalId, turn: usize) -> Option<&mut TurnEdits> {
+    pub(super) fn turn_mut(&mut self, chat: TerminalId, turn: TurnUid) -> Option<&mut TurnEdits> {
         let edits = self.chats.iter_mut().find(|edits| edits.chat == chat)?;
         edits.turns.iter_mut().find(|edits| edits.turn == turn)
     }
 
     /// Lets go of the oldest turns of `chat` past the bound, as after its
     /// changes have been rewritten. Returns the turns dropped.
-    pub(super) fn trim(&mut self, chat: TerminalId) -> Vec<usize> {
+    pub(super) fn trim(&mut self, chat: TerminalId) -> Vec<TurnUid> {
         match self.chats.iter_mut().find(|edits| edits.chat == chat) {
             Some(edits) => edits.trim(),
             None => Vec::new(),
@@ -352,7 +357,7 @@ impl EditLog {
     }
 
     /// What turn `turn` of `chat` changed in files, as a chat shows it.
-    pub(super) fn summary(&self, chat: TerminalId, turn: usize) -> Option<TurnFiles> {
+    pub(super) fn summary(&self, chat: TerminalId, turn: TurnUid) -> Option<TurnFiles> {
         let edits = self.chats.iter().find(|edits| edits.chat == chat)?;
         if let Some(&(_, count)) = edits.dropped.iter().find(|(old, _)| *old == turn) {
             return Some(TurnFiles {
@@ -374,7 +379,7 @@ impl EditLog {
     }
 
     /// The turns of `chat` the log knows of, kept or dropped.
-    pub(super) fn turns_of(&self, chat: TerminalId) -> Vec<usize> {
+    pub(super) fn turns_of(&self, chat: TerminalId) -> Vec<TurnUid> {
         let Some(edits) = self.chats.iter().find(|edits| edits.chat == chat) else {
             return Vec::new();
         };
@@ -389,14 +394,14 @@ impl EditLog {
         self.chats.retain(|edits| edits.chat != chat);
     }
 
-    /// The files `chat`'s turns `turns` changed, as far as the log keeps
+    /// The files `chat`'s turns `turns`, by their uids, changed, as far as the log keeps
     /// them, each once, in the order they were first changed: whether it
     /// was there before the first of those turns, after the last, and
     /// whether every change to it was undone.
     pub(super) fn changed_in(
         &self,
         chat: TerminalId,
-        turns: std::ops::Range<usize>,
+        turns: &[TurnUid],
     ) -> Vec<crate::handoff::Changed> {
         let mut changed: Vec<crate::handoff::Changed> = Vec::new();
         let Some(edits) = self.chats.iter().find(|edits| edits.chat == chat) else {
@@ -450,11 +455,11 @@ impl EditLog {
                 .map(|edits| handover::ChatEdits {
                     chat: edits.chat.0,
                     dropped: (edits.dropped.iter())
-                        .map(|&(turn, count)| (turn as u64, count))
+                        .map(|&(turn, count)| (u64::from(turn.0), count))
                         .collect(),
                     turns: (edits.turns.iter())
                         .map(|turn| handover::TurnEdits {
-                            turn: turn.turn as u64,
+                            turn: u64::from(turn.turn.0),
                             files: turn.files.iter().map(hand_over_file).collect(),
                         })
                         .collect(),
@@ -465,7 +470,7 @@ impl EditLog {
 
     /// The log the last build handed over.
     pub(super) fn resume(handed: handover::EditLog) -> Self {
-        let index = |turn: u64| usize::try_from(turn).unwrap_or(usize::MAX);
+        let index = |turn: u64| TurnUid(u32::try_from(turn).unwrap_or(u32::MAX));
         Self {
             chats: (handed.chats.into_iter())
                 .map(|edits| ChatEdits {
@@ -545,10 +550,10 @@ fn resume_file(file: handover::FileEdits) -> FileEdits {
 mod tests {
     use super::*;
 
-    fn maker(turn: usize, tool: &str) -> Maker {
+    fn maker(turn: u32, tool: &str) -> Maker {
         Maker {
             chat: TerminalId(1),
-            turn,
+            turn: TurnUid(turn),
             tool: Some(tool.to_owned()),
         }
     }
@@ -558,15 +563,15 @@ mod tests {
         let mut log = EditLog::default();
         let a = Path::new("/a");
         let chat = TerminalId(1);
-        assert!(!log.continues(chat, a, 0, Some("t1")));
+        assert!(!log.continues(chat, a, TurnUid(0), Some("t1")));
         log.note_buffer(&maker(0, "t1"), a, (BufferId(1), 1, 1), true);
-        assert!(log.continues(chat, a, 0, Some("t1")));
-        assert!(!log.continues(chat, a, 0, Some("t2")));
-        assert!(!log.continues(chat, a, 1, Some("t1")));
-        assert!(!log.continues(TerminalId(2), a, 0, Some("t1")));
-        assert!(!log.continues(chat, Path::new("/b"), 0, Some("t1")));
+        assert!(log.continues(chat, a, TurnUid(0), Some("t1")));
+        assert!(!log.continues(chat, a, TurnUid(0), Some("t2")));
+        assert!(!log.continues(chat, a, TurnUid(1), Some("t1")));
+        assert!(!log.continues(TerminalId(2), a, TurnUid(0), Some("t1")));
+        assert!(!log.continues(chat, Path::new("/b"), TurnUid(0), Some("t1")));
         // A write in no tool call is a step of its own.
-        assert!(!log.continues(chat, a, 0, None));
+        assert!(!log.continues(chat, a, TurnUid(0), None));
     }
 
     #[test]
@@ -584,25 +589,25 @@ mod tests {
                 .is_empty()
         );
         let dropped = log.note_text(&maker(2, "t"), Path::new("/c"), None, Some(&quarter));
-        assert_eq!(dropped, [0, 1]);
+        assert_eq!(dropped, [TurnUid(0), TurnUid(1)]);
         let chat = TerminalId(1);
         let too_old = TurnFiles {
             count: 1,
             state: TurnFilesState::TooOld,
         };
-        assert_eq!(log.summary(chat, 0), Some(too_old));
-        assert_eq!(log.summary(chat, 3), None);
+        assert_eq!(log.summary(chat, TurnUid(0)), Some(too_old));
+        assert_eq!(log.summary(chat, TurnUid(3)), None);
         assert_eq!(
-            log.summary(chat, 2).map(|files| files.state),
+            log.summary(chat, TurnUid(2)).map(|files| files.state),
             Some(TurnFilesState::Made)
         );
         // One turn bigger than the bound alone stays.
         let big = "y".repeat(CHAT_BYTES + 1);
         assert_eq!(
             log.note_text(&maker(3, "t"), Path::new("/d"), None, Some(&big)),
-            [2]
+            [TurnUid(2)]
         );
-        assert!(log.turn(chat, 3).is_some());
+        assert!(log.turn(chat, TurnUid(3)).is_some());
     }
 
     #[test]
