@@ -1344,7 +1344,7 @@ pub struct ChatSummary {
     pub profile: Option<String>,
     /// Whether its last turn went wrong (ended `Outcome::Failed`), for a
     /// notification of it to say so. `None` from a daemon older than
-    /// protocol 118, which doesn't say.
+    /// protocol 116, which doesn't say.
     #[serde(
         default,
         skip_serializing_if = "wire::before::<{ wire::TURN_FAILED }, _>",

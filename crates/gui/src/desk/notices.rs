@@ -35,7 +35,7 @@ enum Why {
     /// Its agent stopped, as something went wrong, or couldn't start.
     Failed,
     /// Its agent's turn ended, finished or failed: a daemon before
-    /// protocol 118 doesn't say which.
+    /// protocol 116 doesn't say which.
     Ended,
     /// Its agent asks the user something.
     Asks,
@@ -132,7 +132,7 @@ impl Desk {
             _ if matches!(summary.state, ChatState::Failed(_)) => Why::Failed,
             Some(true) => Why::Failed,
             Some(false) => Why::Finished,
-            // A daemon older than protocol 118 doesn't say how it ended.
+            // A daemon older than protocol 116 doesn't say how it ended.
             None => Why::Ended,
         })
     }

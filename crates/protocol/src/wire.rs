@@ -296,9 +296,8 @@ gates! {
     /// again, `ChatAction::Resend`.
     CHAT_FACTS = 115,
     /// Whether a chat's last turn went wrong, as the list of chats says
-    /// it: `ChatSummary`'s `failed`. (116 and 117 are taken by work in
-    /// flight; renumber on a rebase.)
-    TURN_FAILED = 118,
+    /// it: `ChatSummary`'s `failed`.
+    TURN_FAILED = 116,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
