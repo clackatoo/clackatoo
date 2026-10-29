@@ -290,6 +290,49 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_asked_about_before_its_subagent_was_named_still_opens_the_cards() {
+        use clackatoo_protocol::{ChatPatch, Patch, Question, ViewUpdate};
+        let mut node = delegating();
+        node.turns[0]
+            .items
+            .push(tool("late", "Edit src/lib.rs", ToolStatus::Running));
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), node);
+        paint(&mut chat, &mut fonts);
+        // Asked about while it's still the agent's own…
+        let question = Question {
+            id: 5,
+            title: "Edit src/lib.rs".into(),
+            choices: Vec::new(),
+            own: false,
+            form: None,
+            plan: None,
+            tool: Some("late".into()),
+        };
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
+            Some(question),
+        ))]));
+        assert!(!chat.open_cards.contains("task"));
+        // …then named as the Task's subagent's: the card opens.
+        let late = Item::nested(
+            "task".into(),
+            tool("late", "Edit src/lib.rs", ToolStatus::Running),
+        );
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Item {
+            turn: 0,
+            item: 5,
+            value: late,
+        })]));
+        paint(&mut chat, &mut fonts);
+        assert!(chat.open_cards.contains("task"));
+        assert!(
+            shown(&chat).contains(&(ITEMS + 5, true)),
+            "{:?}",
+            shown(&chat)
+        );
+    }
+
+    #[test]
     fn a_folded_tasks_line_says_what_its_subagent_changed_and_ran() {
         let mut node = delegating();
         let edit = Item::Tool(Tool {

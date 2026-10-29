@@ -831,10 +831,12 @@ impl ChatView {
             if asking.is_some() {
                 self.asked_at = Some(self.now());
             }
-            self.open_cards_over_asked();
             self.proposal_scroll = 0.0;
             self.proposal_rect = None;
         }
+        // What's asked about shows, even if the agent said whose subagent's
+        // it is only after it asked.
+        self.open_cards_over_asked();
         self.start_filling();
         // A chat that moved to another agent has nothing to say in detail
         // until the new one says how much it uses.
@@ -2666,23 +2668,17 @@ impl ChatView {
         // Every tool it started, however it went, that may change
         // something: commands, changes to files, and any other, as an
         // MCP server's; not reads, searches, fetches or thinking, nor the
-        // rows clackatoo adds itself.
+        // rows clackatoo adds itself. A subagent's count as the agent's.
         let (mut commands, mut files, mut others) = (0, 0, 0);
-        let tools = (self.node.turns.last().into_iter())
+        let effects = (self.node.turns.last().into_iter())
             .flat_map(|turn| &turn.items)
-            .filter_map(|item| match item {
-                clackatoo_protocol::Item::Tool(tool) if !tool.id.starts_with("clackatoo-") => {
-                    Some(tool.kind)
-                }
-                _ => None,
-            });
-        for kind in tools {
-            use clackatoo_protocol::ToolKind;
-            match kind {
-                ToolKind::Execute => commands += 1,
-                ToolKind::Edit | ToolKind::Delete | ToolKind::Move => files += 1,
-                ToolKind::Other => others += 1,
-                ToolKind::Read | ToolKind::Search | ToolKind::Fetch | ToolKind::Think => {}
+            .filter_map(|item| item.tool()?.effect());
+        for effect in effects {
+            use clackatoo_protocol::Effect;
+            match effect {
+                Effect::Command => commands += 1,
+                Effect::Files => files += 1,
+                Effect::Other => others += 1,
             }
         }
         if again || commands + files + others == 0 {

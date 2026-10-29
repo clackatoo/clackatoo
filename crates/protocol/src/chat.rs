@@ -2085,12 +2085,45 @@ pub struct NestedWork {
     pub tools: usize,
     /// The index in the turn of the last of its items.
     pub last: usize,
-    /// How many files it, or a subagent of its own, changed, made,
-    /// deleted or moved, by tools that finished: what's folded away
-    /// under its card that changed files is never unsaid.
+    /// How many files it, or a subagent of its own, started to change,
+    /// make, delete or move, however that went: what's folded away under
+    /// its card that may have changed something is never unsaid.
     pub files: usize,
-    /// How many commands it, or a subagent of its own, ran to the end.
+    /// How many commands it, or a subagent of its own, started.
     pub commands: usize,
+    /// How many other tools that may change something, as an MCP
+    /// server's, it, or a subagent of its own, started.
+    pub others: usize,
+}
+
+/// What a tool an agent started may have changed, by its kind: see
+/// [`Tool::effect`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// It runs a command.
+    Command,
+    /// It changes, makes, deletes or moves files.
+    Files,
+    /// Something else, as an MCP server's tool: what isn't known.
+    Other,
+}
+
+impl Tool {
+    /// What it may have changed once started, however it went: `None`
+    /// for reads, searches, fetches and thinking, and for the rows
+    /// clackatoo adds itself.
+    #[must_use]
+    pub fn effect(&self) -> Option<Effect> {
+        if self.id.starts_with("clackatoo-") {
+            return None;
+        }
+        match self.kind {
+            ToolKind::Execute => Some(Effect::Command),
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => Some(Effect::Files),
+            ToolKind::Other => Some(Effect::Other),
+            ToolKind::Read | ToolKind::Search | ToolKind::Fetch | ToolKind::Think => None,
+        }
+    }
 }
 
 /// How deep [`Turn::nested_work`] follows subagents' subagents: a peer
@@ -2121,11 +2154,12 @@ impl Turn {
             sum.items += 1;
             sum.tools += usize::from(item.tool().is_some());
             sum.last = at;
-            let Some(tool) = item.tool().filter(|tool| tool.status == ToolStatus::Done) else {
+            let Some((tool, effect)) = item.tool().and_then(|tool| Some((tool, tool.effect()?)))
+            else {
                 continue;
             };
-            let changed: Vec<&str> = match tool.kind {
-                ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+            let changed: Vec<&str> = match effect {
+                Effect::Files => {
                     let diffs = (tool.content.iter()).filter_map(|content| match content {
                         ToolContent::Diff(diff) => Some(diff.path.as_str()),
                         _ => None,
@@ -2137,15 +2171,16 @@ impl Turn {
                     }
                     paths
                 }
-                _ => Vec::new(),
+                Effect::Command | Effect::Other => Vec::new(),
             };
-            let ran = tool.kind == ToolKind::Execute;
             // Said on its card, and every card it's folded under.
             let mut above = Some(parent);
             for _ in 0..DEEPEST_NESTED {
                 let Some(id) = above else { break };
                 files.entry(id).or_default().extend(&changed);
-                work.entry(id).or_default().commands += usize::from(ran);
+                let sum = work.entry(id).or_default();
+                sum.commands += usize::from(effect == Effect::Command);
+                sum.others += usize::from(effect == Effect::Other);
                 above = parents.get(id).copied().flatten();
             }
         }
@@ -2197,6 +2232,13 @@ impl Turn {
                 line,
                 " · ran {}",
                 plural(work.commands, "command", "commands")
+            );
+        }
+        if work.others > 0 {
+            let _ = write!(
+                line,
+                " · used {}",
+                plural(work.others, "other tool", "other tools")
             );
         }
         line
@@ -2437,7 +2479,7 @@ mod tests {
         );
         assert_eq!(turn.nested_line(&done, &work["inner"]), "↳ Done");
         // What changed files and ran commands, its own subagent's too, is
-        // said on the card it's folded under; what's still running isn't.
+        // said on the card it's folded under, however each went.
         let with = |kind, path: &str, status| Tool {
             kind,
             locations: vec![Location {
@@ -2463,11 +2505,16 @@ mod tests {
                 "make",
                 ToolStatus::Done,
             ))),
+            nested(Item::Tool(with(
+                ToolKind::Other,
+                "mcp__x__y",
+                ToolStatus::Failed,
+            ))),
         ]);
         let work = turn.nested_work();
         assert_eq!(
             turn.nested_line(&done, &work["task"]),
-            "↳ Done · 6 tool uses · edited 2 files · ran 1 command"
+            "↳ Done · 7 tool uses · edited 3 files · ran 1 command · used 1 other tool"
         );
         assert_eq!(
             turn.nested_line(&done, &work["inner"]),

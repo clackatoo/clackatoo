@@ -301,7 +301,7 @@ gates! {
     /// What an agent's own subagents did, under the tool call that
     /// started each, as Claude Code's Task tool starts them:
     /// `Item::Nested`. An older peer gets each item as the agent's own.
-    NESTED_WORK = 118,
+    NESTED_WORK = 117,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

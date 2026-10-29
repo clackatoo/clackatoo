@@ -90,9 +90,9 @@
 //!     chats' open turn, link and questions; the connections its tools are
 //!     served on, and the calls on them still waiting. Before, every agent
 //!     was stopped, and all it ran with it.
-//! 40. Which items of chats' turns an agent's own subagents did, and the
+//! 39. Which items of chats' turns an agent's own subagents did, and the
 //!     tool call that started each (CLACKA-195). Before, a subagent's work
-//!     came back as the agent's own. (39 is CLACKA-192's, in flight.)
+//!     came back as the agent's own.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -105,7 +105,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 40;
+pub(crate) const VERSION: u32 = 39;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
@@ -272,13 +272,13 @@ pub(crate) struct State {
     /// the build it upgraded to couldn't take them.
     pub(crate) live: Option<Live>,
     /// The items of chats' turns that an agent's own subagents did: see
-    /// [`NestedItem`]. Since version 40; before, none was.
+    /// [`NestedItem`]. Since version 39; before, none was.
     pub(crate) nested: Vec<NestedItem>,
 }
 
 /// An item of a chat's turn that a subagent the agent started itself did,
 /// as Claude Code's Task tool starts one, and the tool call that started
-/// it: [`ChatItem`] holds nothing nested. Since version 40.
+/// it: [`ChatItem`] holds nothing nested. Since version 39.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct NestedItem {
     /// The chat, by its terminal's number.
@@ -4827,9 +4827,9 @@ mod tests {
     }
 
     #[test]
-    fn version_40_keeps_which_items_subagents_did() {
+    fn version_39_keeps_which_items_subagents_did() {
         let mut file = tempfile::tempfile().unwrap();
-        file.write_all(include_bytes!("../tests/fixtures/handover-v40.bin"))
+        file.write_all(include_bytes!("../tests/fixtures/handover-v39.bin"))
             .unwrap();
         let read = State::read(&mut file).unwrap();
         let [nested] = &read.nested[..] else {
@@ -4991,9 +4991,7 @@ mod tests {
 
     #[test]
     fn version_30_keeps_originals_and_their_thumbnail_references() {
-        // 39 is CLACKA-192's, still to land: renumber at the merge.
-        let readable: Vec<u32> = (1..=VERSION).filter(|&version| version != 39).collect();
-        assert_eq!(READABLE, readable);
+        assert_eq!(READABLE, (1..=VERSION).collect::<Vec<_>>());
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v30.bin"))
             .unwrap();
@@ -5323,11 +5321,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v40.bin"]
+    #[ignore = "writes tests/fixtures/handover-v39.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v40.bin"
+            "/tests/fixtures/handover-v39.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
