@@ -4280,12 +4280,16 @@ fn a_real_claude_says_what_a_turn_spent_and_where_it_compacted() {
     let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
         panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
     };
-    let daemon = TestDaemon::start_with_agent(|_| {
-        ["env", "ANTHROPIC_MODEL=haiku"]
-            .into_iter()
-            .chain(command.split_whitespace())
-            .map(Into::into)
-            .collect()
+    let command: Vec<std::ffi::OsString> = ["env", "ANTHROPIC_MODEL=haiku"]
+        .into_iter()
+        .chain(command.split_whitespace())
+        .map(Into::into)
+        .collect();
+    // Its traffic, in `$TMPDIR/acp-compact`, to see what the adapter said.
+    let trace = live_trace("compact");
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", command)];
+        config.agents.trace = Some(trace.clone());
     });
     let mut client = daemon.client();
     client.new_workspace(None, new_chat()).unwrap();
@@ -4312,6 +4316,7 @@ fn a_real_claude_says_what_a_turn_spent_and_where_it_compacted() {
     assert!(end.spent.is_some_and(|spent| spent.output > 0), "{end:?}");
     let node = send(&mut client, "/compact");
     let items = &node.turns.last().unwrap().items;
+    eprintln!("COMPACTED: {items:?}");
     assert!(
         items.iter().any(|item| matches!(item, Item::Compacted(_))),
         "{node:#?}"
@@ -18659,6 +18664,112 @@ struct GitLeft(PathBuf);
 impl Drop for GitLeft {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+/// Claude Code asked for AIR's `sessionFailure` (CLACKA-196): a turn that
+/// runs a command, asked about first, ends well with its tool row whole
+/// and what it spent; a stop ends a turn as stopped; and on a model that
+/// doesn't exist, a turn fails, saying so in plain words with the agent's
+/// own beside. Its traffic is in `$TMPDIR/acp-failures` and
+/// `$TMPDIR/acp-failures-bad`, to compare with a build that doesn't ask.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_claude_turn_ends_well_stops_or_fails_as_it_did_before() {
+    let Some(mut live) = live_claude("failures") else {
+        return;
+    };
+    let minute = Duration::from_mins(2);
+    let text =
+        "Run the shell command `echo hi` with your Bash tool, then reply with one word: done.";
+    let node = live_send(&mut live.client, live.chat, text, minute);
+    eprintln!("WELL: {:#?}", node.turns.last().unwrap());
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    let tools = live_tools(&node);
+    assert!(
+        tools.iter().any(|tool| tool.kind == ToolKind::Execute
+            && tool.status == clackatoo_protocol::ToolStatus::Done),
+        "{tools:#?}"
+    );
+    // In Manual mode, a command is asked about first.
+    let mode = (node.settings.iter())
+        .find(|setting| setting.kind == clackatoo_protocol::SettingKind::Mode);
+    if let Some(mode) = mode.filter(|mode| mode.choices.iter().any(|c| c.value == "default")) {
+        let setting = mode.id.clone();
+        live.client
+            .chat(
+                live.chat,
+                ChatAction::Set {
+                    setting,
+                    value: "default".into(),
+                },
+            )
+            .unwrap();
+        let text = "Run the shell command `touch probe.txt` with your Bash tool, then reply: done.";
+        live.client
+            .chat(live.chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        let asked = wait_for_chat_for(&mut live.client, live.chat, minute, |node| {
+            node.question.is_some() || live_idle(node) && node.turns.len() > 1
+        });
+        eprintln!("ASKED: {:?}", asked.question);
+        let node = live_wait(&mut live.client, live.chat, minute, |node| {
+            node.turns.len() > 1 && live_idle(node)
+        });
+        eprintln!("ALLOWED: {:#?}", live_tools(&node));
+        assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    }
+    // Stopped as it starts writing.
+    let node = live
+        .client
+        .capture(live.chat)
+        .unwrap()
+        .chat()
+        .unwrap()
+        .clone();
+    let count = node.turns.len();
+    let long = "Count from 1 to 200, one number a line, using no tools.";
+    live.client
+        .chat(live.chat, ChatAction::Send(long.to_owned()))
+        .unwrap();
+    wait_for_chat_for(&mut live.client, live.chat, minute, |node| {
+        node.turns.len() > count && !last_words(node).is_empty()
+    });
+    live.client.chat(live.chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat_for(&mut live.client, live.chat, minute, live_idle);
+    eprintln!("STOPPED: {:?}", node.turns.last().unwrap().end);
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    drop(live);
+
+    // A model that doesn't exist fails each turn.
+    let Some(command) = real_adapter("claude", "CLACKATOO_REAL_AGENT") else {
+        return;
+    };
+    let command: Vec<std::ffi::OsString> = ["env", "ANTHROPIC_MODEL=claude-no-such-model-1"]
+        .map(Into::into)
+        .into_iter()
+        .chain(command)
+        .collect();
+    let trace = live_trace("failures-bad");
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", command)];
+        config.agents.trace = Some(trace.clone());
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        matches!(node.state, ChatState::Ready | ChatState::Failed(_))
+    });
+    if node.state == ChatState::Ready {
+        let node = live_send(&mut client, chat, "hi", minute);
+        eprintln!("FAILED: {:?}", node.turns.last().unwrap().end);
+        assert!(
+            matches!(last_outcome(&node), Some(Outcome::Failed(_))),
+            "{node:#?}"
+        );
+    } else {
+        eprintln!("FAILED TO START: {:?}", node.state);
     }
 }
 
