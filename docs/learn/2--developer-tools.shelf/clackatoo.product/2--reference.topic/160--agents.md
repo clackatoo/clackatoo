@@ -354,14 +354,13 @@ A line that has ended says how: `✓ done`, `✗ failed`, or `■ stopped`, with
 
 A subagent's card says how many things its chats run in the background, and when open, has a line under each chat for what it runs. A chat with something running in the background is never let go while it's idle in the background, as that would end it.
 
-Only Claude Code says what it runs in the background. The phone lists the same lines, without the buttons that stop them.
+Only Claude Code says what it runs in the background. Codex's adapter lists what Codex runs in the background (its `/ps` in a terminal) only to a client that asks as AIR does, and then leaves every command's output out of its row, so clackatoo doesn't ask, and those commands aren't listed. The phone lists the same lines, without the buttons that stop them.
 
 Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it reports some things differently:
 
 - It sends a read or a search of files without what it found. clackatoo asks it for the messages it hands the model too, and shows what Claude Code's Read, Grep and Glob found from those, as before, while they run: in a past session opened again, those rows don't show it. (Claude Code 2.1.310 has no Grep or Glob of its own here: it searches with commands, whose output shows anyway.)
 - It keeps the words and thinking of Claude Code's own subagents (its Task tool) to itself unless asked for them: clackatoo asks, and shows them [under the Task's card](#claude-code-s-own-subagents).
 - It doesn't send the same task list twice in a row, which changes nothing shown.
-- Its notices, such as a fast mode turned off, come as notices above the box rather than as words in the turn.
 - A command moved to the background doesn't go on showing its output in its row once it has moved: the shelf says how it's going, its line [follows what it prints](#what-a-background-command-printed), and Claude Code reads it when it ends.
 - A question it asks you with its own AskUserQuestion tool is titled `Asking for your input`, not by the question; the question shows under it.
 - A failed call of one of its tools for other agents, such as SendMessage, shows its error as plain text, not as code.
@@ -387,7 +386,7 @@ Once every step is done, the list stays, as `Plan · all 5 done`, until your nex
 
 ### Turns the agent takes by itself
 
-An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its notices, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn doesn't end it: the agent goes on through the upgrade, and so does its turn. Only an upgrade that stops the agent, as described [below](#through-an-upgrade), ends it there. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
+An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its own adapter's notices to a client that can't show them, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn doesn't end it: the agent goes on through the upgrade, and so does its turn. Only an upgrade that stops the agent, as described [below](#through-an-upgrade), ends it there. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
 
 ### When a turn fails
 
@@ -666,6 +665,10 @@ A question clackatoo asks itself, such as this one or an offer to install, shows
 
 Codex offers its own settings in the box: its mode in the permissions menu, from Read-only, which asks before every change, through Workspace access and Auto review to Full access, and its model and reasoning effort at the lower left. A new Codex chat starts in the mode Codex's own config gives.
 
+Codex's Plan mode is in the permissions menu too, under its mode, as Default or Plan, and its `/plan` turns it on as in a terminal. While it's on, the control under the box says so first, as `Plan · Auto review`, and Codex plans rather than changes anything. When it has a plan, it asks to implement it, with the plan [above the question](#questions-forms-and-plans); saying yes leaves Plan mode and Codex carries on with the plan in the same turn, and a session opened again later stays out of Plan mode. Saying no keeps it planning.
+
+Every agent is asked for ACP's notices, so what Codex warns of, such as a problem in its config, and that it moved to another model, shows as a notice above the box rather than as words in the turn. Where Codex compacts its context, the turn has the [line](#what-else-a-turn-says) that says so.
+
 To add an agent that speaks ACP, or run a known one another way, list it in `~/.config/clackatoo/daemon/agents.toml`:
 
 ```toml
@@ -734,14 +737,14 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 - The phone's chats don't colour code. Sideways swipes on a trackpad don't scroll tables: use Shift and the wheel.
 - Moving a file in the explorer forgets which of its lines agents changed. Rejecting every change of a file an agent made leaves it empty, rather than in the trash. Reviews of everything since the base stop past about 8 MB of changes: narrow them with `:Review turn` or `chat`.
 - A file the agent changed with a command, or that clackatoo couldn't read before the agent wrote it, can't be undone. The chat says which.
-- There's no menu of agents to pick from: name one after `:Agent`. Codex's Plan mode can't be changed from the box.
+- There's no menu of agents to pick from: name one after `:Agent`.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
 - Ctrl+? doesn't list a form's keys yet. What an input method is composing doesn't show in a form's box until it's committed.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
-- Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
+- Codex's commands in the background (its `/ps`) aren't listed: its adapter lists them only to a client that asks as JetBrains' AIR does, which leaves every command's output out of its row. Shift+Tab steps through Codex's modes, not its Plan mode.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.
 

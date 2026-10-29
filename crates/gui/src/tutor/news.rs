@@ -1103,6 +1103,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Click a background shell on a chat's shelf, or :taskoutput, to follow what it prints in a terminal below the chat",
     },
+    News {
+        id: "codex-plan-mode",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Codex's Plan mode is in the permissions menu beside its mode, and its warnings show as notices, not words",
+    },
 ];
 
 impl News {
