@@ -471,6 +471,7 @@ impl Mirror {
                 .map(WorkspaceId),
             active: summary.active,
             profile: summary.profile.as_deref().map(shown_name),
+            failed: summary.failed,
         }
     }
 
@@ -1845,6 +1846,7 @@ mod tests {
             workspace: workspace.map(WorkspaceId),
             active: 3,
             profile: None,
+            failed: None,
         };
         let changed = mirror.take_chats(
             &[summary(5, None, Some(7)), summary(9, Some(5), Some(8))],

@@ -1342,6 +1342,15 @@ pub struct ChatSummary {
         deserialize_with = "wire::since::<{ wire::SUBAGENT_PROFILE }, _, _>"
     )]
     pub profile: Option<String>,
+    /// Whether its last turn went wrong (ended `Outcome::Failed`), for a
+    /// notification of it to say so. `None` from a daemon older than
+    /// protocol 118, which doesn't say.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::TURN_FAILED }, _>",
+        deserialize_with = "wire::since::<{ wire::TURN_FAILED }, _, _>"
+    )]
+    pub failed: Option<bool>,
 }
 
 impl ChatSummary {

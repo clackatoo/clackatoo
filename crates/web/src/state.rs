@@ -1731,6 +1731,7 @@ mod tests {
             workspace: Some(WorkspaceId(1)),
             active: 0,
             profile: None,
+            failed: None,
         }];
         let ids = |list: Vec<&TerminalInfo>| list.iter().map(|info| info.id.0).collect::<Vec<_>>();
         assert_eq!(ids(state.terminals_of(Some(WorkspaceId(1)))), [2]);

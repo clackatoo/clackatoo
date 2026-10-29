@@ -3425,6 +3425,7 @@ mod tests {
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
             profile: None,
+            failed: Some(false),
         };
         let choices = ChatChoices {
             agents: vec![Provider {
@@ -3950,6 +3951,7 @@ mod tests {
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
             profile: None,
+            failed: Some(false),
         }
     }
 

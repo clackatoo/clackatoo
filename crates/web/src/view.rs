@@ -1752,6 +1752,7 @@ mod tests {
             workspace: workspace.map(WorkspaceId),
             active,
             profile: None,
+            failed: None,
         }
     }
 

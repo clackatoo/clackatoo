@@ -1388,6 +1388,16 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::CHAT_FACTS, sample)),
     );
+    // Whether a chat's last turn went wrong, for its notification
+    // (CLACKA-194).
+    let failed = ChatSummary {
+        failed: Some(true),
+        ..summary()
+    };
+    samples.push((
+        crate::wire::TURN_FAILED,
+        Server(ServerMessage::Event(Event::Chats(vec![failed]))),
+    ));
     samples
 }
 
@@ -3224,6 +3234,7 @@ fn summary() -> ChatSummary {
         workspace: Some(WorkspaceId(1)),
         active: 9,
         profile: None,
+        failed: None,
     }
 }
 

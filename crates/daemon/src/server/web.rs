@@ -769,6 +769,10 @@ impl Daemon {
             workspace: self.workspace_of_chat(id),
             active,
             profile: chat.profile().map(str::to_owned),
+            failed: Some(
+                (node.turns.last().and_then(|turn| turn.end.as_ref()))
+                    .is_some_and(|end| matches!(end.outcome, Outcome::Failed(_))),
+            ),
         })
     }
 

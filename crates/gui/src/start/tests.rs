@@ -80,6 +80,7 @@ fn chat(id: u32, title: &str) -> ChatSummary {
         workspace: Some(WorkspaceId(1)),
         active: u64::from(id),
         profile: None,
+        failed: Some(false),
     }
 }
 
