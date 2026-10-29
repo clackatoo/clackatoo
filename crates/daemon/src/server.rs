@@ -1277,10 +1277,13 @@ impl Daemon {
             let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
             // Before anything handed over keyed by turn.
-            if !chat.resume_uids(&mut uids) {
+            if chat.resume_uids(&mut uids) {
+                chat.resume_branches(&mut branches);
+            } else {
+                // Its branches' uids could collide with the new ones.
                 renumbered.push(chat.info().id);
+                chat.notify("Its other branches couldn't be kept through the upgrade.".to_owned());
             }
-            chat.resume_branches(&mut branches);
             chat.resume_forks(&mut forks);
             chat.resume_nesting(&nested);
             if let Some(images) = images {

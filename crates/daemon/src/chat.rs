@@ -1369,7 +1369,9 @@ impl HostedChat {
     /// [`MAX_INBOX`] waiting already, it's handed back. Returns what the
     /// server must do to send it, if it went.
     pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Message> {
-        if self.answering() || !self.relations.inbox.is_empty() {
+        // While a new branch of the conversation waits for the user's
+        // message, what comes waits too: it would show the branch left.
+        if self.answering() || !self.relations.inbox.is_empty() || self.branch_pending() {
             // Notices from clackatoo don't count: there's at most one that
             // subagents finished (see `mark_finished`), and activities'
             // are bounded by the activities.

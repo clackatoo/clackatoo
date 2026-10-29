@@ -304,6 +304,8 @@ pub(crate) struct ChatBranches {
     /// The segment they came off, where, and how many.
     pub(crate) dropped: Vec<(u64, u64, u16)>,
     pub(crate) plan: Option<ForkPlanRecord>,
+    /// The sessions of branches let go, still kept off the start page.
+    pub(crate) gone: Vec<String>,
 }
 
 /// A segment of a chat's conversation: the one it goes on from, the index
@@ -4669,6 +4671,7 @@ mod tests {
                     known: 1,
                     sent: true,
                 }),
+                gone: vec!["s-gone".to_owned()],
             }],
             forks: vec![ChatForks {
                 chat: 2,

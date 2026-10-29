@@ -99,7 +99,13 @@ pub(super) struct Tree {
     /// came off and where.
     dropped: Vec<(usize, usize, u16)>,
     pub(super) plan: Option<ForkPlan>,
+    /// The sessions of branches let go, the latest [`MOST_GONE`].
+    gone: Vec<String>,
 }
+
+/// The most sessions of branches let go a chat remembers, to keep off
+/// the start page.
+const MOST_GONE: usize = 64;
 
 impl Tree {
     fn seg(&self, id: usize) -> &Seg {
@@ -355,7 +361,8 @@ impl HostedChat {
         self.tree.current = current;
         self.tree.pending = Some(at);
         self.heard = None;
-        self.keep_to_bounds();
+        // Never the branch just left.
+        self.keep_to_bounds(&[first_off]);
         if let Some((words, images)) = edited {
             let draft = match self.draft() {
                 "" => words,
@@ -456,6 +463,9 @@ impl HostedChat {
         self.tree.seg_mut(leaf).used = used;
         let actions = self.take_branch_session(wanted);
         self.heard = None;
+        // Never the branch just left, nor the one shown.
+        let left = self.tree.children(parent);
+        self.keep_to_bounds(&left);
         self.publish_cut();
         actions
     }
@@ -509,12 +519,17 @@ impl HostedChat {
         });
         let point =
             (self.fork_point_before(at)).map(|(index, point)| (index + 1, point.message.clone()));
-        self.tree.plan = self.session.clone().map(|from| ForkPlan {
-            from,
-            known: point.as_ref().map_or(0, |(known, _)| *known),
-            message: point.map(|(_, message)| message),
-            sent: false,
-        });
+        // Forked only at a point: forking with none copies the whole
+        // session, turns cut included. With none, the branch's session is
+        // a new one, told the turns before as a digest.
+        self.tree.plan = (self.session.clone())
+            .zip(point)
+            .map(|(from, (known, message))| ForkPlan {
+                from,
+                known,
+                message: Some(message),
+                sent: false,
+            });
         if self.tree.plan.is_none() {
             self.tree.seg_mut(self.tree.current).summary = true;
         }
@@ -749,20 +764,39 @@ impl HostedChat {
     /// than [`MOST_BRANCHES`] besides the one shown, or their turns take
     /// more than [`MOST_BRANCH_BYTES`]: each with its turns' fork points.
     /// Returns their turns' uids, whose records the server forgets.
-    fn keep_to_bounds(&mut self) {
+    fn keep_to_bounds(&mut self, keep: &[usize]) {
+        // Under a segment kept: the branch just left, which may be over the
+        // bound by itself, and is kept whole all the same.
+        let kept = |tree: &Tree, id: usize| {
+            let mut at = Some(id);
+            while let Some(step) = at {
+                if keep.contains(&step) {
+                    return true;
+                }
+                at = tree.seg(step).parent;
+            }
+            false
+        };
         loop {
             let path = self.tree.path();
             let leaves: Vec<usize> = (self.tree.live())
                 .filter(|(id, _)| !path.contains(id) && self.tree.children(*id).is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
                 .map(|(id, _)| id)
                 .collect();
+            let droppable: Vec<usize> = (leaves.iter().copied())
+                .filter(|&id| !kept(&self.tree, id))
+                .collect();
             let bytes: usize = (self.tree.live())
+                .filter(|(id, _)| !kept(&self.tree, *id))
                 .filter_map(|(_, seg)| seg.held.as_ref())
                 .map(|held| held.bytes)
                 .sum();
             if leaves.len() <= MOST_BRANCHES && bytes <= MOST_BRANCH_BYTES {
                 return;
             }
+            let leaves = droppable;
             let Some(&oldest) = leaves
                 .iter()
                 .min_by_key(|&&id| (self.tree.seg(id).used, id))
@@ -780,6 +814,16 @@ impl HostedChat {
         let mut at = id;
         loop {
             let seg = self.tree.segs[at].take().expect("a live segment");
+            // Its session is still the agent's, and still a branch's: the
+            // start page doesn't list it.
+            if let Some(session) =
+                (seg.session.as_ref()).and_then(|session| session.session.clone())
+            {
+                if self.tree.gone.len() == MOST_GONE {
+                    self.tree.gone.remove(0);
+                }
+                self.tree.gone.push(session);
+            }
             for (uid, _) in seg.held.map(|held| held.turns).unwrap_or_default() {
                 self.forks.forget(uid);
                 self.forgotten.push(uid);
@@ -821,6 +865,7 @@ impl HostedChat {
     pub(crate) fn branch_sessions(&self) -> Vec<String> {
         (self.tree.live())
             .filter_map(|(_, seg)| seg.session.as_ref()?.session.clone())
+            .chain(self.tree.gone.iter().cloned())
             .filter(|session| self.session.as_ref() != Some(session))
             .collect()
     }
@@ -878,6 +923,7 @@ impl HostedChat {
                     known: plan.known as u64,
                     sent: plan.sent,
                 }),
+            gone: self.tree.gone.clone(),
         })
     }
 
@@ -934,6 +980,7 @@ impl HostedChat {
                 known: index(plan.known),
                 sent: plan.sent,
             }),
+            gone: record.gone.into_iter().take(MOST_GONE).collect(),
         };
         if fits(&tree, self.node.turns.len()) {
             self.tree = tree;
@@ -1198,7 +1245,8 @@ mod tests {
         // The oldest, banana, went, with what was kept of its turn.
         assert!(place.branches.iter().all(|branch| branch.first != "banana"));
         assert_eq!(chat.take_forgotten().len(), 1);
-        assert!(!chat.branch_sessions().contains(&"s1".to_owned()));
+        // Its session is still kept off the start page.
+        assert!(chat.branch_sessions().contains(&"s1".to_owned()));
     }
 
     #[test]
@@ -1221,5 +1269,58 @@ mod tests {
         chat.node.turns.clear();
         chat.resume_branches(&mut vec![record]);
         assert!(!chat.tree.branched());
+    }
+
+    #[test]
+    fn a_branch_with_no_point_to_fork_at_gets_a_new_session_told_a_digest() {
+        // Editing the first message: nothing before it to fork at.
+        let mut chat = talked(&["apple", "banana"]);
+        chat.rewind(0, true, false).unwrap();
+        let mut actions = Vec::new();
+        chat.send("cherry".into(), &mut actions);
+        assert!(chat.fork_plan().is_none(), "never the whole session forked");
+        assert!(chat.session.is_none());
+        assert!(chat.node.branches[0].branches[1].summary);
+        // Every turn before stopped: nowhere clean to fork either.
+        let mut chat = talked(&["apple"]);
+        send(&mut chat, "banana");
+        chat.answered(Ok(StopReason::Cancelled));
+        send(&mut chat, "cherry");
+        answer(&mut chat, "msg-c");
+        chat.node.turns[0].end.as_mut().unwrap().outcome = clackatoo_protocol::Outcome::Stopped;
+        chat.rewind(2, false, false).unwrap();
+        let mut actions = Vec::new();
+        chat.send("date".into(), &mut actions);
+        assert!(chat.fork_plan().is_none());
+    }
+
+    #[test]
+    fn the_branch_just_left_is_kept_however_big() {
+        let mut chat = talked(&["apple"]);
+        send(
+            &mut chat,
+            &"x".repeat(MOST_BRANCH_BYTES + MOST_BRANCH_BYTES / 4),
+        );
+        answer(&mut chat, "msg-big");
+        chat.rewind(1, false, false).unwrap();
+        let place = &chat.node.branches[0];
+        assert_eq!((place.count, place.dropped), (2, 0));
+        assert!(chat.take_forgotten().is_empty());
+        chat.switch_branch(1, 1, false).unwrap();
+        assert_eq!(chat.node.turns.len(), 2);
+    }
+
+    #[test]
+    fn what_other_chats_send_waits_while_a_branch_is_pending() {
+        let mut chat = talked(&["apple", "banana"]);
+        chat.rewind(1, false, false).unwrap();
+        let message = super::super::Message::finished_notice(clackatoo_protocol::TerminalId(7));
+        let mut message = message;
+        message.text = "done".to_owned();
+        let actions = chat.deliver(message).unwrap();
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(chat.branch_pending());
+        assert_eq!(prompts(&chat), ["apple"]);
+        assert!(chat.deliver_next().is_empty());
     }
 }
