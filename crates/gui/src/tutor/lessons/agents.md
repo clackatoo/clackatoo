@@ -107,6 +107,16 @@ Beside Send is a small circular context gauge, with the percentage in its centre
 
 A tab says what its chats are doing after its name: `⋯` while one is at work, `?` while one asks you something, and `•` when one finished while this window wasn't showing it with the focus, until you show it. The workspaces in the top bar say the same of theirs, so a chat in another workspace that wants you shows there. When chats in one tab or workspace would say different things, the one that needs you most is shown: `?`, then `⋯`, then `•`.
 
+## Desktop notifications
+
+When a chat you can't see finishes, fails or asks you something, the desktop shows a notification too: the chat's title and what happened, never what the agent wrote. A chat you can't see is one outside the tab shown, or any chat while the window doesn't have the focus. Each chat has one notification at most, updated as the chat changes, and it goes away once you look at the chat. Clicking it goes to the chat. A subagent's finishing tells the chat that started it, not you, but its questions are yours. The `notify` option says which are shown: `all`, `questions`, or `off`.
+
+Type `:set notify=questions` in normal mode, so only questions are shown. `:set notify=all` puts it back.
+
+```check
+option notify=questions
+```
+
 ## Reading in normal mode
 
 Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `W`, `B`, `E`, `f` and `t` with `;` and `,`, `gg` and `G` move it as in an editor, with a count before them, as `3j`, and Ctrl+E, Ctrl+D and Ctrl+F scroll as far as in any pane; in a table, `j` and `k` go to the cell below and above. Ctrl+? lists every key. `v` and `V` select, and `y` yanks what's selected. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.

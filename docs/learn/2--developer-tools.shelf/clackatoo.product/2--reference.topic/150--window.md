@@ -135,7 +135,7 @@ Workspace names are unique on each machine, so one from another machine may shar
 
 A tab says what its chats are doing after its name: `⋯` while one's agent is at work, `?` while one asks you something, and `•` when one finished while this window wasn't showing it. A workspace in the top bar says the same of all its chats, so a chat in another workspace that wants you shows there. Where several would say different things, the one that needs you most shows: `?`, then `⋯`, then `•`.
 
-What's unseen is each window's own: a chat counts as seen once its tab is shown in a focused window, and a chat finished while no window or phone was looking is unseen to a window that comes to it later. A chat that starts again loses its `•`. While the daemon is out of reach, no chat is said to work or ask.
+What's unseen is each window's own: a chat counts as seen once its tab is shown in a focused window, and a chat finished while no window or phone was looking is unseen to a window that comes to it later. A chat that starts again loses its `•`. While the daemon is out of reach, no chat is said to work or ask. A window also shows a [desktop notification](~clackatoo/reference/agents#desktop-notifications) for a chat it marks, as it finishes or asks.
 
 The daemon keeps all of them, as it keeps terminals. Closing the window closes nothing, and the next window opens on the workspace, tab and pane last used. Each window shows one workspace, so two windows can show two workspaces, or two tabs of one.
 

@@ -91,7 +91,7 @@ The log notes the device that fits a terminal, or starts typing into one, never 
 
 ## Notifications
 
-Tap **Enable** in the overview. The phone is then told when a chat finishes a turn, or asks you something, while no window you're using shows it. A window counts as in use while it has the focus and has been used in the last five minutes. A notification carries only the chat's title and a few words, sealed for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's push services.
+Tap **Enable** in the overview. The phone is then told when a chat finishes a turn, or asks you something, while no window you're using shows it. A window counts as in use while it has the focus and has been used in the last five minutes. A notification carries only the chat's title and a few words, sealed for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's push services. A window on a desktop shows its own [desktop notifications](~clackatoo/reference/agents#desktop-notifications) besides, on the computer it runs on; one without the focus says nothing of a turn you watched end on the phone.
 
 ## What's kept
 

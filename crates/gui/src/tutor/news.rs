@@ -1067,6 +1067,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Agents go on through upgrades: background shells, deploys, turns and tool calls keep running as they were",
     },
+    News {
+        id: "desktop-notifications",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "A chat you can't see that finishes, fails or asks something shows a desktop notification; :set notify",
+    },
 ];
 
 impl News {

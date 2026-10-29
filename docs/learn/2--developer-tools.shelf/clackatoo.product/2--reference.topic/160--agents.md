@@ -388,6 +388,20 @@ Saying it can show forms changes what the agents do, beyond asking:
 ### Selecting and copying
 
 Drag across the conversation to select its text, or double-click a word or triple-click a line. Letting go copies it to the primary selection, which a middle click pastes. Drag past the top or bottom of the conversation and it scrolls, faster the further past you go, selecting as it goes. While it's selected, the bar says VISUAL, and `y` in normal mode yanks it into the registers, as visual mode's does, after a count or a register too; any other key forgets it. Ctrl+Shift+C, or Ctrl+C while the agent isn't answering, copies it to the clipboard, where `"+` and the unnamed register have it too. What's copied is the text as shown, without its Markdown. A turn's folded work isn't copied, only its message and its answer. Over a block of code, a Copy button copies the code.
+
+### Desktop notifications
+
+The window shows a desktop notification when a chat you can't see finishes a turn, fails (its turn went wrong, or its agent couldn't start) or asks you something: a permission, or a form. A chat you can't see is one that isn't in the tab shown, or any chat while the window doesn't have the focus. These are the chats the tabs mark `•` and `?` (see [Workspaces, tabs and panes](~clackatoo/reference/window#workspaces-tabs-and-panes)): the notification and the mark go by the same rules.
+
+- **One a chat.** Each chat has one notification at most, replaced as it changes, so a chat that asks and then finishes says so in one.
+- **Taken back when you look.** Showing the chat with the window focused removes its notification, as does its question being answered elsewhere, the agent going again, or the chat closing.
+- **What it says.** The chat's title and a line such as `Claude Code finished`, never what the agent wrote, as a lock screen can show it.
+- **Subagents.** A subagent finishing tells the chat that started it, not you, so it shows no notification. A subagent's question does, since its chat waits on you. A chat in no workspace at all isn't one you watch, and shows none.
+- **Only what the window saw happen.** Chats that finished before the window opened or connected are marked, not notified.
+- **Seen elsewhere.** A window without the focus says nothing of a turn that ended while you were looking at the chat somewhere else, in another window or on your [phone](~clackatoo/reference/phone).
+- **Clicking it** goes to the chat: its workspace, its tab and its pane, or for a subagent in the background, the pane of the chat that started it. On X11 the window takes the focus. On Wayland a window can't raise itself without an activation token; GNOME raises it anyway for clackatoo's desktop file (`clackatoo desktop install`). Other Wayland desktops send a token with the click, which the window can't use yet, so there it goes to the chat without coming to the front.
+
+The [`notify` option](~clackatoo/reference/config#options) says which are shown: `all`, the default; `questions` only; or `off`. The notifications are the window's own, sent over D-Bus to the desktop's notification server (`org.freedesktop.Notifications`), so a window connected to a daemon on another machine notifies on the machine it runs on, of the chats it shows. The daemon sends none. Two windows open on the same chats each show their own. A browser on the same computer with [phone notifications](~clackatoo/reference/phone#notifications) turned on is told as well: turn one off.
 ## The files it changes
 
 When the agent changes a file you have open, the change lands in the editor as the agent's own edit, in every window showing it, beside anything you've typed and not saved. `u` takes back your edits, never the agent's, and each of the agent's tool calls is one step of its own. A change to a line you've changed and not saved isn't made: the bar and the chat say so, the file keeps the agent's version, and `:e!` takes it or `:w!` keeps yours.
