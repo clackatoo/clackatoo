@@ -497,7 +497,8 @@ impl State {
             return;
         }
         let whole = match &update {
-            ViewUpdate::Snapshot(view) => view.chat().map(|chat| chat.draft.clone()),
+            // Not known, from a daemon that keeps none: the page's own stays.
+            ViewUpdate::Snapshot(view) => view.chat().and_then(|chat| chat.draft.clone()),
             ViewUpdate::Patch(_) => None,
         };
         // Every message sent from a box, in order.
@@ -593,17 +594,25 @@ impl State {
 
     /// A message, `sent`, was sent from a box of chat `terminal`, which
     /// emptied the daemon's draft: this box empties too if it holds just
-    /// that, ignoring white space at its ends, and anything else typed here
-    /// is told again.
+    /// that, ignoring white space at its ends, and tells the empty draft;
+    /// anything else typed here is told again.
     fn draft_sent(&mut self, terminal: TerminalId, sent: &str) {
         let sent = sent.trim();
         let local = self.drafts.get(&terminal).map_or("", String::as_str);
-        if !sent.is_empty() && local.trim() == sent {
+        // Emptied, it tells the empty draft, so none it told late leaves
+        // the message in the daemon's.
+        let emptied = !sent.is_empty() && local.trim() == sent;
+        if emptied {
             self.drafts.remove(&terminal);
             self.drafts_changed.insert(terminal);
             self.dirty.footer = true;
         }
-        self.drafts_synced.insert(terminal, String::new());
+        let synced = if emptied {
+            sent.to_owned()
+        } else {
+            String::new()
+        };
+        self.drafts_synced.insert(terminal, synced);
         self.tell_draft_of(terminal);
     }
 
@@ -1252,7 +1261,7 @@ mod tests {
                 title: "chat".into(),
                 cwd: None,
                 root: Node::Chat(Box::new(ChatNode {
-                    draft: draft.into(),
+                    draft: Some(draft.into()),
                     ..ChatNode::default()
                 })),
             }),
@@ -1331,7 +1340,6 @@ mod tests {
         // Not the last change in the patch, and with white space at its end.
         state.receive(sent(&["fix the lint\n", "something else"]));
         assert_eq!(shown(&state), "");
-        assert!(told(&mut state).is_empty(), "the daemon's is empty too");
     }
 
     #[test]
@@ -1360,6 +1368,33 @@ mod tests {
         type_in_box(&mut state, "mine!");
         state.receive(kept("theirs"));
         assert_eq!(shown(&state), "mine!");
+    }
+
+    #[test]
+    fn a_daemon_keeping_no_drafts_leaves_the_pages_own_copy() {
+        let mut state = drafting();
+        state
+            .drafts
+            .insert(TerminalId(4), "kept by the page".into());
+        state.receive(ServerMessage::Event(Event::View {
+            terminal: TerminalId(4),
+            update: ViewUpdate::Snapshot(View {
+                title: "chat".into(),
+                cwd: None,
+                root: Node::Chat(Box::default()),
+            }),
+        }));
+        assert_eq!(shown(&state), "kept by the page");
+    }
+
+    #[test]
+    fn a_box_emptied_by_a_message_sent_elsewhere_tells_the_empty_draft() {
+        let mut state = drafting();
+        state.receive(kept("fix the lint"));
+        state.receive(sent(&["fix the lint"]));
+        assert_eq!(shown(&state), "");
+        // So a draft it told late can't leave the message in the daemon's.
+        assert_eq!(told(&mut state), [""]);
     }
 
     #[test]

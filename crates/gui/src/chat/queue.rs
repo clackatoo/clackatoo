@@ -1,10 +1,10 @@
 //! Sending a draft and controlling the daemon-owned pending messages,
 //! and taking one back into the box to edit, as Claude Code's Up does:
 //! the daemon moves it out of the queue into the chat's draft in one step
-//! (`ChatAction::TakeBack`), before what the box told it was typed, and
-//! answers with the draft that makes, which goes in the box. Nothing of it
-//! lives only in a window: with the window gone, the next to open the
-//! chat starts with it.
+//! (`ChatAction::TakeBack`), before what the draft held, and answers with
+//! the message's text, which goes before what's typed in the box asking.
+//! Nothing of it lives only in a window: with the window gone, the next to
+//! open the chat starts with the draft.
 use clackatoo_protocol::{ChatAction, ChatTarget, QueuedMessage};
 
 use super::{ChatView, Settled, handoff};
@@ -77,8 +77,8 @@ impl super::ChatView {
     }
 
     /// Asks the daemon to move the message `id` out of the queue and into
-    /// the draft, telling it first what's typed, for the message to go
-    /// before it; or says why it can't be.
+    /// the draft, telling it first what's typed, so with the window gone
+    /// the draft holds both; or says why it can't be.
     pub(super) fn take_back(&mut self, id: u64, settled: &mut Settled) {
         let Some(message) = (self.node.delivery.queued.iter()).find(|message| message.id == id)
         else {
@@ -103,11 +103,7 @@ impl super::ChatView {
         if let Some(typed) = self.take_draft(true) {
             settled.actions.push(ChatAction::Draft { text: typed });
         }
-        self.memory.taking_back = Some(super::prompts::TakingBack {
-            id,
-            text,
-            told: self.memory.synced.clone(),
-        });
+        self.memory.taking_back = Some(super::prompts::TakingBack { id, text });
         settled.actions.push(ChatAction::TakeBack { queued: id });
     }
 
