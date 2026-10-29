@@ -4475,6 +4475,21 @@ mod tests {
         assert_eq!(kept.prompt.images, vec![image]);
         assert_eq!(kept.target, Some(target));
         assert!(resumed.enqueue_user("later".into(), vec![], None).unwrap() > id);
+        assert!(resumed.node.delivery.paused, "kept, shown paused");
+    }
+
+    /// An empty queue handed over comes back as it went, not paused: a
+    /// message sent later while the chat is busy goes once it's idle
+    /// (CLACKA-185).
+    #[test]
+    fn an_empty_queue_handed_over_comes_back_unpaused() {
+        let c = chat();
+        let record = c.hand_over_queue();
+        let mut resumed = chat();
+        resumed.resume_queue(&mut [record]);
+        assert!(!resumed.node.delivery.paused);
+        let id = resumed.enqueue_user("later".into(), vec![], None).unwrap();
+        assert_eq!(resumed.next_user(), Some(id));
     }
 
     pub(super) fn chat() -> HostedChat {

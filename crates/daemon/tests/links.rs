@@ -7352,40 +7352,80 @@ fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
         "what the builder ran in the background"
     );
 
-    // The PM waits once more, hearing nothing new, and closes the builder.
-    let close = format!("{wait}\nmcp close_chat {{\"chat\":{builder}}}");
+    // Round 5: the builder finishes while the PM waits for another chat,
+    // a helper it starts, so a notice of the builder's answer waits its
+    // turn; the PM then waits for the builder in the same turn, hearing
+    // the answer, so the notice has nothing left to say and goes.
+    let helper = TerminalId(builder.0 + 1);
+    let rh = world.path().join("rh");
+    let start = serde_json::json!({ "prompt": format!("build {}", rh.display()) });
+    let message = format!(
+        "{}\nmcp start_chat {start}\n\
+         mcp wait_for_chat {{\"chat\":{helper},\"timeout\":60}}\n{wait}",
+        send(5)
+    );
+    client.chat(pm, ChatAction::Send(message)).unwrap();
+    pm_turns += 1;
+    builder_turns += 1;
+    wait_for_chat(&mut client, pm, |node| {
+        last_words(node).contains(&format!("start_chat: Started chat {helper} ("))
+    });
+    attach_to(&mut client, helper);
+    wait_for_chat(&mut client, helper, |node| {
+        last_words(node).contains("building rh")
+    });
+    sleepers.0.push(pid_in(&rh));
+    wait_for_chat(&mut client, builder, |node| {
+        node.turns.len() == builder_turns && last_words(node).contains("building r5")
+    });
+    sleepers.0.push(pid_in(&round(5)));
+    finish(5);
+    settled(&mut client, builder, builder_turns);
+    std::fs::write(world.path().join("rh.go"), "").unwrap();
+    let node = settled(&mut client, pm, pm_turns);
+    nothing_tripped(&node);
+    let said = last_words(&node);
+    let from_helper = format!(
+        "wait_for_chat: Chat {helper}'s answer to your message, turn 1:\nbuilding rh\nbuilt rh\n"
+    );
+    assert!(said.contains(&from_helper), "{said}");
+    let from_builder = format!(
+        "wait_for_chat: {}built r5\n[finished]",
+        answer(builder_turns, 5)
+    );
+    assert!(said.contains(&from_builder), "{said}");
+    let node = settled(&mut client, helper, 1);
+    assert_eq!(node.turns[0].from.as_ref().map(|from| from.chat), Some(pm));
+
+    // The PM waits once more, hearing nothing new, and closes both.
+    let close = format!(
+        "{wait}\nmcp close_chat {{\"chat\":{builder}}}\nmcp close_chat {{\"chat\":{helper}}}"
+    );
     client.chat(pm, ChatAction::Send(close)).unwrap();
     pm_turns += 1;
     let node = settled(&mut client, pm, pm_turns);
     nothing_tripped(&node);
     let said = last_words(&node);
-    let last = if carried {
-        answer(4, 4)
-    } else {
-        format!("Chat {builder} went on by itself after your message, in turn {builder_turns}:\n")
-    };
+    let last = answer(builder_turns, 5);
     assert!(
         said.starts_with(&format!("wait_for_chat: {last}")),
         "{said}"
     );
     assert!(!said.contains("since you last heard"), "{said}");
-    assert!(
-        said.ends_with(&format!("close_chat: Closed chat {builder}.\n")),
-        "{said}"
-    );
+    let closed = format!("close_chat: Closed chat {builder}.\nclose_chat: Closed chat {helper}.\n");
+    assert!(said.ends_with(&closed), "{said}");
     let alive = client.list_terminals().unwrap();
     assert!(
-        !alive.iter().any(|terminal| terminal.id == builder),
+        !alive
+            .iter()
+            .any(|terminal| [builder, helper].contains(&terminal.id)),
         "{alive:#?}"
     );
     // Nothing more comes: every answer was heard, once.
     let node = ask_chat(&mut client, pm, "pid");
     assert_eq!(node.turns.len(), pm_turns + 1, "{node:#?}");
     let notices = (node.turns.iter())
-        .filter(|turn| {
-            turn.prompt
-                .starts_with(&format!("[chat {builder} finished]"))
-        })
+        .filter(|turn| turn.prompt.starts_with("[chat "))
         .count();
     assert_eq!(notices, if carried { 1 } else { 4 }, "{node:#?}");
 }
@@ -7406,13 +7446,14 @@ fn a_pm_runs_a_builder_through_upgrades_that_restart_agents() {
 /// A message the user sends a chat while it answers a notice from
 /// clackatoo, after an upgrade that restarted its agent as it was idle,
 /// is sent once that turn ends, as one sent while any turn is answered
-/// is. The PM loop found it stuck: each chat's queue comes back from an
-/// upgrade paused, empty or not, and only a chat continuing a turn has
-/// that put back as it was; a message sent while the chat is busy joins
-/// the paused queue and never goes (CLACKA-185). The agent here answers
-/// notices only once the test says, so the message is sent mid-turn.
+/// is. The PM loop found it stuck: each chat's queue came back from an
+/// upgrade paused, empty or not, and only a chat continuing a turn had
+/// that put back as it was, so a message sent while the chat was busy
+/// joined the paused queue and never went (CLACKA-185). Only messages
+/// handed over come back paused now, shown so, to be sent or dropped.
+/// The agent here answers notices only once the test says, so the
+/// message is sent mid-turn.
 #[test]
-#[ignore = "CLACKA-185: a message sent mid-turn after a restarting upgrade stays queued, paused (fails)"]
 fn a_message_sent_mid_turn_after_a_restarting_upgrade_is_sent() {
     let world = World::new();
     let gate = world.path().join("notices.go");
