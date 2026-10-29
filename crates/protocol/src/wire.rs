@@ -1234,7 +1234,8 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
 /// `PROMPT_BOX`, a retry before `CHAT_FACTS`, and the older ones), or
 /// else, before `CHAT_FACTS`, without what `CHAT_FACTS` brought. `None`
 /// if it reads it as it is. `TURN_FAILED` (116) is a field of the list of
-/// chats, gated as fields are, so it needs nothing here.
+/// chats, gated as fields are, so it needs nothing here, and `NESTED_WORK`
+/// (117) has its own step after this one (`without_nesting`).
 fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
     if wire >= PROMPT_BOX {
         return None;
