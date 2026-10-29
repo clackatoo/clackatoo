@@ -17870,6 +17870,63 @@ fn live_send(client: &mut Client, chat: TerminalId, text: &str, limit: Duration)
     })
 }
 
+/// A background shell's output, as the real Claude Code writes it, is in
+/// the file its adapter names, which a terminal on this machine follows as
+/// a window opens one (CLACKA-199). ACP carries none of the output itself.
+/// Recorded live on haiku (2026-10-29, adapter 0.98.0): the spawn comes
+/// without the path, a progress beat with it straight after, then the
+/// state; the file is under `$TMPDIR/claude-UID/`, and ends with
+/// `[exited with code 0]`.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_background_shells_output_is_followed_from_the_file_its_adapter_names() {
+    // The daemon is kept: a field left out would go with the temporary.
+    let Some(Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        ..
+    }) = live_claude("task-output")
+    else {
+        return;
+    };
+    let limit = Duration::from_mins(2);
+    let text = "Use the Bash tool once, with run_in_background set to true, to run exactly: \
+                echo alpha; sleep 4; echo omega. Then reply with the single word started, and \
+                don't check on it.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let node = live_wait(&mut client, chat, limit, |node| {
+        (node.tasks.iter()).any(|task| task.kind == AgentTaskKind::Shell && task.output.is_some())
+    });
+    let shell = (node.tasks.iter())
+        .find(|task| task.output.is_some())
+        .unwrap()
+        .clone();
+    eprintln!("task: {shell:#?}");
+    let output = shell.output.clone().unwrap();
+    assert!(output.ends_with(&format!("/tasks/{}.output", shell.id)), "{output}");
+
+    let terminal = client
+        .new_terminal(NewTerminal {
+            size: Size::new(60, 10).unwrap(),
+            command: shell.follow_output(),
+            cwd: None,
+            record_to: None,
+        })
+        .unwrap();
+    let text = wait_for_screen_for(&mut client, terminal, limit, |text| text.contains("omega"));
+    assert!(text.contains("alpha"), "{text}");
+    let node = live_wait(&mut client, chat, limit, |node| {
+        (node.tasks.iter()).any(|task| task.id == shell.id && !task.going())
+    });
+    eprintln!("ended: {:#?}", node.tasks);
+    // Claude Code 2.1.310 ends the file with how the command exited.
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(written.starts_with("alpha\nomega\n"), "{written:?}");
+}
+
 /// Submits `text` as the window does, queued if the agent is busy.
 fn live_submit(client: &mut Client, chat: TerminalId, text: &str, steer: bool) {
     client
