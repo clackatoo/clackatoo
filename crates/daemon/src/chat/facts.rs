@@ -27,11 +27,13 @@
 //!   turn's tokens; and `usage_update`'s `cost`, the session's cost so
 //!   far, which only Claude Code's says: a turn's is what it grew by.
 
+use std::collections::VecDeque;
+
 use agent_client_protocol_schema::v1::{ContentBlock, Meta, StopReason};
 use clackatoo_protocol::{ChatPatch, Cost, Item, Outcome, Spent, Tool, ToolKind, ToolStatus};
 use serde_json::Value;
 
-use super::{Action, HostedChat, Prompt, clean, failure, one_line_notice};
+use super::{Action, HostedChat, Prompt, failure, one_line_notice};
 use crate::agent::{Answer, Failure};
 
 /// What Codex's adapter says, as words, to a client that can't take a
@@ -55,24 +57,48 @@ pub(super) struct Facts {
     /// How many images the agent has shown in its words: each is a row of
     /// its own, numbered.
     images: u64,
-    /// The tool calls of the turn answering that are the agent compacting
-    /// its context, and the item each is shown as once it has finished, a
-    /// line across the turn.
-    compactions: Vec<(String, Option<usize>)>,
+    /// The row the image in the agent's words being taken goes in, once
+    /// it's been taken to be made a picture of (see `image_sources`).
+    image_taken: Option<String>,
+    /// The tool calls that are the agent compacting its context, the
+    /// latest few: the turn each is in, and the item it's shown as once
+    /// it has finished, a line across the turn.
+    compactions: VecDeque<Compaction>,
+    /// The role or brief the message of a turn went with, and that turn,
+    /// to send with it again if it failed.
+    briefed: Option<(usize, String)>,
 }
+
+/// A tool call that's the agent compacting its context.
+#[derive(Debug)]
+struct Compaction {
+    id: String,
+    /// The turn it's in.
+    turn: Option<usize>,
+    /// The item it's shown as, a line across the turn, once it's finished.
+    line: Option<usize>,
+}
+
+/// How many compactions are kept: more than come in a few turns.
+const COMPACTIONS: usize = 16;
 
 impl HostedChat {
     /// A turn starts.
     pub(super) fn facts_begin(&mut self) {
         self.facts.cost_before = self.node.usage.and_then(|usage| usage.cost);
         self.facts.cost_seen = false;
-        self.facts.compactions.clear();
         self.set_retrying(None);
     }
 
     /// The user's `prompt` started turn `turn`: kept, to send again.
     pub(super) fn remember_prompt(&mut self, turn: usize, prompt: &Prompt) {
         self.facts.last_prompt = Some((turn, prompt.clone()));
+    }
+
+    /// The message of turn `turn` went with `role`, the chat's role or
+    /// brief: kept, to send with it again if it fails.
+    pub(super) fn remember_brief(&mut self, turn: usize, role: &str) {
+        self.facts.briefed = Some((turn, role.to_owned()));
     }
 
     pub(super) fn set_retrying(&mut self, retrying: Option<String>) {
@@ -108,13 +134,7 @@ impl HostedChat {
                 Some("warning") if self.answering() && !title.is_empty() => {
                     self.set_retrying(Some(retrying_text(title)));
                 }
-                // While answering, a failure comes with the answer: by
-                // itself, it's of the session, such as its worker going.
-                Some("error") if !self.answering() => {
-                    if let Some(said) = failure::typed(record, &self.node.agent, None) {
-                        self.set_notice(Some(one_line_notice(&capitalised(&said.text))));
-                    }
-                }
+                Some("error") => self.failure_said(record),
                 _ => {}
             }
             return;
@@ -124,22 +144,45 @@ impl HostedChat {
         };
         let message = (error.get("message").and_then(Value::as_str)).unwrap_or_default();
         let again = error.get("willRetry").and_then(Value::as_bool) == Some(true);
-        if message.is_empty() {
+        if message.trim().is_empty() {
             return;
         }
         if again && self.answering() {
             self.set_retrying(Some(retrying_text(message)));
         } else if !self.answering() {
-            self.set_notice(Some(one_line_notice(&clean(message))));
+            let said = format!(
+                "{} said: {}",
+                self.node.agent,
+                clackatoo_protocol::code_span(&failure::agent_text(message))
+            );
+            self.set_notice(Some(one_line_notice(&said)));
+        }
+    }
+
+    /// A failure the agent gave by itself, as AIR's `sessionFailure`,
+    /// `record`, rather than on a turn's answer. It ends a turn the agent
+    /// took by itself, whose end no answer says, as failed: Claude Code's
+    /// adapter, to a client that asks for these, leaves its error out of
+    /// the turn's words. Any other is of the session, such as its worker
+    /// going, or its connection lost: a notice says so. None goes unsaid.
+    fn failure_said(&mut self, record: &Value) {
+        let said = failure::typed(record, &self.node.agent, None)
+            .unwrap_or_else(|| failure::untyped(record));
+        if self.woken() {
+            self.answered_as(Outcome::Failed(said.text), said.raw, None);
+        } else {
+            self.set_notice(Some(one_line_notice(&capitalised(&said.text))));
         }
     }
 
     /// Whether tool call `id` is the agent compacting its context, shown
-    /// already as the line across the turn: what more is said of it goes
-    /// to that line (see [`compaction`](Self::compaction)), never to a
-    /// tool.
+    /// already as the line across the turn, or in a turn that's over:
+    /// what more is said of it goes to that line, or nowhere (see
+    /// [`compaction`](Self::compaction)), never to a tool.
     pub(super) fn compacted(&self, id: &str) -> bool {
-        (self.facts.compactions.iter()).any(|(known, line)| known == id && line.is_some())
+        let turn = self.answering_turn();
+        (self.facts.compactions.iter())
+            .any(|known| known.id == id && (known.line.is_some() || known.turn != turn))
     }
 
     /// Notes tool call `id` as the agent compacting its context, if its
@@ -153,25 +196,30 @@ impl HostedChat {
         let named = (meta.and_then(|meta| meta.get("claudeCode")))
             .and_then(|claude| claude.get("toolName"))
             .is_some_and(|name| name == "compact");
-        let known = self
-            .facts
-            .compactions
-            .iter()
-            .position(|(known, _)| known == id);
+        let Some(turn) = self.answering_turn() else {
+            return;
+        };
+        let known = (self.facts.compactions.iter()).position(|known| known.id == id);
         let known = match known {
+            // A report on one of a turn that's over goes nowhere.
+            Some(known) if self.facts.compactions[known].turn != Some(turn) => return,
             Some(known) => known,
-            None if (air.is_some() || named) && self.facts.compactions.len() < 16 => {
-                self.facts.compactions.push((id.to_owned(), None));
+            None if air.is_some() || named => {
+                if self.facts.compactions.len() == COMPACTIONS {
+                    self.facts.compactions.pop_front();
+                }
+                self.facts.compactions.push_back(Compaction {
+                    id: id.to_owned(),
+                    turn: Some(turn),
+                    line: None,
+                });
                 self.facts.compactions.len() - 1
             }
             None => return,
         };
-        let Some(turn) = self.answering_turn() else {
-            return;
-        };
         let details = compaction_details(air.or(raw));
         let items = &mut self.node.turns[turn].items;
-        if let Some(at) = self.facts.compactions[known].1 {
+        if let Some(at) = self.facts.compactions[known].line {
             if let Some(Item::Compacted(old)) = items.get_mut(at)
                 && !details.is_empty()
                 && *old != details
@@ -188,7 +236,7 @@ impl HostedChat {
         };
         let item = Item::Compacted(details);
         items[at] = item.clone();
-        self.facts.compactions[known].1 = Some(at);
+        self.facts.compactions[known].line = Some(at);
         self.patch_item(turn, at, item);
     }
 
@@ -209,13 +257,18 @@ impl HostedChat {
         true
     }
 
-    /// An image in the agent's words: a row of its own, which its
-    /// picture is added to once it's made (see `image_sources`).
+    /// An image in the agent's words, if it was taken to be made a picture
+    /// of: a row of its own, which the picture is added to once it's made
+    /// (see `image_sources`). One not taken, as too big, shows nothing.
     pub(super) fn message_image(&mut self, content: &ContentBlock) {
+        let taken = self.facts.image_taken.take();
         if !matches!(content, ContentBlock::Image(_)) || self.told_again() || !self.answering() {
             return;
         }
         let id = self.next_image();
+        if taken.as_ref() != Some(&id) {
+            return;
+        }
         self.facts.images += 1;
         self.set_tool(Tool {
             id,
@@ -228,9 +281,26 @@ impl HostedChat {
         });
     }
 
-    /// The ID the next image in the agent's words is shown as.
+    /// The ID the next image in the agent's words is shown as: one no
+    /// item of the turn answering has, the agent's tool calls among them.
     pub(super) fn next_image(&self) -> String {
-        format!("clackatoo-image-{}", self.facts.images)
+        let items = (self.answering_turn()).map_or(&[][..], |turn| &self.node.turns[turn].items);
+        // A turn of n items takes at most n numbers before one is free.
+        let most = self.facts.images.saturating_add(items.len() as u64);
+        (self.facts.images..=most)
+            .map(|number| format!("clackatoo-agent-image:{number}"))
+            .find(|id| {
+                !items
+                    .iter()
+                    .any(|item| matches!(item, Item::Tool(tool) if tool.id == *id))
+            })
+            .unwrap_or_else(|| format!("clackatoo-agent-image:{most}+"))
+    }
+
+    /// The image in the agent's words that's to show as row `id` has
+    /// been taken to be made a picture of.
+    pub(super) fn image_taken(&mut self, id: String) {
+        self.facts.image_taken = Some(id);
     }
 
     /// Takes the session's cost so far, `cost`, as a `usage_update` says
@@ -301,9 +371,14 @@ impl HostedChat {
     }
 
     /// Sends the last turn's message again, as a turn of its own, if it
-    /// failed and was the user's. A message with images can be sent again
-    /// only as long as the chat has them: not after an upgrade.
+    /// failed and was the user's, with the role or brief it went with. A
+    /// message with images is sent with them only as long as the chat has
+    /// them: after an upgrade, its words go alone, and the chat says so.
+    /// Nothing is sent while a message waits for the session to load.
     pub(super) fn resend(&mut self, actions: &mut Vec<Action>) {
+        if self.holding() || self.loading() {
+            return;
+        }
         let Some(index) = self.node.turns.len().checked_sub(1) else {
             return;
         };
@@ -317,20 +392,61 @@ impl HostedChat {
         }
         let prompt = match &self.facts.last_prompt {
             Some((at, prompt)) if *at == index => prompt.clone(),
-            _ if turn.previews.is_empty() && !turn.prompt.trim().is_empty() => {
-                Prompt::from(turn.prompt.clone())
-            }
             _ => {
-                self.set_notice(Some(
-                    "That message can't be sent again: its images aren't kept any more. \
-                     Paste them again."
-                        .to_owned(),
-                ));
-                return;
+                let (words, images) = without_image_labels(&turn.prompt);
+                if words.trim().is_empty() {
+                    self.set_notice(Some(
+                        "That message can't be sent again: its images aren't kept any more. \
+                         Paste them again."
+                            .to_owned(),
+                    ));
+                    return;
+                }
+                if images {
+                    self.set_notice(Some(
+                        "Sent its words again without its images, which aren't kept any \
+                         more: paste them again if they're needed."
+                            .to_owned(),
+                    ));
+                }
+                Prompt::from(words)
             }
         };
+        // The role or brief it went with goes again.
+        if let Some((at, role)) = self.facts.briefed.take() {
+            if at == index && self.role.is_none() {
+                self.role = Some(role);
+            } else {
+                self.facts.briefed = Some((at, role));
+            }
+        }
+        let notice = self.node.notice.clone();
         self.send_prompt(prompt, actions);
+        // What it says of its images stays over the turn just begun.
+        if notice.is_some() && self.node.notice.is_none() {
+            self.set_notice(notice);
+        }
     }
+}
+
+/// `shown`, a message as a turn shows it, without the labels that stand
+/// for its images, `[Image · 640 × 480]` or `[Image]` on lines of their
+/// own; and whether it had any.
+fn without_image_labels(shown: &str) -> (String, bool) {
+    let label = |line: &str| {
+        line == "[Image]"
+            || line
+                .strip_prefix("[Image · ")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .is_some_and(|size| {
+                    size.split_once(" × ").is_some_and(|(width, height)| {
+                        width.parse::<u32>().is_ok() && height.parse::<u32>().is_ok()
+                    })
+                })
+    };
+    let had = shown.lines().any(label);
+    let words: Vec<&str> = shown.lines().filter(|line| !label(line)).collect();
+    (words.join("\n").trim().to_owned(), had)
 }
 
 /// How a turn that ended as `result` says ended.
@@ -392,9 +508,11 @@ fn compaction_details(facts: Option<&Value>) -> String {
     details.join(" · ")
 }
 
-/// What an agent says as it tries again, on one line, cut short.
+/// What an agent says as it tries again, on one line, with nothing in it
+/// hidden, cut short.
 fn retrying_text(text: &str) -> String {
-    let mut text = clean(text).trim().to_owned();
+    let text = failure::agent_text(text);
+    let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Some((cut, _)) = text.char_indices().nth(RETRYING) {
         text.truncate(cut);
         text.push('…');

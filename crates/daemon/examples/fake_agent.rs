@@ -45,6 +45,13 @@
 //! | `usage-limit` | Fails as the account's usage limit is reached: as AIR's `sessionFailure` on the answer, to a client that asked for it; as Codex's `usageLimitExceeded` with `--codex`; else as Claude Code's SDK's `billing_error` |
 //! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's words for it; then `compacted` |
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
+//! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
+//! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
+//! | `compact-late` | Compacts its context, as `compact` does, but says its last report with the next message |
+//! | `image-bad` | Shows an image in its words with no data, then `shown` |
+//!
+//! With `--in-use`, it refuses to open a session again, as Codex's
+//! adapter does one open in another Codex client.
 //! | `fail-command N` | Runs `false` in a terminal, which fails with exit code N; then `failed` |
 //! | `cost` | Says the session has cost $0.0421, then 1200 tokens more, `spent`, and answers with what the turn spent |
 //! | `image` | Shows a small image in its words, then `shown` |
@@ -172,6 +179,8 @@ fn main() {
         elicited: None,
         woken: None,
         logged_out: flag("--logged-out"),
+        in_use: flag("--in-use"),
+        late_compaction: None,
         mute_init: first && flag("--mute-init"),
         answers: (flag("--mute").then_some(0))
             .or_else(|| value("--mute-after").map(|most| most.parse().unwrap()))
@@ -252,6 +261,12 @@ struct Fake {
     codex: bool,
     /// Refuses sessions, as no one's logged in.
     logged_out: bool,
+    /// Refuses to open a session again, as Codex's adapter does one open
+    /// in another Codex client (`thread_active_writer`).
+    in_use: bool,
+    /// The session whose compaction's last report is still to come, with
+    /// its next message (`compact-late`).
+    late_compaction: Option<String>,
     /// Never answers `initialize`, as one still being fetched.
     mute_init: bool,
     /// The most requests for a new session it answers, if it stops.
@@ -795,6 +810,13 @@ impl Fake {
                     None => reply(&id, &result),
                 }
             }
+            Some("session/load" | "session/resume") if self.in_use => {
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32600,
+                    "message": "Invalid request: This Codex session is in use by another Codex client.",
+                    "data": { "reason": "thread_active_writer", "threadId": session } } }),
+                );
+            }
             // As after a crash: the settings are back where they started.
             Some("session/resume") => {
                 self.note(&format!("resumed {session}"));
@@ -1199,6 +1221,72 @@ impl Fake {
                         "_meta": { "quota": { "token_count": null, "model_usage": [] } } }),
                 );
             }
+            "wake-fail" => {
+                say(session, "started\n");
+                done(id, "end_turn");
+                let session = session.to_owned();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "turn-2",
+                                 "name": "Claude is working", "taskType": "turn",
+                                 "description": "Background command \"npm test\" completed",
+                                 "showInTranscript": false, "canStop": true }),
+                    );
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "session_info_update", "_meta": { "jetbrains":
+                            { "air": { "version": 1, "sessionFailure": {
+                                "id": "s:session-error:1", "revision": 1, "category": "limit",
+                                "severity": "error", "title": "You've hit your limit · resets 3pm",
+                                "actions": [] } } } } }),
+                    );
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "async_task_state_update",
+                                 "asyncTaskId": "turn-2", "state": "completed" }),
+                    );
+                });
+            }
+            "session-error" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "session_info_update", "_meta": { "jetbrains":
+                        { "air": { "version": 1, "sessionFailure": {
+                            "id": "s:session-error:2", "revision": 1, "category": "connection",
+                            "severity": "error", "title": "The connection to Claude was lost.",
+                            "actions": ["new_session"] } } } } }),
+                );
+                say(session, "carried on\n");
+                done(id, "end_turn");
+            }
+            "compact-late" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "c9",
+                             "title": "Compact conversation", "kind": "think",
+                             "status": "in_progress", "_meta": { "jetbrains": { "air": {
+                                 "version": 1, "contextCompaction": { "version": 1 } } } } }),
+                );
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c9",
+                             "status": "completed" }),
+                );
+                self.late_compaction = Some(session.to_owned());
+                say(session, "compacted\n");
+                done(id, "end_turn");
+            }
+            "image-bad" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "agent_message_chunk",
+                             "content": { "type": "image", "mimeType": "image/png", "data": "" } }),
+                );
+                say(session, "shown\n");
+                done(id, "end_turn");
+            }
             "image" => {
                 update(
                     session,
@@ -1264,6 +1352,16 @@ impl Fake {
         }
         if self.file(&id, &session, text) {
             return true;
+        }
+        // The last report of a compaction a turn before, which came late.
+        if let Some(late) = self.late_compaction.take() {
+            update(
+                &late,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c9",
+                    "_meta": { "jetbrains": { "air": { "version": 1, "contextCompaction":
+                        { "version": 1, "trigger": "manual", "preTokens": 9000,
+                          "postTokens": 2000 } } } } }),
+            );
         }
         if self.facts(&id, &session, text) {
             return true;

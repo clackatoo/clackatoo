@@ -1492,6 +1492,7 @@ impl HostedChat {
             return Action::Prompt(text);
         }
         if let Some(role) = self.role.take() {
+            self.remember_brief(to, &role);
             self.known = self.node.turns.len();
             return Action::Briefed { role, text };
         }
@@ -2312,7 +2313,12 @@ impl HostedChat {
     fn answer(&mut self, asker: Asker, option: Option<String>) -> Option<Action> {
         let install = option.as_deref() == Some(INSTALL);
         match asker {
-            Asker::Agent(request) => Some(Action::Answer { request, option }),
+            // An older window's way to say no to a question it was shown
+            // none of the answers of: no answer, which cancels it.
+            Asker::Agent(request) => Some(Action::Answer {
+                request,
+                option: option.filter(|option| option != clackatoo_protocol::DECLINE),
+            }),
             // The only choice a window older than forms is offered says no;
             // none is not now.
             Asker::Elicit { request, .. } => {
@@ -2933,7 +2939,7 @@ impl HostedChat {
     }
 
     pub(crate) fn image_sources(
-        &self,
+        &mut self,
         update: &mut SessionUpdate,
     ) -> Option<(String, Vec<crate::tool_images::Source>)> {
         if let Some(images) = crate::tool_images::extract(update) {
@@ -2945,7 +2951,9 @@ impl HostedChat {
             && !self.told_again()
             && let Some(source) = crate::tool_images::extract_message(update)
         {
-            return Some((self.next_image(), vec![source]));
+            let id = self.next_image();
+            self.image_taken(id.clone());
+            return Some((id, vec![source]));
         }
         if self.agent != "antigravity" {
             return None;
@@ -5531,6 +5539,49 @@ mod tests {
             .position(|a| matches!(a, Action::Prompt(_)))
             .unwrap();
         assert!(setting < prompt);
+    }
+
+    #[test]
+    fn a_failed_message_is_sent_again_with_its_role_and_never_with_image_labels() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        c.role = Some("Review only.".into());
+        let briefed = |actions: &[Action]| {
+            actions.iter().any(|a| {
+                matches!(a, Action::Briefed { role, text }
+                    if role == "Review only." && text.text == "inspect")
+            })
+        };
+        assert!(briefed(&send(&mut c, "inspect")));
+        c.answered(Err("failed".into()));
+        assert!(briefed(&c.act(ChatAction::Resend)));
+        c.answered(Ok(StopReason::EndTurn));
+        // A message whose images the chat no longer has, as after an
+        // upgrade: its words go alone, and the chat says so.
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "look");
+        c.answered(Err("failed".into()));
+        c.facts = facts::Facts::default();
+        c.node.turns[0].prompt = "look at this\n\n[Image · 640 × 480]".into();
+        let actions = c.act(ChatAction::Resend);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Prompt(prompt) if prompt.text == "look at this")),
+            "{actions:?}"
+        );
+        assert!(
+            c.node
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("without its images"))
+        );
+        // One of images alone can't be.
+        c.answered(Err("failed".into()));
+        c.facts = facts::Facts::default();
+        c.node.turns[1].prompt = "[Image · 640 × 480]".into();
+        assert!(c.act(ChatAction::Resend).is_empty());
     }
 
     #[test]

@@ -2911,7 +2911,7 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     assert_eq!(
         last_failure(&node),
         (
-            "the account's usage limit is reached: You've hit your limit · resets 3pm".to_owned(),
+            "the account's usage limit is reached. Claude Code said: `You've hit your limit · resets 3pm`".to_owned(),
             Some("You've hit your limit · resets 3pm".to_owned())
         )
     );
@@ -2920,7 +2920,7 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     assert_eq!(
         last_failure(&node),
         (
-            "the agent failed: Something new went wrong".to_owned(),
+            "the agent failed: `Something new went wrong`".to_owned(),
             None
         )
     );
@@ -2939,7 +2939,7 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     let node = ask(&mut client, codex, "usage-limit");
     assert_eq!(
         last_failure(&node).0,
-        "the account's usage limit is reached: You've hit your usage limit. Try again at 3:05 PM."
+        "the account's usage limit is reached. Codex said: `You've hit your usage limit. Try again at 3:05 PM.`"
     );
 }
 
@@ -3089,7 +3089,7 @@ fn an_image_in_the_agents_words_shows_in_a_row_of_its_own() {
     ask(&mut client, chat, "image");
     let node = wait_for_chat(&mut client, chat, |node| {
         node.turns.last().unwrap().items.iter().any(|item| {
-            matches!(item, Item::Tool(tool) if tool.id == "clackatoo-image-0"
+            matches!(item, Item::Tool(tool) if tool.id == "clackatoo-agent-image:0"
                 && tool.content.iter().any(|content| matches!(content,
                     clackatoo_protocol::ToolContent::Image(_))))
         })
@@ -3126,6 +3126,87 @@ fn an_answer_of_a_kind_not_known_is_offered_as_named_and_never_taken_for_yes() {
     answer(&mut client, chat, Some("session".into()));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     assert_eq!(last_words(&node), "picked session\n");
+}
+
+#[test]
+fn a_message_that_failed_waiting_for_its_session_to_load_isnt_held_again_by_resending() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        vec![
+            fake_agent().into(),
+            "--in-use".into(),
+            "--log".into(),
+            dir.join("agent.log").into(),
+        ]
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, resumed_chat(&home, "past-1", None))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    client.chat(chat, ChatAction::Send("first".into())).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        matches!(last_outcome(node), Some(Outcome::Failed(_)))
+    });
+    let turns = node.turns.len();
+    // Pressed twice: nothing is held to go once the session loads.
+    client.chat(chat, ChatAction::Resend).unwrap();
+    client.chat(chat, ChatAction::Resend).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let node = chat_now(&mut client, chat);
+    assert_eq!(node.turns.len(), turns, "{node:#?}");
+    assert!(
+        !node
+            .notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("goes once"),
+        "{node:#?}"
+    );
+}
+
+#[test]
+fn a_turn_the_agent_took_by_itself_fails_as_its_agent_says_and_no_failure_goes_unsaid() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "wake-fail");
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert!(node.turns[1].woke.is_some());
+    assert_eq!(
+        last_failure(&node).0,
+        "the account's usage limit is reached. Claude Code said: `You've hit your limit · \
+         resets 3pm`"
+    );
+    // One said by itself while a message is answered is the session's:
+    // a notice says so, and the turn goes on.
+    let node = ask(&mut client, chat, "session-error");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    assert!(
+        (node.notice.as_deref()).is_some_and(|notice| notice.contains("connection")),
+        "{node:#?}"
+    );
+}
+
+#[test]
+fn a_compactions_report_after_its_turn_ended_goes_nowhere_and_a_bad_image_shows_nothing() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "compact-late");
+    assert_eq!(node.turns[0].items[0], Item::Compacted(String::new()));
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(
+        node.turns.last().unwrap().items,
+        [Item::Words("echo: hello\n".into())]
+    );
+    let node = ask(&mut client, chat, "image-bad");
+    assert_eq!(
+        node.turns.last().unwrap().items,
+        [Item::Words("shown\n".into())]
+    );
 }
 
 #[test]

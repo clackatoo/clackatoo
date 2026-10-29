@@ -346,6 +346,11 @@ impl HostedChat {
         true
     }
 
+    /// Whether a message waits for the session to load.
+    pub(super) fn holding(&self) -> bool {
+        self.told.held.is_some()
+    }
+
     /// Does with the message held while the session loaded, if there is
     /// one, as `held` says.
     pub(super) fn release_held(&mut self, held: Held) {
@@ -373,6 +378,8 @@ impl HostedChat {
                     from: None,
                     switch: None,
                 });
+                // As it was, images and all, to send again.
+                self.remember_prompt(self.node.turns.len() - 1, &text);
                 self.end_turn(outcome);
             }
         }
