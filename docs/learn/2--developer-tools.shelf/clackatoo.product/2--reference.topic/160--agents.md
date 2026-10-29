@@ -330,9 +330,11 @@ A turn that fails anyway says why in plain words, with what to do, rather than t
 | The conversation, or the answer, hit the model's limit | to start a new chat |
 | A Codex session open in another Codex client: the app, the CLI or an editor | to close it there, then send the message again |
 
-What the agent itself said follows underneath, `The agent said: …`, unless the plain words already say it; `clackatoo capture` and copying the turn keep it. A failure clackatoo doesn't know says `the agent failed:` and the agent's words, as before. A Codex session open in another Codex client is no longer taken for one that's gone: the chat says so and waits, rather than starting a new session in its place.
+Where the agent's words say more, they follow clackatoo's, as `Codex said:` and the words, in the terminal's font, as code: nothing the agent says can pass for clackatoo's advice, nor hide what it says, and each thing it says is cut to about 2 KB. What it said in full follows underneath, `The agent said: …`, unless that's said already; `clackatoo capture` and copying the turn keep it. A failure clackatoo doesn't know says `the agent failed:` and the agent's words, quoted the same way. A Codex session open in another Codex client is no longer taken for one that's gone: the chat says so and waits, rather than starting a new session in its place.
 
-The last turn, if it failed and was a message of yours, has a **Send again** button under it, and `R` in normal mode does the same: the same message, with its images, as a new turn below. Images can be sent again only until the daemon is upgraded; after that, paste them again.
+A failure the agent gives by itself, rather than with a turn's answer, isn't lost either: if it took a turn by itself, as Claude Code does when something it ran in the background ends, that turn ends failed, saying why; otherwise a notice above the box says so, as when its connection was lost.
+
+The last turn, if it failed and was a message of yours, has a **Send again** button under it, and `R` in normal mode does the same: the same message, with its images and any role it was started with, as a new turn below. If the turn already ran commands or changed files, which would be done again, the bar says how many first, and it's sent only if you ask again within 5 seconds. Images can be sent again only until the daemon is upgraded; after that, its words go alone and the chat says so. Nothing is sent again while the chat waits for a session to load.
 
 ### What else a turn says
 
@@ -342,7 +344,7 @@ A command that failed says its exit code at the end of its card's head, as `$ ca
 
 Under each finished turn, on the right, is what it spent, where the agent says: its tokens, and its cost, as `12k tokens · $0.04`. Claude Code gives both, and a turn's cost is what the session's grew by during it; Codex gives tokens only. `K` shows what the session has cost so far beside its context and limits. `:set nochatcost` hides both.
 
-An image the agent shows in its words, rather than from a tool, shows in a row of its own, `Image`, with the same caps as a tool's images.
+An image the agent shows in its words, rather than from a tool, shows in a row of its own, `Image`, with the same caps as a tool's images; one that can't be shown, as too big, shows nothing.
 
 ### When the agent asks
 
@@ -352,7 +354,7 @@ Click an answer to give it. In insert mode, press an answer's number to give it,
 
 clackatoo's own questions about its tools say Reject, as Claude Code's do, and show what the agent wrote as code, so nothing in it can pass for clackatoo's words.
 
-An answer of a kind clackatoo doesn't know, which a newer agent may offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent colour, and Esc never picks it.
+An answer of a kind clackatoo doesn't know, which a newer agent may offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent colour, and Esc never picks it. A window from before this is shown the other answers only, or, if every answer is of a kind not known, a Decline that says no.
 
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
