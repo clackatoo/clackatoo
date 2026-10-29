@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.108 (2026-10-29)
+
+### Features
+
+- a subagent in a pane keeps its parent, profile and limits through a cold restart (CLACKA-184) (cd98538c)
+
+### Fixes
+
+- a restored subagent's mode is never above its parent's, and its parent is in its workspace (CLACKA-184) (bfc034aa)
+
 ## 2026.10.107 (2026-10-29)
 
 ### Features
