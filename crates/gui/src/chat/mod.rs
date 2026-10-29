@@ -466,20 +466,11 @@ pub(crate) struct ChatView {
     /// A click went into a box of the form, to type in: the pane goes to
     /// insert mode.
     wants_insert: bool,
-    /// Where Up and Down have gone through the messages sent, and the text
-    /// they showed: typing anything else forgets it (see [`prompts`]).
-    recall: Option<(crate::cmdline::recall::Walk, String)>,
-    /// The queued message being taken back into the box, by its ID, and
-    /// its text, until the daemon has taken it out of the queue.
-    taking_back: Option<(u64, String)>,
-    /// Whether the daemon keeps what's typed in the box (protocol 116 on).
+    /// The box's memory of messages sent and what's typed (see
+    /// [`prompts`]).
+    memory: prompts::Memory,
+    /// Whether the daemon keeps what's typed in the box (protocol 117 on).
     pub(crate) drafts_supported: bool,
-    /// What the daemon was last told is typed in the box, or told the
-    /// window, as it came.
-    draft_sent: String,
-    /// When what's typed first changed since the daemon was last told,
-    /// and last changed, as turns count time.
-    draft_changed: Option<(u64, u64)>,
 }
 
 /// How long, in milliseconds, after a number arms an answer in normal mode
@@ -626,11 +617,8 @@ impl ChatView {
             proposal_scroll: 0.0,
             proposal_rect: None,
             wants_insert: false,
-            recall: None,
-            taking_back: None,
+            memory: prompts::Memory::default(),
             drafts_supported: false,
-            draft_sent: String::new(),
-            draft_changed: None,
         };
         view.came_whole();
         // A chat first seen asking may be arrived at already.

@@ -37,6 +37,23 @@ pub(crate) const DRAFT_PAUSE: Duration = Duration::from_millis(600);
 /// pausing.
 pub(crate) const DRAFT_MOST: Duration = Duration::from_secs(3);
 
+/// What the box remembers, beside what's in it.
+#[derive(Debug, Default)]
+pub(super) struct Memory {
+    /// Where Up and Down have gone through the messages sent, and the text
+    /// they showed: typing anything else forgets it.
+    pub(super) recall: Option<(Walk, String)>,
+    /// The queued message being taken back into the box, by its ID, and
+    /// its text, until the daemon has taken it out of the queue.
+    pub(super) taking_back: Option<(u64, String)>,
+    /// What the daemon was last told is typed in the box, or told the
+    /// window, as it came.
+    pub(super) draft_sent: String,
+    /// When what's typed first changed since the daemon was last told,
+    /// and last changed, as turns count time.
+    pub(super) draft_changed: Option<(u64, u64)>,
+}
+
 /// A duration as turns count time, in milliseconds.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -57,7 +74,7 @@ impl ChatView {
             self.queued.push(Input::CaretToEnd);
         }
         // What's typed here now, if not that, is to be told it.
-        self.draft_sent = draft;
+        self.memory.draft_sent = draft;
         self.note_draft();
     }
 
@@ -66,10 +83,10 @@ impl ChatView {
     /// told the daemon. Otherwise what's typed here stays, and is told it
     /// in turn as typing pauses.
     pub(super) fn draft_came(&mut self, draft: &str) {
-        if self.box_empty() && self.draft_changed.is_none() && !draft.is_empty() {
+        if self.box_empty() && self.memory.draft_changed.is_none() && !draft.is_empty() {
             self.editor.set_text(draft);
             self.queued.push(Input::CaretToEnd);
-            draft.clone_into(&mut self.draft_sent);
+            draft.clone_into(&mut self.memory.draft_sent);
         }
     }
 
@@ -79,26 +96,26 @@ impl ChatView {
         self.editor.raw_text().is_empty()
             && self.images.is_empty()
             && self.handoff_sent.is_none()
-            && self.taking_back.is_none()
+            && self.memory.taking_back.is_none()
     }
 
     /// Notes whether what's typed has changed since the daemon was last
     /// told, and when, for it to be told as typing pauses.
     pub(super) fn note_draft(&mut self) {
-        if !self.drafts_supported || self.editor.raw_text() == self.draft_sent {
-            self.draft_changed = None;
+        if !self.drafts_supported || self.editor.raw_text() == self.memory.draft_sent {
+            self.memory.draft_changed = None;
             return;
         }
         let now = self.now();
-        let first = self.draft_changed.map_or(now, |(first, _)| first);
-        self.draft_changed = Some((first, now));
+        let first = self.memory.draft_changed.map_or(now, |(first, _)| first);
+        self.memory.draft_changed = Some((first, now));
     }
 
     /// When what's typed is to be told the daemon, if it's to be: as
     /// typing pauses, or at once once the box is empty, as after sending,
     /// so a window opened next doesn't start with what was sent.
     pub(super) fn draft_due(&self) -> Option<u64> {
-        let (first, last) = self.draft_changed?;
+        let (first, last) = self.memory.draft_changed?;
         if self.editor.raw_text().is_empty() {
             return Some(last);
         }
@@ -115,9 +132,9 @@ impl ChatView {
         if !now && self.now() < due {
             return None;
         }
-        self.draft_changed = None;
+        self.memory.draft_changed = None;
         let mut text = self.editor.raw_text().to_owned();
-        self.draft_sent.clone_from(&text);
+        self.memory.draft_sent.clone_from(&text);
         if text.len() > DRAFT_LONGEST {
             text.truncate(text.floor_char_boundary(DRAFT_LONGEST));
         }
@@ -166,7 +183,7 @@ impl ChatView {
     fn recall_step(&mut self, up: bool, fonts: &mut Fonts) -> bool {
         let text = self.editor.raw_text().to_owned();
         // Typing since forgets where it had gone.
-        let mut walk = (self.recall.take())
+        let mut walk = (self.memory.recall.take())
             .filter(|(_, shown)| *shown == text)
             .map(|(walk, _)| walk);
         let shown = Walk::step(&mut walk, &self.node.prompts, &text, up);
@@ -178,7 +195,7 @@ impl ChatView {
                 driver.move_to_text_end();
             });
         }
-        self.recall = walk.map(|walk| (walk, shown));
+        self.memory.recall = walk.map(|walk| (walk, shown));
         changed
     }
 

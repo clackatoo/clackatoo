@@ -65,7 +65,7 @@ impl super::ChatView {
     /// box is empty, and one waits.
     pub(super) fn takes_back(&self) -> bool {
         self.queue_supported
-            && self.taking_back.is_none()
+            && self.memory.taking_back.is_none()
             && self.handoff_sent.is_none()
             && self.editor.raw_text().is_empty()
             && self.images.is_empty()
@@ -87,16 +87,17 @@ impl super::ChatView {
             self.say(why.into());
             return;
         }
-        if self.taking_back.is_some() {
+        if self.memory.taking_back.is_some() {
             return;
         }
-        self.taking_back = Some((id, message.text.clone()));
+        self.memory.taking_back = Some((id, message.text.clone()));
         settled.actions.push(ChatAction::RemoveQueued { id });
     }
 
     /// Whether the message `id` is being taken back into the box.
     pub(crate) fn taking_back(&self, id: u64) -> bool {
-        self.taking_back
+        self.memory
+            .taking_back
             .as_ref()
             .is_some_and(|(taking, _)| *taking == id)
     }
@@ -106,7 +107,7 @@ impl super::ChatView {
     /// goes in the box all the same, rather than be lost, and the bar
     /// says to check the queue.
     pub(super) fn take_back_lost(&mut self) {
-        if let Some(id) = self.taking_back.as_ref().map(|(id, _)| *id) {
+        if let Some(id) = self.memory.taking_back.as_ref().map(|(id, _)| *id) {
             self.taken_back(id, Response::Done);
             self.say(
                 "Disconnected while taking a queued message back: check the queue, as it may still be there"
@@ -119,7 +120,7 @@ impl super::ChatView {
     /// queue: once it's out, its text goes in the box, before anything
     /// typed since, as a draft refused comes back.
     pub(crate) fn taken_back(&mut self, id: u64, response: Response) {
-        let Some((_, text)) = self.taking_back.take_if(|(taking, _)| *taking == id) else {
+        let Some((_, text)) = self.memory.taking_back.take_if(|(taking, _)| *taking == id) else {
             return;
         };
         match response {
@@ -131,7 +132,7 @@ impl super::ChatView {
                     format!("{text}\n{typed}")
                 };
                 self.editor.set_text(&text);
-                self.recall = None;
+                self.memory.recall = None;
                 self.queued.push(Input::CaretToEnd);
                 self.note_draft();
             }
