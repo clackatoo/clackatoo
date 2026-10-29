@@ -153,7 +153,7 @@ Under each turn that changed files, a compact summary shows how many, with Undo 
 
 ## Rewinding, and branches
 
-`u` takes a turn out of the files, but the agent still remembers it. To take turns out of the conversation too, press `dG` on a turn in the chat's normal mode: the chat goes back to before it, and asks whether to undo the files those turns changed (`y` undoes them, `n` keeps them, any other key stays). `cc` or `S` on a message of yours does the same and puts the message back in the box, to change and send again. `/rewind` or `:rewind` rewinds the last turn.
+`u` takes a turn out of the files, but the agent still remembers it. To take turns out of the conversation too, press `dG` on a turn in the chat's normal mode. The bar names the turn and asks first, and if those turns changed files, whether to undo them (`y` undoes them, `n` keeps them, any other key stays where you are); then the chat goes back to before it. `cc` or `S` on a message of yours does the same and puts the message back in the box, to change and send again. `/rewind` or `:rewind` rewinds the last turn.
 
 Nothing is lost: what you rewound from stays in the chat as another branch. Where branches part, `‹ 2/3 ›` shows over the turn; click an arrow, or press `[b` and `]b`, to switch, and `:branches` lists them all. The agent goes on with each branch's own session.
 

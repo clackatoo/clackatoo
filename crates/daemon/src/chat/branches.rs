@@ -1926,6 +1926,12 @@ mod tests {
         let mut viewer = super::super::ChatSent::default();
         chat.catch_up(&mut viewer);
         assert!(chat.catch_up(&mut viewer).is_none());
+        // And one mid-way, sent all but the last change.
+        let mut behind = super::super::ChatSent::default();
+        chat.catch_up(&mut behind);
+        chat.journal
+            .push(clackatoo_protocol::ChatPatch::Notice(None));
+        chat.catch_up(&mut viewer);
         let actions = chat.rewind(1, false, false).unwrap();
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(prompts(&chat), ["apple"]);
@@ -1938,6 +1944,10 @@ mod tests {
         // Viewers get the chat whole, one sent everything before too.
         assert!(matches!(
             chat.catch_up(&mut viewer),
+            Some(clackatoo_protocol::ViewUpdate::Snapshot(_))
+        ));
+        assert!(matches!(
+            chat.catch_up(&mut behind),
             Some(clackatoo_protocol::ViewUpdate::Snapshot(_))
         ));
         assert_eq!(

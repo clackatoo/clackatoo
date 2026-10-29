@@ -19,6 +19,8 @@
 //! is kept for the turns before the first that changed and let go of
 //! from there (see [`ChatView::cut_from`]).
 
+use std::fmt::Write as _;
+
 use clackatoo_protocol::{ChatAction, Divergence, ForkFiles, Response, TurnFilesState};
 
 use super::{ChatView, Input};
@@ -57,6 +59,18 @@ fn counted(count: usize, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{count} {many}")
+    }
+}
+
+/// The first line of `words`, a message, cut short for the bar.
+fn quoted(words: &str) -> String {
+    const LONGEST: usize = 24;
+    let line = words.lines().next().unwrap_or_default().trim();
+    if line.chars().count() <= LONGEST {
+        line.to_owned()
+    } else {
+        let cut: String = line.chars().take(LONGEST - 1).collect();
+        format!("{}…", cut.trim_end())
     }
 }
 
@@ -189,7 +203,12 @@ impl ChatView {
             self.failed = true;
             return;
         }
-        let named = self.turn_named(turn);
+        // The turn's named, and quoted: one key does this, and may fall
+        // back to the last turn.
+        let mut named = self.turn_named(turn);
+        if let Some(words) = shown.user_prompt() {
+            let _ = write!(named, " (\"{}\")", quoted(words));
+        }
         let doing = if edit {
             format!("Edit {named}")
         } else {
@@ -197,16 +216,19 @@ impl ChatView {
         };
         let undoable = self.undoable_from(turn);
         let files = if force {
-            Some(ForkFiles::UndoForce)
+            Ok(ForkFiles::UndoForce)
         } else {
             match (self.rewind_files, undoable) {
-                (_, 0) | (RewindFiles::Keep, _) => Some(ForkFiles::Keep),
-                (RewindFiles::Undo, _) => Some(ForkFiles::Undo),
-                (RewindFiles::Ask, _) => None,
+                (_, 0) | (RewindFiles::Keep, _) => Ok(ForkFiles::Keep),
+                (RewindFiles::Undo, _) => Ok(ForkFiles::Undo),
+                (RewindFiles::Ask, _) => Err(format!(
+                    "undo the files {} changed",
+                    counted(undoable, "turn", "turns")
+                )),
             }
         };
         let what = What::Rewind { turn, edit };
-        self.ask_move(what, &doing, undoable, files, "");
+        self.ask_move(what, &doing, files, !force);
     }
 
     /// How many turns from `turn` on, by its index among those held,
@@ -222,16 +244,16 @@ impl ChatView {
     }
 
     /// Asks for `what`, `doing` as the bar says it, once the user has
-    /// said what's to become of the files of `undoable` turns, if `files`
-    /// doesn't say, and of the agent's background tasks, if any run:
-    /// leaving the branch stops them. `others` ends the files' question.
+    /// said what's to become of the files, if `files` is the question to
+    /// ask about them rather than the answer, and of the agent's
+    /// background tasks, if any run: leaving the branch stops them. With
+    /// `confirm`, it's asked even if nothing else is.
     fn ask_move(
         &mut self,
         what: What,
         doing: &str,
-        undoable: usize,
-        files: Option<ForkFiles>,
-        others: &str,
+        files: Result<ForkFiles, String>,
+        confirm: bool,
     ) {
         let tasks = (self.node.tasks.iter()).filter(|task| task.going()).count();
         let stop_tasks = tasks > 0;
@@ -246,19 +268,20 @@ impl ChatView {
             files,
             stop_tasks,
         };
-        let asked =
-            match (files, tasks_said) {
-                (Some(files), None) => return self.send_move(moved(files)),
-                (Some(files), Some(tasks)) => Confirm::new(format!("{doing}{tasks}? (y/n)"))
-                    .choice('y', "Go on, stopping them", moved(files)),
-                (None, tasks) => Confirm::new(format!(
-                    "{doing}{}: undo the files {} changed{others}? (y/n)",
-                    tasks.unwrap_or_default(),
-                    counted(undoable, "turn", "turns"),
-                ))
-                .choice('y', "Undo the files", moved(ForkFiles::Undo))
-                .choice('n', "Keep the files", moved(ForkFiles::Keep)),
-            };
+        let asked = match (files, tasks_said) {
+            (Ok(files), None) if !confirm => return self.send_move(moved(files)),
+            (Ok(files), tasks) => Confirm::new(format!(
+                "{doing}{}? (y/n)",
+                tasks.unwrap_or_default()
+            ))
+            .choice('y', "Go on", moved(files)),
+            (Err(question), tasks) => Confirm::new(format!(
+                "{doing}{}: {question}? (y/n)",
+                tasks.unwrap_or_default(),
+            ))
+            .choice('y', "Undo the files", moved(ForkFiles::Undo))
+            .choice('n', "Keep the files", moved(ForkFiles::Keep)),
+        };
         self.branch_asked = Some(asked);
     }
 
@@ -463,12 +486,16 @@ impl ChatView {
         );
         let undoable = self.undoable_from(turn);
         let files = match (self.rewind_files, undoable) {
-            (RewindFiles::Keep, _) => Some(ForkFiles::Keep),
-            (RewindFiles::Undo, _) | (RewindFiles::Ask, 0) => Some(ForkFiles::Undo),
-            (RewindFiles::Ask, _) => None,
+            (RewindFiles::Keep, _) => Ok(ForkFiles::Keep),
+            (RewindFiles::Undo, _) => Ok(ForkFiles::Undo),
+            (RewindFiles::Ask, 0) => Err("redo its files".to_owned()),
+            (RewindFiles::Ask, _) => Err(format!(
+                "undo the files {} here changed, and redo its",
+                counted(undoable, "turn", "turns")
+            )),
         };
         let what = What::Switch { turn, to };
-        self.ask_move(what, &doing, undoable, files, ", and redo the other's");
+        self.ask_move(what, &doing, files, false);
     }
 
     /// Every branch of the conversation where it parts from others, for
@@ -527,6 +554,16 @@ impl ChatView {
         Ok(())
     }
 
+    /// Older turns, `count` of them, have come before those held: what a
+    /// rewind or a switch asks is about a turn numbered that many on.
+    pub(super) fn branches_prepended(&mut self, count: usize) {
+        if let Some(asked) = &mut self.branch_asked {
+            asked.each_choice(|moved| match &mut moved.what {
+                What::Rewind { turn, .. } | What::Switch { turn, .. } => *turn += count,
+            });
+        }
+    }
+
     /// The chat came whole again with its turns from `turn` on, by index
     /// among those held, not those it held before, as after a rewind or a
     /// switch to another branch: what's kept by turn index from there on
@@ -569,6 +606,13 @@ impl ChatView {
             _ => true,
         });
         let past = |at: u32| at as usize >= turn;
+        // An edit whose rewind is dropped puts nothing in the box.
+        let edit_dropped = (self.queued.iter()).any(|input| {
+            matches!(input, Input::Act(ChatAction::Rewind { at, edit: true, .. }) if past(*at))
+        });
+        if edit_dropped {
+            self.memory.editing = None;
+        }
         self.queued.retain(|input| match input {
             Input::Yank { start, end, .. } => start.text.turn < turn && end.text.turn < turn,
             Input::Search { from, .. } => from.text.turn < turn,
@@ -593,7 +637,7 @@ mod tests {
     };
 
     use crate::chat::ChatView;
-    use crate::chat::fixtures::talk;
+    use crate::chat::fixtures::{fonts, read, talk};
     use crate::options::RewindFiles;
     use crate::vim::Stroke;
 
@@ -603,7 +647,9 @@ mod tests {
     }
 
     fn chat_of(node: ChatNode) -> ChatView {
-        ChatView::new(String::new(), node)
+        let mut chat = ChatView::new(String::new(), node);
+        chat.branches_supported = true;
+        chat
     }
 
     fn made(node: &mut ChatNode, index: usize) {
@@ -631,15 +677,59 @@ mod tests {
         }
     }
 
+    fn switch(at: u32, to: u16, files: ForkFiles) -> ChatAction {
+        ChatAction::SwitchBranch {
+            at,
+            to,
+            files,
+            stop_tasks: false,
+        }
+    }
+
+    fn divergence(at: u32, current: u16, count: u16) -> clackatoo_protocol::Divergence {
+        clackatoo_protocol::Divergence {
+            at,
+            current,
+            count,
+            dropped: 0,
+            branches: vec![BranchSummary::default(); usize::from(count)],
+        }
+    }
+
+    fn snapshot(node: ChatNode) -> clackatoo_protocol::ViewUpdate {
+        clackatoo_protocol::ViewUpdate::Snapshot(clackatoo_protocol::View {
+            title: String::new(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::new(node)),
+        })
+    }
+
     #[test]
-    fn a_rewind_with_no_files_to_undo_asks_nothing() {
-        let mut chat = chat_of(node(&["one", "two", "three"]));
-        chat.branches_supported = true;
+    fn a_rewind_always_names_the_turn_and_asks_before_it_goes() {
+        let mut chat = chat_of(node(&[
+            "one",
+            "two, a long message that goes on and on",
+            "three",
+        ]));
         chat.rewind(1, false, false);
-        assert_eq!(chat.branch_asking(), None);
+        assert_eq!(
+            chat.branch_asking(),
+            Some("Rewind to before turn 2 (\"two, a long message tha…\")? (y/n)")
+        );
+        chat.answer_branch(Stroke::char('n'));
+        assert!(actions(&mut chat).is_empty());
+        chat.rewind(1, false, false);
+        chat.answer_branch(Stroke::char('y'));
         assert_eq!(
             actions(&mut chat),
             [rewind(1, ForkFiles::Keep, false, false)]
+        );
+        // `:rewind!` asks nothing.
+        chat.rewind(1, false, true);
+        assert_eq!(chat.branch_asking(), None);
+        assert_eq!(
+            actions(&mut chat),
+            [rewind(1, ForkFiles::UndoForce, false, false)]
         );
     }
 
@@ -648,11 +738,10 @@ mod tests {
         let mut shown = node(&["one", "two", "three"]);
         made(&mut shown, 2);
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
         chat.rewind(1, false, false);
         assert_eq!(
             chat.branch_asking(),
-            Some("Rewind to before turn 2: undo the files 1 turn changed? (y/n)")
+            Some("Rewind to before turn 2 (\"two\"): undo the files 1 turn changed? (y/n)")
         );
         chat.answer_branch(Stroke::char('y'));
         assert_eq!(
@@ -669,20 +758,17 @@ mod tests {
         chat.answer_branch(Stroke::Escape);
         assert!(actions(&mut chat).is_empty());
         assert_eq!(chat.branch_asking(), None);
-        // `!`, or the option, doesn't ask.
-        chat.rewind(1, false, true);
-        assert_eq!(
-            actions(&mut chat),
-            [rewind(1, ForkFiles::UndoForce, false, false)]
-        );
+        // The option answers about the files; the turn is still asked about.
         chat.rewind_files = RewindFiles::Undo;
         chat.rewind(1, false, false);
+        chat.answer_branch(Stroke::char('y'));
         assert_eq!(
             actions(&mut chat),
             [rewind(1, ForkFiles::Undo, false, false)]
         );
         chat.rewind_files = RewindFiles::Keep;
         chat.rewind(1, false, false);
+        chat.answer_branch(Stroke::char('y'));
         assert_eq!(
             actions(&mut chat),
             [rewind(1, ForkFiles::Keep, false, false)]
@@ -705,11 +791,10 @@ mod tests {
             output: None,
         });
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
         chat.rewind(1, false, false);
         assert_eq!(
             chat.branch_asking(),
-            Some("Rewind to before turn 2, stopping 1 background task? (y/n)")
+            Some("Rewind to before turn 2 (\"two\"), stopping 1 background task? (y/n)")
         );
         chat.answer_branch(Stroke::char('n'));
         assert!(actions(&mut chat).is_empty());
@@ -724,9 +809,13 @@ mod tests {
     #[test]
     fn an_edit_puts_the_message_before_whats_typed_once_done() {
         let mut chat = chat_of(node(&["one", "fix the bug\n[Image]"]));
-        chat.branches_supported = true;
         chat.editor.set_text("and more");
         chat.rewind(1, true, false);
+        assert_eq!(
+            chat.branch_asking(),
+            Some("Edit turn 2 (\"fix the bug\")? (y/n)")
+        );
+        chat.answer_branch(Stroke::char('y'));
         let sent = actions(&mut chat);
         assert_eq!(sent.last(), Some(&rewind(1, ForkFiles::Keep, true, false)));
         assert!(chat.editing());
@@ -735,52 +824,67 @@ mod tests {
         assert!(!chat.editing());
         // Not a message of the user's: refused, asking nothing.
         let mut chat = chat_of(node(&["one"]));
-        chat.branches_supported = true;
         chat.node.turns[0].woke = Some(String::new());
         chat.rewind(0, true, false);
+        assert_eq!(chat.branch_asking(), None);
         assert!(actions(&mut chat).is_empty());
     }
 
     #[test]
     fn an_older_daemon_or_a_busy_agent_refuses_at_once() {
         let mut chat = chat_of(node(&["one", "two"]));
+        chat.branches_supported = false;
         chat.rewind(1, false, false);
-        assert!(actions(&mut chat).is_empty());
+        assert_eq!(chat.branch_asking(), None);
         assert!(chat.take_failed());
-    }
-
-    fn divergence(at: u32, current: u16, count: u16) -> clackatoo_protocol::Divergence {
-        clackatoo_protocol::Divergence {
-            at,
-            current,
-            count,
-            dropped: 0,
-            branches: vec![BranchSummary::default(); usize::from(count)],
-        }
     }
 
     #[test]
-    fn brackets_step_through_the_branches_where_they_part_and_stop_at_the_ends() {
+    fn brackets_step_through_the_branches_where_they_part_with_counts_and_stop_at_the_ends() {
         let mut shown = node(&["one", "two", "three"]);
         shown.branches = vec![divergence(1, 2, 3)];
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
-        chat.branch_step(true, None);
-        let switch = |to| ChatAction::SwitchBranch {
-            at: 1,
-            to,
-            files: ForkFiles::Undo,
-            stop_tasks: false,
-        };
-        assert_eq!(actions(&mut chat), [switch(1)]);
-        chat.branch_step(false, Some(5));
-        assert_eq!(actions(&mut chat), [switch(3)]);
+        chat.rewind_files = RewindFiles::Undo;
+        read(&mut chat, "[b");
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
+        read(&mut chat, "5]b");
+        assert_eq!(actions(&mut chat), [switch(1, 3, ForkFiles::Undo)]);
+        read(&mut chat, "9[b");
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
         chat.node.branches = vec![divergence(1, 3, 3)];
-        chat.branch_step(false, None);
+        read(&mut chat, "]b");
         assert!(actions(&mut chat).is_empty());
         assert!(chat.take_failed());
         assert!(chat.branch_numbered(1).is_ok());
-        assert_eq!(actions(&mut chat), [switch(1)]);
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
+    }
+
+    #[test]
+    fn a_switch_asks_about_the_files_even_with_nothing_here_to_undo() {
+        let mut shown = node(&["one", "two"]);
+        shown.branches = vec![divergence(1, 2, 2)];
+        let mut chat = chat_of(shown);
+        chat.branch_step(true, None);
+        assert_eq!(
+            chat.branch_asking(),
+            Some("Switch to branch 1 of 2 at turn 2: redo its files? (y/n)")
+        );
+        chat.answer_branch(Stroke::char('y'));
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
+        chat.branch_step(true, None);
+        chat.answer_branch(Stroke::char('n'));
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Keep)]);
+        made(&mut chat.node, 1);
+        chat.branch_step(true, None);
+        assert!(
+            chat.branch_asking()
+                .unwrap()
+                .contains("undo the files 1 turn here changed, and redo its")
+        );
+        chat.rewind_files = RewindFiles::Keep;
+        chat.branch_asked = None;
+        chat.branch_step(true, None);
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Keep)]);
     }
 
     #[test]
@@ -788,51 +892,67 @@ mod tests {
         let mut shown = node(&["one"]);
         shown.branches = vec![divergence(1, 2, 2)];
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
+        chat.rewind_files = RewindFiles::Undo;
         chat.branch_step(true, None);
-        assert_eq!(
-            actions(&mut chat),
-            [ChatAction::SwitchBranch {
-                at: 1,
-                to: 1,
-                files: ForkFiles::Undo,
-                stop_tasks: false,
-            }]
-        );
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
     }
 
     #[test]
     fn rewinding_by_number_counts_as_people_do() {
         let mut chat = chat_of(node(&["one", "two", "three"]));
-        chat.branches_supported = true;
-        assert!(chat.rewind_numbered(Some(2), false).is_ok());
+        assert!(chat.rewind_numbered(Some(2), true).is_ok());
         assert_eq!(
             actions(&mut chat),
-            [rewind(1, ForkFiles::Keep, false, false)]
+            [rewind(1, ForkFiles::UndoForce, false, false)]
         );
-        assert!(chat.rewind_numbered(None, false).is_ok());
+        assert!(chat.rewind_numbered(None, true).is_ok());
         assert_eq!(
             actions(&mut chat),
-            [rewind(2, ForkFiles::Keep, false, false)]
+            [rewind(2, ForkFiles::UndoForce, false, false)]
         );
         assert!(chat.rewind_numbered(Some(9), false).is_err());
     }
 
-    fn snapshot(node: ChatNode) -> clackatoo_protocol::ViewUpdate {
-        clackatoo_protocol::ViewUpdate::Snapshot(clackatoo_protocol::View {
-            title: String::new(),
-            cwd: None,
-            root: clackatoo_protocol::Node::Chat(Box::new(node)),
-        })
+    #[test]
+    fn the_keys_rewind_the_turn_in_view_or_else_the_last() {
+        let mut fonts = fonts();
+        let mut chat = chat_of(node(&["one", "two", "three"]));
+        chat.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        read(&mut chat, "gg");
+        read(&mut chat, "dG");
+        assert!(chat.branch_asking().unwrap().contains("turn 1 (\"one\")"));
+        chat.branch_asked = None;
+        // The cursor's turn out of view: the last.
+        chat.shown.clear();
+        read(&mut chat, "dG");
+        assert!(chat.branch_asking().unwrap().contains("turn 3 (\"three\")"));
+    }
+
+    #[test]
+    fn older_turns_coming_while_asked_keep_the_question_on_its_turn() {
+        let mut chat = chat_of(node(&["one", "two"]));
+        chat.rewind(1, false, false);
+        chat.queued
+            .push(super::Input::Act(rewind(0, ForkFiles::Keep, false, false)));
+        chat.prepend_history(3);
+        assert_eq!(
+            actions(&mut chat),
+            [rewind(3, ForkFiles::Keep, false, false)]
+        );
+        chat.answer_branch(Stroke::char('y'));
+        assert_eq!(
+            actions(&mut chat),
+            [rewind(4, ForkFiles::Keep, false, false)]
+        );
     }
 
     #[test]
     fn the_switcher_is_drawn_where_branches_part_and_its_arrows_switch() {
-        let mut fonts = crate::chat::fixtures::fonts();
+        let mut fonts = fonts();
         let mut shown = node(&["one", "two", "three"]);
         shown.branches = vec![divergence(1, 2, 3)];
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
+        chat.rewind_files = RewindFiles::Undo;
         chat.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         let arrow = |chat: &ChatView, to| {
             let (_, [x, y, width, height]) = (chat.hits.iter())
@@ -850,19 +970,14 @@ mod tests {
         chat.press(back, 1, false);
         assert_eq!(
             chat.settle(&mut fonts).actions,
-            [ChatAction::SwitchBranch {
-                at: 1,
-                to: 1,
-                files: ForkFiles::Undo,
-                stop_tasks: false,
-            }]
+            [switch(1, 1, ForkFiles::Undo)]
         );
         arrow(&chat, 3);
     }
 
     #[test]
     fn a_new_branch_not_written_to_has_a_row_after_the_last_turn_or_alone() {
-        let mut fonts = crate::chat::fixtures::fonts();
+        let mut fonts = fonts();
         let mut shown = node(&["one"]);
         shown.branches = vec![divergence(1, 2, 2)];
         let mut chat = chat_of(shown);
@@ -881,16 +996,19 @@ mod tests {
 
     #[test]
     fn a_rewind_lets_go_of_what_was_kept_of_the_turns_cut_and_a_reconnect_keeps_it() {
-        let mut fonts = crate::chat::fixtures::fonts();
+        let mut fonts = fonts();
         let shown = node(&["one", "two", "three"]);
         let mut chat = chat_of(shown.clone());
         chat.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         chat.folds.insert(0, true);
         chat.folds.insert(2, true);
         chat.open_agents.insert(2);
+        chat.table_scrolls.insert((0, 2, 0), 10.0);
+        chat.table_scrolls.insert((2, 2, 0), 10.0);
         // The same turns again, as after a reconnect: everything kept.
         chat.apply(&snapshot(shown.clone()));
         assert_eq!(chat.folds.len(), 2);
+        assert_eq!(chat.table_scrolls.len(), 2);
         // Turn 2 on is another branch now: what's kept of it goes.
         let mut cut = node(&["one", "TWO"]);
         cut.turns[1].sent = 99_000;
@@ -898,6 +1016,10 @@ mod tests {
         chat.apply(&snapshot(cut));
         assert_eq!(chat.folds.keys().copied().collect::<Vec<_>>(), [0]);
         assert!(chat.open_agents.is_empty());
+        assert_eq!(
+            chat.table_scrolls.keys().copied().collect::<Vec<_>>(),
+            [(0, 2, 0)]
+        );
         chat.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         assert!(
             chat.hits
@@ -911,6 +1033,52 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_lets_go_of_the_search_selection_and_queue_past_it() {
+        use crate::chat::fixtures::paint;
+        let mut fonts = fonts();
+        let mut chat = chat_of(talk(&[("a cat", "ok"), ("b", "a cat too")]));
+        chat.reading = true;
+        paint(&mut chat, &mut fonts);
+        read(&mut chat, "G");
+        read(&mut chat, "/cat");
+        crate::chat::fixtures::read_named(&mut chat, winit::keyboard::NamedKey::Enter);
+        chat.settle(&mut fonts);
+        read(&mut chat, "v");
+        assert!(
+            chat.search
+                .found()
+                .is_some_and(|found| found.text.turn == 1)
+        );
+        assert!(chat.picked.is_some());
+        chat.queued.push(super::Input::Act(ChatAction::Undo {
+            turn: 1,
+            force: false,
+        }));
+        chat.queued.push(super::Input::Act(ChatAction::Undo {
+            turn: 0,
+            force: false,
+        }));
+        chat.queued
+            .push(super::Input::Act(rewind(1, ForkFiles::Keep, true, false)));
+        chat.memory.editing = Some("b".into());
+        chat.cut_from(1);
+        assert_eq!(chat.search.found(), None);
+        assert!(chat.picked.is_none());
+        assert!(chat.cursor.is_none());
+        assert_eq!(
+            actions(&mut chat),
+            [ChatAction::Undo {
+                turn: 0,
+                force: false
+            }]
+        );
+        assert!(
+            !chat.editing(),
+            "the edit's rewind went, and the box takes nothing"
+        );
+    }
+
+    #[test]
     fn finder_rows_name_each_branch_and_pick_it() {
         let mut shown = node(&["one", "two"]);
         let mut place = divergence(1, 2, 2);
@@ -921,7 +1089,7 @@ mod tests {
         place.branches[1].summary = true;
         shown.branches = vec![place];
         let mut chat = chat_of(shown);
-        chat.branches_supported = true;
+        chat.rewind_files = RewindFiles::Undo;
         let items = chat.branch_items();
         assert_eq!(items.len(), 2);
         assert!(
@@ -931,39 +1099,22 @@ mod tests {
         );
         assert!(items[1].text.ends_with("1 turn · shown · from a summary"));
         assert!(chat.switch_picked(&items[0].name).is_ok());
-        assert_eq!(
-            actions(&mut chat),
-            [ChatAction::SwitchBranch {
-                at: 1,
-                to: 1,
-                files: ForkFiles::Undo,
-                stop_tasks: false,
-            }]
-        );
+        assert_eq!(actions(&mut chat), [switch(1, 1, ForkFiles::Undo)]);
     }
 
     #[test]
     fn dg_rewinds_cc_edits_and_other_cuts_say_why_not() {
-        use crate::chat::fixtures::read;
         let mut chat = chat_of(node(&["one", "two"]));
-        chat.branches_supported = true;
-        read(&mut chat, "dG");
-        assert_eq!(
-            actions(&mut chat),
-            [rewind(1, ForkFiles::Keep, false, false)]
-        );
-        read(&mut chat, "cc");
-        assert_eq!(
-            actions(&mut chat).last(),
-            Some(&rewind(1, ForkFiles::Keep, true, false))
-        );
-        chat.memory.editing = None;
-        read(&mut chat, "S");
-        assert_eq!(
-            actions(&mut chat).last(),
-            Some(&rewind(1, ForkFiles::Keep, true, false))
-        );
-        chat.memory.editing = None;
+        for (keys, edit) in [("dG", false), ("cc", true), ("S", true)] {
+            read(&mut chat, keys);
+            chat.answer_branch(Stroke::char('y'));
+            assert_eq!(
+                actions(&mut chat).last(),
+                Some(&rewind(1, ForkFiles::Keep, edit, false)),
+                "{keys}"
+            );
+            chat.memory.editing = None;
+        }
         assert!(!chat.take_failed());
         read(&mut chat, "dd");
         assert!(actions(&mut chat).is_empty());

@@ -735,6 +735,7 @@ impl ChatView {
             .map(|((t, p, n), v)| ((t + count, p, n), v))
             .collect();
         self.search_prepended(count);
+        self.branches_prepended(count);
         if let Some(cursor) = &mut self.cursor {
             cursor.text.turn += count;
         }
@@ -776,7 +777,12 @@ impl ChatView {
                     end.text.turn += count;
                 }
                 Input::Search { from, .. } => from.text.turn += count,
-                Input::Act(ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. }) => {
+                Input::Act(
+                    ChatAction::Undo { turn, .. }
+                    | ChatAction::Redo { turn, .. }
+                    | ChatAction::Rewind { at: turn, .. }
+                    | ChatAction::SwitchBranch { at: turn, .. },
+                ) => {
                     *turn = turn.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
                 }
                 _ => {}

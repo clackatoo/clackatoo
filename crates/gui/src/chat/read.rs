@@ -668,11 +668,7 @@ impl ChatView {
             }
             Action::Search { backward } => self.start_search(backward, command.count),
             Action::SearchAgain { reverse } => self.search_again(reverse, command.count),
-            Action::Own(ChatKey::Branch { back }) => {
-                self.branch_step(back, command.count);
-                return (true, false);
-            }
-            Action::Own(own) => return self.own(own),
+            Action::Own(own) => return self.own(own, command.count),
             // Nothing else is taken (see `ChatKeys::takes`).
             _ => return (false, false),
         }
@@ -681,7 +677,7 @@ impl ChatView {
     }
 
     /// Does `key`, a command of a chat's own.
-    fn own(&mut self, key: ChatKey) -> (bool, bool) {
+    fn own(&mut self, key: ChatKey, count: Option<usize>) -> (bool, bool) {
         match key {
             ChatKey::Compose => return (true, true),
             ChatKey::Enter => {
@@ -714,8 +710,8 @@ impl ChatView {
                 }
             }
             ChatKey::Undo { redo } => self.undo_key(redo),
-            ChatKey::Branch { back } => self.branch_step(back, None),
             ChatKey::Rewind { edit } => self.rewind_key(edit),
+            ChatKey::Branch { back } => self.branch_step(back, count),
             ChatKey::Resend => {
                 if !self.resend() {
                     self.say(

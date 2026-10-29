@@ -450,7 +450,7 @@ fn branches_at(node: &ChatNode, index: usize) -> Option<&clackatoo_protocol::Div
 /// What the phone says where branches part: "Branch 2 of 3", and that it
 /// was made from a summary.
 fn branches_said(place: &clackatoo_protocol::Divergence) -> String {
-    let mut said = format!("‹ Branch {} of {} ›", place.current, place.count);
+    let mut said = format!("Branch {} of {}", place.current, place.count);
     let summary = (place
         .branches
         .get(usize::from(place.current).wrapping_sub(1)))
@@ -2127,12 +2127,9 @@ mod tests {
         let open = open();
         assert!(!turn(&node, &open, 0, 0).all_text().contains("Branch"));
         let text = turn(&node, &open, 1, 0).all_text();
+        assert!(text.contains("Branch 2 of 3 · from a summary"), "{text}");
         assert!(
-            text.contains("‹ Branch 2 of 3 › · from a summary"),
-            "{text}"
-        );
-        assert!(
-            text.contains("New branch, to write to · ‹ Branch 2 of 2 ›"),
+            text.contains("New branch, to write to · Branch 2 of 2"),
             "{text}"
         );
     }

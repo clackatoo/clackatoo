@@ -32,6 +32,13 @@ impl<T: Clone> Confirm<T> {
         self
     }
 
+    /// Changes what each answer does, as with the place it's about moved.
+    pub(crate) fn each_choice(&mut self, mut change: impl FnMut(&mut T)) {
+        for (.., then) in &mut self.choices {
+            change(then);
+        }
+    }
+
     /// What the bar shows.
     pub(crate) fn question(&self) -> &str {
         &self.question
