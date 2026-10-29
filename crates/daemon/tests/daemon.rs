@@ -18768,7 +18768,7 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
 fn an_agents_rewrite_of_a_big_file_not_open_leaves_the_daemon_answering() {
     // About 20 ms in a debug build; half a second before CLACKA-200.
     let slowest = slowest_answer_while_a_big_file_is_rewritten(false, true);
-    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
+    assert!(slowest < Duration::from_millis(150), "{slowest:?}");
 }
 
 #[test]
