@@ -987,6 +987,9 @@ impl Daemon {
             limits: Some(chat.limits().name().to_owned()),
             kept: chat.kept_by_user(),
             mode: (chat.kept_mode()).map(|(setting, value)| saved::Mode { setting, value }),
+            off_branch: parent
+                .and_then(|parent| self.chat_ref(parent))
+                .is_some_and(|of| of.subagent(id).is_none() && of.holds_card(id)),
         })
     }
 
@@ -1082,6 +1085,14 @@ impl Daemon {
                 continue;
             };
             log::info!("chat {chat} made again as a subagent of chat {parent}");
+            // Its card was on a branch not shown, which comes back a stub
+            // without it: its finishing is never told to the branch shown.
+            if started.off_branch {
+                if let Some(of) = self.chat(parent) {
+                    of.lose_card(chat);
+                }
+                continue;
+            }
             // Its card in its parent, on the turn it was, as neither has
             // its turns until its session is told again.
             let shown = self.workspaces.get().pane_showing(chat).is_some();
@@ -1784,6 +1795,43 @@ mod tests {
             .filter(|chat| chat.saved_branches().is_some())
             .count();
         assert_eq!(kept, 1);
+    }
+
+    /// A subagent whose card was on a branch of its parent's not shown
+    /// comes back with no card, and its finishing isn't told to the
+    /// branch shown.
+    #[test]
+    fn a_subagent_of_a_branch_not_shown_comes_back_with_no_card_and_untold() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let started = serde_json::json!({
+            "parent": 20, "depth": 1, "profile": "general", "limits": "none", "off_branch": true,
+        });
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [kept_workspace("here", &[
+                kept_chat(20, "user", None),
+                kept_chat(21, "sub", Some(started)),
+            ])],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let id = |title: &str| {
+            (daemon.terminals.iter())
+                .find(|(_, slot)| {
+                    (slot.terminal.chat_ref()).is_some_and(|chat| chat.info().title == title)
+                })
+                .map_or_else(|| panic!("no chat {title}"), |(&id, _)| id)
+        };
+        let (user, sub) = (id("user"), id("sub"));
+        let parent = daemon.chat_ref(user).unwrap();
+        assert!(parent.subagent(sub).is_none());
+        assert!(parent.holds_card(sub));
+        assert_eq!(daemon.chat_ref(sub).unwrap().relations().parent, Some(user));
     }
 
     #[test]

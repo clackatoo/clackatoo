@@ -13,6 +13,58 @@ use super::Daemon;
 use super::turn_undo::Reversal;
 use crate::agent::Listed;
 
+/// What undoing or redoing a branch's turns' files did: the turns done,
+/// by their uids, and the first that couldn't be, by its index, with why,
+/// and how many after it weren't tried.
+#[derive(Debug, Default)]
+struct Reversed {
+    done: Vec<crate::chat::TurnUid>,
+    refused: Option<(usize, String)>,
+    untried: usize,
+}
+
+impl Reversed {
+    /// What to say of what was done, if anything was.
+    fn said(&self, redo: bool) -> Option<String> {
+        let done = self.done.len();
+        let turns = if done == 1 { "turn" } else { "turns" };
+        let verb = if redo { "Redid" } else { "Undid" };
+        (done > 0).then(|| format!("{verb} what {done} {turns} changed in files."))
+    }
+
+    /// What to say of redoing the files of a branch switched to: the
+    /// conversation switched whatever came of it, so a turn that couldn't
+    /// be redone says which, what was and wasn't, and what to do.
+    fn switched_said(&self) -> Option<String> {
+        let Some((turn, said)) = &self.refused else {
+            return self.said(true);
+        };
+        let done = self.done.len();
+        let untried = match self.untried {
+            0 => String::new(),
+            1 => " 1 more after it wasn't tried.".to_owned(),
+            more => format!(" {more} more after it weren't tried."),
+        };
+        Some(format!(
+            "Switched, but turn {}'s files couldn't be redone: {said} Redid what {done} {} \
+             before it changed.{untried} Switch back with Undo to put the files as they were, \
+             or redo the rest with u on each turn.",
+            turn + 1,
+            if done == 1 { "turn" } else { "turns" },
+        ))
+    }
+}
+
+/// What to say of turns undone before one that stopped a rewind or
+/// switch: they stay undone, and can be redone.
+fn kept_undone(done: usize) -> String {
+    match done {
+        0 => String::new(),
+        1 => " The turn after it stays undone: u redoes it.".to_owned(),
+        more => format!(" The {more} turns after it stay undone: u redoes them."),
+    }
+}
+
 impl Daemon {
     /// Answers [`ChatAction::Rewind`](clackatoo_protocol::ChatAction::Rewind).
     pub(super) fn rewind_chat(
@@ -23,23 +75,26 @@ impl Daemon {
         edit: bool,
         stop_tasks: bool,
     ) -> Result<(), Error> {
+        // Everything that refuses, before any file is touched.
         let chat = self.chat_ref(id).ok_or(Error::NotAChat(id))?;
-        if let Some(why) = chat.unsettled(stop_tasks) {
+        if let Some(why) = chat.rewind_refused(at, edit, stop_tasks) {
             return Err(Error::Other(why));
-        }
-        let shown = chat.node().turns.len();
-        if at >= shown {
-            return Err(Error::Other(format!("There's no turn {}.", at + 1)));
         }
         // The files first: a turn that can't be undone stops the rewind,
         // what was undone before it kept, and redoable.
-        let undone = self
-            .reverse_turns(id, at, files, false)
-            .map_err(Error::Other)?;
+        let undone = self.reverse_turns(id, at, files, false);
+        if let Some((turn, said)) = undone.refused {
+            return Err(Error::Other(format!(
+                "{said} Turn {} stopped the rewind: nothing was rewound.{}",
+                turn + 1,
+                kept_undone(undone.done.len()),
+            )));
+        }
         let chat = self.chat(id).ok_or(Error::NotAChat(id))?;
         let actions = chat.rewind(at, edit, stop_tasks).map_err(Error::Other)?;
-        if let Some(undone) = undone {
-            chat.notify(undone);
+        chat.note_left_undone(&undone.done);
+        if let Some(said) = undone.said(false) {
+            chat.notify(said);
         }
         self.act(id, actions);
         self.after_cut(id);
@@ -64,33 +119,40 @@ impl Daemon {
         }
         // What the branch shown changed after the divergence is undone
         // first, newest first; what the branch switched to changed, that
-        // was undone as it was left, is made again after, oldest first.
-        let undone = self
-            .reverse_turns(id, at, files, false)
-            .map_err(Error::Other)?;
+        // its leaving undid, is made again after, oldest first.
+        let undone = self.reverse_turns(id, at, files, false);
+        if let Some((turn, said)) = undone.refused {
+            return Err(Error::Other(format!(
+                "{said} Turn {} stopped the switch: the conversation wasn't switched.{}",
+                turn + 1,
+                kept_undone(undone.done.len()),
+            )));
+        }
         let chat = self.chat(id).ok_or(Error::NotAChat(id))?;
         let actions = chat
             .switch_branch(at, to, stop_tasks)
             .map_err(Error::Other)?;
+        chat.note_left_undone(&undone.done);
         self.act(id, actions);
+        let undone_said = undone.said(false);
         // A branch whose turns were let go has them told again first.
         if let Some(chat) = self.chat(id)
             && chat.branch_reloading()
         {
             chat.redo_when_told(files);
-            if let Some(undone) = undone {
-                chat.notify(undone);
+            if let Some(said) = undone_said {
+                chat.notify(said);
             }
             self.after_cut(id);
             return Ok(());
         }
         let redone = self.reverse_turns(id, at, files, true);
-        let said = match (undone, redone) {
-            (_, Err(why)) => Some(why),
-            (Some(undone), Ok(Some(redone))) => Some(format!("{undone} {redone}")),
-            (undone, Ok(redone)) => undone.or(redone),
-        };
-        if let (Some(said), Some(chat)) = (said, self.chat(id)) {
+        let said = [undone_said, redone.switched_said()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let (false, Some(chat)) = (said.is_empty(), self.chat(id)) {
             chat.notify(said);
         }
         self.after_cut(id);
@@ -99,69 +161,85 @@ impl Daemon {
 
     /// Undoes, or with `redo` redoes, what chat `id`'s turns from `from`
     /// on changed in files, as `files` says: newest first to undo, oldest
-    /// first to redo, and only those undone, to redo. Stops at the first
-    /// that can't be, saying why. Returns what to say of what was done.
+    /// first to redo; and to redo, only those the rewind or switch that
+    /// left them undid, never one the user undid. Stops at the first that
+    /// can't be, saying why.
     fn reverse_turns(
         &mut self,
         id: TerminalId,
         from: usize,
         files: ForkFiles,
         redo: bool,
-    ) -> Result<Option<String>, String> {
+    ) -> Reversed {
+        let mut reversed = Reversed::default();
         let force = match files {
-            ForkFiles::Keep => return Ok(None),
+            ForkFiles::Keep => return reversed,
             ForkFiles::Undo => false,
             ForkFiles::UndoForce => true,
         };
         self.settle_all_pending();
         let shown = self.chat_ref(id).map_or(0, |chat| chat.node().turns.len());
+        // Turns laid back in say what they changed as the log has it, as
+        // turns handed over off the branch shown don't keep that.
+        if redo {
+            let uids = (self.chat_ref(id))
+                .map(|chat| chat.turn_uids(from..shown).to_vec())
+                .unwrap_or_default();
+            self.refresh_files(id, uids);
+        }
         let mut order: Vec<usize> = (from..shown).collect();
         if !redo {
             order.reverse();
         }
-        let mut done = 0;
-        for index in order {
-            let chat = self.chat_ref(id).ok_or("the chat closed")?;
-            let undone = (chat.node().turns.get(index))
-                .and_then(|turn| turn.files)
-                .is_some_and(|files| files.state != TurnFilesState::Made);
-            if redo && !undone {
+        for (step, &index) in order.iter().enumerate() {
+            let Some(chat) = self.chat_ref(id) else {
+                break;
+            };
+            let Some(uid) = chat.turn_uid(index) else {
                 continue;
+            };
+            if redo {
+                let undone = (chat.node().turns.get(index))
+                    .and_then(|turn| turn.files)
+                    .is_some_and(|files| files.state != TurnFilesState::Made);
+                if !undone || !chat.left_undone(uid) {
+                    continue;
+                }
             }
-            let uid = chat.turn_uid(index);
             let (said, how) = self.reverse_turn_said(id, index, redo, force);
             let dropped = self.agent_files.log.trim(id);
-            self.refresh_files(id, dropped.into_iter().chain(uid));
+            self.refresh_files(id, dropped.into_iter().chain([uid]));
             match how {
-                Reversal::Done => done += 1,
+                Reversal::Done => reversed.done.push(uid),
                 Reversal::Nothing => {}
                 // Forced, a turn none of whose files can be is left as it is.
                 Reversal::Refused if force => {}
                 Reversal::Refused => {
-                    let what = if redo { "switched" } else { "rewound" };
-                    return Err(format!("{said} Nothing was {what} past it."));
+                    reversed.refused = Some((index, said));
+                    reversed.untried = order[step + 1..].len();
+                    break;
                 }
             }
         }
-        let turns = if done == 1 { "turn" } else { "turns" };
-        let verb = if redo { "Redid" } else { "Undid" };
-        Ok((done > 0).then(|| format!("{verb} what {done} {turns} changed in files.")))
+        if redo && let Some(chat) = self.chat(id) {
+            for &uid in &reversed.done {
+                chat.forget_left_undone(uid);
+            }
+        }
+        reversed
     }
 
     /// The turns of a branch of chat `id` whose turns were let go have
     /// come back, if they have: they're told what they changed in files,
-    /// and what was undone of them is made again, as the switch to it
-    /// asked.
+    /// and what its leaving undid of them is made again, as the switch to
+    /// it asked.
     pub(super) fn branch_told(&mut self, id: TerminalId) {
         let Some(told) = self.chat(id).and_then(crate::chat::HostedChat::take_told) else {
             return;
         };
         self.refresh_files(id, told.uids.iter().copied());
-        let said = match self.reverse_turns(id, told.at, told.files, true) {
-            Ok(said) => said,
-            Err(why) => Some(why),
-        };
-        if let (Some(said), Some(chat)) = (said, self.chat(id)) {
+        let redone = self.reverse_turns(id, told.at, told.files, true);
+        if let (Some(said), Some(chat)) = (redone.switched_said(), self.chat(id)) {
             chat.notify(said);
         }
         self.after_cut(id);
@@ -414,7 +492,7 @@ mod tests {
             .daemon
             .chat_act(chat, rewind_undoing(1, ForkFiles::Undo));
         let refused = refused.unwrap_err().to_string();
-        assert!(refused.contains("Nothing was rewound past it"), "{refused}");
+        assert!(refused.contains("nothing was rewound"), "{refused}");
         // The newest was undone, and stays so; nothing was cut.
         assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"));
         assert_eq!(world.chat_node().turns.len(), 3);
@@ -428,14 +506,14 @@ mod tests {
 
     /// Tells the chat's session's load again, as an agent does: `turns`
     /// turns, each a message answered.
-    fn tell_again(world: &mut World, turns: usize) {
+    fn tell_again(world: &mut World, prompts: &[&str]) {
         use agent_client_protocol_schema::v1::{
             ContentBlock, ContentChunk, SessionUpdate, TextContent,
         };
         let chat = world.daemon.chat(world.chat).unwrap();
-        for at in 0..turns {
+        for prompt in prompts {
             let text = |text: &str| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-            chat.replay(SessionUpdate::UserMessageChunk(text(&format!("turn {at}"))));
+            chat.replay(SessionUpdate::UserMessageChunk(text(prompt)));
             chat.replay(SessionUpdate::AgentMessageChunk(text("ok")));
         }
         chat.opened_again(true);
@@ -471,7 +549,7 @@ mod tests {
         let hosted = world.daemon.chat(chat).unwrap();
         assert!(hosted.branch_reloading());
         hosted.session_closed();
-        tell_again(&mut world, 3);
+        tell_again(&mut world, &["go", "more", "more"]);
         world.daemon.collect_damage(chat);
         assert_eq!(world.chat_node().turns.len(), 3);
         let hosted = world.daemon.chat_ref(chat).unwrap();
@@ -510,5 +588,92 @@ mod tests {
         assert!(world.daemon.agent_files.log.turns_of(chat).is_empty());
         let hosted = world.daemon.chat(chat).unwrap();
         assert!(hosted.switch_target(1, 1).is_err());
+    }
+
+    #[test]
+    fn a_switch_back_redoes_only_what_leaving_undid_never_what_the_user_did() {
+        // Turn 3 undone by hand, then left without touching files: a
+        // switch back with Undo leaves it undone.
+        let mut world = three_turns();
+        let chat = world.chat;
+        world.undo(2, false, false);
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"));
+        world.daemon.chat_act(chat, rewind(1)).unwrap();
+        world
+            .daemon
+            .chat_act(chat, switch(1, 1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.chat_node().turns.len(), 3);
+        assert_eq!(world.disk("b.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"), "still undone");
+        // Left undoing files, only what that undid is redone.
+        world
+            .daemon
+            .chat_act(chat, rewind_undoing(1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.disk("b.txt").as_deref(), Some("x\n"));
+        world
+            .daemon
+            .chat_act(chat, switch(1, 1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.disk("b.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"), "still undone");
+        // It survives an upgrade.
+        world
+            .daemon
+            .chat_act(chat, rewind_undoing(1, ForkFiles::Undo))
+            .unwrap();
+        let mut world = world.upgraded(|_| {});
+        world
+            .daemon
+            .chat_act(chat, switch(1, 1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.disk("b.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"));
+    }
+
+    #[test]
+    fn a_redo_that_fails_partway_through_a_switch_says_what_was_and_wasnt_done() {
+        let mut world = three_turns();
+        let chat = world.chat;
+        world
+            .daemon
+            .chat_act(chat, rewind_undoing(1, ForkFiles::Undo))
+            .unwrap();
+        // Yours, on the line turn 2 changed.
+        std::fs::write(world.path("b.txt"), "yours\n").unwrap();
+        world
+            .daemon
+            .chat_act(chat, switch(1, 1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.chat_node().turns.len(), 3, "switched all the same");
+        assert_eq!(world.disk("b.txt").as_deref(), Some("yours\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"));
+        let notice = world.chat_node().notice.unwrap_or_default();
+        for said in [
+            "Switched, but turn 2's files couldn't be redone",
+            "Redid what 0 turns before it changed.",
+            "1 more after it wasn't tried.",
+            "Switch back with Undo",
+        ] {
+            assert!(notice.contains(said), "{said}: {notice}");
+        }
+    }
+
+    #[test]
+    fn a_rewind_refused_touches_no_file() {
+        let mut world = three_turns();
+        let chat = world.chat;
+        world.daemon.chat(chat).unwrap().turn_mut(1).woke = Some("woke".to_owned());
+        let edit = ChatAction::Rewind {
+            at: 1,
+            files: ForkFiles::Undo,
+            edit: true,
+            stop_tasks: false,
+        };
+        let refused = world.daemon.chat_act(chat, edit).unwrap_err().to_string();
+        assert!(refused.contains("Only a message of yours"), "{refused}");
+        assert_eq!(world.disk("b.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("X\n"));
     }
 }

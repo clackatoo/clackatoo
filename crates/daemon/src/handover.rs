@@ -306,6 +306,12 @@ pub(crate) struct ChatBranches {
     pub(crate) plan: Option<ForkPlanRecord>,
     /// The sessions of branches let go, still kept off the start page.
     pub(crate) gone: Vec<String>,
+    /// The uids of turns off the branch shown whose files the rewind or
+    /// switch that left them undid, to redo as they're shown again.
+    pub(crate) undone: Vec<u32>,
+    /// The chats whose cards were on branches let go, by their terminals'
+    /// numbers: their finishing isn't told to the branch shown.
+    pub(crate) lost_cards: Vec<u32>,
 }
 
 /// A segment of a chat's conversation: the one it goes on from, the index
@@ -4706,6 +4712,8 @@ mod tests {
                     sent: true,
                 }),
                 gone: vec!["s-gone".to_owned()],
+                undone: vec![3],
+                lost_cards: vec![5],
             }],
             forks: vec![ChatForks {
                 chat: 2,
@@ -5146,6 +5154,10 @@ mod tests {
             Some("s-left")
         );
         assert!(branches.plan.as_ref().unwrap().sent);
+        assert_eq!(
+            (&branches.undone[..], &branches.lost_cards[..]),
+            (&[3][..], &[5][..])
+        );
         assert_eq!(read.forks[0].points[0].2, "msg_01");
         assert_eq!(read.drafts.len(), 1);
     }

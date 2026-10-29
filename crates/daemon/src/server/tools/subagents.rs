@@ -84,6 +84,11 @@ impl Daemon {
         let entry = match of.subagent(chat) {
             Some(entry) if !child.outdates(entry, shown) => return,
             Some(entry) => child.as_subagent(entry.turn, shown),
+            // Its card is on a branch of the conversation not shown, or
+            // was lost with one (CLACKA-198): never one on the branch
+            // shown, whose agent never started it. A card kept is brought
+            // up to date as its branch is shown again.
+            None if of.holds_card(chat) => return,
             None => {
                 let started = (child.node().turns.first()).map_or(u64::MAX, |turn| turn.sent);
                 child.as_subagent(of.turn_at(started), shown)

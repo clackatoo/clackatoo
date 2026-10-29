@@ -369,6 +369,11 @@ pub(crate) struct Started {
     /// session opens, never the mode a new chat of the user's starts in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) mode: Option<Mode>,
+    /// Its card was on a branch of its parent's conversation not shown
+    /// (CLACKA-198): it comes back with no card, and its finishing isn't
+    /// told to the branch shown. Builds before then pass this over.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) off_branch: bool,
 }
 
 /// The branches of a chat's conversation, as its tree of segments of
@@ -969,6 +974,7 @@ mod tests {
                 setting: "mode".into(),
                 value: "default".into(),
             }),
+            off_branch: false,
         };
         state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Chat {
             id: 8,
