@@ -95,12 +95,13 @@ pub use buffer::{
 pub use chat::{
     AMBER, AgentCommand, AgentSession, AgentTask, AgentTaskKind, AgentTaskState, ChatAction,
     ChatChoices, ChatDelivery, ChatImage, ChatNode, ChatPatch, ChatPreview, ChatState, ChatSummary,
-    ChatTarget, Choice, ChoiceKind, Code, Cost, Diff, Fullness, INTERFACE_COMMANDS, Item,
+    ChatTarget, Choice, ChoiceKind, Code, Cost, DECLINE, Diff, Fullness, INTERFACE_COMMANDS, Item,
     KNOWN_COMMANDS, Limit, Location, Outcome, PlanState, PlanStep, Provider, ProviderModels,
     ProviderUsage, Question, QueuedMessage, RED, ResumeSession, Said, Sender, Setting,
     SettingChoice, SettingKind, Spent, Subagent, SubagentStatus, Switch, Tool, ToolContent,
     ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage, UsageLimit, UsageLine,
-    agent_command, code_span, interface_command, slash_command, tokens, turn_number, turn_numbered,
+    agent_command, code_span, interface_command, said, slash_command, tokens, turn_number,
+    turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,

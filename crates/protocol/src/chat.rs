@@ -1225,7 +1225,8 @@ pub fn code_span(text: &str) -> String {
 /// `text` in pieces, as Markdown reads its inline code: a run of
 /// backticks starts code that the next run of as many ends; with none,
 /// the run is just backticks.
-fn said(text: &str) -> Vec<Said> {
+#[must_use]
+pub fn said(text: &str) -> Vec<Said> {
     let mut pieces = Vec::new();
     let mut words = String::new();
     let mut rest = text;
@@ -1302,6 +1303,11 @@ pub enum ChoiceKind {
     /// user.
     Other,
 }
+
+/// The ID of the answer a daemon gives a window from before
+/// [`ChoiceKind::Other`] in place of a question's answers, if all are of
+/// that kind, which it leaves out: it says no, cancelling the question.
+pub const DECLINE: &str = "clackatoo.decline";
 
 /// A chat as the list of chats shows it: enough to say which need the
 /// user, without each one's turns.

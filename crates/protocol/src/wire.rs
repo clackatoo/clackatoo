@@ -1147,7 +1147,16 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
     }
     fn question(question: &mut Option<crate::Question>) {
         if let Some(question) = question {
+            let asked = !question.choices.is_empty();
             (question.choices).retain(|choice| choice.kind != ChoiceKind::Other);
+            // With none left, it can still be said no to.
+            if asked && question.choices.is_empty() {
+                question.choices.push(crate::Choice {
+                    id: crate::chat::DECLINE.to_owned(),
+                    name: "Decline".to_owned(),
+                    kind: ChoiceKind::RejectOnce,
+                });
+            }
         }
     }
     fn node(node: &mut Node) {
@@ -1432,6 +1441,103 @@ mod tests {
     /// as a change made in it does: a peer a version older hasn't it.
     const NEW: u32 = PROTOCOL_VERSION;
     const OLD: u32 = PROTOCOL_VERSION - 1;
+
+    /// `patches` as a peer of `wire` reads them.
+    fn patches_at(wire: u32, patches: Vec<Patch>) -> Vec<Patch> {
+        let message = ServerMessage::Event(Event::View {
+            terminal: crate::TerminalId(1),
+            update: ViewUpdate::Patch(patches),
+        });
+        let read: ServerMessage = decode(wire, &frame::encode(wire, &message).unwrap());
+        let ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        }) = read
+        else {
+            panic!("not patches: {read:?}")
+        };
+        patches
+    }
+
+    #[test]
+    fn a_peer_before_chat_facts_reads_a_compacted_line_as_words() {
+        let compacted = Patch::Chat(ChatPatch::Item {
+            turn: 0,
+            item: 0,
+            value: Item::Compacted("automatic · 182k → 31k tokens".into()),
+        });
+        assert_eq!(patches_at(CHAT_FACTS, vec![compacted.clone()]), [compacted]);
+        let older = patches_at(AGENT_COMMANDS, vec![compacted_item()]);
+        assert_eq!(
+            older,
+            [Patch::Chat(ChatPatch::Item {
+                turn: 0,
+                item: 0,
+                value: Item::Other("*Context compacted · automatic · 182k → 31k tokens*".into()),
+            })]
+        );
+        // And is sent no news of the agent trying again.
+        let retrying = Patch::Chat(ChatPatch::Retrying(Some("Retrying".into())));
+        assert_eq!(
+            patches_at(AGENT_COMMANDS, vec![retrying, compacted_item()]).len(),
+            1
+        );
+    }
+
+    fn compacted_item() -> Patch {
+        Patch::Chat(ChatPatch::Item {
+            turn: 0,
+            item: 0,
+            value: Item::Compacted("automatic · 182k → 31k tokens".into()),
+        })
+    }
+
+    #[test]
+    fn a_peer_before_chat_facts_is_shown_no_answer_of_a_kind_not_known() {
+        let choice = |id: &str, kind| crate::Choice {
+            id: id.into(),
+            name: id.into(),
+            kind,
+        };
+        let asking = |choices| {
+            Patch::Chat(ChatPatch::Question(Some(crate::Question {
+                id: 1,
+                title: "touch probe.txt".into(),
+                choices,
+                own: false,
+                form: None,
+                plan: None,
+            })))
+        };
+        let choices = |patches: Vec<Patch>| match &patches[..] {
+            [Patch::Chat(ChatPatch::Question(Some(question)))] => (question.choices.iter())
+                .map(|choice| (choice.id.clone(), choice.kind))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        let mixed = asking(vec![
+            choice("allow", ChoiceKind::AllowOnce),
+            choice("session", ChoiceKind::Other),
+            choice("reject", ChoiceKind::RejectOnce),
+        ]);
+        assert_eq!(
+            choices(patches_at(CHAT_FACTS, vec![mixed.clone()])).len(),
+            3
+        );
+        assert_eq!(
+            choices(patches_at(AGENT_COMMANDS, vec![mixed])),
+            [
+                ("allow".to_owned(), ChoiceKind::AllowOnce),
+                ("reject".to_owned(), ChoiceKind::RejectOnce)
+            ]
+        );
+        // With every answer unknown, it can still say no.
+        let unknown = asking(vec![choice("session", ChoiceKind::Other)]);
+        assert_eq!(
+            choices(patches_at(AGENT_COMMANDS, vec![unknown])),
+            [(crate::chat::DECLINE.to_owned(), ChoiceKind::RejectOnce)]
+        );
+    }
 
     #[test]
     fn tool_images_downgrade_without_losing_the_tool_or_text() {
