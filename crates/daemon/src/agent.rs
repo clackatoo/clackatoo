@@ -902,19 +902,7 @@ impl Agent {
                 }
                 let params = message.params;
                 let asked = match method.as_str() {
-                    "session/request_permission" => {
-                        let mut params = params;
-                        let unknown = known_kinds(&mut params);
-                        serde_json::from_value::<RequestPermissionRequest>(params)
-                            .ok()
-                            .map(|request| Incoming::Permission {
-                                session: request.session_id.0.to_string(),
-                                request: id.clone(),
-                                tool: Box::new(request.tool_call),
-                                options: request.options,
-                                unknown,
-                            })
-                    }
+                    "session/request_permission" => permission(params, &id),
                     "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
                         .ok()
                         .map(|request| Incoming::ReadFile {
@@ -1320,6 +1308,22 @@ fn newest(mut got: Vec<Listed>) -> Vec<Listed> {
     got.sort_by(|a, b| b.updated.cmp(&a.updated));
     got.truncate(MOST_LISTED);
     got
+}
+
+/// The agent asking, in the request `id`, whether it may use a tool, as
+/// `params` say, if they can be read: those of its answers of a kind this
+/// build doesn't know are noted (see [`known_kinds`]).
+fn permission(mut params: Value, id: &Value) -> Option<Incoming> {
+    let unknown = known_kinds(&mut params);
+    serde_json::from_value::<RequestPermissionRequest>(params)
+        .ok()
+        .map(|request| Incoming::Permission {
+            session: request.session_id.0.to_string(),
+            request: id.clone(),
+            tool: Box::new(request.tool_call),
+            options: request.options,
+            unknown,
+        })
 }
 
 /// The kinds of answer to a question ACP has, which this build knows.
