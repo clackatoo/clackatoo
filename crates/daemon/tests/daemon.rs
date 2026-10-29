@@ -2913,6 +2913,29 @@ fn a_task_subagents_words_and_tools_go_under_its_tool_call_and_older_windows_see
 }
 
 #[test]
+fn a_question_about_a_subagents_tool_names_it_for_windows_to_show() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client
+        .chat(chat, ChatAction::Send("task-ask".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = node.question.as_ref().unwrap();
+    // The question names the tool, which is the Task's subagent's: a
+    // window opens the Task's card to show it.
+    assert_eq!(question.tool.as_deref(), Some("toolu_edit"));
+    let items = &node.turns.last().unwrap().items;
+    let edit = (items.iter())
+        .find(|item| item.tool().is_some_and(|tool| tool.id == "toolu_edit"))
+        .expect("the edit");
+    assert_eq!(edit.parent(), Some("toolu_task"));
+    answer(&mut client, chat, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "picked allow\n");
+}
+
+#[test]
 fn a_loaded_session_puts_what_its_subagents_did_under_their_tasks_again() {
     let daemon = TestDaemon::start();
     let home = daemon.dir.path().to_owned();

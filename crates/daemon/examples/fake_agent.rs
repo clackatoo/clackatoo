@@ -43,6 +43,7 @@
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
 //! | `task` | Hands a search to a subagent, as Claude Code's Task tool does: the Task call `toolu_task`, "Find the parser", then the subagent's words and tools, each marked as its in `_meta.claudeCode.parentToolUseId`, then the Task's result, then `The parser is in src/parse.rs.` |
+//! | `task-ask` | Starts a Task, `toolu_task`, whose subagent's edit, `toolu_edit`, is marked as the Task's, then asked about as `ask` is; then says which option was picked |
 //! | `commands SPEC` | Gives its slash commands, as `available_commands_update`: a word of SPEC each, `NAME` or `NAME:HINT`, each described `Does NAME`; then `commands given` |
 //! | `retry` | Says it's trying its request again, as Claude Code's adapter does to a client that asked for AIR's `sessionFailure` ("Retrying Claude, attempt 1 of 10."), or Codex's in `_meta.codex.error` ("Reconnecting... 1/5"); then says `recovered` |
 //! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
@@ -1807,6 +1808,34 @@ impl Fake {
                     &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
                     "params": { "sessionId": session,
                         "toolCall": { "toolCallId": "t2", "title": "Write notes.txt" },
+                        "options": [
+                            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                            { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
+            }
+            "task-ask" => {
+                // As Claude Code's adapter asks about a subagent's edit: the
+                // call first, marked as the Task's, then the question.
+                let from = json!({ "claudeCode": { "parentToolUseId": "toolu_task" } });
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_task",
+                             "title": "Fix the parser", "kind": "think", "status": "pending" }),
+                );
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_edit",
+                             "title": "Edit /src/parse.rs", "kind": "edit", "status": "pending",
+                             "content": [{ "type": "diff", "path": "/src/parse.rs",
+                                           "oldText": "old\n", "newText": "new\n" }],
+                             "_meta": from }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "toolu_edit", "title": "Edit /src/parse.rs" },
                         "options": [
                             { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
                             { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
