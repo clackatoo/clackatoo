@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.10.103 (2026-10-29)
+
+### Features
+
+- **daemon:** keep each chat's draft and the user's messages for the prompt box (CLACKA-192) (61366721)
+- **gui:** Up recalls the messages sent in a chat, Ctrl+R finds one, drafts stay, and queued messages come back to edit (CLACKA-192) (8955a84a)
+- **daemon:** a draft sent from any client is no one's draft any more (CLACKA-192) (044d5fd8)
+- **web:** the phone's box starts with what's typed elsewhere and says what it leaves typed (CLACKA-192) (9a915f7d)
+
+### Fixes
+
+- **gui:** a queued message being taken back as the daemon goes out of reach goes in the box, not nowhere (CLACKA-192) (fd654b27)
+- **daemon:** drafts are numbered, say who set them, come back to their setter, and queued messages are taken back into the draft (CLACKA-192) (2b19e693)
+- **gui:** a box takes a draft only if it hasn't changed since the last it took or told, never its own (CLACKA-192) (ed4cd0d4)
+- **web:** the phone takes drafts by the window's rule and tells its own as typing pauses (CLACKA-192) (3a5575fa)
+- **daemon:** a draft not known is None, and taking back answers with the message alone (CLACKA-192) (92931a9d)
+- take-back puts the message before the box's own text, an emptied box tells the empty draft, and an unknown draft is left alone (CLACKA-192) (50d7c94c)
+
 ## 2026.10.102 (2026-10-29)
 
 ### Features
