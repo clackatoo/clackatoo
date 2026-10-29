@@ -3,7 +3,7 @@
 //! send. And having buffers parsed, and sending their highlights.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clackatoo_protocol::{
@@ -1149,7 +1149,7 @@ pub(super) fn resolve(path: &str, dir: &Path, home: &Path) -> PathBuf {
         return path;
     }
     // A new file: its directory, if that exists, is as real as it gets.
-    let lexical = lexical(&path);
+    let lexical = crate::find::lexical(&path);
     match (lexical.parent(), lexical.file_name()) {
         (Some(parent), Some(name)) => match parent.canonicalize() {
             Ok(parent) => parent.join(name),
@@ -1157,21 +1157,6 @@ pub(super) fn resolve(path: &str, dir: &Path, home: &Path) -> PathBuf {
         },
         _ => lexical,
     }
-}
-
-/// `path` with its `.` and `..` worked out, without looking at the disk.
-fn lexical(path: &Path) -> PathBuf {
-    let mut made = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                made.pop();
-            }
-            other => made.push(other),
-        }
-    }
-    made
 }
 
 #[cfg(test)]

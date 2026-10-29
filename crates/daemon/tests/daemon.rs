@@ -2370,6 +2370,62 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
 }
 
 #[test]
+fn files_a_message_mentions_reach_the_agent_as_links_and_lines_as_text() {
+    let daemon = TestDaemon::start();
+    let project = daemon.dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(project.join("b c.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(daemon.dir.path().join("outside.txt"), "secret\n").unwrap();
+    let mut client = daemon.client();
+    let PaneTerminal::Agent(mut agent) = new_chat() else {
+        unreachable!()
+    };
+    agent.cwd = Some(project.display().to_string());
+    client
+        .new_workspace(None, PaneTerminal::Agent(agent))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    let text = "context @a.txt, @\"b c.txt\"#L2 and @../outside.txt";
+    let node = ask(&mut client, chat, text);
+    let said = last_words_of(&node.turns[0]);
+    let blocks: serde_json::Value =
+        serde_json::from_str(said.trim().strip_prefix("context: ").unwrap()).unwrap();
+    let real = project.canonicalize().unwrap();
+    // Claude Code reads a saved file itself; lines go as their text.
+    assert_eq!(
+        blocks,
+        serde_json::json!([
+            { "type": "resource_link", "name": "a.txt",
+              "uri": format!("file://{}/a.txt", real.display()) },
+            { "type": "resource", "resource": {
+                "uri": format!("file://{}/b%20c.txt#L2", real.display()),
+                "mimeType": "text/plain", "text": "two\n" } },
+        ])
+    );
+    let notice = node.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("@../outside.txt"), "{notice}");
+    assert!(!format!("{node:?}").contains("secret"));
+    // The next waits behind one whose files are being read, and doesn't
+    // overtake it.
+    for text in ["context @a.txt", "context alone"] {
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+    }
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 3 && last_outcome(node).is_some()
+    });
+    let prompts: Vec<&str> = (node.turns.iter())
+        .map(|turn| turn.prompt.as_str())
+        .collect();
+    assert_eq!(prompts[1..], ["context @a.txt", "context alone"]);
+    assert!(last_words_of(&node.turns[1]).contains("resource_link"));
+    assert_eq!(last_words_of(&node.turns[2]), "context: []\n");
+}
+
+#[test]
 fn an_agent_without_image_support_fails_the_turn_without_sending_text_alone() {
     let daemon = TestDaemon::start_with_agent(|dir| {
         vec![

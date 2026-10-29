@@ -76,6 +76,7 @@ mod language;
 mod lending;
 mod lent_background;
 mod links;
+mod mentions;
 mod offers;
 mod pieces;
 mod recovery;
@@ -923,6 +924,9 @@ pub struct Daemon {
     /// The agents chats talk to, while any chat needs them, and those
     /// being installed.
     agents: chats::Agents,
+    /// The messages to chats waiting for the files they mention to be
+    /// read, and what's held behind them.
+    mentioning: mentions::Mentioning,
     /// The process groups of agents and language servers stopped, until
     /// nothing they started is left.
     groups: groups::Groups,
@@ -1119,6 +1123,7 @@ impl Daemon {
             clipboard_due: Vec::new(),
             clipboard_unsent: false,
             agents: chats::Agents::default(),
+            mentioning: mentions::Mentioning::default(),
             groups: groups::Groups::default(),
             agent_files: agent_files::AgentFiles::default(),
             disk: disk::Disk::default(),

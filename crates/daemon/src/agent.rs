@@ -390,6 +390,9 @@ pub(crate) struct Agent {
     /// conversation so far as it goes (ACP's `session/load`).
     can_load: bool,
     can_image: bool,
+    /// Whether the agent takes files' text in a message, as ACP's
+    /// embedded `resource` blocks (`promptCapabilities.embeddedContext`).
+    can_embed: bool,
     can_steer: bool,
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
@@ -490,6 +493,7 @@ impl Agent {
             can_close: false,
             can_load: false,
             can_image: false,
+            can_embed: false,
             can_steer: false,
             can_list: None,
             tasks,
@@ -666,6 +670,12 @@ impl Agent {
         self.can_image
     }
 
+    /// Whether initialization advertised files' text in prompts, as
+    /// embedded `resource` blocks.
+    pub(crate) fn can_embed(&self) -> bool {
+        self.can_embed
+    }
+
     /// Whether it says when it takes a turn by itself, and gives its
     /// notices as such (see `chat/woken.rs`).
     pub(crate) fn tells_turns(&self) -> bool {
@@ -687,18 +697,21 @@ impl Agent {
         );
     }
 
-    /// Sends text blocks in order, followed by the user's images. Any
-    /// context carried over or role instructions precede the user's text.
+    /// Sends text blocks in order, then `context`, the files the user's
+    /// text mentions as ACP `resource_link` and `resource` blocks (see
+    /// `server/mentions.rs`), then the user's images. Any context carried
+    /// over or role instructions precede the user's text.
     pub(crate) fn prompt(
         &mut self,
         terminal: TerminalId,
         session: &str,
-        blocks: &[&str],
+        (blocks, context): (&[&str], &[Value]),
         images: &[clackatoo_protocol::ChatImage],
     ) {
         let mut prompt: Vec<Value> = (blocks.iter())
             .map(|text| json!({ "type": "text", "text": text }))
             .collect();
+        prompt.extend_from_slice(context);
         prompt.extend(images.iter().map(|image| {
             json!({
                 "type": "image", "mimeType": "image/png", "data": image.data,
@@ -1051,6 +1064,12 @@ impl Agent {
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         });
+        self.can_embed = result.as_ref().is_ok_and(|result| {
+            result
+                .pointer("/agentCapabilities/promptCapabilities/embeddedContext")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
         self.can_load = result.as_ref().is_ok_and(|result| {
             (result.pointer("/agentCapabilities/loadSession"))
                 .and_then(Value::as_bool)
@@ -1367,6 +1386,8 @@ impl Agent {
             can_close: live.can_close,
             can_load: live.can_load,
             can_image: live.can_image,
+            // Not handed over: known for the adapters checked.
+            can_embed: crate::agents::embeds_checked(&live.name),
             can_steer: live.can_steer,
             can_list: live.can_list,
             tasks: live.tasks,
@@ -1884,7 +1905,7 @@ mod handover_tests {
         agent.held = None;
         agent.pending.clear();
         agent.asked_at.clear();
-        agent.prompt(TerminalId(4), "s4", &["go"], &[]);
+        agent.prompt(TerminalId(4), "s4", (&["go"], &[]), &[]);
         let ago = (std::time::Instant::now())
             .checked_sub(std::time::Duration::from_mins(3))
             .unwrap();
@@ -1925,7 +1946,7 @@ mod handover_tests {
         agent.held = None;
         (agent.can_close, agent.can_steer, agent.can_list) = (true, true, Some(false));
         agent.pending.clear();
-        agent.prompt(TerminalId(4), "s4", &["go"], &[]);
+        agent.prompt(TerminalId(4), "s4", (&["go"], &[]), &[]);
         agent.list_sessions(7, "/src");
         agent.pending.insert(
             90,

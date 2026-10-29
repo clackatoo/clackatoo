@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -74,6 +74,21 @@ const BATCH_WAIT: Duration = Duration::from_millis(25);
 
 /// The most threads one walk takes.
 const MAX_THREADS: usize = 8;
+
+/// `path` with its `.` and `..` worked out, without looking at the disk.
+pub(crate) fn lexical(path: &Path) -> PathBuf {
+    let mut made = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                made.pop();
+            }
+            other => made.push(other),
+        }
+    }
+    made
+}
 
 /// Where a search looks: the root of the project something is in.
 #[derive(Clone, Debug)]

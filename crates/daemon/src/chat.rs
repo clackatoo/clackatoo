@@ -7194,6 +7194,41 @@ mod tests {
     }
 
     #[test]
+    fn files_a_message_mentioned_come_back_as_mentions_not_their_text() {
+        let mut chat = resuming();
+        chat.cwd = "/p/sub".to_owned();
+        chat.project = PathBuf::from("/p");
+        // As Claude's adapter keeps them: the words, a link for each file,
+        // and the text sent after them all.
+        replay_user(&mut chat, "look at @src/a.rs and @../b.rs");
+        replay_user(&mut chat, "[@a.rs](file:///p/sub/src/a.rs)");
+        replay_user(&mut chat, "[@b.rs](file:///p/b.rs)");
+        replay_user(
+            &mut chat,
+            "\n<context ref=\"file:///p/sub/src/a.rs\">\nfn secret() {}\n</context>",
+        );
+        // As Codex's keeps the text sent, and a link of its own interface.
+        replay_user(
+            &mut chat,
+            "[@src/a.rs#L2-L3](file:///p/sub/src/a.rs#L2-L3)\n<context ref=\"file:///p/sub/src/a.rs#L2-L3\">\nb\nc\n</context>",
+        );
+        let link = serde_json::json!({ "sessionUpdate": "user_message_chunk",
+            "content": { "type": "resource_link", "name": "c", "uri": "file:///elsewhere/c.rs" } });
+        replay(&mut chat, &link.to_string());
+        assert_eq!(
+            prompts(&chat),
+            ["look at @src/a.rs and @../b.rs @src/a.rs#L2-L3 @/elsewhere/c.rs"]
+        );
+        // Words shaped as a link, among others, are words.
+        replay_user(&mut chat, "see [@x](file:///p/x) here");
+        assert!(
+            chat.node.turns[0]
+                .prompt
+                .ends_with("see [@x](file:///p/x) here")
+        );
+    }
+
+    #[test]
     fn messages_sent_while_a_session_loads_go_together_after_the_turns_told_again() {
         let mut chat = resuming();
         replay_user(&mut chat, "before");

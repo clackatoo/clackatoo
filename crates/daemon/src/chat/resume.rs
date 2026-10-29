@@ -26,8 +26,12 @@
 //! and goes after them. Another sent meanwhile joins it. If the load ends
 //! another way, the message shows as a turn of its own, saying how.
 
-use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
-use clackatoo_protocol::{ChatState, Outcome, ResumeSession, Turn};
+use std::path::PathBuf;
+
+use agent_client_protocol_schema::v1::{ContentBlock, EmbeddedResourceResource, SessionUpdate};
+use clackatoo_protocol::{
+    ChatState, Outcome, ResumeSession, Turn, mention, mention_lines, mentions,
+};
 
 use super::{Action, HostedChat, Link, TITLE, Wanted, clean, clean_text, nested, now};
 
@@ -154,6 +158,32 @@ impl HostedChat {
             // it's no message of the user's.
             SessionUpdate::UserMessageChunk(chunk) if nested::told_a_subagent(&chunk) => {}
             SessionUpdate::UserMessageChunk(chunk) => {
+                // A file the message mentioned comes back as what the
+                // adapter made of it: a link, or as Claude's and Codex's
+                // adapters keep them, the words they gave the model.
+                let mentioned = match &chunk.content {
+                    ContentBlock::Text(text) => match replayed_context(&text.text) {
+                        Replayed::Words => None,
+                        Replayed::Link(uri) => Some(uri),
+                        Replayed::Text => return,
+                    },
+                    ContentBlock::ResourceLink(link) => Some(link.uri.as_str()),
+                    ContentBlock::Resource(resource) => match &resource.resource {
+                        EmbeddedResourceResource::TextResourceContents(text) => {
+                            Some(text.uri.as_str())
+                        }
+                        EmbeddedResourceResource::BlobResourceContents(blob) => {
+                            Some(blob.uri.as_str())
+                        }
+                        _ => return,
+                    },
+                    _ => None,
+                };
+                if let Some(uri) = mentioned {
+                    let uri = uri.to_owned();
+                    self.replay_mention(&uri);
+                    return;
+                }
                 let text = match chunk.content {
                     ContentBlock::Text(text) => without_inline_images(clean_text(&text.text)),
                     ContentBlock::Image(_) => "[Image]".to_owned(),
@@ -203,6 +233,43 @@ impl HostedChat {
 
     /// Adds a turn told again, with `prompt` its message, still open for
     /// what the agent did with it.
+    /// Takes in a file the message being told again mentioned, `uri`: as
+    /// `@path` in its words, unless they mention it already, as the
+    /// user's words do when clackatoo sent it.
+    fn replay_mention(&mut self, uri: &str) {
+        let Some((path, lines)) = file_of(uri) else {
+            return;
+        };
+        let cwd = PathBuf::from(&self.cwd);
+        let written = match path.strip_prefix(&cwd) {
+            Ok(inside) if path.starts_with(&self.project) => inside.display().to_string(),
+            _ => path.display().to_string(),
+        };
+        let open = (self.answering_turn()).filter(|&index| self.node.turns[index].items.is_empty());
+        if let Some(index) = open {
+            let prompt = &self.node.turns[index].prompt;
+            let already = mentions(prompt).iter().any(|mentioned| {
+                mentioned.lines == lines
+                    && [cwd.as_path(), self.project.as_path()]
+                        .iter()
+                        .any(|from| crate::find::lexical(&from.join(mentioned.path)) == path)
+            });
+            if already {
+                return;
+            }
+            let prompt = &mut self.node.turns[index].prompt;
+            if !prompt.is_empty() {
+                prompt.push(' ');
+            }
+            prompt.push_str(&mention(&written, lines));
+            self.patch_turn(index);
+            return;
+        }
+        self.end_turn(Outcome::Done);
+        self.forget_finished_plan();
+        self.push_replayed(mention(&written, lines));
+    }
+
     fn push_replayed(&mut self, prompt: String) {
         self.push_turn(Turn {
             woke: None,
@@ -449,9 +516,103 @@ pub(super) fn without_inline_images(text: String) -> String {
     shown
 }
 
+/// What a block of words the user's side of a session told again is, as
+/// the adapters write the files a message mentioned (see
+/// `server/mentions.rs`).
+#[derive(Debug, PartialEq, Eq)]
+enum Replayed<'a> {
+    /// The user's own words.
+    Words,
+    /// A link to the file at this URI, `[@name](file:///…)`: Claude's for
+    /// a link or the text sent, Codex's for a link, and Codex's for the
+    /// text sent, with the text after it.
+    Link(&'a str),
+    /// The text of a file sent, as Claude's adapter put it after the
+    /// message: `<context ref="file:///…">…</context>`.
+    Text,
+}
+
+/// What the block of words `text` is, of [`Replayed`].
+fn replayed_context(text: &str) -> Replayed<'_> {
+    if let Some(uri) = link(text) {
+        return Replayed::Link(uri);
+    }
+    if let Some((first, rest)) = text.split_once('\n')
+        && let Some(uri) = link(first)
+        && context(rest, Some(uri))
+    {
+        return Replayed::Link(uri);
+    }
+    if context(text.strip_prefix('\n').unwrap_or(text), None) {
+        return Replayed::Text;
+    }
+    Replayed::Words
+}
+
+/// The file URI `line` links to, if it's all an adapter's link to a
+/// file, `[@name](file:///…)`.
+fn link(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("[@")?;
+    let (name, rest) = rest.split_once("](")?;
+    let uri = rest.strip_suffix(')')?;
+    let plain = !name.contains(['\n', ']']) && !uri.contains(char::is_whitespace);
+    (plain && uri.starts_with("file://")).then_some(uri)
+}
+
+/// Whether `text` is all a file's text as an adapter gives it the model,
+/// `<context ref="file:///…">…</context>`, and of `uri` if it's given.
+fn context(text: &str, uri: Option<&str>) -> bool {
+    let Some(rest) = text.strip_prefix("<context ref=\"") else {
+        return false;
+    };
+    let Some((reference, _)) = rest.split_once('"') else {
+        return false;
+    };
+    reference.starts_with("file://")
+        && uri.is_none_or(|uri| uri == reference)
+        && rest.ends_with("</context>")
+}
+
+/// The file a `file://` URI names, and the lines its fragment says,
+/// `#L12-L20`.
+fn file_of(uri: &str) -> Option<(PathBuf, Option<(u32, u32)>)> {
+    let url = url::Url::parse(uri).ok()?;
+    let path = url.to_file_path().ok()?;
+    let lines = (url.fragment()).and_then(|fragment| mention_lines(&format!("#{fragment}")));
+    Some((path, lines))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::without_inline_images;
+    use super::{Replayed, replayed_context, without_inline_images};
+
+    #[test]
+    fn the_adapters_words_for_files_sent_are_told_apart_from_the_users() {
+        let uri = "file:///p/a.rs";
+        assert_eq!(
+            replayed_context("[@a.rs](file:///p/a.rs)"),
+            Replayed::Link(uri)
+        );
+        assert_eq!(
+            replayed_context(
+                "[@a.rs](file:///p/a.rs)\n<context ref=\"file:///p/a.rs\">\nx\n</context>"
+            ),
+            Replayed::Link(uri)
+        );
+        assert_eq!(
+            replayed_context("\n<context ref=\"file:///p/a.rs\">\nx\n</context>"),
+            Replayed::Text
+        );
+        for words in [
+            "[@a.rs](https://example.com)",
+            "[@a.rs](file:///p/a.rs) and more",
+            "[@a.rs](file:///p/a.rs)\n<context ref=\"file:///p/b.rs\">\nx\n</context>",
+            "<context ref=\"file:///p/a.rs\">unclosed",
+            "plain words",
+        ] {
+            assert_eq!(replayed_context(words), Replayed::Words, "{words}");
+        }
+    }
 
     #[test]
     fn inline_image_labels_preserve_surrounding_text_and_ordinary_links() {

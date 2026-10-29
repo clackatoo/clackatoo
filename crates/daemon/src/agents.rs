@@ -89,6 +89,10 @@ pub(crate) struct Known {
     pub(crate) starting_mode: Option<&'static str>,
     /// Whether it's asked what it runs in the background.
     pub(crate) tasks: bool,
+    /// Whether a saved file a message mentions goes to it as its text, if
+    /// small, rather than as a link it reads itself (see
+    /// `server/mentions.rs`).
+    pub(crate) embeds_saved: bool,
     /// What logs in to it, to say when it isn't logged in.
     pub(crate) login: &'static str,
     /// Where it's told which MCP servers to start, to say when a session
@@ -138,6 +142,10 @@ pub(crate) const KNOWN: &[Known] = &[
         // Auto decides itself what needs asking about (jack, 2026-10-08).
         starting_mode: Some("auto"),
         tasks: true,
+        // Claude Code edits only files its Read tool has read, so a
+        // file's text in the message would be read again before an edit:
+        // it reads a link itself, getting line numbers too.
+        embeds_saved: false,
         login: "claude",
         servers: Servers {
             set_in: "its settings (`~/.claude.json`, or the project's `.mcp.json`)",
@@ -160,6 +168,7 @@ pub(crate) const KNOWN: &[Known] = &[
         starting_mode: None,
         // Asking makes Codex's adapter leave out its commands' output.
         tasks: false,
+        embeds_saved: true,
         login: "codex login",
         servers: Servers {
             set_in: "`~/.codex/config.toml`",
@@ -199,6 +208,7 @@ pub(crate) const KNOWN: &[Known] = &[
         size: "1.1 GB, plus about 1 GB of runtime scratch",
         starting_mode: Some("default"),
         tasks: false,
+        embeds_saved: true,
         login: "clackatoo agent login antigravity",
         servers: Servers {
             set_in: "its Clackatoo Antigravity profile",
@@ -218,6 +228,7 @@ pub(crate) const KNOWN: &[Known] = &[
         size: "100 MB",
         starting_mode: None,
         tasks: false,
+        embeds_saved: true,
         login: "gemini",
         servers: Servers {
             set_in: "`~/.gemini/settings.json`",
@@ -332,6 +343,20 @@ impl Known {
 #[must_use]
 pub(crate) fn known(name: &str) -> Option<&'static Known> {
     KNOWN.iter().find(|known| known.name == name)
+}
+
+/// Whether a saved file a message mentions goes to the agent called
+/// `name` as its text, if small, rather than as a link: for any but the
+/// known agents that do better reading it themselves.
+pub(crate) fn embeds_saved(name: &str) -> bool {
+    known(name).is_none_or(|known| known.embeds_saved)
+}
+
+/// Whether the agent called `name`, carried on through an upgrade from a
+/// build that didn't hand over whether it takes files' text in a message,
+/// is known to: the adapters checked, at the versions pinned.
+pub(crate) fn embeds_checked(name: &str) -> bool {
+    matches!(name, "claude" | "codex")
 }
 
 impl AgentConfig {

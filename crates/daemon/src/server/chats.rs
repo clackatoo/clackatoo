@@ -493,8 +493,14 @@ impl Daemon {
         })
     }
 
+    /// Whether the agent `agent` takes files' text in a message, if it's
+    /// running.
+    pub(super) fn agents_can_embed(&self, agent: AgentId) -> Option<bool> {
+        Some(self.agents.running.get(&agent)?.agent.can_embed())
+    }
+
     /// The running agent chat `id` talks to, if it's running.
-    fn agent_of(&mut self, id: TerminalId) -> Option<AgentId> {
+    pub(super) fn agent_of(&mut self, id: TerminalId) -> Option<AgentId> {
         let name = self.chat(id)?.agent().to_owned();
         self.agents.named(&name)
     }
@@ -731,9 +737,13 @@ impl Daemon {
     }
 
     /// Carries out what a chat asked for.
-    pub(super) fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
+    pub(super) fn act(&mut self, id: TerminalId, mut actions: Vec<Action>) {
+        if self.holding_for_mentions(id, &mut actions) {
+            return;
+        }
         let mut agent = self.agent_of(id);
-        for action in actions {
+        let mut actions = actions.into_iter();
+        while let Some(action) = actions.next() {
             let gone = (agent.and_then(|agent| self.agents.running.get(&agent)))
                 .is_some_and(|slot| slot.agent.has_gone());
             if gone && self.act_on_gone(id, &action) {
@@ -755,6 +765,11 @@ impl Daemon {
                 }
                 continue;
             }
+            // The files it mentions are read first, off the loop, and it
+            // and what follows wait.
+            let Ok((action, context)) = self.mentioned(id, action, &mut actions) else {
+                return;
+            };
             let session = self
                 .chat(id)
                 .and_then(|chat| chat.session().map(str::to_owned));
@@ -769,11 +784,12 @@ impl Daemon {
                 }
                 (Action::Install, _, _) => self.install_agent(id),
                 (Action::Prompt(text), Some(slot), Some(session)) => {
-                    slot.agent.prompt(id, &session, &[&text.text], &text.images);
+                    let blocks = (&[text.text.as_str()][..], &context[..]);
+                    slot.agent.prompt(id, &session, blocks, &text.images);
                 }
                 (Action::Briefed { role, text }, Some(slot), Some(session)) => {
-                    slot.agent
-                        .prompt(id, &session, &[&role, &text.text], &text.images);
+                    let blocks = (&[role.as_str(), &text.text][..], &context[..]);
+                    slot.agent.prompt(id, &session, blocks, &text.images);
                 }
                 (Action::Carry { text, from, to }, Some(_), Some(session)) => {
                     let files = self.agent_files.log.changed_in(id, from..to);
@@ -782,14 +798,13 @@ impl Daemon {
                     if let Some(slot) = slot {
                         match &digest {
                             Some(digest) => {
-                                slot.agent.prompt(
-                                    id,
-                                    &session,
-                                    &[digest, &text.text],
-                                    &text.images,
-                                );
+                                let blocks = (&[digest.as_str(), &text.text][..], &context[..]);
+                                slot.agent.prompt(id, &session, blocks, &text.images);
                             }
-                            None => slot.agent.prompt(id, &session, &[&text.text], &text.images),
+                            None => {
+                                let blocks = (&[text.text.as_str()][..], &context[..]);
+                                slot.agent.prompt(id, &session, blocks, &text.images);
+                            }
                         }
                     }
                 }
@@ -1923,6 +1938,7 @@ impl Daemon {
             }
         }
         self.take_agent_installs();
+        self.take_mentions();
         self.time_out_probes();
         self.time_out_sessions();
         self.time_out_listings();
@@ -2454,9 +2470,12 @@ impl Daemon {
                 "A steering message is already being delivered.".into(),
             ));
         }
+        // Steering sends words alone: a message with images, or that
+        // mentions files, starts the turn again instead, sent whole.
         let native = state.node().delivery.native_steering
             && pending.target.is_none()
-            && pending.prompt.images.is_empty();
+            && pending.prompt.images.is_empty()
+            && clackatoo_protocol::mentions(&pending.prompt.text).is_empty();
         let session = state.session().map(str::to_owned);
         if native {
             let agent = self

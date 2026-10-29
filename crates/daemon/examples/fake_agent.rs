@@ -57,6 +57,7 @@
 //! | `session-error-fail` | Says, by itself, that the usage limit is reached, then ends its turn failed with the same, as AIR's `sessionFailure` |
 //! | `compact-late` | Compacts its context, as `compact` does, but says its last report with the next message |
 //! | `image-bad` | Shows an image in its words with no data, then `shown` |
+//! | `context`, and anything after it | Says `context:` and the files the message came with (its `resource_link` and `resource` blocks), as JSON. Any message's are noted as `context:` and the block. With `--no-embed`, it says it takes no files' text |
 //!
 //! With `--in-use`, it refuses to open a session again, as Codex's
 //! adapter does one open in another Codex client.
@@ -874,7 +875,10 @@ impl Fake {
                 "protocolVersion": 1,
                 "agentCapabilities": {
                     "loadSession": self.load,
-                    "promptCapabilities": { "image": !std::env::args().any(|arg| arg == "--no-images") },
+                    "promptCapabilities": {
+                        "image": !std::env::args().any(|arg| arg == "--no-images"),
+                        "embeddedContext": !std::env::args().any(|arg| arg == "--no-embed"),
+                    },
                     "sessionCapabilities": if self.list {
                         json!({ "close": {}, "resume": {}, "list": {} })
                     } else {
@@ -1120,9 +1124,14 @@ impl Fake {
             }
             Some("session/cancel") => self.cancel(&session),
             Some("session/prompt") => {
+                let mut context = Vec::new();
                 for block in params["prompt"].as_array().into_iter().flatten() {
                     if block["type"] == "image" {
                         self.note(&format!("image: {block}"));
+                    }
+                    if block["type"] == "resource" || block["type"] == "resource_link" {
+                        self.note(&format!("context: {block}"));
+                        context.push(block.clone());
                     }
                 }
                 let blocks: Vec<&str> = (params["prompt"].as_array().into_iter().flatten())
@@ -1135,6 +1144,11 @@ impl Fake {
                     self.note(&format!("carried {session}\n{carried}\nend carried"));
                 }
                 let text = (*text).to_owned();
+                if text.starts_with("context") {
+                    say(&session, &format!("context: {}\n", Value::from(context)));
+                    done(&id, "end_turn");
+                    return true;
+                }
                 return self.prompt(id, session, &text);
             }
             None if id == "f-replay" => {
