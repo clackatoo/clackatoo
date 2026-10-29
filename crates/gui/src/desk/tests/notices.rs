@@ -199,6 +199,50 @@ fn an_agent_that_couldnt_start_is_told_and_marked() {
 }
 
 #[test]
+fn a_failed_turn_says_so_and_an_older_daemons_says_it_needs_a_look() {
+    let (mut desk, said) = notified_desk();
+    let ended = |chat, failed| ChatSummary {
+        failed,
+        ..summary(chat, 2, Ready)
+    };
+    desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
+    desk.chats_changed(vec![ended(5, Some(true)), ended(6, None)]);
+    let mut told = taken(&said);
+    told.sort_by_key(|said| format!("{said:?}"));
+    assert_eq!(
+        told,
+        [
+            Said::Show(5, "Claude Code stopped: something went wrong".into()),
+            Said::Show(6, "Claude Code stopped: it needs a look".into()),
+        ]
+    );
+}
+
+#[test]
+fn what_happened_while_the_window_was_away_is_marked_not_told() {
+    let (mut desk, said) = notified_desk();
+    desk.daemon_at(None);
+    desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
+    // Asleep: out of reach of the daemon, then back, and its list says
+    // they finished and asked meanwhile.
+    desk.lost();
+    desk.daemon_at(None);
+    desk.connected(desk.workspaces.clone(), false);
+    // Asked for the list, whose answer is the next.
+    assert!(
+        (desk.take_outbox().iter())
+            .any(|message| matches!(message, ClientMessage::Request(Request::WatchChats)))
+    );
+    desk.chats_changed(vec![summary(5, 2, Ready), asking(6, 2)]);
+    assert_eq!(taken(&said), []);
+    assert_eq!(marks(&desk).0, [None, Some(Mark::Asking)]);
+    // What happens after is told again.
+    desk.chats_changed(vec![summary(5, 2, Answering), asking(6, 2)]);
+    desk.chats_changed(vec![summary(5, 2, Ready), asking(6, 2)]);
+    assert_eq!(taken(&said), [finished(5)]);
+}
+
+#[test]
 fn the_notify_option_says_which_are_told() {
     let (mut desk, said) = notified_desk();
     desk.run_set("notify=questions");

@@ -43,6 +43,9 @@ pub(super) struct Watched {
     unseen: HashSet<TerminalId>,
     /// The daemon they're of.
     daemon: Daemon,
+    /// Whether the list the window asked for as it connected hasn't come
+    /// yet: what it says happened meanwhile is marked, not told.
+    connecting: bool,
 }
 
 /// Which daemon the chats watched are of.
@@ -85,6 +88,7 @@ impl Desk {
     /// Asks the daemon for the chats, and to say as they change, as the
     /// window connects.
     pub(super) fn watch_chats(&mut self) {
+        self.watched.connecting = true;
         self.request(Request::WatchChats, Asked::Chats);
     }
 
@@ -93,6 +97,7 @@ impl Desk {
         match response {
             Response::Chats(chats) => self.chats_changed(chats),
             other => {
+                self.watched.connecting = false;
                 log::warn!("the daemon answered the chats with {other:?}");
                 false
             }
@@ -136,6 +141,11 @@ impl Desk {
         // Those left closed.
         for id in seen.keys() {
             self.watched.unseen.remove(id);
+        }
+        // The first list after connecting: what changed while the window
+        // was away is old news, marked but not told.
+        if std::mem::take(&mut self.watched.connecting) {
+            fresh.clear();
         }
         self.notify(&fresh);
         self.marks() != before

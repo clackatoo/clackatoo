@@ -17,14 +17,16 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-/// The bus's own name, path and interface, for `Hello` and `AddMatch`.
-const BUS: &str = "org.freedesktop.DBus";
+/// The bus's own name, path and interface, for `Hello` and `AddMatch`,
+/// and the sender of its own signals.
+pub(super) const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
 
-/// The most a message from the bus may be, whole. D-Bus allows 128 MiB;
-/// what a window hears of notifications is a few hundred bytes, so one
-/// far bigger means something's wrong, and the connection is dropped.
+/// The most of a message from the bus that's kept. What a window hears of
+/// notifications is a few hundred bytes; a bigger one isn't for it, and
+/// is read past, up to what D-Bus allows, 128 MiB.
 const MOST: usize = 1 << 20;
+const LARGEST: usize = 128 << 20;
 
 /// How long writing to the bus may take before it's given up on.
 const WRITE_WAIT: Duration = Duration::from_secs(5);
@@ -118,6 +120,26 @@ impl Bus {
         let mut body = Body::default();
         body.string(rule);
         self.call(&call, &body, true)
+    }
+
+    /// Asks the bus which connection owns the name `name`: its reply's
+    /// string is its unique name, as `:1.42`, or it's an error if none
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// If it can't be written.
+    pub(super) fn get_name_owner(&mut self, name: &str) -> io::Result<u32> {
+        let call = Call {
+            destination: BUS,
+            path: BUS_PATH,
+            interface: BUS,
+            member: "GetNameOwner",
+            signature: "s",
+        };
+        let mut body = Body::default();
+        body.string(name);
+        self.call(&call, &body, false)
     }
 }
 
@@ -371,6 +393,10 @@ pub(super) struct Message {
     pub(super) member: Option<String>,
     /// The error's name, for an error.
     pub(super) error: Option<String>,
+    /// The unique name of the connection that sent it, as the bus says,
+    /// which no one else can claim: `:1.42`, or the bus's own name for
+    /// its signals.
+    pub(super) sender: Option<String>,
     /// The body's signature.
     pub(super) signature: String,
     pub(super) body: Vec<u8>,
@@ -401,12 +427,14 @@ impl Message {
     }
 }
 
-/// Reads the next message from `stream`.
+/// Reads the next message from `stream`: `None` for one too big to be for
+/// a window, which is read past.
 ///
 /// # Errors
 ///
-/// If it can't be read, isn't a D-Bus message, or is too big.
-pub(super) fn read_message(stream: &mut impl Read) -> io::Result<Message> {
+/// If it can't be read, isn't a D-Bus message, or is bigger than D-Bus
+/// allows.
+pub(super) fn read_message(stream: &mut impl Read) -> io::Result<Option<Message>> {
     let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     let mut fixed = [0u8; 16];
     stream.read_exact(&mut fixed)?;
@@ -426,14 +454,23 @@ pub(super) fn read_message(stream: &mut impl Read) -> io::Result<Message> {
     let body_len = number(4) as usize;
     let fields_len = number(12) as usize;
     let header_len = (16 + fields_len).next_multiple_of(8);
-    if header_len.saturating_add(body_len) > MOST {
-        return Err(bad("a message from the bus is too big"));
+    let whole_len = header_len.saturating_add(body_len);
+    if whole_len > LARGEST {
+        return Err(bad("a message from the bus is bigger than D-Bus allows"));
     }
-    let mut rest = vec![0; header_len - 16 + body_len];
+    if whole_len > MOST {
+        let rest = (whole_len - 16) as u64;
+        if io::copy(&mut stream.by_ref().take(rest), &mut io::sink())? < rest {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        return Ok(None);
+    }
+    let mut rest = vec![0; whole_len - 16];
     stream.read_exact(&mut rest)?;
     let mut whole = fixed.to_vec();
     whole.extend_from_slice(&rest);
     parse(&whole, big, fields_len, header_len)
+        .map(Some)
         .ok_or_else(|| bad("a message from the bus is malformed"))
 }
 
@@ -462,6 +499,7 @@ fn parse(whole: &[u8], big: bool, fields_len: usize, header_len: usize) -> Optio
                     2 => message.interface = Some(text),
                     3 => message.member = Some(text),
                     4 => message.error = Some(text),
+                    7 => message.sender = Some(text),
                     _ => {}
                 }
             }
@@ -607,6 +645,7 @@ mod tests {
         field(1, b'o', "/org/freedesktop/Notifications");
         field(2, b's', "org.freedesktop.Notifications");
         field(3, b's', member);
+        field(7, b's', ":1.9");
         field(8, b'g', signature);
         let mut message = vec![if big { b'B' } else { b'l' }, 4, 1, 1];
         message.extend_from_slice(&number(u32::try_from(body.len()).unwrap()));
@@ -634,8 +673,9 @@ mod tests {
             body.extend_from_slice(&number(7));
             body.extend_from_slice(b"default\0");
             let bytes = signal(big, "ActionInvoked", "us", &body);
-            let message = read_message(&mut bytes.as_slice()).unwrap();
+            let message = read_message(&mut bytes.as_slice()).unwrap().unwrap();
             assert!(message.is_signal("org.freedesktop.Notifications", "ActionInvoked"));
+            assert_eq!(message.sender.as_deref(), Some(":1.9"));
             let mut args = message.args("us").unwrap();
             assert_eq!(args.u32(), Some(42));
             assert_eq!(args.string(), Some("default"));
@@ -652,6 +692,16 @@ mod tests {
         // Cut short.
         let whole = signal(false, "M", "", &[]);
         assert!(read_message(&mut &whole[..whole.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn a_message_too_big_for_a_window_is_read_past_not_fatal() {
+        let mut stream = signal(false, "Big", "ay", &vec![7; 2 << 20]);
+        stream.extend_from_slice(&signal(false, "Next", "", &[]));
+        let mut reading = stream.as_slice();
+        assert_eq!(read_message(&mut reading).unwrap(), None);
+        let next = read_message(&mut reading).unwrap().unwrap();
+        assert_eq!(next.member.as_deref(), Some("Next"));
     }
 
     #[test]

@@ -13,8 +13,9 @@
 //!
 //! Each chat has one notification at most, replaced as what it says
 //! changes, so a chat that asks, then finishes, says so in one. Only what
-//! the window sees happen is told: chats that finished before it came, or
-//! while it was connecting, are only marked.
+//! the window sees happen is told: chats that finished or asked before it
+//! came, or while it was out of reach of the daemon, as a laptop asleep
+//! is, are only marked, so waking one isn't a burst of notifications.
 //!
 //! The `notify` option says which: `all`, `questions` or `off`.
 
@@ -22,8 +23,7 @@ use std::collections::HashMap;
 
 use clackatoo_protocol::{ChatState, TerminalId};
 
-use super::Desk;
-use crate::chat::ChatPane;
+use super::{Desk, shown_in_names};
 use crate::notify::{Notice, Notifier};
 use crate::options::Notify;
 
@@ -34,6 +34,9 @@ enum Why {
     Finished,
     /// Its agent stopped, as something went wrong, or couldn't start.
     Failed,
+    /// Its agent's turn ended, finished or failed: a daemon before
+    /// protocol 118 doesn't say which.
+    Ended,
     /// Its agent asks the user something.
     Asks,
 }
@@ -125,12 +128,13 @@ impl Desk {
         if notify == Notify::Questions || !self.unseen(chat) {
             return None;
         }
-        let failed = matches!(summary.state, ChatState::Failed(_))
-            || self
-                .chats
-                .get(&chat)
-                .is_some_and(ChatPane::last_turn_failed);
-        Some(if failed { Why::Failed } else { Why::Finished })
+        Some(match summary.failed {
+            _ if matches!(summary.state, ChatState::Failed(_)) => Why::Failed,
+            Some(true) => Why::Failed,
+            Some(false) => Why::Finished,
+            // A daemon older than protocol 118 doesn't say how it ended.
+            None => Why::Ended,
+        })
     }
 
     /// Whether `chat`, which just finished, was seen elsewhere while this
@@ -171,12 +175,14 @@ impl Desk {
 
 /// The notification for chat `chat`, titled `title`, of `agent`, as
 /// `why` says: its title, and a line of what happened, never what the
-/// agent wrote. The line is escaped, as a notification server may read
-/// markup in it.
+/// agent wrote. Both are shown as a tab's name is, without control
+/// characters or those that turn text around. The line is escaped, as
+/// the spec lets a server read markup in it; the title isn't, as it's
+/// plain text by the spec, and GNOME escapes it itself.
 fn notice(title: &str, agent: &str, chat: TerminalId, why: Why) -> Notice {
     let title: String = title
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|&c| shown_in_names(c))
         .take(100)
         .collect();
     let title = if title.trim().is_empty() {
@@ -184,10 +190,15 @@ fn notice(title: &str, agent: &str, chat: TerminalId, why: Why) -> Notice {
     } else {
         title
     };
-    let agent: String = agent.chars().filter(|c| !c.is_control()).take(60).collect();
+    let agent: String = agent
+        .chars()
+        .filter(|&c| shown_in_names(c))
+        .take(60)
+        .collect();
     let body = match why {
         Why::Finished => format!("{agent} finished"),
         Why::Failed => format!("{agent} stopped: something went wrong"),
+        Why::Ended => format!("{agent} stopped: it needs a look"),
         Why::Asks => format!("{agent} asks you something"),
     };
     Notice {
@@ -210,7 +221,7 @@ mod tests {
     #[test]
     fn a_notice_says_the_title_and_what_happened_escaped() {
         let said = notice(
-            "fix\u{1b}[2J the <b>build",
+            "fix\u{1b}[2J the \u{202E}<b>build",
             "Claude <Code>",
             TerminalId(4),
             Why::Asks,

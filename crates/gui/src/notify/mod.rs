@@ -67,10 +67,10 @@ pub(crate) trait Notifier: std::fmt::Debug {
 enum Input {
     Show(TerminalId, Notice),
     Withdraw(TerminalId),
-    /// A message from the bus.
-    Heard(Message),
-    /// The bus's connection ended.
-    Lost,
+    /// A message from the bus, on connection number `.0`.
+    Heard(u64, Message),
+    /// Connection number `.0` to the bus ended.
+    Lost(u64),
     /// The window's gone.
     Quit,
 }
@@ -138,6 +138,14 @@ impl Notifier for Desktop {
     }
 }
 
+/// A `Notify` call not yet answered: which chat's, and whether the window
+/// took it back meanwhile.
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    chat: TerminalId,
+    withdrawn: bool,
+}
+
 /// The notifier's thread: the connection, and which notification is
 /// which chat's.
 struct Thread {
@@ -145,14 +153,25 @@ struct Thread {
     /// For the thread reading the bus to send to.
     back: Sender<Input>,
     bus: Option<Bus>,
+    /// The connection's number, so what's heard of one gone is ignored.
+    connection: u64,
     /// When the bus last couldn't be reached.
     failed: Option<Instant>,
+    /// The notification server's unique name on the bus, as `:1.42`: only
+    /// its signals count, as anyone on the bus could send one like them.
+    /// `None` while no server runs, until the bus starts one.
+    server: Option<String>,
     /// Each chat's notification, by the server's number for it.
     ids: HashMap<TerminalId, u32>,
     chats: HashMap<u32, TerminalId>,
     /// Activation tokens the server gave for notifications clicked, until
     /// the click itself comes.
     tokens: HashMap<u32, String>,
+    /// `Notify` calls not yet answered, by their numbers: an answer that
+    /// comes late is still filed.
+    pending: HashMap<u32, Pending>,
+    /// The newest `Notify` call for each chat, by its number.
+    latest: HashMap<TerminalId, u32>,
     /// What came while a reply was waited for, in order.
     later: VecDeque<Input>,
 }
@@ -163,10 +182,14 @@ impl Thread {
             proxy,
             back,
             bus: None,
+            connection: 0,
             failed: None,
+            server: None,
             ids: HashMap::new(),
             chats: HashMap::new(),
             tokens: HashMap::new(),
+            pending: HashMap::new(),
+            latest: HashMap::new(),
             later: VecDeque::new(),
         }
     }
@@ -186,8 +209,12 @@ impl Thread {
                 Input::Quit => break,
                 Input::Show(chat, notice) => self.show(inputs, chat, &notice),
                 Input::Withdraw(chat) => self.withdraw(chat),
-                Input::Heard(message) => self.heard(&message),
-                Input::Lost => self.lost(),
+                Input::Heard(connection, message) => {
+                    if connection == self.connection {
+                        self.heard(&message);
+                    }
+                }
+                Input::Lost(connection) => self.lost(connection),
             }
         }
         let chats: Vec<TerminalId> = self.ids.keys().copied().collect();
@@ -227,20 +254,24 @@ impl Thread {
             .ok_or("there's no session bus")?;
         let mut bus = Bus::connect(&address).map_err(|err| format!("the session bus: {err}"))?;
         let mut reader = bus.reader().map_err(|err| err.to_string())?;
+        self.connection += 1;
+        self.forget();
+        let connection = self.connection;
         let back = self.back.clone();
         std::thread::Builder::new()
             .name("notifications-bus".into())
             .spawn(move || {
                 loop {
                     match dbus::read_message(&mut reader) {
-                        Ok(message) => {
-                            if back.send(Input::Heard(message)).is_err() {
+                        Ok(Some(message)) => {
+                            if back.send(Input::Heard(connection, message)).is_err() {
                                 return;
                             }
                         }
+                        Ok(None) => log::debug!("read past a message too big for the window"),
                         Err(err) => {
                             log::debug!("the session bus's connection ended: {err}");
-                            let _ = back.send(Input::Lost);
+                            let _ = back.send(Input::Lost(connection));
                             return;
                         }
                     }
@@ -254,30 +285,54 @@ impl Thread {
             Some(reply) => return Err(format!("the bus said {:?} to hello", reply.error)),
             None => return Err("the bus didn't answer".to_owned()),
         }
-        // Only once the bus has said hello back, as nothing may come before.
-        let rule = format!("type='signal',interface='{NOTIFICATIONS}',path='{NOTIFICATIONS_PATH}'");
-        match self.bus.as_mut() {
-            Some(bus) => bus
-                .add_match(&rule)
-                .map(drop)
-                .map_err(|err| err.to_string()),
-            None => Err("the bus's connection ended".to_owned()),
+        // Only once the bus has said hello back, as nothing may come
+        // before. The server's signals, and its coming and going, which
+        // the bus itself says; then who the server is now, if one runs.
+        let rules = [
+            format!(
+                "type='signal',sender='{NOTIFICATIONS}',interface='{NOTIFICATIONS}',path='{NOTIFICATIONS_PATH}'"
+            ),
+            format!(
+                "type='signal',sender='{BUS}',interface='{BUS}',member='NameOwnerChanged',arg0='{NOTIFICATIONS}'",
+                BUS = dbus::BUS
+            ),
+        ];
+        let bus = self.bus.as_mut().ok_or("the bus's connection ended")?;
+        for rule in &rules {
+            bus.add_match(rule).map_err(|err| err.to_string())?;
         }
+        let owner = bus
+            .get_name_owner(NOTIFICATIONS)
+            .map_err(|err| err.to_string())?;
+        if let Some(reply) = self.wait_for(inputs, owner)
+            && reply.is(Kind::Reply)
+            && let Some(name) = reply.args("s").and_then(|mut args| args.string())
+        {
+            self.server = Some(name.to_owned());
+        }
+        Ok(())
     }
 
-    /// Waits for the reply to call `serial`, keeping what else comes for
-    /// after. `None` if none came in time, or the bus went.
+    /// Waits for the reply to call `serial`, keeping what the window asks
+    /// meanwhile for after, and hearing the rest. `None` if none came in
+    /// time, or the bus went.
     fn wait_for(&mut self, inputs: &Receiver<Input>, serial: u32) -> Option<Message> {
         let until = Instant::now() + REPLY_WAIT;
         loop {
             let left = until.saturating_duration_since(Instant::now());
             match inputs.recv_timeout(left) {
-                Ok(Input::Heard(message)) if message.reply_serial == Some(serial) => {
-                    return Some(message);
+                Ok(Input::Heard(connection, message)) if connection == self.connection => {
+                    if message.reply_serial == Some(serial) {
+                        return Some(message);
+                    }
+                    self.heard(&message);
                 }
-                Ok(Input::Lost) => {
-                    self.lost();
-                    return None;
+                Ok(Input::Heard(..)) => {}
+                Ok(Input::Lost(connection)) => {
+                    if connection == self.connection {
+                        self.lost(connection);
+                        return None;
+                    }
                 }
                 Ok(other) => self.later.push_back(other),
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
@@ -305,36 +360,87 @@ impl Thread {
             Ok(serial) => serial,
             Err(err) => {
                 log::warn!("a desktop notification couldn't be sent: {err}");
-                self.lost();
+                let connection = self.connection;
+                self.lost(connection);
                 return;
             }
         };
-        let Some(reply) = self.wait_for(inputs, serial) else {
-            log::warn!("the desktop's notification server didn't answer");
-            return;
-        };
-        match reply.args("u").and_then(|mut args| args.u32()) {
-            Some(id) if reply.is(Kind::Reply) => {
-                if let Some(old) = self.ids.insert(chat, id)
-                    && old != id
-                {
-                    self.chats.remove(&old);
-                }
-                self.chats.insert(id, chat);
-            }
-            _ => log::warn!(
-                "the desktop's notification server refused a notification: {}",
-                reply.error.as_deref().unwrap_or("it said nothing of why")
-            ),
+        self.latest.insert(chat, serial);
+        self.pending.insert(
+            serial,
+            Pending {
+                chat,
+                withdrawn: false,
+            },
+        );
+        // Waited for, so the next notification of the chat replaces this
+        // one; one later than that is filed as it comes (see `answered`).
+        match self.wait_for(inputs, serial) {
+            Some(reply) => self.answered(&reply),
+            None => log::warn!("the desktop's notification server is slow to answer"),
         }
     }
 
+    /// Files the answer to a `Notify` call: the server's number for the
+    /// chat's notification. One the window has taken back, or replaced
+    /// with another meanwhile, is closed.
+    fn answered(&mut self, reply: &Message) {
+        let Some(pending) = reply
+            .reply_serial
+            .and_then(|serial| self.pending.remove(&serial))
+        else {
+            return;
+        };
+        let id = match reply.args("u").and_then(|mut args| args.u32()) {
+            Some(id) if reply.is(Kind::Reply) => id,
+            _ => {
+                log::warn!(
+                    "the desktop's notification server refused a notification: {}",
+                    reply.error.as_deref().unwrap_or("it said nothing of why")
+                );
+                return;
+            }
+        };
+        if pending.withdrawn {
+            self.close(id);
+            return;
+        }
+        let chat = pending.chat;
+        let newest =
+            reply.reply_serial.is_some() && self.latest.get(&chat) == reply.reply_serial.as_ref();
+        if let Some(old) = self.ids.get(&chat).copied()
+            && old != id
+        {
+            // Two notifications of one chat, as when an answer came too
+            // late to be replaced: the newer call's stays.
+            if !newest {
+                self.close(id);
+                return;
+            }
+            self.chats.remove(&old);
+            self.tokens.remove(&old);
+            self.close(old);
+        }
+        self.ids.insert(chat, id);
+        self.chats.insert(id, chat);
+    }
+
     fn withdraw(&mut self, chat: TerminalId) {
+        for pending in self.pending.values_mut() {
+            if pending.chat == chat {
+                pending.withdrawn = true;
+            }
+        }
         let Some(id) = self.ids.remove(&chat) else {
             return;
         };
         self.chats.remove(&id);
         self.tokens.remove(&id);
+        self.close(id);
+    }
+
+    /// Closes the server's notification `id`.
+    fn close(&mut self, id: u32) {
         let call = Call {
             destination: NOTIFICATIONS,
             path: NOTIFICATIONS_PATH,
@@ -348,13 +454,36 @@ impl Thread {
             && let Err(err) = bus.call(&call, &body, true)
         {
             log::debug!("a desktop notification couldn't be closed: {err}");
-            self.lost();
+            let connection = self.connection;
+            self.lost(connection);
         }
     }
 
-    /// A message from the bus: a signal about a notification, perhaps
-    /// one of this window's.
+    /// A message from the bus: a late answer, the server coming or going,
+    /// or a signal about a notification, perhaps one of this window's.
+    /// Signals count only from the server they're of.
     fn heard(&mut self, message: &Message) {
+        if message.reply_serial.is_some() {
+            self.answered(message);
+            return;
+        }
+        if message.is_signal(dbus::BUS, "NameOwnerChanged") {
+            if message.sender.as_deref() == Some(dbus::BUS)
+                && let Some(mut args) = message.args("sss")
+                && let (Some(name), Some(_old), Some(new)) =
+                    (args.string(), args.string(), args.string())
+                && name == NOTIFICATIONS
+            {
+                // Another server's numbers are its own: what this window
+                // knew of the last one's means nothing to it.
+                self.forget();
+                self.server = (!new.is_empty()).then(|| new.to_owned());
+            }
+            return;
+        }
+        if self.server.is_none() || message.sender != self.server {
+            return;
+        }
         if message.is_signal(NOTIFICATIONS, "ActivationToken") {
             // Sent before the click it's for.
             if let Some(mut args) = message.args("us")
@@ -383,13 +512,25 @@ impl Thread {
         }
     }
 
-    /// The connection's gone: what was shown on it can't be replaced or
-    /// closed by number on another, as far as this window knows.
-    fn lost(&mut self) {
+    /// Connection number `connection` is gone: if it's the one in use,
+    /// what was shown on it can't be replaced or closed by number on
+    /// another, as far as this window knows. A gone one's is nothing.
+    fn lost(&mut self, connection: u64) {
+        if connection != self.connection {
+            return;
+        }
         self.bus = None;
+        self.server = None;
+        self.forget();
+    }
+
+    /// Forgets which notification is which chat's.
+    fn forget(&mut self) {
         self.ids.clear();
         self.chats.clear();
         self.tokens.clear();
+        self.pending.clear();
+        self.latest.clear();
     }
 }
 
@@ -427,6 +568,178 @@ fn notify_body(replaces: u32, notice: &Notice) -> Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SERVER: &str = ":1.5";
+
+    /// A thread on connection 1, whose server is [`SERVER`], with chat 4's
+    /// notification its number 7, and where the clicks it sends go.
+    fn thread() -> (Thread, Receiver<SessionEvent>) {
+        let (sender, events) = mpsc::channel();
+        let (back, _) = mpsc::channel();
+        let mut thread = Thread::new(Proxy::Channel(sender), back);
+        thread.connection = 1;
+        thread.server = Some(SERVER.to_owned());
+        thread.ids.insert(TerminalId(4), 7);
+        thread.chats.insert(7, TerminalId(4));
+        (thread, events)
+    }
+
+    fn signal(
+        sender: &str,
+        member: &str,
+        signature: &str,
+        write: impl FnOnce(&mut Body),
+    ) -> Message {
+        let mut body = Body::default();
+        write(&mut body);
+        let interface = if member == "NameOwnerChanged" {
+            dbus::BUS
+        } else {
+            NOTIFICATIONS
+        };
+        Message {
+            kind: Kind::Signal as u8,
+            sender: Some(sender.to_owned()),
+            interface: Some(interface.to_owned()),
+            member: Some(member.to_owned()),
+            signature: signature.to_owned(),
+            body: body.as_bytes().to_vec(),
+            ..Message::default()
+        }
+    }
+
+    fn click(sender: &str, id: u32) -> [Message; 2] {
+        [
+            signal(sender, "ActivationToken", "us", |body| {
+                body.u32(id);
+                body.string("token");
+            }),
+            signal(sender, "ActionInvoked", "us", |body| {
+                body.u32(id);
+                body.string("default");
+            }),
+        ]
+    }
+
+    fn owner_changed(sender: &str, new: &str) -> Message {
+        signal(sender, "NameOwnerChanged", "sss", |body| {
+            body.string(NOTIFICATIONS);
+            body.string(SERVER);
+            body.string(new);
+        })
+    }
+
+    fn answer(serial: u32, id: u32) -> Message {
+        let mut body = Body::default();
+        body.u32(id);
+        Message {
+            kind: Kind::Reply as u8,
+            reply_serial: Some(serial),
+            sender: Some(SERVER.to_owned()),
+            signature: "u".to_owned(),
+            body: body.as_bytes().to_vec(),
+            ..Message::default()
+        }
+    }
+
+    #[test]
+    fn a_click_counts_only_from_the_notification_server() {
+        let (mut thread, events) = thread();
+        for message in click(":1.6", 7) {
+            thread.heard(&message);
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "another peer on the bus can't click"
+        );
+        for message in click(SERVER, 7) {
+            thread.heard(&message);
+        }
+        match events.try_recv() {
+            Ok(SessionEvent::Notified { chat, token }) => {
+                assert_eq!((chat, token.as_deref()), (TerminalId(4), Some("token")));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Another app's notification, clicked: not this window's.
+        for message in click(SERVER, 8) {
+            thread.heard(&message);
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_server_restarting_forgets_the_last_ones_numbers() {
+        let (mut thread, events) = thread();
+        // Said by anyone but the bus: nothing.
+        thread.heard(&owner_changed(":1.6", ":1.8"));
+        assert_eq!(thread.server.as_deref(), Some(SERVER));
+        assert_eq!(thread.ids.len(), 1);
+        thread.heard(&owner_changed(dbus::BUS, ":1.8"));
+        assert_eq!(thread.server.as_deref(), Some(":1.8"));
+        assert!(thread.ids.is_empty() && thread.chats.is_empty());
+        // The new server's notification 7 is another app's.
+        for message in click(":1.8", 7) {
+            thread.heard(&message);
+        }
+        assert!(events.try_recv().is_err());
+        // Gone: no server, so no signal counts.
+        thread.heard(&owner_changed(dbus::BUS, ""));
+        assert_eq!(thread.server, None);
+    }
+
+    #[test]
+    fn a_notification_closed_is_forgotten() {
+        let (mut thread, _events) = thread();
+        thread.heard(&signal(SERVER, "NotificationClosed", "uu", |body| {
+            body.u32(7);
+            body.u32(2);
+        }));
+        assert!(thread.ids.is_empty() && thread.chats.is_empty());
+    }
+
+    #[test]
+    fn only_the_connection_in_use_being_lost_counts() {
+        let (mut thread, _events) = thread();
+        thread.lost(0);
+        assert_eq!(thread.ids.len(), 1);
+        assert!(thread.server.is_some());
+        thread.lost(1);
+        assert!(thread.ids.is_empty());
+        assert_eq!(thread.server, None);
+    }
+
+    #[test]
+    fn a_late_answer_is_filed_closed_or_dropped_as_it_should_be() {
+        let (mut thread, _events) = thread();
+        let pending = |chat| Pending {
+            chat: TerminalId(chat),
+            withdrawn: false,
+        };
+        // Chat 5's, late: filed.
+        thread.pending.insert(3, pending(5));
+        thread.latest.insert(TerminalId(5), 3);
+        thread.heard(&answer(3, 9));
+        assert_eq!(thread.ids.get(&TerminalId(5)), Some(&9));
+        assert_eq!(thread.chats.get(&9), Some(&TerminalId(5)));
+        // Taken back before it came: not filed.
+        thread.pending.insert(4, pending(6));
+        thread.latest.insert(TerminalId(6), 4);
+        thread.withdraw(TerminalId(6));
+        thread.heard(&answer(4, 10));
+        assert!(!thread.ids.contains_key(&TerminalId(6)));
+        // An older call's, after a newer one's was filed: dropped.
+        thread.pending.insert(5, pending(4));
+        thread.latest.insert(TerminalId(4), 6);
+        thread.heard(&answer(5, 12));
+        assert_eq!(thread.ids.get(&TerminalId(4)), Some(&7));
+        assert!(!thread.chats.contains_key(&12));
+        // The newest, with another number: it replaces the one before.
+        thread.pending.insert(6, pending(4));
+        thread.heard(&answer(6, 13));
+        assert_eq!(thread.ids.get(&TerminalId(4)), Some(&13));
+        assert!(!thread.chats.contains_key(&7));
+    }
 
     #[test]
     fn notify_says_who_what_and_the_click() {
