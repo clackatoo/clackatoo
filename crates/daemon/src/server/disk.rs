@@ -77,6 +77,13 @@ struct Noted {
     chat: TerminalId,
     /// The turn it was found in.
     turn: usize,
+    /// The tool it was found while has finished, while the chat's change
+    /// to the file was being merged into the buffer.
+    finished: bool,
+    /// The file changed again some other way while the chat's change to
+    /// it was being merged: once that's made, what's on disk is taken as
+    /// from outside, as it would have been then.
+    contested: bool,
 }
 
 impl Daemon {
@@ -185,9 +192,23 @@ impl Daemon {
     /// Has buffer `id`'s file looked at again, late in this pass, once an
     /// agent's change merged into it has been made, unless a change found
     /// meanwhile is noted as an agent's: that's taken as its own then.
+    ///
+    /// A change noted meanwhile, but contested, is taken as from outside
+    /// instead, if the file isn't as the change made it.
     pub(super) fn look_again(&mut self, id: BufferId) {
-        if !self.disk.noted.contains_key(&id) {
-            self.disk_maybe_changed(id);
+        match self.disk.noted.get(&id) {
+            None => self.disk_maybe_changed(id),
+            Some(noted) if noted.contested => {
+                self.disk.noted.remove(&id);
+                let Some(slot) = self.buffers.get(&id) else {
+                    return;
+                };
+                let now = DiskStamp::now(slot.buffer.path()).ok().flatten();
+                if now.is_some() && now != slot.buffer.disk() {
+                    self.changed_outside(id, true);
+                }
+            }
+            Some(_) => {}
         }
     }
 
@@ -238,17 +259,21 @@ impl Daemon {
                 // The chat's own change to the file is still being merged:
                 // this is taken after it, from what it leaves, and is still
                 // the tool's that finished, if one has.
-                if ran.contains(&noted.chat) && !self.disk.ran.contains(&noted.chat) {
-                    self.disk.ran.push(noted.chat);
+                if ran.contains(&noted.chat)
+                    && let Some(noted) = self.disk.noted.get_mut(&id)
+                {
+                    noted.finished = true;
                 }
                 continue;
             }
             let running = self.chat(noted.chat).is_some_and(|chat| chat.answering());
-            if running && !ran.contains(&noted.chat) {
+            if running && !ran.contains(&noted.chat) && !noted.finished {
                 continue;
             }
             self.disk.noted.remove(&id);
-            if (self.buffers.get(&id)).is_some_and(super::buffers::BufferSlot::stale) {
+            if noted.contested {
+                self.changed_outside(id, true);
+            } else if (self.buffers.get(&id)).is_some_and(super::buffers::BufferSlot::stale) {
                 // Since the agent's change was noted, something other
                 // than the agent changed the file too, and wasn't taken, so
                 // none of what's on disk is taken as the agent's. A buffer
@@ -289,8 +314,14 @@ impl Daemon {
             // An agent's change to it is still being merged into the
             // buffer, which doesn't know the file as it is yet: nothing is
             // taken as from outside until it's made, and the file looked
-            // at again.
-            _ if self.agent_files.pending(&path) => {}
+            // at again. A change noted as a chat's, changed again by
+            // someone else, is taken as from outside then, as it would
+            // have been now.
+            _ if self.agent_files.pending(&path) => {
+                if let Some(noted) = self.disk.noted.get_mut(&id) {
+                    noted.contested = true;
+                }
+            }
             _ => {
                 self.disk.noted.remove(&id);
                 self.changed_outside(id, true);
@@ -317,7 +348,12 @@ impl Daemon {
                 return None;
             }
             let (turn, _) = chat.working_on();
-            found = Some(Noted { chat: id, turn });
+            found = Some(Noted {
+                chat: id,
+                turn,
+                finished: false,
+                contested: false,
+            });
         }
         found
     }

@@ -330,7 +330,7 @@ impl Settler {
 /// may happen to the buffer meanwhile (CLACKA-201).
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{Author, BufferId};
+    use clackatoo_protocol::{Author, BufferId, TerminalId};
 
     use serde_json::json;
 
@@ -459,6 +459,84 @@ mod tests {
         world.end_turn();
         assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
         assert_eq!(world.text(id), first);
+    }
+
+    /// Another chat, numbered `id`, on session `s{id}`, in the same
+    /// directory, its agent answering its first message.
+    fn other_chat(world: &mut World, id: u32) -> clackatoo_protocol::TerminalId {
+        use clackatoo_protocol::ChatAction;
+
+        use crate::agent::Opened;
+        use crate::chat::HostedChat;
+
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = clackatoo_protocol::Size::new(40, 10).unwrap();
+        let cwd = world.root.display().to_string();
+        let tools = clackatoo_protocol::AgentTools::Ask;
+        let mut chat = HostedChat::new(TerminalId(id), size, cwd, &agent, tools, true, false);
+        chat.connected(Opened {
+            session: format!("s{id}"),
+            settings: None,
+        });
+        chat.act(ChatAction::Send("go".into()));
+        world.daemon.add_chat(chat);
+        TerminalId(id)
+    }
+
+    /// `big.txt` being merged, and changed meanwhile by a command of the
+    /// chat's agent, which has finished, then by `other`, which writes
+    /// line 9. Returns the buffer, and the file's text with the change
+    /// being merged.
+    fn contested(world: &mut World, other: impl FnOnce(&mut World)) -> (BufferId, String) {
+        let (id, _, second) = merging(world);
+        let chat = world.chat;
+        let done = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+        });
+        says(&mut world.daemon, chat, done);
+        start_command(&mut world.daemon, chat);
+        let third = second.replacen("line 5\n", "line #5\n", 1);
+        std::fs::write(world.path("big.txt"), &third).unwrap();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        finish_command(&mut world.daemon, chat);
+        world.daemon.check_disk();
+        world.daemon.check_disk();
+        other(world);
+        std::fs::write(world.path("big.txt"), third.replacen("line 9\n", "line #9\n", 1))
+            .unwrap();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        (id, second)
+    }
+
+    #[test]
+    fn another_chats_change_while_a_big_change_is_merged_is_from_outside() {
+        let mut world = World::new();
+        let (id, second) = contested(&mut world, |world| {
+            let other = other_chat(world, 2);
+            start_command(&mut world.daemon, other);
+        });
+        assert!(!world.daemon.buffers[&id].stale());
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        world.daemon.settle_all_pending();
+        // Neither chat's: the agent's tool's change is made as its own,
+        // and what's on disk besides is from outside.
+        assert_eq!(world.text(id), second);
+        assert!(world.daemon.buffers[&id].stale());
+        assert!(world.daemon.agent_files.log.turn(TerminalId(2), 0).is_none());
+    }
+
+    #[test]
+    fn a_change_from_outside_after_a_command_while_a_big_change_is_merged_isnt_the_agents() {
+        let mut world = World::new();
+        let (id, second) = contested(&mut world, |_| {});
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), second);
+        assert!(world.daemon.buffers[&id].stale());
     }
 
     #[test]
