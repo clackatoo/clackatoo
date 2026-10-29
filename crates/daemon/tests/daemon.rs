@@ -22430,18 +22430,11 @@ fn a_queued_message_taken_back_is_the_next_clients_draft() {
     let node = wait_for_chat(&mut client, chat, |node| !node.delivery.queued.is_empty());
     let id = node.delivery.queued[0].id;
     let text = "and the lint".to_owned();
-    client
-        .chat(chat, ChatAction::Draft { text, by: 7 })
-        .unwrap();
-    client
-        .chat(chat, ChatAction::TakeBack { queued: id })
-        .unwrap();
+    client.chat(chat, ChatAction::Draft { text }).unwrap();
+    let made = client.take_back(chat, id).unwrap();
+    assert_eq!(made, "after\nand the lint");
     // Gone already, it's refused.
-    assert!(
-        client
-            .chat(chat, ChatAction::TakeBack { queued: id })
-            .is_err()
-    );
+    assert!(client.take_back(chat, id).is_err());
     drop(client);
     let mut client = daemon.client();
     let view = attach(&mut client, chat);

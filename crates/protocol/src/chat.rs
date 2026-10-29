@@ -125,7 +125,10 @@ pub struct ChatNode {
     pub prompts: Vec<String>,
     /// The message being typed in the chat's box and not sent yet, as a
     /// client last said: text only, at most [`DRAFT_LONGEST`] bytes. A
-    /// client opening the chat with nothing typed starts with it.
+    /// client opening the chat with nothing typed starts with it. Changes
+    /// to it aren't sent to viewers as they're made, as typing isn't
+    /// mirrored from box to box: only sending, which empties it (see
+    /// [`ChatPatch::DraftCleared`]).
     #[serde(
         default,
         skip_serializing_if = "wire::before::<{ wire::PROMPT_BOX }, _>",
@@ -1711,20 +1714,13 @@ pub enum ChatPatch {
     Commands(Vec<AgentCommand>),
     /// What the agent says as it tries again is now this.
     Retrying(Option<String>),
-    /// The message being typed in the box is now `text` (see
-    /// [`ChatNode::draft`]), as the client that said `by` set it (see
-    /// [`ChatAction::Draft`]; 0 for the daemon itself, as taking a queued
-    /// message back): that client doesn't take it, as it's its own. `rev`
-    /// counts the chat's drafts from 1. A draft with `rev` 0 was replaced
-    /// by a later one, which follows: it's to be passed over, as the
-    /// daemon keeps only the latest draft's text in what it has to send.
-    Draft {
-        /// What's typed.
-        text: String,
-        /// Its number, from 1; 0 once replaced.
-        rev: u64,
-        /// The client that set it, by the number it gave.
-        by: u64,
+    /// A client sent `sent` from the chat's box, which emptied the draft
+    /// (see [`ChatNode::draft`]): every other box holding just that,
+    /// ignoring white space at its ends, empties too, and one holding
+    /// anything else is left as it is.
+    DraftCleared {
+        /// The message sent.
+        sent: String,
     },
 }
 
@@ -1941,21 +1937,20 @@ pub enum ChatAction {
     /// images, as a turn of its own. Requires `wire::CHAT_FACTS`.
     Resend,
     /// Keep `text` as the message being typed in the chat's box and not
-    /// sent yet, for any client to start with (see [`ChatNode::draft`]).
-    /// Empty for none; at most [`DRAFT_LONGEST`] bytes. Requires
-    /// `wire::PROMPT_BOX`.
+    /// sent yet, for a client opening the chat with nothing typed to start
+    /// with (see [`ChatNode::draft`]): the last said is kept, whichever
+    /// client said it. Empty for none; at most [`DRAFT_LONGEST`] bytes.
+    /// Requires `wire::PROMPT_BOX`.
     Draft {
         /// What's typed.
         text: String,
-        /// The client's own number for itself, random, which the draft's
-        /// patch carries back, so it doesn't take its own draft again.
-        by: u64,
     },
     /// Take the message `queued`, waiting in the queue, out of it and into
-    /// the chat's draft, before what was typed there, in one step: every
-    /// client whose box hasn't changed since takes it. Refused for a
-    /// message with images or one that moves the chat to another agent,
-    /// which a draft can't hold. Requires `wire::PROMPT_BOX`.
+    /// the chat's draft, before what the draft held, in one step: answered
+    /// with the draft that makes, `Response::Text`, for the client asking
+    /// to put in its box. Refused for a message with images or one that
+    /// moves the chat to another agent, which a draft can't hold. Requires
+    /// `wire::PROMPT_BOX`.
     TakeBack {
         /// The queued message's ID.
         queued: u64,
@@ -2147,11 +2142,7 @@ impl ChatNode {
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
-            ChatPatch::Draft { text, rev, .. } => {
-                if rev != 0 {
-                    self.draft = text;
-                }
-            }
+            ChatPatch::DraftCleared { .. } => self.draft.clear(),
             ChatPatch::History {
                 first,
                 before,
@@ -2744,16 +2735,9 @@ mod tests {
             turn: Box::new(turn("two", vec![Item::Words("done".into())])),
         });
         assert_eq!(chat.prompts, ["one", "two"]);
-        let draft = |text: &str, rev| ChatPatch::Draft {
-            text: text.into(),
-            rev,
-            by: 7,
-        };
-        chat.apply(draft("and", 1));
-        assert_eq!(chat.draft, "and");
-        // One replaced since is passed over.
-        chat.apply(draft("", 0));
-        assert_eq!(chat.draft, "and");
+        chat.draft = "and".into();
+        chat.apply(ChatPatch::DraftCleared { sent: "two".into() });
+        assert_eq!(chat.draft, "");
     }
 
     #[test]

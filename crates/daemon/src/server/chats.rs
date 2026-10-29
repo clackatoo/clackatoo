@@ -104,9 +104,6 @@ pub(super) struct Agents {
     /// when it ends, is taken to have ended it, the agent being quiet
     /// till then (see `chat/woken.rs`).
     woken: BTreeMap<TerminalId, Instant>,
-    /// The chats with a draft the pace held back, and when it's to be
-    /// sent to viewers (see `chat/draft.rs`).
-    drafts: BTreeMap<TerminalId, Instant>,
     /// The chats whose agent has been asked for their session, and when,
     /// until it answers, or they've been told it's slow to (see
     /// [`Daemon::time_out_sessions`]).
@@ -172,11 +169,6 @@ impl Agents {
     /// or the parser's thread has parsed what one sent.
     pub(super) fn unread(&self) -> bool {
         (self.running.values()).any(|slot| slot.unread_errors || slot.agent.parsed())
-    }
-
-    /// Notes that chat `chat` holds a draft back until `due`.
-    pub(super) fn held_draft(&mut self, chat: TerminalId, due: Instant) {
-        self.drafts.entry(chat).or_insert(due);
     }
 
     /// The agent called `name`, if it's running.
@@ -1936,33 +1928,6 @@ impl Daemon {
         self.time_out_listings();
         self.park_idle();
         self.end_quiet_turns();
-        self.send_held_drafts();
-    }
-
-    /// Sends viewers the drafts the pace held back that are due. Cheap
-    /// when none is.
-    fn send_held_drafts(&mut self) {
-        let now = Instant::now();
-        if self
-            .agents
-            .drafts
-            .values()
-            .min()
-            .is_none_or(|due| *due > now)
-        {
-            return;
-        }
-        let due: Vec<TerminalId> = (self.agents.drafts.iter())
-            .filter(|(_, due)| **due <= now)
-            .map(|(&chat, _)| chat)
-            .collect();
-        for id in due {
-            self.agents.drafts.remove(&id);
-            if let Some(chat) = self.chat(id) {
-                chat.send_draft();
-                self.collect_damage(id);
-            }
-        }
     }
 
     /// Ends the turns agents took by themselves, without saying when they
@@ -2208,7 +2173,6 @@ impl Daemon {
         (self.next_probe_due().into_iter())
             .chain(self.next_park_due())
             .chain(self.agents.woken.values().min().copied())
-            .chain(self.agents.drafts.values().min().copied())
             .chain(self.next_session_due())
             .chain(self.next_listing_due())
             .min()

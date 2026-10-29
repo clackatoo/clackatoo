@@ -3334,7 +3334,12 @@ impl Daemon {
                 .ok_or_else(|| Error::Other("Original image is no longer available".into())),
             Request::Chat { terminal, action } => {
                 self.note_device_action(token, terminal, &action);
-                self.chat_action(terminal, action).map(|()| Response::Done)
+                // Answered with the draft it makes, for the box asking.
+                if let ChatAction::TakeBack { queued } = action {
+                    self.take_back_queued(terminal, queued).map(Response::Text)
+                } else {
+                    self.chat_action(terminal, action).map(|()| Response::Done)
+                }
             }
             request @ (Request::WatchWorkspaces
             | Request::NewWorkspace { .. }
@@ -3647,9 +3652,39 @@ impl Daemon {
         slot.terminal.grid().ok_or(Error::IsAChat(id))
     }
 
-    /// Does what a client asked of the chat `id`.
-    #[allow(clippy::too_many_lines, reason = "one arm for each action")]
+    /// Takes the message `queued` out of the chat `id`'s queue and into its
+    /// draft, returning the draft it makes (see `HostedChat::take_back`).
+    fn take_back_queued(&mut self, id: TerminalId, queued: u64) -> Result<String, Error> {
+        let chat = self.chat(id).ok_or(Error::NotAChat(id))?;
+        let made = chat.take_back(queued).map_err(Error::Other)?;
+        self.collect_damage(id);
+        Ok(made)
+    }
+
+    /// Does what a client asked of the chat `id`. A message sent from the
+    /// box, once taken, empties the draft, and tells viewers what was sent,
+    /// for every box holding just that to empty too.
     fn chat_action(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
+        let sent = match &action {
+            ChatAction::Send(text)
+            | ChatAction::SendImages { text, .. }
+            | ChatAction::Submit { text, .. }
+            | ChatAction::SendTo { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        self.chat_act(id, action)?;
+        if let Some(sent) = sent
+            && let Some(chat) = self.chat(id)
+        {
+            chat.draft_sent(sent);
+            self.collect_damage(id);
+        }
+        Ok(())
+    }
+
+    /// Does what a client asked of the chat `id`, as [`Self::chat_action`].
+    #[allow(clippy::too_many_lines, reason = "one arm for each action")]
+    fn chat_act(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
         let slot = self
             .terminals
             .get_mut(&id)
@@ -3700,18 +3735,13 @@ impl Daemon {
                 return self.submit_chat(id, text, images, target, steer);
             }
             // What's typed in the box: the clients', which the agent never
-            // hears of. Sent to viewers at the chat's pace.
-            ChatAction::Draft { text, by } => {
-                if let Some(due) = chat.set_draft(text, by) {
-                    self.agents.held_draft(id, due);
-                }
-                self.collect_damage(id);
+            // hears of, nor do viewers.
+            ChatAction::Draft { text } => {
+                chat.set_draft(text);
                 return Ok(());
             }
             ChatAction::TakeBack { queued } => {
-                chat.take_back(queued).map_err(Error::Other)?;
-                self.collect_damage(id);
-                return Ok(());
+                return self.take_back_queued(id, queued).map(drop);
             }
             ChatAction::RemoveQueued { id: message } => {
                 chat.take_queued_user(message).map_err(Error::Other)?;

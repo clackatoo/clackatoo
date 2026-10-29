@@ -6345,12 +6345,7 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
         });
     }
     let text = "and then NEWS".to_owned();
-    client
-        .chat(chat, ChatAction::Draft { text, by: 7 })
-        .unwrap();
-    let node = wait_for_chat(&mut client, chat, |node| !node.draft.is_empty());
-    assert_eq!(node.draft, "and then NEWS");
-    assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
+    client.chat(chat, ChatAction::Draft { text }).unwrap();
 
     upgrade_process(&child, &socket);
     let mut client = Client::connect(&socket).unwrap();
@@ -6359,14 +6354,10 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
     let node = wait_for_chat(&mut client, chat, |node| !node.turns.is_empty());
     assert_eq!(node.draft, "and then NEWS");
     assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
-    // Sent, by the box that says it's empty now, as a window does, it's
-    // no one's draft any more, and it's the newest message to recall.
+    // Sent, it's no one's draft any more, and it's the newest message to
+    // recall.
     client
         .chat(chat, ChatAction::Send("and then NEWS".into()))
-        .unwrap();
-    let text = String::new();
-    client
-        .chat(chat, ChatAction::Draft { text, by: 7 })
         .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| {
         node.turns.len() == 3 && node.draft.is_empty()

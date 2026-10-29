@@ -764,6 +764,20 @@ impl Client {
         }
     }
 
+    /// Takes the message `queued` out of chat `terminal`'s queue and into
+    /// its draft (`ChatAction::TakeBack`), returning the draft it makes.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn take_back(&mut self, terminal: TerminalId, queued: u64) -> Result<String, ClientError> {
+        let action = ChatAction::TakeBack { queued };
+        match self.request(&Request::Chat { terminal, action })? {
+            Response::Text(made) => Ok(made),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Captures what a terminal is showing.
     ///
     /// # Errors

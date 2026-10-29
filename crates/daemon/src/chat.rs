@@ -452,8 +452,6 @@ pub(crate) struct HostedChat {
     /// opens no turn, as what was in flight when one was stopped comes
     /// after it.
     wake_held: Option<std::time::Instant>,
-    /// Where what's typed in the box stands (see `draft`).
-    draft: draft::Draft,
     /// What the agent said with no turn open that was taken for a notice,
     /// and when: given back to a turn it opens soon after, which shows it
     /// was the turn's start (see `chat/woken.rs`).
@@ -564,36 +562,13 @@ impl Journal {
     /// A whole plan, task list or list of commands takes the place of the last change if
     /// that's one of the same and no viewer has had it yet, so an agent
     /// that sends them fast doesn't push out what viewers still need.
-    /// Only the latest draft keeps its text: each before it, sent or not,
-    /// is emptied and numbered 0, keeping its place so viewers' numbering
-    /// holds, and who set it, so it still comes back to that client.
     fn push(&mut self, patch: ChatPatch) {
-        if matches!(patch, ChatPatch::Draft { .. }) {
-            for kept in &mut self.patches {
-                if let ChatPatch::Draft { rev, by, .. } = kept
-                    && *rev != 0
-                {
-                    let replaced = ChatPatch::Draft {
-                        text: String::new(),
-                        rev: 0,
-                        by: *by,
-                    };
-                    self.bytes -= weight(kept);
-                    self.bytes += weight(&replaced);
-                    *kept = replaced;
-                }
-            }
-        }
         let replaces = |last: &ChatPatch| {
             matches!(
                 (last, &patch),
                 (ChatPatch::Plan(_), ChatPatch::Plan(_))
                     | (ChatPatch::Tasks(_), ChatPatch::Tasks(_))
                     | (ChatPatch::Commands(_), ChatPatch::Commands(_))
-            ) || matches!(
-                (last, &patch),
-                // The same client's: the later comes back to it for both.
-                (ChatPatch::Draft { by: before, .. }, ChatPatch::Draft { by, .. }) if before == by
             )
         };
         if self.end() > self.sent.get()
@@ -697,7 +672,6 @@ impl HostedChat {
             woke_by_task: None,
             woken_stopping: false,
             wake_held: None,
-            draft: draft::Draft::default(),
             idle_taken: None,
             tasks_session: None,
             own_tools: VecDeque::new(),
@@ -3563,7 +3537,7 @@ fn weight(patch: &ChatPatch) -> usize {
         ChatPatch::Item { value, .. } => item(value),
         ChatPatch::Append { text, .. }
         | ChatPatch::Output { text, .. }
-        | ChatPatch::Draft { text, .. }
+        | ChatPatch::DraftCleared { sent: text }
         | ChatPatch::Notice(Some(text)) => text.len(),
         ChatPatch::Question(Some(question)) => {
             question.title.len()
@@ -4252,18 +4226,18 @@ mod tests {
     #[test]
     fn a_draft_is_kept_cut_to_size_and_handed_over() {
         let mut chat = chat();
-        assert_eq!(chat.set_draft("and then".into(), 7), None);
+        let end = chat.journal.end();
+        chat.set_draft("and then".into());
         assert_eq!(chat.node.draft, "and then");
-        // The same again still comes back to the client that said it.
-        chat.set_draft("and then".into(), 7);
-        assert_eq!(chat.node.draft, "and then");
+        // Typing isn't sent to viewers.
+        assert_eq!(chat.journal.end(), end);
         // Too long is cut at a character's edge.
         let long = "é".repeat(clackatoo_protocol::DRAFT_LONGEST);
-        chat.set_draft(long, 7);
+        chat.set_draft(long);
         assert!(chat.node.draft.len() <= clackatoo_protocol::DRAFT_LONGEST);
         assert!(chat.node.draft.chars().all(|c| c == 'é'));
         // Through an upgrade.
-        chat.set_draft("the docs".into(), 7);
+        chat.set_draft("the docs".into());
         let mut drafts: Vec<_> = chat.hand_over_draft().into_iter().collect();
         let mut resumed = chat_with("claude");
         resumed.resume_draft(&mut drafts);
@@ -4273,68 +4247,39 @@ mod tests {
         // over.
         let actions = chat.act(ChatAction::Draft {
             text: String::new(),
-            by: 7,
         });
         assert!(actions.is_empty());
-        chat.set_draft(String::new(), 7);
+        chat.set_draft(String::new());
         assert!(chat.hand_over_draft().is_none());
     }
 
-    /// The drafts in `chat`'s journal: their text, number and setter.
-    fn journal_drafts(chat: &HostedChat) -> Vec<(String, u64, u64)> {
-        (chat.journal.patches.iter())
-            .filter_map(|patch| match patch {
-                ChatPatch::Draft { text, rev, by } => Some((text.clone(), *rev, *by)),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
-    fn drafts_go_at_the_chats_pace_and_only_the_latest_keeps_its_text() {
+    fn a_message_sent_empties_the_draft_and_tells_viewers_what_was_sent() {
         let mut chat = chat();
-        assert_eq!(chat.set_draft("a".into(), 7), None);
-        // A viewer has had it.
-        chat.journal.sent.set(chat.journal.end());
-        // Said again at once, it's kept, held back, and sent once due.
-        let due = chat.set_draft("ab".into(), 7).expect("held back");
-        assert!(due > std::time::Instant::now());
-        assert_eq!(chat.node.draft, "ab");
-        assert_eq!(journal_drafts(&chat), [("a".to_owned(), 1, 7)]);
-        // Another client's: the one held back goes first, to come back
-        // to its client.
-        assert!(chat.set_draft("abc".into(), 8).is_some());
-        chat.send_draft();
-        // Those before are emptied and numbered 0, keeping their place and
-        // who said them.
+        chat.set_draft("fix it".into());
+        chat.draft_sent("fix it".into());
+        assert_eq!(chat.node.draft, "");
         assert_eq!(
-            journal_drafts(&chat),
-            [
-                (String::new(), 0, 7),
-                (String::new(), 0, 7),
-                ("abc".to_owned(), 3, 8)
-            ]
+            chat.journal.patches.back(),
+            Some(&ChatPatch::DraftCleared {
+                sent: "fix it".into()
+            })
         );
-        // Nothing waits now.
-        let end = chat.journal.end();
-        chat.send_draft();
-        assert_eq!(chat.journal.end(), end);
     }
 
     #[test]
     fn a_queued_message_taken_back_is_the_draft_with_no_window_open() {
         let mut chat = chat();
-        chat.set_draft("and the lint".into(), 7);
+        chat.set_draft("and the lint".into());
         let id = chat
             .enqueue_user("review the tests".into(), Vec::new(), None)
             .unwrap();
-        // No window holds it: the daemon does, in one step.
-        chat.take_back(id).unwrap();
+        // No window holds it: the daemon does, in one step, and says what
+        // it made.
+        let made = chat.take_back(id).unwrap();
+        assert_eq!(made, "review the tests\nand the lint");
         assert!(chat.user_queue.messages.is_empty());
-        assert_eq!(chat.node.draft, "review the tests\nand the lint");
-        // Sent at once, by the daemon, for every unchanged box to take.
-        let last = journal_drafts(&chat).pop().unwrap();
-        assert_eq!(last, ("review the tests\nand the lint".to_owned(), 2, 0));
+        assert_eq!(chat.node.draft, made);
         // Gone already, or with images, it isn't taken back.
         assert!(chat.take_back(id).is_err());
         let image = clackatoo_protocol::ChatImage {

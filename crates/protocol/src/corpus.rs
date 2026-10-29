@@ -1412,8 +1412,8 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
 }
 
 /// Samples of protocol 118: the chat's prompt box, the user's messages
-/// and a draft in a snapshot, a draft as a patch and one emptied, and a
-/// window keeping a draft (CLACKA-192).
+/// and a draft in a snapshot, a message sent emptying the draft, and a
+/// window keeping a draft and taking a queued message back (CLACKA-192).
 fn prompt_box() -> Vec<Sample> {
     let terminal = TerminalId(3);
     vec![
@@ -1431,25 +1431,20 @@ fn prompt_box() -> Vec<Sample> {
         })),
         Sample::Server(ServerMessage::Event(Event::View {
             terminal,
-            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft {
-                text: "half a thought".into(),
-                rev: 3,
-                by: 0x5eed_cafe,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::DraftCleared {
+                sent: "fix the lint".into(),
             })]),
         })),
         Sample::Server(ServerMessage::Event(Event::View {
             terminal,
-            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft {
-                text: String::new(),
-                rev: 0,
-                by: 0,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::DraftCleared {
+                sent: String::new(),
             })]),
         })),
         Sample::Client(ClientMessage::Request(Request::Chat {
             terminal,
             action: ChatAction::Draft {
                 text: "half a thought".into(),
-                by: 0x5eed_cafe,
             },
         })),
         Sample::Client(ClientMessage::Request(Request::Chat {

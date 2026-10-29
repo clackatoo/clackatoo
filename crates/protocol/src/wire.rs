@@ -304,7 +304,8 @@ gates! {
     NESTED_WORK = 117,
     /// The chat's prompt box: the messages the user sent, for Up to recall,
     /// `ChatNode`'s `prompts`; and the message being typed and not sent,
-    /// `ChatNode`'s `draft`, `ChatPatch::Draft` and `ChatAction::Draft`.
+    /// `ChatNode`'s `draft`, `ChatAction::Draft`, `ChatPatch::DraftCleared`
+    /// and taking a queued message back into it, `ChatAction::TakeBack`.
     PROMPT_BOX = 118,
 }
 
@@ -480,7 +481,7 @@ impl Since for ChatPatch {
             Self::Tasks(_) => AGENT_TASKS,
             Self::Plan(_) => AGENT_PLAN,
             Self::Commands(_) => AGENT_COMMANDS,
-            Self::Draft { .. } => PROMPT_BOX,
+            Self::DraftCleared { .. } => PROMPT_BOX,
             Self::Retrying(_) => CHAT_FACTS,
         }
     }
@@ -1229,7 +1230,7 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
 }
 
 /// `message` as a peer of `wire`, older than `PROMPT_BOX`, reads a chat:
-/// without the chat updates it has no controls for (a draft before
+/// without the chat updates it has no controls for (a sent draft before
 /// `PROMPT_BOX`, a retry before `CHAT_FACTS`, and the older ones), or
 /// else, before `CHAT_FACTS`, without what `CHAT_FACTS` brought. `None`
 /// if it reads it as it is. `TURN_FAILED` (116) is a field of the list of
@@ -1253,7 +1254,7 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Draft { .. }) if wire < PROMPT_BOX)
+        matches!(patch, Patch::Chat(ChatPatch::DraftCleared { .. }) if wire < PROMPT_BOX)
             || matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
             || matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
             || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
