@@ -359,7 +359,10 @@ mod tests {
         let (id, first, second) = merging(&mut world);
         world.daemon.settle_all_pending();
         assert!(!world.daemon.agent_files.diffing(world.chat));
-        assert_eq!((world.text(id), saved(&world, id)), (second.clone(), second));
+        assert_eq!(
+            (world.text(id), saved(&world, id)),
+            (second.clone(), second)
+        );
         assert!(!world.daemon.buffers[&id].agents.is_empty(), "reviewed");
         world.end_turn();
         assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
@@ -407,7 +410,11 @@ mod tests {
             world.type_in(id, first.len() + typed.len(), "", key);
             typed.push_str(key);
             world.daemon.take_one_settled();
-            assert_eq!(world.daemon.agent_files.diffing(world.chat), pending, "{key}");
+            assert_eq!(
+                world.daemon.agent_files.diffing(world.chat),
+                pending,
+                "{key}"
+            );
         }
         assert_eq!(world.text(id), format!("{second}{typed}"));
         world.end_turn();
@@ -503,8 +510,11 @@ mod tests {
         world.daemon.check_disk();
         world.daemon.check_disk();
         other(world);
-        std::fs::write(world.path("big.txt"), third.replacen("line 9\n", "line #9\n", 1))
-            .unwrap();
+        std::fs::write(
+            world.path("big.txt"),
+            third.replacen("line 9\n", "line #9\n", 1),
+        )
+        .unwrap();
         world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         (id, second)
@@ -547,7 +557,14 @@ mod tests {
         // and what's on disk besides is from outside.
         assert_eq!(world.text(id), second);
         assert!(world.daemon.buffers[&id].stale());
-        assert!(world.daemon.agent_files.log.turn(TerminalId(2), 0).is_none());
+        assert!(
+            world
+                .daemon
+                .agent_files
+                .log
+                .turn(TerminalId(2), 0)
+                .is_none()
+        );
     }
 
     #[test]

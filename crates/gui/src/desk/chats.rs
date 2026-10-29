@@ -168,7 +168,13 @@ impl Desk {
                     wanting.push(terminal);
                 }
                 if let Some(target) = chat.view_mut().take_opening() {
-                    opening.push((terminal, target, chat.view().folder().map(str::to_owned)));
+                    // From where it works, made absolute if the daemon
+                    // says, so it can go to an editor already open.
+                    let view = chat.view();
+                    let cwd = (view.paths().map(|paths| paths.cwd.as_str()))
+                        .or_else(|| view.folder())
+                        .map(str::to_owned);
+                    opening.push((terminal, target, cwd));
                 }
             }
             // What a chat's `@` menu offers, and what `gf` on a mention

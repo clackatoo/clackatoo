@@ -207,7 +207,9 @@ pub(crate) fn prepare_written(
 ) -> Result<Prepared, Unprepared> {
     let failed = |err: clackatoo_text::EditError| Unprepared::Failed(err.to_string());
     let Some((disk, _)) = steps.last() else {
-        return Err(Unprepared::Failed("the changes don't make the file's text".into()));
+        return Err(Unprepared::Failed(
+            "the changes don't make the file's text".into(),
+        ));
     };
     let whole = match merge(saved, disk, now).map_err(failed)? {
         Merged::Made(edit) => edit,

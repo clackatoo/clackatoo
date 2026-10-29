@@ -982,7 +982,11 @@ impl Daemon {
                 turn: 0,
                 tool: None,
             });
-            match self.agent_files.settler.submit(Job::Open(merging), &self.waker) {
+            match self
+                .agent_files
+                .settler
+                .submit(Job::Open(merging), &self.waker)
+            {
                 None => {
                     self.agent_files.diffing.push(Diffing {
                         path,
@@ -1250,7 +1254,11 @@ impl Daemon {
             return Some(settled);
         }
         let (path, maker) = (settled.path.clone(), settled.maker.clone());
-        match self.agent_files.settler.submit(Job::Closed(settled), &self.waker) {
+        match self
+            .agent_files
+            .settler
+            .submit(Job::Closed(settled), &self.waker)
+        {
             None => {
                 self.agent_files.diffing.push(Diffing {
                     path,

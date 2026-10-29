@@ -18828,7 +18828,10 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
         })
     };
     let (message, made) = if small {
-        (format!("disk {}\nsmall\n", big.display()), "small\n".to_owned())
+        (
+            format!("disk {}\nsmall\n", big.display()),
+            "small\n".to_owned(),
+        )
     } else {
         let message = format!("disk-swap {}\nline 1\nline one", big.display());
         (message, text.replacen("line 1", "line one", 1))
