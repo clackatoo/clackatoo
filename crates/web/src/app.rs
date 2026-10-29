@@ -569,6 +569,18 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
             }
         });
     });
+    // What's typed in the box is told the daemon as the box is left, for
+    // a window, or this phone, to start with later.
+    listen(root, "focusout", false, |event| {
+        let left_box =
+            (event.target()).is_some_and(|target| target.dyn_into::<HtmlTextAreaElement>().is_ok());
+        if left_box {
+            with_app(|app| {
+                app.state.tell_draft();
+                app.send();
+            });
+        }
+    });
     listen(root, "focusin", false, |event| {
         let model = (event
             .target()
@@ -2444,6 +2456,8 @@ impl App {
                 .and_then(|id| id.parse().ok())
                 .map(TerminalId)
         };
+        // What's typed in the chat left goes with it.
+        self.state.tell_draft();
         if let Some(chat) = id("#chat/") {
             if self.state.open.as_ref().is_none_or(|open| open.id != chat) {
                 self.page = None;

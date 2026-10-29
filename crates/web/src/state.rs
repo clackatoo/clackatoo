@@ -180,6 +180,9 @@ pub struct State {
     pub home_filter: HomeFilter,
     pub home_query: String,
     pub drafts: BTreeMap<TerminalId, String>,
+    /// What each chat's daemon was last told is typed in its box, or told
+    /// the app, so it's told only what changed (see [`State::tell_draft`]).
+    drafts_told: BTreeMap<TerminalId, String>,
     pub images: BTreeMap<TerminalId, Vec<Attachment>>,
     pub loading_images: BTreeSet<TerminalId>,
     next_image: u64,
@@ -228,6 +231,7 @@ impl Default for State {
             home_filter: HomeFilter::All,
             home_query: String::new(),
             drafts: BTreeMap::new(),
+            drafts_told: BTreeMap::new(),
             images: BTreeMap::new(),
             loading_images: BTreeSet::new(),
             next_image: 0,
@@ -531,6 +535,37 @@ impl State {
             }
             (None, ViewUpdate::Patch(_)) => {}
         }
+        // What's typed in the box, as another window or this phone left
+        // it, goes in a box with nothing typed.
+        let kept = (open.view.as_ref().and_then(View::chat)).map(|chat| chat.draft.clone());
+        if let Some(kept) = kept
+            && self.drafts.get(&terminal).is_none_or(String::is_empty)
+            && !kept.is_empty()
+        {
+            self.drafts.insert(terminal, kept.clone());
+            self.drafts_told.insert(terminal, kept);
+            self.dirty.footer = true;
+        }
+    }
+
+    /// Tells the daemon what's typed in the open chat's box, if that's
+    /// changed since it was told, for a window or this phone to start
+    /// with later. Its failure, as from another machine's older daemon,
+    /// is only logged.
+    pub fn tell_draft(&mut self) {
+        let Some(terminal) = self.open.as_ref().map(|open| open.id) else {
+            return;
+        };
+        if self.online != Online::Open {
+            return;
+        }
+        let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
+        if self.drafts_told.get(&terminal).map_or("", String::as_str) == text {
+            return;
+        }
+        self.drafts_told.insert(terminal, text.clone());
+        let action = ChatAction::Draft { text };
+        self.request(Request::Chat { terminal, action }, Asked::Quiet);
     }
 
     /// Shows chat `id`.
@@ -1126,6 +1161,51 @@ mod tests {
             terminal: TerminalId(4),
             update: ViewUpdate::Patch(patches.into_iter().map(Patch::Chat).collect()),
         })
+    }
+
+    #[test]
+    fn whats_typed_elsewhere_fills_an_empty_box_and_whats_typed_here_is_told_once() {
+        let mut state = State::default();
+        state.connected();
+        state.open_chat(TerminalId(4));
+        state.take_outbox();
+        let kept = |draft: &str| {
+            ServerMessage::Event(Event::View {
+                terminal: TerminalId(4),
+                update: ViewUpdate::Snapshot(View {
+                    title: "chat".into(),
+                    cwd: None,
+                    root: Node::Chat(Box::new(ChatNode {
+                        draft: draft.into(),
+                        ..ChatNode::default()
+                    })),
+                }),
+            })
+        };
+        state.receive(kept("and then"));
+        assert_eq!(state.drafts[&TerminalId(4)], "and then");
+        state.take_outbox();
+        // Nothing changed: nothing to tell.
+        state.tell_draft();
+        assert!(state.take_outbox().is_empty());
+        state
+            .drafts
+            .insert(TerminalId(4), "and then the docs".into());
+        state.tell_draft();
+        state.tell_draft();
+        assert_eq!(
+            state.take_outbox(),
+            [ClientMessage::Request(Request::Chat {
+                terminal: TerminalId(4),
+                action: ChatAction::Draft {
+                    text: "and then the docs".into()
+                },
+            })]
+        );
+        // Typed here, what's typed elsewhere doesn't replace it.
+        state.receive(patch(vec![ChatPatch::Draft("on the laptop".into())]));
+        state.receive(kept("on the laptop"));
+        assert_eq!(state.drafts[&TerminalId(4)], "and then the docs");
     }
 
     #[test]
