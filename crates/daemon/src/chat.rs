@@ -2402,12 +2402,12 @@ impl HostedChat {
                 self.progressed();
                 self.message_image(&chunk.content);
                 let parent = self.parent_here(chunk.meta.as_ref(), None);
-                self.write(&chunk.content, false, parent);
+                self.write(&chunk.content, false, parent.as_deref());
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.progressed();
                 let parent = self.parent_here(chunk.meta.as_ref(), None);
-                self.write(&chunk.content, true, parent);
+                self.write(&chunk.content, true, parent.as_deref());
             }
             SessionUpdate::ToolCall(call) => {
                 self.progressed();
@@ -2749,7 +2749,7 @@ impl HostedChat {
     /// A piece of the agent's words, or of its thinking, on the end of the
     /// turn answering: of the subagent the tool call `parent` started, if
     /// it's given.
-    fn write(&mut self, content: &ContentBlock, thinking: bool, parent: Option<String>) {
+    fn write(&mut self, content: &ContentBlock, thinking: bool, parent: Option<&str>) {
         let ContentBlock::Text(text) = content else {
             return;
         };
@@ -2763,7 +2763,7 @@ impl HostedChat {
         let items = &mut self.node.turns[index].items;
         // A subagent's words never run on from the agent's, nor another's.
         let continues = items.last().is_some_and(|last| {
-            last.parent() == parent.as_deref()
+            last.parent() == parent
                 && match last.inner() {
                     Item::Words(_) => !thinking,
                     Item::Thought(_) => thinking,
@@ -2777,14 +2777,14 @@ impl HostedChat {
             } else {
                 Item::Words(String::new())
             };
-            let item = match &parent {
-                Some(parent) => Item::nested(parent.clone(), item),
+            let item = match parent {
+                Some(parent) => Item::nested(parent.to_owned(), item),
                 None => item,
             };
             items.push(item.clone());
             let at = items.len() - 1;
             self.patch_item(index, at, item);
-            if let Some(parent) = &parent {
+            if let Some(parent) = parent {
                 self.bound_nested(index, parent);
             }
         }
@@ -3036,9 +3036,7 @@ impl HostedChat {
             .enumerate()
             .flat_map(|(turn, value)| {
                 value.items.iter().filter_map(move |item| {
-                    let Some(tool) = item.tool() else {
-                        return None;
-                    };
+                    let tool = item.tool()?;
                     let images: Vec<_> = tool
                         .content
                         .iter()

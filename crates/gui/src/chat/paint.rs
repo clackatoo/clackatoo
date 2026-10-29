@@ -709,7 +709,8 @@ impl ChatView {
                 y += height;
                 continue;
             }
-            let left = m.em(nested::INDENT) * nesting.depth(item) as f32;
+            let depth = u8::try_from(nesting.depth(item)).unwrap_or(u8::MAX);
+            let left = m.em(nested::INDENT) * f32::from(depth);
             let width = (column - left).max(m.em(8.0));
             let left = column - width;
             if let Item::Tool(tool) = item.inner() {

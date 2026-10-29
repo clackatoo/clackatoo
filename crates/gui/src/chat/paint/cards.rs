@@ -142,7 +142,7 @@ impl ChatView {
                 if laid.open == open
                     && laid.tool == *tool
                     && laid.nested == nested
-                    && laid.width == width =>
+                    && laid.width.to_bits() == width.to_bits() =>
             {
                 laid
             }
@@ -150,6 +150,7 @@ impl ChatView {
         }
     }
 
+    #[allow(clippy::too_many_lines, reason = "a card's parts, top to bottom")]
     fn lay_out_card(
         &mut self,
         fonts: &mut Fonts,

@@ -1302,6 +1302,10 @@ impl Downgrade for ServerMessage {
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "an arm for each kind of message grown since"
+    )]
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
@@ -1739,15 +1743,16 @@ mod tests {
     fn a_nested_item_is_never_read_nested_deeper() {
         // `Item::Nested` holding another: as a forged peer might send it.
         #[derive(Serialize)]
+        #[allow(dead_code, reason = "each variant stands in for Item's, for its place")]
         enum Forged {
-            _Words(String),
-            _Thought(String),
-            _Tool(crate::Tool),
-            _Other(String),
-            _Compacted(String),
+            Words(String),
+            Thought(String),
+            Tool(crate::Tool),
+            Other(String),
+            Compacted(String),
             Nested { parent: String, item: Box<Forged> },
         }
-        let mut forged = Forged::_Words("x".into());
+        let mut forged = Forged::Words("x".into());
         for _ in 0..3 {
             forged = Forged::Nested {
                 parent: "p".into(),
