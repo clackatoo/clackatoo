@@ -317,6 +317,9 @@ gates! {
     /// `branches`, `ChatPatch::Branches`, and `ChatAction::Rewind` and
     /// `ChatAction::SwitchBranch`.
     CHAT_BRANCHES = 121,
+    /// Copying a chat's conversation into a new chat of its own
+    /// (CLACKA-198): `ChatAction::Fork`.
+    CHAT_FORK = 122,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1092,6 +1095,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::Fork { .. } => CHAT_FORK,
         ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => CHAT_BRANCHES,
         ChatAction::Draft { .. } | ChatAction::TakeBack { .. } => PROMPT_BOX,
         ChatAction::Fill { .. } => ELICITATION,

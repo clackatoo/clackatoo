@@ -104,7 +104,7 @@ pub use chat::{
     UsageLimit, UsageLine, agent_command, code_span, interface_command, said, slash_command,
     tokens, turn_number, turn_numbered, without_image_labels,
 };
-pub use chat::{BranchSummary, Divergence, ForkFiles, TURN_NOT_SHOWN};
+pub use chat::{BranchSummary, Divergence, ForkFiles, ForkPlace, TURN_NOT_SHOWN};
 pub use chat::{
     DRAFT_LONGEST, PROMPT_LONGEST, PROMPTS_BYTES, PROMPTS_KEPT, TASK_OUTPUT_TAIL, recent_prompts,
     remember_prompt,
@@ -145,7 +145,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 121;
+pub const PROTOCOL_VERSION: u32 = 122;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

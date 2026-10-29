@@ -7,7 +7,9 @@
 
 use std::collections::HashSet;
 
-use clackatoo_protocol::{Error, ForkFiles, TerminalId, TurnFilesState};
+use clackatoo_protocol::{
+    Error, ForkFiles, ForkPlace, PaneTerminal, Response, TerminalId, TurnFilesState,
+};
 
 use super::Daemon;
 use super::turn_undo::Reversal;
@@ -102,6 +104,69 @@ impl Daemon {
         self.act(id, actions);
         self.after_cut(id);
         Ok(())
+    }
+
+    /// Answers [`ChatAction::Fork`](clackatoo_protocol::ChatAction::Fork):
+    /// copies chat `id`'s first `keep` turns into a new chat of the user's
+    /// own, with the same agent, folder and settings, whose session is
+    /// forked from `id`'s at the last point before their end (or told them
+    /// as a digest with its first message), and moves what those turns
+    /// changed in files to the copy, to be undone from there. The files
+    /// aren't touched. The copy goes where `place` says.
+    pub(super) fn fork_chat(
+        &mut self,
+        id: TerminalId,
+        keep: usize,
+        place: ForkPlace,
+    ) -> Result<TerminalId, Error> {
+        let chat = self.chat_ref(id).ok_or(Error::NotAChat(id))?;
+        let copied = chat.copy_of(keep).map_err(Error::Other)?;
+        let (agent, cwd, tools, task, browser, size) = (
+            chat.agent().to_owned(),
+            chat.working_directory().to_owned(),
+            chat.tools(),
+            chat.task(),
+            chat.browser(),
+            chat.size(),
+        );
+        let pane = self.workspaces.get().pane_showing(id);
+        let workspace = pane.and_then(|pane| {
+            let (workspace, ..) = self.workspaces.get().find_pane(pane)?;
+            Some(workspace.id)
+        });
+        let Some((pane, workspace)) = pane.zip(workspace) else {
+            return Err(Error::Other(
+                "The chat isn't in a pane to copy it beside.".to_owned(),
+            ));
+        };
+        self.settle_all_pending();
+        let spec = self.agent_spec(&agent);
+        let copy = self.next_terminal();
+        let mut hosted = crate::chat::HostedChat::new(copy, size, cwd, &spec, tools, task, browser);
+        let from = copied.uids.clone();
+        let to = hosted.take_copy(copied);
+        let pairs: Vec<_> = from.iter().copied().zip(to).collect();
+        self.agent_files.log.move_turns(id, copy, &pairs);
+        log::info!(
+            "chat {copy} started, with {agent}, a copy of chat {id}'s first {} turns",
+            pairs.len()
+        );
+        self.start_hosted_chat(hosted);
+        self.refresh_files(id, from);
+        self.refresh_files(copy, pairs.iter().map(|&(_, new)| new));
+        let placed = match place {
+            ForkPlace::Here => {
+                self.workspaces.replace_terminal(pane, copy);
+                self.workspaces_changed();
+                Ok(Response::PaneCreated(pane))
+            }
+            ForkPlace::Beside(beside) => self.split(pane, beside, PaneTerminal::Existing(copy)),
+            ForkPlace::Tab => self.new_tab(workspace, PaneTerminal::Existing(copy)),
+        };
+        if let Err(err) = placed {
+            log::warn!("chat {copy}, a copy, couldn't be shown: {err}");
+        }
+        Ok(copy)
     }
 
     /// Answers [`ChatAction::SwitchBranch`](clackatoo_protocol::ChatAction::SwitchBranch).

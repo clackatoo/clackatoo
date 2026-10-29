@@ -1163,6 +1163,7 @@ impl HostedChat {
             | ChatAction::Redo { .. }
             | ChatAction::Rewind { .. }
             | ChatAction::SwitchBranch { .. }
+            | ChatAction::Fork { .. }
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
             | ChatAction::Submit { .. }

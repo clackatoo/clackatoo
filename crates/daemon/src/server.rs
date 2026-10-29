@@ -3373,6 +3373,9 @@ impl Daemon {
                 // Answered with the message's text, for the box asking.
                 if let ChatAction::TakeBack { queued } = action {
                     self.take_back_queued(terminal, queued).map(Response::Text)
+                } else if let ChatAction::Fork { keep, place } = action {
+                    let keep = usize::try_from(keep).unwrap_or(usize::MAX);
+                    (self.fork_chat(terminal, keep, place)).map(Response::TerminalCreated)
                 } else {
                     self.chat_action(terminal, action).map(|()| Response::Done)
                 }

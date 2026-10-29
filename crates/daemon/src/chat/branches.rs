@@ -73,6 +73,17 @@ pub(crate) struct BranchSession {
     pub(crate) chosen: Vec<(String, String)>,
 }
 
+/// What a copy of a chat's turns takes (see `HostedChat::copy_of`).
+#[derive(Debug)]
+pub(crate) struct Copied {
+    turns: Vec<Turn>,
+    /// The turns' uids in the chat copied.
+    pub(crate) uids: Vec<TurnUid>,
+    plan: Option<ForkPlan>,
+    title: String,
+    chosen: Vec<(String, String)>,
+}
+
 /// How the session of a branch being made is to be had: forked from
 /// `from`, the branch left's, at the agent's message `message`, knowing
 /// the first `known` turns, or all of `from`'s if no message is named.
@@ -344,7 +355,10 @@ impl HostedChat {
         };
         let forked = forked || plan.sent;
         self.known = if forked { plan.known } else { 0 };
-        if !forked || plan.known < self.node.turns.len().saturating_sub(1) {
+        // A copy (`:fork`) has no branches to say so on.
+        if !self.tree.segs.is_empty()
+            && (!forked || plan.known < self.node.turns.len().saturating_sub(1))
+        {
             let leaf = self.tree.current;
             self.tree.seg_mut(leaf).summary = true;
             self.publish_branches();
@@ -377,17 +391,7 @@ impl HostedChat {
                     .to_owned(),
             );
         }
-        let busy = self.answering()
-            || self.woken()
-            || self.stop_requested
-            || self.loading()
-            || self.told_again()
-            || matches!(self.link, Link::Opening | Link::Closing)
-            || self.carry.is_some()
-            || !self.asking.is_empty()
-            || self.user_queue.native.is_some()
-            || self.node.delivery.sending.is_some();
-        if busy {
+        if self.busy() {
             return Some("Wait for the agent to finish, or stop it, first.".to_owned());
         }
         let going = self.tasks_going().len();
@@ -398,6 +402,77 @@ impl HostedChat {
             ));
         }
         None
+    }
+
+    /// Whether the agent is at work, or the chat between sessions, as
+    /// nothing may cut or copy its conversation while it is.
+    fn busy(&self) -> bool {
+        self.answering()
+            || self.woken()
+            || self.stop_requested
+            || self.loading()
+            || self.told_again()
+            || matches!(self.link, Link::Opening | Link::Closing)
+            || self.carry.is_some()
+            || !self.asking.is_empty()
+            || self.user_queue.native.is_some()
+            || self.node.delivery.sending.is_some()
+    }
+
+    /// What a copy of the first `keep` turns of the branch shown takes
+    /// (`ChatAction::Fork`, `:fork`): the turns and their uids here, the
+    /// fork the copy's session is to be had by, from this chat's session
+    /// at the last point before the end of them, and its title and
+    /// settings; or why it can't be had now.
+    pub(crate) fn copy_of(&self, keep: usize) -> Result<Copied, String> {
+        if self.busy() {
+            return Err("Wait for the agent to finish, or stop it, first.".to_owned());
+        }
+        let keep = keep.min(self.node.turns.len());
+        if keep == 0 {
+            return Err("There's no turn to copy yet.".to_owned());
+        }
+        let point =
+            (self.fork_point_before(keep)).map(|(index, point)| (index + 1, point.message.clone()));
+        let plan = (self.session.clone())
+            .zip(point)
+            .map(|(from, (known, message))| ForkPlan {
+                from,
+                known,
+                message: Some(message),
+                sent: false,
+            });
+        Ok(Copied {
+            turns: self.node.turns[..keep].to_vec(),
+            uids: self.uids.within(0..keep).to_vec(),
+            plan,
+            title: self.title.clone(),
+            chosen: self.chosen.clone(),
+        })
+    }
+
+    /// Takes `copied`, the turns of another chat, as this new chat's
+    /// conversation, its session to be forked from that chat's as
+    /// `copied` plans, or else told them as a digest with the first
+    /// message. Returns the uids it gave the turns, in order.
+    pub(crate) fn take_copy(&mut self, copied: Copied) -> Vec<TurnUid> {
+        let mut uids = Vec::new();
+        for turn in copied.turns {
+            self.node.turns.push(turn);
+            uids.push(self.uids.push());
+        }
+        self.node.prompts = clackatoo_protocol::recent_prompts(&self.node.turns);
+        self.title = copied.title;
+        for (setting, value) in copied.chosen {
+            match self.chosen.iter_mut().find(|(known, _)| *known == setting) {
+                Some(kept) => kept.1 = value,
+                None => self.chosen.push((setting, value)),
+            }
+        }
+        self.known = 0;
+        self.tree.plan = copied.plan;
+        self.journal.restart();
+        uids
     }
 
     /// The session the branch shown has now, to keep on its leaf.

@@ -397,6 +397,58 @@ impl EditLog {
         }
     }
 
+    /// Moves what `from`'s turns changed in files to `to`'s, each pair
+    /// being a turn's uid in each, as a chat's turns are copied into
+    /// another (`:fork`): they're undone and redone from there from now on.
+    pub(super) fn move_turns(
+        &mut self,
+        from: TerminalId,
+        to: TerminalId,
+        pairs: &[(TurnUid, TurnUid)],
+    ) {
+        let theirs = |uid: TurnUid| {
+            (pairs.iter())
+                .find(|(old, _)| *old == uid)
+                .map(|&(_, new)| new)
+        };
+        let Some(source) = self.chats.iter_mut().find(|edits| edits.chat == from) else {
+            return;
+        };
+        let mut turns = VecDeque::new();
+        let mut dropped = Vec::new();
+        source.turns.retain_mut(|turn| match theirs(turn.turn) {
+            Some(new) => {
+                turns.push_back(TurnEdits {
+                    turn: new,
+                    files: std::mem::take(&mut turn.files),
+                });
+                false
+            }
+            None => true,
+        });
+        source.dropped.retain(|&(turn, count)| match theirs(turn) {
+            Some(new) => {
+                dropped.push((new, count));
+                false
+            }
+            None => true,
+        });
+        if turns.is_empty() && dropped.is_empty() {
+            return;
+        }
+        match self.chats.iter_mut().find(|edits| edits.chat == to) {
+            Some(target) => {
+                target.turns.extend(turns);
+                target.dropped.extend(dropped);
+            }
+            None => self.chats.push(ChatEdits {
+                chat: to,
+                turns,
+                dropped,
+            }),
+        }
+    }
+
     /// Forgets what the agent in `chat` changed, as the chat has closed,
     /// and nothing can undo it now.
     pub(super) fn forget(&mut self, chat: TerminalId) {

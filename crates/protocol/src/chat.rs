@@ -331,6 +331,8 @@ pub const INTERFACE_COMMANDS: &[&str] = &[
     "new",
     "resume",
     "rewind",
+    "fork",
+    "branch",
     "context",
     "status",
     "cost",
@@ -2157,6 +2159,32 @@ pub enum ChatAction {
         /// rather than refusing.
         stop_tasks: bool,
     },
+    /// Copy the first `keep` turns of the branch shown (all of them if
+    /// it's more) into a new chat of the user's own, with the same agent,
+    /// whose session is forked from this one's where it can be, or else
+    /// told those turns as a summary; what those turns changed in files is
+    /// undone and redone from the copy from then on. The files aren't
+    /// touched. The copy goes where `place` says. Refused while the chat
+    /// isn't settled. Answered with `Response::TerminalCreated`, the
+    /// copy. Requires `wire::CHAT_FORK`.
+    Fork {
+        /// How many turns to copy, from the first.
+        keep: u32,
+        /// Where the copy goes.
+        place: ForkPlace,
+    },
+}
+
+/// Where a chat copied with [`ChatAction::Fork`] goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkPlace {
+    /// In the pane the chat is in, which it leaves, to be found among the
+    /// chats in no pane.
+    Here,
+    /// In a new pane beside the chat's, on that side.
+    Beside(crate::Side),
+    /// In a new tab of the chat's workspace.
+    Tab,
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from

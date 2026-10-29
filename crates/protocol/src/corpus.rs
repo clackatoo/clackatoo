@@ -1413,6 +1413,19 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::CHAT_BRANCHES, sample)),
     );
+    for place in [
+        crate::ForkPlace::Here,
+        crate::ForkPlace::Beside(crate::Side::Below),
+        crate::ForkPlace::Tab,
+    ] {
+        samples.push((
+            crate::wire::CHAT_FORK,
+            Client(ClientMessage::Request(Request::Chat {
+                terminal: TerminalId(3),
+                action: ChatAction::Fork { keep: 4, place },
+            })),
+        ));
+    }
     samples.push((
         crate::wire::CHAT_PATHS,
         Server(ServerMessage::Event(Event::View {
