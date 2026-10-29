@@ -539,15 +539,22 @@ impl Daemon {
             return;
         };
         let state = self.background_state(&background.tab);
+        // A command that starts and ends between two looks leaves the state
+        // as it was, but not the name; and a shell with nothing to be called
+        // yet, at its first prompt, keeps the name it was started with.
+        let name = self.background_name(&background.tab);
+        let renamed = !name.is_empty() && name != background.name;
         if state == background.state
+            && !renamed
             && failed.is_none_or(|failed| background.failed == Some(failed))
         {
             return;
         }
-        let name = self.background_name(&background.tab);
         if let Some(background) = self.workspaces.background_mut(tab) {
             background.state = state;
-            background.name = name;
+            if !name.is_empty() {
+                background.name = name;
+            }
             if failed.is_some() {
                 background.failed = failed;
             }
