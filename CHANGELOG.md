@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.10.102 (2026-10-29)
+
+### Features
+
+- nest Claude Code's Task subagent work under its tool call (CLACKA-195) (c471a989)
+
+### Fixes
+
+- nothing that must be seen folds away under a Task's card (CLACKA-195) (990db449)
+- cards open over a tool asked about whenever it nests, and a Task's line counts every tool that may change something; protocol 117, handover v39 (CLACKA-195) (ce3e998c)
+
 ## 2026.10.101 (2026-10-29)
 
 ### Features
