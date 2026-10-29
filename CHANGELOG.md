@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.10.106 (2026-10-29)
+
+### Features
+
+- **daemon:** say where a background task's output goes, protocol 120 (CLACKA-199) (c2f8f042)
+- **gui:** follow a background task's output from the task shelf (CLACKA-199) (4150628f)
+
+### Fixes
+
+- a task's output is followed by chat and task, from Claude Code's temp area only, with tail by its path (CLACKA-199) (0998c122)
+
 ## 2026.10.105 (2026-10-29)
 
 ### Features
