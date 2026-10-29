@@ -20307,7 +20307,7 @@ printf '%s\\n' \"$secret\" >> '{}'
 while :; do
   printf '\\033]133;A\\007$ '
   IFS= read -r line || exit 0
-  url=$(printf '%s' \"$line\" | sed 's/%/%25/g; s/;/%3B/g; s/ /%20/g')
+  url=$(printf '%s' \"$line\" | od -An -v -tx1 | tr -d ' \\n' | sed 's/../%&/g')
   printf '\\033]133;C;clackatoo=%s;cmdline_url=%s\\007' \"$secret\" \"$url\"
   eval \"$line\"
   printf '\\033]133;D;%s\\007' \"$?\"
@@ -22325,10 +22325,19 @@ fn a_background_tab_started_is_named_safely_and_its_terminal_shown_nowhere_else(
     };
     background(&mut client, start);
     let workspaces = client.watch_workspaces().unwrap();
-    let started = &workspaces.list[0].background[0];
-    assert_eq!(started.name, "echo ab c");
+    let terminal = workspaces.list[0].background[0].tab.terminals()[0];
+    wait_for_screen(&mut client, terminal, |screen| {
+        screen.contains("a\u{202e}bc\n$")
+    });
+    // Named so from the start, through its shell's first prompt, and once
+    // the command has run, as its shell says it.
+    wait_for_background(&mut client, |background| {
+        background.first().is_some_and(|started| {
+            started.name == "echo ab c"
+                && started.state == clackatoo_protocol::BackgroundState::Idle
+        })
+    });
     // Its terminal can't be put in a pane of a tab as well.
-    let terminal = started.tab.terminals()[0];
     let refused = client.new_tab(workspace, PaneTerminal::Existing(terminal));
     assert!(
         matches!(refused, Err(ClientError::Daemon(Error::TerminalInPane(_)))),
