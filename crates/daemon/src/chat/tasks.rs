@@ -101,8 +101,7 @@ impl HostedChat {
                 if let Some(state) = state.filter(|_| task.going()) {
                     // A stop asked for stays in hand until the agent says
                     // it ended.
-                    if !(task.state == AgentTaskState::Stopping
-                        && state == AgentTaskState::Running)
+                    if !(task.state == AgentTaskState::Stopping && state == AgentTaskState::Running)
                     {
                         task.state = state;
                     }
@@ -126,7 +125,9 @@ impl HostedChat {
             id.starts_with(TURN_TASK) && chat.woke_by_task.as_deref() != Some(id)
         };
         match said {
-            Task::Progress { id, description, .. } if unseen(id, self) => {
+            Task::Progress {
+                id, description, ..
+            } if unseen(id, self) => {
                 if !self.woken() {
                     self.wake(description.clone());
                 }

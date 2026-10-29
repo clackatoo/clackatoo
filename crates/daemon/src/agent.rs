@@ -2091,27 +2091,41 @@ mod task_tests {
     #[test]
     fn a_tasks_output_file_is_taken_only_as_claude_codes_own_for_it() {
         // In the agent's own temp area, where nothing's there yet.
-        let path = format!("{}no-such-project/0d9c/tasks/b1.output", agent_temp_areas()[0]);
+        let path = format!(
+            "{}no-such-project/0d9c/tasks/b1.output",
+            agent_temp_areas()[0]
+        );
         let path = path.as_str();
         let said = |update: Value| task(&json!({"sessionId": "s", "update": update}));
-        let spawned = said(json!({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b1",
-            "name": "npm test", "taskType": "shell", "outputFilePath": path}));
+        let spawned = said(
+            json!({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b1",
+            "name": "npm test", "taskType": "shell", "outputFilePath": path}),
+        );
         assert!(
             matches!(spawned, Some((_, Task::Spawned { output: Some(output), .. })) if output == path)
         );
-        let progress = said(json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
-            "outputFilePath": path}));
+        let progress = said(
+            json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
+            "outputFilePath": path}),
+        );
         assert!(
             matches!(progress, Some((_, Task::Progress { output: Some(output), .. })) if output == path)
         );
-        let ended = said(json!({"sessionUpdate": "async_task_state_update", "asyncTaskId": "b1",
-            "state": "completed", "outputFilePath": path}));
+        let ended = said(
+            json!({"sessionUpdate": "async_task_state_update", "asyncTaskId": "b1",
+            "state": "completed", "outputFilePath": path}),
+        );
         assert!(
             matches!(ended, Some((_, Task::State { output: Some(output), .. })) if output == path)
         );
-        let other = said(json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
-            "outputFilePath": "/etc/passwd"}));
-        assert!(matches!(other, Some((_, Task::Progress { output: None, .. }))));
+        let other = said(
+            json!({"sessionUpdate": "async_task_progress", "asyncTaskId": "b1",
+            "outputFilePath": "/etc/passwd"}),
+        );
+        assert!(matches!(
+            other,
+            Some((_, Task::Progress { output: None, .. }))
+        ));
 
         let areas = ["/tmp/claude-1000/".to_owned()];
         let path = "/tmp/claude-1000/-home-jack-app/0d9c/tasks/b1.output";

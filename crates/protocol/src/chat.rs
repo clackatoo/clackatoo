@@ -419,7 +419,11 @@ impl AgentTask {
     pub fn follow_output(&self, tail: &str) -> Option<Vec<String>> {
         let path = self.output.as_ref()?;
         let bytes = TASK_OUTPUT_TAIL.to_string();
-        Some([tail, "-c", &bytes, "-F", "--", path].map(str::to_owned).to_vec())
+        Some(
+            [tail, "-c", &bytes, "-F", "--", path]
+                .map(str::to_owned)
+                .to_vec(),
+        )
     }
 }
 

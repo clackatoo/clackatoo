@@ -198,18 +198,19 @@ impl ChatPane {
     /// name for it; or why there's none.
     pub(crate) fn task_on_shelf(&self, line: Option<usize>) -> Result<String, String> {
         let listed = self.view.shelf();
-        let task = match line {
-            Some(line) => *listed
-                .get(line)
-                .ok_or(format!("there's no line {} above the box", line + 1))?,
-            None => *(listed.iter())
-                .find(|task| task.output.is_some())
-                .ok_or(if listed.is_empty() {
-                    "the agent runs nothing in the background"
-                } else {
-                    "the agent didn't say where any of it prints: ask it to show the output"
-                })?,
-        };
+        let task =
+            match line {
+                Some(line) => *listed
+                    .get(line)
+                    .ok_or(format!("there's no line {} above the box", line + 1))?,
+                None => *(listed.iter()).find(|task| task.output.is_some()).ok_or(
+                    if listed.is_empty() {
+                        "the agent runs nothing in the background"
+                    } else {
+                        "the agent didn't say where any of it prints: ask it to show the output"
+                    },
+                )?,
+            };
         Ok(task.id.clone())
     }
 

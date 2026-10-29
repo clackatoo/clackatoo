@@ -44,7 +44,11 @@ fn show_chat(desk: &mut Desk, chat: u32, tasks: Vec<AgentTask>) {
 
 /// A desk showing chat 2, whose agent runs `tasks` in the background.
 fn chat_desk(tasks: Vec<AgentTask>) -> Desk {
-    let mut desk = desk(workspaces(vec![workspace(1, "work", vec![tab(1, pane(2))])]));
+    let mut desk = desk(workspaces(vec![workspace(
+        1,
+        "work",
+        vec![tab(1, pane(2))],
+    )]));
     show_chat(&mut desk, 2, tasks);
     answer_all(&mut desk);
     normal_mode(&mut desk);
@@ -58,9 +62,10 @@ fn split_below(asked: &[Request]) -> (PaneId, Vec<String>) {
         Request::Split {
             pane,
             side: Side::Below,
-            terminal: PaneTerminal::New(NewTerminal {
-                command: Some(run), ..
-            }),
+            terminal:
+                PaneTerminal::New(NewTerminal {
+                    command: Some(run), ..
+                }),
             on: None,
         },
     ] = asked
@@ -126,7 +131,11 @@ fn a_click_follows_the_task_it_was_on_below_its_own_chat_whichever_has_the_focus
         vec![tab(1, side_by_side(vec![pane(2), pane(3)]))],
     )]));
     let mine = "/tmp/c/tasks/a.output";
-    show_chat(&mut desk, 2, vec![shell("b", 300, Some("/tmp/c/tasks/b.output"))]);
+    show_chat(
+        &mut desk,
+        2,
+        vec![shell("b", 300, Some("/tmp/c/tasks/b.output"))],
+    );
     show_chat(&mut desk, 3, vec![shell("a", 100, Some(mine))]);
     answer_all(&mut desk);
     normal_mode(&mut desk);
@@ -154,8 +163,5 @@ fn a_click_follows_the_task_it_was_on_below_its_own_chat_whichever_has_the_focus
     chat.view_mut().follows.push("gone".into());
     desk.settle_chats(&mut fonts);
     assert!(answer_all(&mut desk).is_empty());
-    assert_eq!(
-        note(&desk),
-        "that task is no longer listed above the box"
-    );
+    assert_eq!(note(&desk), "that task is no longer listed above the box");
 }

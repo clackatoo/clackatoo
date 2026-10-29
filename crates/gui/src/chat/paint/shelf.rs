@@ -97,7 +97,8 @@ impl ChatView {
             };
             if let Some(hit) = line.open {
                 let rect = [inner_left - m.em(0.3), top, text_width + m.em(0.3), row];
-                if (self.mouse).is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p))
+                if (self.mouse)
+                    .is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p))
                 {
                     canvas.fill(Fill::rounded(rect, Paint::ChatHover, m.em(0.4)));
                 }

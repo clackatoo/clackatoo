@@ -17910,7 +17910,10 @@ fn a_real_background_shells_output_is_followed_from_the_file_its_adapter_names()
         .clone();
     eprintln!("task: {shell:#?}");
     let output = shell.output.clone().unwrap();
-    assert!(output.ends_with(&format!("/tasks/{}.output", shell.id)), "{output}");
+    assert!(
+        output.ends_with(&format!("/tasks/{}.output", shell.id)),
+        "{output}"
+    );
 
     let terminal = client
         .new_terminal(NewTerminal {
