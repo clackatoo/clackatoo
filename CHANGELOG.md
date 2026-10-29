@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026.10.105 (2026-10-29)
+
+### Features
+
+- **protocol:** read the files a chat message mentions, @path, one way everywhere (CLACKA-193) (dd91a601)
+- **daemon:** send the files a message mentions to the agent as links or their text (CLACKA-193) (aad9c012)
+- **gui:** complete @path from the chat's project files, show mentions as chips that open, and :Ask (CLACKA-193) (007b28dc)
+- **web:** show the files a message mentions as chips (CLACKA-193) (4de4a9a4)
+- **protocol:** protocol 119, CHAT_PATHS: where a chat works, made absolute; may_mention_files (CLACKA-193) (27a11467)
+- **gui:** :Ask writes paths from where the chat works; Stop & send for a message mentioning files (CLACKA-193) (f29fafe3)
+- **web:** Stop & send on the composer's steer button too (CLACKA-193) (0f0b2081)
+
+### Fixes
+
+- **gui:** Up keeps walking through messages sent that mention files, and one settle_image after the rebase (CLACKA-193) (99a9813c)
+- **daemon:** mentions read on a thread each with a 2 s deadline, lexical check first, one safe handle; Stop never waits; steering stops only for files (CLACKA-193) (478c4d07)
+- **daemon:** resume leaves out only the file text a message's own mentions account for (CLACKA-193) (b745fd31)
+- **gui:** a mention opens from where the chat works, in the tab's editor; the look asks with <Space>a before gf (CLACKA-193) (36a3b783)
+- **daemon:** what was read goes only with its own message; one steering read a message; the project canonicalized for mentions (CLACKA-193) (fdf69b48)
+- **daemon:** a background tab is renamed when its command runs between two looks, and keeps its start name at its first prompt (CLACKA-203) (cdf02889)
+
 ## 2026.10.104 (2026-10-29)
 
 ### Fixes
