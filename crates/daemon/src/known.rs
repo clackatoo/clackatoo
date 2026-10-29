@@ -50,6 +50,9 @@ pub(crate) struct Known {
     keys: Arc<Mutex<BTreeMap<MachineId, Pin>>>,
     /// Held while the file is written, so writes never cross.
     writing: Arc<Mutex<()>>,
+    /// The threads writing, or about to, so `kept` can wait for them: one
+    /// that hasn't taken `writing` yet would otherwise write after it.
+    writers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 /// The file, as it's written and read.
@@ -77,6 +80,7 @@ impl Known {
             file,
             keys: Arc::new(Mutex::new(keys)),
             writing: Arc::default(),
+            writers: Mutex::default(),
         }
     }
 
@@ -154,14 +158,24 @@ impl Known {
                     log::error!("{} couldn't be written: {err}", file.display());
                 }
             });
-        if let Err(err) = spawned {
-            log::error!("there's no thread to keep the keys known on: {err}");
+        match spawned {
+            Ok(writer) => {
+                let mut writers = self.writers.lock().unwrap_or_else(PoisonError::into_inner);
+                writers.retain(|writer| !writer.is_finished());
+                writers.push(writer);
+            }
+            Err(err) => log::error!("there's no thread to keep the keys known on: {err}"),
         }
     }
 
     /// Waits for what's being written to the file to be written, as the
-    /// daemon stops or upgrades.
+    /// daemon stops or upgrades: every thread writing, and then once more.
     pub(crate) fn kept(&self) {
+        let writers =
+            std::mem::take(&mut *self.writers.lock().unwrap_or_else(PoisonError::into_inner));
+        for writer in writers {
+            let _ = writer.join();
+        }
         if let Some(file) = &self.file {
             let _held = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
             if let Err(err) = write(file, &self.all()) {
