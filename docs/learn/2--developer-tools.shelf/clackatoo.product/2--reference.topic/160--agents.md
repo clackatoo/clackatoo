@@ -395,9 +395,9 @@ The window shows a desktop notification when a chat you can't see finishes a tur
 
 - **One a chat.** Each chat has one notification at most, replaced as it changes, so a chat that asks and then finishes says so in one.
 - **Taken back when you look.** Showing the chat with the window focused removes its notification, as does its question being answered elsewhere, the agent going again, or the chat closing.
-- **What it says.** The chat's title and a line such as `Claude Code finished`, never what the agent wrote, as a lock screen can show it.
+- **What it says.** The chat's title and a line such as `Claude Code finished` or `Claude Code stopped: something went wrong`, never what the agent wrote, as a lock screen can show it. A daemon older than the window doesn't say whether a turn went wrong, so its chats say `stopped: it needs a look`.
 - **Subagents.** A subagent finishing tells the chat that started it, not you, so it shows no notification. A subagent's question does, since its chat waits on you. A chat in no workspace at all isn't one you watch, and shows none.
-- **Only what the window saw happen.** Chats that finished before the window opened or connected are marked, not notified.
+- **Only what the window saw happen.** Chats that finished or asked before the window opened, or while it was out of reach of the daemon (a laptop asleep, say), are marked, not notified, so waking up isn't a burst of notifications.
 - **Seen elsewhere.** A window without the focus says nothing of a turn that ended while you were looking at the chat somewhere else, in another window or on your [phone](~clackatoo/reference/phone).
 - **Clicking it** goes to the chat: its workspace, its tab and its pane, or for a subagent in the background, the pane of the chat that started it. On X11 the window takes the focus. On Wayland a window can't raise itself without an activation token; GNOME raises it anyway for clackatoo's desktop file (`clackatoo desktop install`). Other Wayland desktops send a token with the click, which the window can't use yet, so there it goes to the chat without coming to the front.
 
