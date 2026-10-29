@@ -112,6 +112,17 @@ pub(crate) fn typed(record: &Value, agent: &str, login: Option<&str>) -> Option<
     })
 }
 
+/// What to say of a failure an adapter gave as AIR's `sessionFailure`,
+/// `record`, of a kind [`typed`] doesn't know: that the agent failed, in
+/// its words.
+pub(crate) fn untyped(record: &Value) -> Said {
+    let title = (record.get("title").and_then(Value::as_str)).unwrap_or("it said no more");
+    Said {
+        text: format!("the agent failed: {title}"),
+        raw: None,
+    }
+}
+
 /// A kind of failure clackatoo knows what to say of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {

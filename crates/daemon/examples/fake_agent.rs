@@ -43,7 +43,8 @@
 //! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
 //! | `signed-out` | Refuses the message with ACP's `-32000`, as a sign-in that ran out mid-turn |
 //! | `usage-limit` | Fails as the account's usage limit is reached: as AIR's `sessionFailure` on the answer, to a client that asked for it; as Codex's `usageLimitExceeded` with `--codex`; else as Claude Code's SDK's `billing_error` |
-//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished with its facts, or with `--codex`, Codex's words for it; then `compacted` |
+//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's words for it; then `compacted` |
+//! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
 //! | `fail-command N` | Runs `false` in a terminal, which fails with exit code N; then `failed` |
 //! | `cost` | Says the session has cost $0.0421, then 1200 tokens more, `spent`, and answers with what the turn spent |
 //! | `image` | Shows a small image in its words, then `shown` |
@@ -1110,6 +1111,14 @@ impl Fake {
                         "severity": "error", "title": "You've hit your limit · resets 3pm",
                         "actions": [] } } } } }),
             ),
+            "odd-failure" => reply(
+                id,
+                &json!({ "stopReason": "end_turn",
+                    "_meta": { "jetbrains": { "air": { "version": 1, "sessionFailure": {
+                        "id": "u1:error", "revision": 1, "category": "unknown",
+                        "severity": "error", "title": "Something new went wrong",
+                        "actions": [] } } } } }),
+            ),
             "usage-limit" => send(&json!({ "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32603, "message": "Internal error: Credit balance is too low",
                     "data": { "errorKind": "billing_error" } } })),
@@ -1140,12 +1149,20 @@ impl Fake {
                              "title": "Compact conversation", "kind": "think",
                              "status": "in_progress", "_meta": opening }),
                 );
-                let mut finished = json!({ "sessionUpdate": "tool_call_update",
-                    "toolCallId": "c1", "status": "completed", "_meta": closing });
+                // Finished, then, as the boundary comes, finished again
+                // with its tokens, and no status, as Claude Code's adapter
+                // says one.
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                             "status": "completed", "_meta": opening }),
+                );
+                let mut enriched = json!({ "sessionUpdate": "tool_call_update",
+                    "toolCallId": "c1", "_meta": closing });
                 if !self.async_tasks {
-                    finished["rawOutput"] = facts;
+                    enriched["rawOutput"] = facts;
                 }
-                update(session, &finished);
+                update(session, &enriched);
                 say(session, "compacted\n");
                 done(id, "end_turn");
             }

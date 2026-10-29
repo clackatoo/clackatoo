@@ -2414,6 +2414,12 @@ impl HostedChat {
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.progressed();
+                // More of a compaction shown as a line already.
+                if self.compacted(&update.tool_call_id.0) {
+                    let raw = update.fields.raw_output.as_ref();
+                    self.compaction(&update.tool_call_id.0, update.meta.as_ref(), raw);
+                    return None;
+                }
                 if let Some(content) = &update.fields.content {
                     self.revoke_image(&update.tool_call_id.0);
                     self.note_diffs(&update.tool_call_id.0, content);

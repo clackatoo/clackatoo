@@ -56,8 +56,9 @@ pub(super) struct Facts {
     /// its own, numbered.
     images: u64,
     /// The tool calls of the turn answering that are the agent compacting
-    /// its context.
-    compactions: Vec<String>,
+    /// its context, and the item each is shown as once it has finished, a
+    /// line across the turn.
+    compactions: Vec<(String, Option<usize>)>,
 }
 
 impl HostedChat {
@@ -133,33 +134,61 @@ impl HostedChat {
         }
     }
 
+    /// Whether tool call `id` is the agent compacting its context, shown
+    /// already as the line across the turn: what more is said of it goes
+    /// to that line (see [`compaction`](Self::compaction)), never to a
+    /// tool.
+    pub(super) fn compacted(&self, id: &str) -> bool {
+        (self.facts.compactions.iter()).any(|(known, line)| known == id && line.is_some())
+    }
+
     /// Notes tool call `id` as the agent compacting its context, if its
     /// `meta` says it is; and, if it is and has finished, shows it as the
     /// line across the turn that says so, with what `meta` or `raw` say
-    /// of it.
+    /// of it. Claude Code's adapter says it finished once, then again with
+    /// the tokens before and after, which the line then says.
     pub(super) fn compaction(&mut self, id: &str, meta: Option<&Meta>, raw: Option<&Value>) {
         let air = (meta.and_then(|meta| meta.get("jetbrains")))
             .and_then(|jetbrains| jetbrains.pointer("/air/contextCompaction"));
         let named = (meta.and_then(|meta| meta.get("claudeCode")))
             .and_then(|claude| claude.get("toolName"))
             .is_some_and(|name| name == "compact");
-        let known = self.facts.compactions.iter().any(|known| known == id);
-        if !known && (air.is_some() || named) && self.facts.compactions.len() < 16 {
-            self.facts.compactions.push(id.to_owned());
-        } else if !known {
-            return;
-        }
+        let known = self
+            .facts
+            .compactions
+            .iter()
+            .position(|(known, _)| known == id);
+        let known = match known {
+            Some(known) => known,
+            None if (air.is_some() || named) && self.facts.compactions.len() < 16 => {
+                self.facts.compactions.push((id.to_owned(), None));
+                self.facts.compactions.len() - 1
+            }
+            None => return,
+        };
         let Some(turn) = self.answering_turn() else {
             return;
         };
+        let details = compaction_details(air.or(raw));
         let items = &mut self.node.turns[turn].items;
+        if let Some(at) = self.facts.compactions[known].1 {
+            if let Some(Item::Compacted(old)) = items.get_mut(at)
+                && !details.is_empty()
+                && *old != details
+            {
+                old.clone_from(&details);
+                self.patch_item(turn, at, Item::Compacted(details));
+            }
+            return;
+        }
         let Some(at) = items.iter().position(
             |item| matches!(item, Item::Tool(tool) if tool.id == id && tool.status == ToolStatus::Done),
         ) else {
             return;
         };
-        let item = Item::Compacted(compaction_details(air.or(raw)));
+        let item = Item::Compacted(details);
         items[at] = item.clone();
+        self.facts.compactions[known].1 = Some(at);
         self.patch_item(turn, at, item);
     }
 
@@ -252,9 +281,13 @@ impl HostedChat {
         match result {
             Ok(answer) => {
                 let spent = self.spent(answer.usage.as_ref());
+                // A failure on the answer is one, whatever its kind.
                 let said = (answer.failure.as_ref())
                     .filter(|_| answer.stop != StopReason::Cancelled)
-                    .and_then(|record| failure::typed(record, &agent, login));
+                    .map(|record| {
+                        failure::typed(record, &agent, login)
+                            .unwrap_or_else(|| failure::untyped(record))
+                    });
                 match said {
                     Some(said) => self.answered_as(Outcome::Failed(said.text), said.raw, spent),
                     None => self.answered_as(outcome_of(Ok(answer.stop)), None, spent),

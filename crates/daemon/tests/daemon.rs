@@ -2915,6 +2915,15 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
             Some("You've hit your limit · resets 3pm".to_owned())
         )
     );
+    // A failure on the answer of a kind not known still fails the turn.
+    let node = ask(&mut client, claude, "odd-failure");
+    assert_eq!(
+        last_failure(&node),
+        (
+            "the agent failed: Something new went wrong".to_owned(),
+            None
+        )
+    );
     // A sign-in that ran out mid-turn says how to sign in again.
     let node = ask(&mut client, claude, "signed-out");
     let (why, raw) = last_failure(&node);
@@ -3021,6 +3030,7 @@ fn compacting_the_context_shows_as_a_line_across_the_turn_for_claude_and_codex()
         !items.iter().any(|item| matches!(item, Item::Tool(_))),
         "{items:?}"
     );
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
     let pane = focused_pane(&mut client);
     client
         .split_pane(pane, Side::Below, new_chat_with(Some("codex")))
