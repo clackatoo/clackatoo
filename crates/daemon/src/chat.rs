@@ -3531,7 +3531,7 @@ impl HostedChat {
         if !modes::is_plan(agent, chosen) {
             return rank <= chosen_rank;
         }
-        if self.relations.parent.is_some() {
+        if self.agents_chat() {
             return false;
         }
         if let Some(said) = &self.leaving_plan {
@@ -6989,6 +6989,7 @@ mod tests {
             limits: Limits::None,
             kept: true,
             mode: Some(("mode".into(), "read-only".into())),
+            cap: Some("agent".into()),
         });
         assert_eq!(kid.relations.parent, Some(TerminalId(7)));
         assert_eq!(

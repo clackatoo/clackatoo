@@ -56,15 +56,22 @@ pub(crate) struct Standing {
     pub(crate) limits: Limits,
     /// The user had it in a pane and sent it back.
     pub(crate) kept: bool,
-    /// The mode it was in, by its setting's ID and the value, if known.
+    /// The mode it had chosen, by its setting's ID and the value, if
+    /// kept: kept only as far as `cap` allows (see `modes::restored`).
     pub(crate) mode: Option<(String, String)>,
+    /// The mode its parent has, or will ask for, if its agent is this
+    /// one's: the most its own may be. With none, the safest is.
+    pub(crate) cap: Option<String>,
 }
 
 impl HostedChat {
     /// It's made again as the daemon starts afresh, as a chat an agent
     /// started that stood as `standing` says: its parent, profile and
-    /// limits, together, and the mode it was in, asked for as its session
-    /// opens, never the mode a new chat of the user's starts in.
+    /// limits, together, and the mode it had chosen, asked for as its
+    /// session opens, if it's no more than its parent's (or with no
+    /// parent, than the safest): else the safest, never the mode a new
+    /// chat of the user's starts in. An agent whose modes clackatoo
+    /// doesn't know is asked for none.
     pub(crate) fn stand_again(&mut self, standing: Standing) {
         let Standing {
             parent,
@@ -74,6 +81,7 @@ impl HostedChat {
             limits,
             kept,
             mode,
+            cap,
         } = standing;
         self.relations.parent = parent;
         self.relations.root = parent.and(root);
@@ -88,10 +96,17 @@ impl HostedChat {
         if kept {
             self.keep_for_user();
         }
-        if let Some((setting, value)) = mode {
-            self.chosen.retain(|(id, _)| *id != setting);
-            (self.chosen).push((setting.clone(), value.clone()));
-            self.restored_mode = Some((setting, value));
+        let saved = mode.as_ref().map(|(_, value)| value.as_str());
+        let value = super::modes::restored(&self.agent, saved, cap.as_deref());
+        match (value, mode) {
+            (Some(value), Some((setting, _))) => {
+                self.chosen.retain(|(id, _)| *id != setting);
+                (self.chosen).push((setting.clone(), value.to_owned()));
+                self.restored_mode = Some((setting, value.to_owned()));
+            }
+            // Its setting's ID isn't known until its session opens.
+            (Some(value), None) => self.starting_mode = Some(value.to_owned()),
+            (None, _) => {}
         }
         // One that may run no commands opens in its agent's read-only
         // mode, where it has one, as it did as it started.
@@ -104,8 +119,8 @@ impl HostedChat {
     /// started it wasn't: it's on its own, and says so.
     pub(crate) fn stand_alone(&mut self) {
         self.set_notice(Some(
-            "The chat that started this one wasn't kept through the restart, so it's on its own \
-             now, with no more than it could do before."
+            "The chat that started this one didn't come back with it after the restart, so it's on \
+             its own now, with no more than it could do before."
                 .to_owned(),
         ));
     }
@@ -117,14 +132,33 @@ impl HostedChat {
         self.relations.parent.is_some() || self.relations.depth > 0
     }
 
-    /// The mode it's in, by its setting's ID and the value, as the saved
-    /// workspaces keep it: as its agent last said, or if its session
-    /// hasn't opened since it was made again, the mode it was made again
-    /// with.
+    /// The mode it chose, by its setting's ID and the value, as the saved
+    /// workspaces keep it: never one its agent moved itself to, nor its
+    /// agent's own it never chose; or if its session hasn't opened since
+    /// it was made again, the mode it was made again with.
     pub(crate) fn kept_mode(&self) -> Option<(String, String)> {
         match self.setting_of(SettingKind::Mode) {
-            Some(setting) => Some((setting.id.clone(), setting.value.clone())),
+            Some(setting) => (self.chosen.iter())
+                .find(|(id, _)| *id == setting.id)
+                .cloned(),
             None => self.restored_mode.clone(),
+        }
+    }
+
+    /// The mode it has, or will ask for as its session opens, by its
+    /// value: as it chose, or the agent's own if it chose none; or before
+    /// its session has opened, the mode it was made again with or starts
+    /// in.
+    pub(crate) fn mode_to_be(&self) -> Option<&str> {
+        match self.setting_of(SettingKind::Mode) {
+            Some(setting) => Some(
+                (self.chosen.iter())
+                    .find(|(id, _)| *id == setting.id)
+                    .map_or(setting.value.as_str(), |(_, value)| value.as_str()),
+            ),
+            None => (self.restored_mode.as_ref())
+                .map(|(_, value)| value.as_str())
+                .or(self.starting_mode.as_deref()),
         }
     }
 
@@ -196,8 +230,10 @@ impl HostedChat {
         }
         // Made again as the daemon started, and not opened since: the
         // mode it was in, which it asks for again.
-        if self.setting_of(SettingKind::Mode).is_none() {
-            return (self.restored_mode.as_ref()).map(|(_, value)| value.as_str());
+        if self.setting_of(SettingKind::Mode).is_none() && self.agents_chat() {
+            return (self.restored_mode.as_ref())
+                .map(|(_, value)| value.as_str())
+                .or(self.starting_mode.as_deref());
         }
         None
     }

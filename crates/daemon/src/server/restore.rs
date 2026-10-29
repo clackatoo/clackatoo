@@ -987,39 +987,26 @@ impl Daemon {
     /// Makes each chat an agent started, made again in `chats` by its ID
     /// in the run that kept `state`, stand as it did: under its parent, on
     /// its parent's card, as its profile, with its limits, and the mode it
-    /// was in, never more than it had. A chat whose parent wasn't made
-    /// again is on its own, with what it may do as it was, and says so. A
+    /// chose, never more than it had nor than its parent has. A chat whose
+    /// parent wasn't made again, or in another workspace, is on its own,
+    /// with what it may do as it was, and says so. A
     /// chain of parents that loops, or goes further up than chats go deep,
     /// as only a file mended by hand could have, is cut.
     fn restore_standing(&mut self, state: &State, chats: &HashMap<u32, (TerminalId, bool)>) {
-        let mut kept = HashMap::new();
-        for tab in state
-            .workspaces
-            .iter()
-            .flat_map(|workspace| &workspace.tabs)
-        {
-            let mut panes = Vec::new();
-            saved_panes(&tab.layout, &mut panes);
-            for pane in panes {
-                if let Pane::Chat {
-                    id,
-                    started: Some(started),
-                    ..
-                } = pane
-                    && chats.contains_key(id)
-                {
-                    kept.entry(*id).or_insert(started);
-                }
-            }
-        }
+        let kept = kept_standings(state, chats);
         if kept.is_empty() {
             return;
         }
-        // Each one's parent, by the file's IDs, if it was made again.
+        // Each one's parent, by the file's IDs, if it was made again in
+        // the same workspace: a chat's family reaches across workspaces,
+        // which only a file mended by hand could make it do anew.
         let mut parents: HashMap<u32, u32> = (kept.iter())
             .filter_map(|(&id, started)| {
                 let parent = started.parent?;
-                (parent != id && chats.contains_key(&parent)).then_some((id, parent))
+                let (&(chat, _), &(of, _)) = (chats.get(&id)?, chats.get(&parent)?);
+                let workspace = self.workspace_of_chat(chat);
+                (parent != id && workspace.is_some() && workspace == self.workspace_of_chat(of))
+                    .then_some((id, parent))
             })
             .collect();
         let mut order: Vec<u32> = kept.keys().copied().collect();
@@ -1040,13 +1027,17 @@ impl Daemon {
             let started = kept[&id];
             let parent = parents.get(&id).map(|parent| chats[parent].0);
             let of = parent.and_then(|parent| Some((parent, self.chat_ref(parent)?)));
-            let (root, depth, parent_limits) = match of {
+            let agent = self.chat_ref(chat).map(|kid| kid.agent().to_owned());
+            let (root, depth, parent_limits, cap) = match of {
                 Some((parent, of)) => (
                     Some(of.relations().root.unwrap_or(parent)),
                     of.relations().depth.saturating_add(1),
                     of.limits(),
+                    (agent.as_deref() == Some(of.agent()))
+                        .then(|| of.mode_to_be().map(str::to_owned))
+                        .flatten(),
                 ),
-                None => (None, 1, Limits::None),
+                None => (None, 1, Limits::None, None),
             };
             let limits = match started.limits.as_deref() {
                 Some(name) => Limits::named(name).unwrap_or_else(|| {
@@ -1069,6 +1060,7 @@ impl Daemon {
                 kept: started.kept,
                 mode: (started.mode.as_ref())
                     .map(|mode| (mode.setting.clone(), mode.value.clone())),
+                cap,
             };
             let alone = started.parent.is_some() && parent.is_none();
             let Some(hosted) = self.chat(chat) else {
@@ -1433,6 +1425,36 @@ fn unoffer(layout: &mut saved::Layout, at: &mut usize, offered: &[usize]) {
     }
 }
 
+/// Where each chat an agent started that's in `state`, and made again in
+/// `chats`, stood, by its ID in the run that kept `state`: the first pane
+/// of each, as a file mended by hand could have one in two.
+fn kept_standings<'a>(
+    state: &'a State,
+    chats: &HashMap<u32, (TerminalId, bool)>,
+) -> HashMap<u32, &'a saved::Started> {
+    let mut kept = HashMap::new();
+    for tab in state
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+    {
+        let mut panes = Vec::new();
+        saved_panes(&tab.layout, &mut panes);
+        for pane in panes {
+            if let Pane::Chat {
+                id,
+                started: Some(started),
+                ..
+            } = pane
+                && chats.contains_key(id)
+            {
+                kept.entry(*id).or_insert(started);
+            }
+        }
+    }
+    kept
+}
+
 /// How many chats are above the chat `id` by `parents`, each chat's
 /// parent by the saved file's IDs: `None` if they go round, or further up
 /// than chats go deep.
@@ -1507,7 +1529,7 @@ mod tests {
 
     use clackatoo_protocol::{NewTerminal, Size};
 
-    use super::kept_command;
+    use super::{Limits, kept_command};
 
     /// A copy of the lock on the workspaces a program just started took
     /// holds it a moment after the build before let it go: the next build,
@@ -1569,6 +1591,143 @@ mod tests {
         daemon.keep_last();
         let kept = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(kept.contains("\"written\""), "{kept}");
+    }
+
+    /// A chat pane as the saved workspaces keep it: chat `id`, called
+    /// `title`, standing as `started` says, if an agent started it.
+    fn kept_chat(id: u32, title: &str, started: Option<serde_json::Value>) -> serde_json::Value {
+        let mut chat = serde_json::json!({
+            "id": id,
+            "agent": "claude",
+            "session": format!("s-{id}"),
+            "title": title,
+            "cwd": "/",
+        });
+        if let Some(started) = started {
+            chat["started"] = started;
+        }
+        serde_json::json!({ "pane": { "chat": chat } })
+    }
+
+    /// A workspace of `chats`, side by side.
+    fn kept_workspace(name: &str, chats: &[serde_json::Value]) -> serde_json::Value {
+        let shares = vec![1; chats.len()];
+        serde_json::json!({ "name": name, "tabs": [{ "layout": { "split": {
+            "left_to_right": true, "parts": chats, "shares": shares,
+        }}}]})
+    }
+
+    /// A subagent made again never stands with more than it had, nor more
+    /// than its parent has, whatever the file says: its limits are its
+    /// parent's at least, its depth no less than its parent's and one,
+    /// its mode none above its parent's, and its parent in its own
+    /// workspace; a loop, or a chain longer than chats go deep, is cut.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one file, and what each chat comes back as"
+    )]
+    fn a_subagent_made_again_never_has_more_than_it_had_or_than_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let started = |parent: u32, depth: u8, limits: &str, mode: Option<&str>| {
+            let mut started = serde_json::json!({
+                "parent": parent, "depth": depth, "profile": "general", "limits": limits,
+            });
+            if let Some(mode) = mode {
+                started["mode"] = serde_json::json!({ "setting": "mode", "value": mode });
+            }
+            Some(started)
+        };
+        let mut chain: Vec<serde_json::Value> = (50..60)
+            .map(|id| kept_chat(id, &format!("chain {id}"), started(id + 1, 1, "none", None)))
+            .collect();
+        chain.push(kept_chat(60, "chain 60", None));
+        let mut there = vec![
+            kept_chat(30, "elsewhere", started(20, 1, "none", Some("default"))),
+            kept_chat(40, "loop 40", started(41, 1, "none", None)),
+            kept_chat(41, "loop 41", started(40, 1, "none", None)),
+        ];
+        there.extend(chain);
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [
+                kept_workspace("here", &[
+                    kept_chat(20, "user", None),
+                    // Kept too shallow, in a mode above its parent's.
+                    kept_chat(21, "sub", started(20, 0, "read-only", Some("bypassPermissions"))),
+                    // Kept with fewer limits than its parent's.
+                    kept_chat(22, "grand", started(21, 1, "none", Some("acceptEdits"))),
+                    // In a mode below its parent's, which it keeps.
+                    kept_chat(23, "edits", started(20, 1, "none", Some("acceptEdits"))),
+                ]),
+                kept_workspace("there", &there),
+            ],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let id = |title: &str| {
+            (daemon.terminals.iter())
+                .find(|(_, slot)| {
+                    (slot.terminal.chat_ref()).is_some_and(|chat| chat.info().title == title)
+                })
+                .map_or_else(|| panic!("no chat {title}"), |(&id, _)| id)
+        };
+        let chat = |title: &str| daemon.chat_ref(id(title)).unwrap();
+        let stands = |title: &str| {
+            let chat = chat(title);
+            let parent = chat.relations().parent;
+            (
+                parent,
+                chat.relations().depth,
+                chat.limits(),
+                chat.mode_to_be(),
+            )
+        };
+        let (user, sub) = (id("user"), id("sub"));
+        // Claude Code's new chats start in Auto, which the user's comes
+        // back in, as before.
+        assert_eq!(chat("user").mode_to_be(), Some("auto"));
+        assert_eq!(
+            stands("sub"),
+            (Some(user), 1, Limits::ReadOnly, Some("default"))
+        );
+        assert_eq!(
+            stands("grand"),
+            (Some(sub), 2, Limits::ReadOnly, Some("default"))
+        );
+        assert_eq!(
+            stands("edits"),
+            (Some(user), 1, Limits::None, Some("acceptEdits"))
+        );
+        assert_eq!(
+            chat("sub").kept_mode(),
+            Some(("mode".to_owned(), "default".to_owned()))
+        );
+        // Each on its parent's card.
+        assert!(
+            chat("user").subagent(sub).is_some() && chat("sub").subagent(id("grand")).is_some()
+        );
+        // A parent in another workspace isn't its parent again: it's on
+        // its own, says so, and its mode is the safest.
+        assert_eq!(
+            stands("elsewhere"),
+            (None, 1, Limits::None, Some("default"))
+        );
+        let notice = chat("elsewhere").node().notice.clone().unwrap_or_default();
+        assert!(notice.contains("didn't come back with it"), "{notice}");
+        // A loop is cut once, in the order of the file's IDs.
+        assert_eq!(chat("loop 40").relations().parent, None);
+        assert_eq!(chat("loop 41").relations().parent, Some(id("loop 40")));
+        // A chain longer than chats go deep is cut where it's too long.
+        assert_eq!(chat("chain 50").relations().parent, None);
+        assert_eq!(chat("chain 51").relations().parent, None);
+        assert_eq!(chat("chain 52").relations().parent, Some(id("chain 53")));
+        assert_eq!(chat("chain 59").relations().parent, Some(id("chain 60")));
     }
 
     #[test]

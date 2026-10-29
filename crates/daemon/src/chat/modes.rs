@@ -71,6 +71,29 @@ pub(super) fn safest<'a>(agent: &str, offered: impl Iterator<Item = &'a str>) ->
         .map(|(_, value)| value)
 }
 
+/// The mode a chat of `agent`'s, made again from the saved workspaces as
+/// a chat an agent started, asks for: `saved`, the mode it had chosen, if
+/// it may do no more than `cap`, its parent's, or with no parent to go by,
+/// than the safest; or else the safest. `None` for an agent whose modes
+/// aren't known, which is given none, never one the file says.
+pub(super) fn restored(
+    agent: &str,
+    saved: Option<&str>,
+    cap: Option<&str>,
+) -> Option<&'static str> {
+    let modes = ranked(agent)?;
+    let safest = safest(agent, modes.iter().copied())?;
+    let cap = cap
+        .and_then(|cap| rank(agent, cap))
+        .unwrap_or(rank(agent, safest)?);
+    let saved = saved.and_then(|saved| modes.iter().copied().find(|known| *known == saved));
+    Some(
+        saved
+            .filter(|saved| rank(agent, saved).is_some_and(|saved| saved <= cap))
+            .unwrap_or(safest),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +112,36 @@ mod tests {
         assert_eq!(safest("mine", ["yolo", "careful"].into_iter()), None);
         assert_eq!(leaving_plan_for("claude", "exit-plan-auto"), Some("auto"));
         assert_eq!(leaving_plan_for("codex", "implement_plan"), None);
+    }
+
+    #[test]
+    fn a_mode_made_again_is_never_above_its_parents_nor_unknown() {
+        // At or below the parent's, it's kept.
+        assert_eq!(
+            restored("claude", Some("acceptEdits"), Some("auto")),
+            Some("acceptEdits")
+        );
+        assert_eq!(restored("claude", Some("plan"), None), Some("plan"));
+        // Above it, or with no parent above the safest, it's the safest.
+        let bypass = Some("bypassPermissions");
+        assert_eq!(restored("claude", bypass, Some("default")), Some("default"));
+        assert_eq!(restored("claude", Some("auto"), None), Some("default"));
+        assert_eq!(
+            restored("codex", Some("agent-full-access"), Some("agent")),
+            Some("read-only")
+        );
+        // A parent's mode not of this agent's goes by the safest.
+        assert_eq!(
+            restored("codex", Some("agent"), Some("auto")),
+            Some("read-only")
+        );
+        // None kept, or one no build knows: the safest.
+        assert_eq!(restored("claude", None, Some("auto")), Some("default"));
+        assert_eq!(
+            restored("claude", Some("yolo"), Some("auto")),
+            Some("default")
+        );
+        // An agent whose modes aren't known gets none.
+        assert_eq!(restored("mine", Some("careful"), Some("careful")), None);
     }
 }

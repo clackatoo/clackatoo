@@ -14533,14 +14533,14 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
     // It says why it's on its own.
     let notice = chat_now(&mut client, orphan).notice.unwrap_or_default();
     assert!(
-        notice.contains("wasn't kept through the restart"),
+        notice.contains("didn't come back with it after the restart"),
         "{notice}"
     );
-    // Limits it doesn't know are the strictest: it can't message a chat
-    // in the mode it was in, Claude Code's new chats' Auto, that may do
-    // more.
-    ask_for(&mut client, older, "hi", Duration::from_secs(10));
-    let message = format!("mcp send_to_chat {{\"chat\":{older},\"message\":\"hi\"}}");
+    // On its own, its Auto comes back as the safest, Manual. Limits it
+    // doesn't know are the strictest: it can't message a chat in that
+    // mode too that may do more.
+    ask_for(&mut client, fifth, "hi", Duration::from_secs(10));
+    let message = format!("mcp send_to_chat {{\"chat\":{fifth},\"message\":\"hi\"}}");
     let words = last_words(&ask_for(
         &mut client,
         orphan,
