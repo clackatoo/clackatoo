@@ -1,7 +1,8 @@
 //! The lines typed before into the command line and into searches, which
 //! Up and Down go back through, as Vim's history does: Up goes to the
 //! last line typed that starts with what's typed, and Down back, to what
-//! was typed in the end.
+//! was typed in the end. A chat's box goes back through the messages sent
+//! in it the same way (see [`Walk::step`]).
 //!
 //! Every window remembers them, in a small file under `$XDG_STATE_HOME`,
 //! `clackatoo/history`: a line each, oldest first, `:` before a command
@@ -93,39 +94,64 @@ pub(crate) struct Walk {
     at: usize,
 }
 
-impl Line {
-    /// Goes to the line typed before this one, or after it if not
-    /// `older`, of those in `recall` that start with what was typed before
-    /// the first Up. Past the newest, it's back to what was typed. Returns
-    /// whether there was one to go to.
-    pub(crate) fn recall(&mut self, recall: &Recall, older: bool) -> bool {
-        let (typed, at) = match self.walk.take() {
+impl Walk {
+    /// Goes from `walk`, where Up and Down have gone in `lines`, oldest
+    /// first, to the line before, or after it if not `older`, of those
+    /// that start with what was typed before the first Up: `text`, what's
+    /// typed now, if Up hasn't been pressed since it was typed. Past the
+    /// newest, it's back to what was typed. Returns the text to show
+    /// instead, if there was one to go to.
+    ///
+    /// Whoever keeps `walk` forgets it once what's shown is edited, for
+    /// the next Up to start from what's typed then.
+    pub(crate) fn step(
+        walk: &mut Option<Self>,
+        lines: &[String],
+        text: &str,
+        older: bool,
+    ) -> Option<String> {
+        let (typed, at) = match walk.take() {
             Some(walk) => (walk.typed, Some(walk.at)),
-            None => (self.text.clone(), None),
+            None => (text.to_owned(), None),
         };
-        let starts = |index: &usize| recall.lines[*index].starts_with(&typed);
+        let starts = |index: &usize| lines[*index].starts_with(&typed);
+        // Lines gone since, as a chat's may be, go back to the newest.
+        let at = at.map(|at| at.min(lines.len()));
         let to = if older {
-            (0..at.unwrap_or(recall.lines.len())).rev().find(starts)
+            (0..at.unwrap_or(lines.len())).rev().find(starts)
         } else {
-            at.and_then(|at| (at + 1..recall.lines.len()).find(starts))
+            at.and_then(|at| (at + 1..lines.len()).find(starts))
         };
         match (to, at) {
             (Some(to), _) => {
-                self.set(&recall.lines[to]);
-                self.walk = Some(Walk { typed, at: to });
-                true
+                let shown = lines[to].clone();
+                *walk = Some(Self { typed, at: to });
+                Some(shown)
             }
             // Older than the oldest: it stays where it is.
             (None, Some(at)) if older => {
-                self.walk = Some(Walk { typed, at });
-                false
+                *walk = Some(Self { typed, at });
+                None
             }
             // Newer than the newest: back to what was typed.
-            (None, Some(_)) => {
-                self.set(&typed);
+            (None, Some(_)) => Some(typed),
+            (None, None) => None,
+        }
+    }
+}
+
+impl Line {
+    /// Goes to the line typed before this one, or after it if not
+    /// `older`, of those in `recall` that start with what was typed before
+    /// the first Up (see [`Walk::step`]). Returns whether there was one
+    /// to go to.
+    pub(crate) fn recall(&mut self, recall: &Recall, older: bool) -> bool {
+        match Walk::step(&mut self.walk, &recall.lines, &self.text, older) {
+            Some(shown) => {
+                self.set(&shown);
                 true
             }
-            (None, None) => false,
+            None => false,
         }
     }
 }
