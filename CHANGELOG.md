@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.112 (2026-10-29)
+
+### Fixes
+
+- **daemon:** a handed-over queue stays paused; a message sent to an empty one unpauses it (CLACKA-185) (f38a4747)
+
 ## 2026.10.111 (2026-10-29)
 
 ### Fixes
