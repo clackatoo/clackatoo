@@ -4169,6 +4169,69 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
 }
 
 #[test]
+fn codexs_plan_mode_is_set_from_the_box_and_left_once_its_plan_is_approved() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "codex");
+    let plan_mode = |node: &ChatNode| {
+        (node.settings.iter())
+            .find(|setting| setting.is_plan_mode())
+            .cloned()
+            .unwrap()
+    };
+    let plan = plan_mode(&node);
+    assert_eq!(
+        (plan.id.as_str(), plan.kind, plan.value.as_str()),
+        ("collaboration_mode", clackatoo_protocol::SettingKind::Other, "default")
+    );
+    // Out of Plan mode, Codex just does it.
+    assert_eq!(last_words(&ask(&mut client, chat, "propose")), "changed the notes\n");
+
+    client
+        .chat(
+            chat,
+            ChatAction::Set {
+                setting: "collaboration_mode".into(),
+                value: "plan".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| plan_mode(node).planning());
+    // In it, Codex plans, then asks to implement the plan, which shows
+    // with the question; approved, Codex leaves Plan mode itself.
+    client
+        .chat(chat, ChatAction::Send("propose".into()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = node.question.unwrap();
+    assert_eq!(question.plan.as_deref(), Some("1. Change the notes."));
+    answer(&mut client, chat, Some("implement_plan".into()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(last_words(&node).ends_with("implemented\n"), "{node:#?}");
+    assert!(!plan_mode(&node).planning());
+}
+
+#[test]
+fn codexs_warnings_are_notices_not_words() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "codex");
+    // Codex isn't asked what it runs in the background, which would leave
+    // out its commands' output, but it's asked for notices.
+    let node = ask(&mut client, chat, "warn");
+    assert_eq!(last_words(&node), "warned\n");
+    assert_eq!(node.notice.as_deref(), Some("Heads up: the sandbox is off"));
+    let node = ask(&mut client, chat, "tool");
+    let Item::Tool(tool) = &node.turns.last().unwrap().items[0] else {
+        panic!("{node:#?}");
+    };
+    assert_eq!(
+        tool.content,
+        [ToolContent::Output("notes.txt\ntodo.txt\n".into())]
+    );
+}
+
+#[test]
 fn chats_with_different_agents_have_an_agent_each() {
     let daemon = with_fake_codex(&[]);
     let mut client = daemon.client();

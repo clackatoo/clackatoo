@@ -51,7 +51,7 @@
 //! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
 //! | `signed-out` | Refuses the message with ACP's `-32000`, as a sign-in that ran out mid-turn |
 //! | `usage-limit` | Fails as the account's usage limit is reached: as AIR's `sessionFailure` on the answer, to a client that asked for it; as Codex's `usageLimitExceeded` with `--codex`; else as Claude Code's SDK's `billing_error` |
-//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's words for it; then `compacted` |
+//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's notice of it, or its words to a client that can't show notices; then `compacted` |
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
 //! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
 //! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
@@ -99,7 +99,13 @@
 //! at Auto review, and models, efforts and more), a notification of its
 //! own with the account's email address, commands with their output in
 //! `_meta.terminal_output_delta` rather than in their content, and
-//! questions that call every change "Edit files". With `--logged-out`, it
+//! questions that call every change "Edit files". It has Codex's Plan mode
+//! (`collaboration_mode`): `propose` in it says a plan and asks to
+//! implement it, as Codex's plan review does, and approved, leaves Plan
+//! mode (`config_option_update`) and says `implemented`; out of it,
+//! `propose` says `changed the notes`. `warn` gives a warning, as a notice
+//! to a client that can show one, else in Codex's words (`Warning: …`),
+//! then says `warned`. With `--logged-out`, it
 //! refuses sessions as Codex does when no one's logged in. With
 //! `--broken`, it says why on stderr and exits before it starts. With
 //! `--mute`, it never answers a request for a new session; with
@@ -143,7 +149,7 @@
 //! `--replay-gap MS`, between its pieces, going on with what else it's
 //! asked meanwhile.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -209,6 +215,7 @@ fn main() {
             .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
+        planning: BTreeSet::new(),
         tools: BTreeMap::new(),
         meta: BTreeMap::new(),
         waiting: None,
@@ -303,6 +310,8 @@ struct Fake {
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
     settings: BTreeMap<String, (String, String)>,
+    /// The sessions in Codex's Plan mode (its `collaboration_mode`).
+    planning: BTreeSet<String>,
     /// The MCP servers each session was given.
     tools: BTreeMap<String, Value>,
     /// The `_meta` each session was last opened with.
@@ -841,7 +850,8 @@ fn done(id: &Value, reason: &str) {
 }
 
 /// A session's settings, as Codex's adapter gives them.
-fn codex_options((mode, model): &(String, String)) -> Value {
+fn codex_options((mode, model): &(String, String), planning: bool) -> Value {
+    let collaboration = if planning { "plan" } else { "default" };
     json!([
         { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
           "options": [
@@ -850,8 +860,9 @@ fn codex_options((mode, model): &(String, String)) -> Value {
               { "value": "agent", "name": "Auto review" },
               { "value": "agent-full-access", "name": "Full access" }] },
         { "id": "collaboration_mode", "name": "Collaboration mode",
-          "category": "collaboration_mode", "type": "select", "currentValue": "default",
-          "options": [{ "value": "default", "name": "Default" }, { "value": "plan", "name": "Plan" }] },
+          "category": "collaboration_mode", "type": "select", "currentValue": collaboration,
+          "options": [{ "value": "default", "name": "Default" },
+                      { "value": "plan", "name": "Plan", "description": "Plan before making changes" }] },
         { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
           "options": [{ "value": "gpt-6-astra", "name": "6 Astra" },
                       { "value": "gpt-6-luna", "name": "6 Luna" }] },
@@ -896,11 +907,12 @@ impl Fake {
         }
     }
 
-    /// A session's settings, as the agent impersonated gives them: with
-    /// `--no-modes`, none of them a mode.
-    fn options(&self, settings: &(String, String)) -> Value {
+    /// A session's settings, as the agent impersonated gives them, in
+    /// Codex's Plan mode if `planning`: with `--no-modes`, none of them a
+    /// mode.
+    fn options(&self, settings: &(String, String), planning: bool) -> Value {
         let mut options = if self.codex {
-            codex_options(settings)
+            codex_options(settings, planning)
         } else {
             config_options(settings)
         };
@@ -1022,7 +1034,7 @@ impl Fake {
                     .insert(session.clone(), params["mcpServers"].clone());
                 self.meta.insert(session.clone(), params["_meta"].clone());
                 let settings = self.starting_settings();
-                let options = self.options(&settings);
+                let options = self.options(&settings, false);
                 self.settings.insert(session.clone(), settings);
                 let result = json!({ "sessionId": session, "configOptions": options });
                 match self.slow {
@@ -1051,7 +1063,7 @@ impl Fake {
                     .insert(session.clone(), params["mcpServers"].clone());
                 self.meta.insert(session.clone(), params["_meta"].clone());
                 let settings = self.starting_settings();
-                let options = self.options(&settings);
+                let options = self.options(&settings, false);
                 self.settings.insert(session, settings);
                 reply(&id, &json!({ "configOptions": options }));
             }
@@ -1100,7 +1112,7 @@ impl Fake {
                     .insert(session.clone(), params["mcpServers"].clone());
                 self.meta.insert(session.clone(), params["_meta"].clone());
                 let settings = self.starting_settings();
-                let options = self.options(&settings);
+                let options = self.options(&settings, false);
                 self.settings.insert(session.clone(), settings);
                 let (slow, gap, log) = (self.slow_load, self.replay_gap, self.log.clone());
                 let load = move || {
@@ -1141,9 +1153,16 @@ impl Fake {
                 match params["configId"].as_str() {
                     Some("mode") => settings.0 = value,
                     Some("model") => settings.1 = value,
+                    Some("collaboration_mode") if value == "plan" => {
+                        self.planning.insert(session.clone());
+                    }
+                    Some("collaboration_mode") => {
+                        self.planning.remove(&session);
+                    }
                     _ => {}
                 }
-                reply(&id, &json!({ "configOptions": self.options(&settings) }));
+                let planning = self.planning.contains(&session);
+                reply(&id, &json!({ "configOptions": self.options(&settings, planning) }));
                 self.settings.insert(session, settings);
             }
             Some("session/close") => {
@@ -1249,6 +1268,8 @@ impl Fake {
                     done(&id, "end_turn");
                 }
             }
+            // The answer to Codex's asking to implement its plan.
+            None if id == "plan-review" => self.plan_reviewed(message),
             // The answer to the permission asked for.
             None if id == "p1" => {
                 let picked = message["result"]["outcome"]["optionId"]
@@ -1328,8 +1349,77 @@ impl Fake {
                 );
                 self.waiting = Some((id, session));
             }
+            // In Plan mode, a plan, then asking to implement it, as Codex's
+            // adapter does once a turn in Plan mode has finished one.
+            "propose" if self.planning.contains(&session) => {
+                say(&session, "1. Change the notes.\n");
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "plan-review:i1",
+                             "title": "Implement this plan?", "kind": "switch_mode",
+                             "status": "pending", "rawInput": { "plan": "1. Change the notes." } }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "plan-review", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "plan-review:i1", "title": "Implement this plan?",
+                                      "kind": "switch_mode", "status": "pending",
+                                      "rawInput": { "plan": "1. Change the notes." } },
+                        "options": [
+                            { "optionId": "implement_plan", "name": "Yes, implement this plan", "kind": "allow_once" },
+                            { "optionId": "revise_plan", "name": "No, and tell Codex what to do differently", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
+            }
+            "propose" => {
+                say(&session, "changed the notes\n");
+                done(&id, "end_turn");
+            }
+            // A warning, as a notice to a client that can show one, else
+            // as Codex's adapter words it.
+            "warn" => {
+                if self.notices {
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "notice", "severity": "warning",
+                                 "title": "Heads up: the sandbox is off" }),
+                    );
+                } else {
+                    say(&session, "Warning: Heads up: the sandbox is off\n\n");
+                }
+                say(&session, "warned\n");
+                done(&id, "end_turn");
+            }
             _ => {}
         }
+    }
+
+    /// Codex's plan was approved, or not, in `message`: approved, it leaves
+    /// Plan mode, says so, and implements the plan in the same turn.
+    fn plan_reviewed(&mut self, message: &Value) {
+        let Some((id, session)) = self.waiting.take() else {
+            return;
+        };
+        let approved = message["result"]["outcome"]["optionId"] == "implement_plan";
+        update(
+            &session,
+            &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "plan-review:i1",
+                     "status": "completed" }),
+        );
+        if approved {
+            self.planning.remove(&session);
+            let settings = self.settings.get(&session).cloned().unwrap_or_default();
+            update(
+                &session,
+                &json!({ "sessionUpdate": "config_option_update",
+                         "configOptions": self.options(&settings, false) }),
+            );
+            say(&session, "implemented\n");
+        } else {
+            say(&session, "kept planning\n");
+        }
+        done(&id, "end_turn");
     }
 
     /// Answers the scripts of what agents say of a turn beyond their
@@ -1387,6 +1477,16 @@ impl Fake {
             "usage-limit" => send(&json!({ "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32603, "message": "Internal error: Credit balance is too low",
                     "data": { "errorKind": "billing_error" } } })),
+            "compact" if self.codex && self.notices => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "notice", "severity": "info",
+                             "title": "Context compacted",
+                             "description": "Conversation compacted to fit the model's context window." }),
+                );
+                say(session, "compacted\n");
+                done(id, "end_turn");
+            }
             "compact" if self.codex => {
                 say(
                     session,
@@ -1604,7 +1704,7 @@ impl Fake {
             let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
             update(&session, &usage);
         }
-        if self.codex && matches!(text, "tool" | "ask") {
+        if self.codex && matches!(text, "tool" | "ask" | "propose" | "warn") {
             self.codex_prompt(id, session, text);
             return true;
         }

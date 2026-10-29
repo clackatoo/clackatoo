@@ -188,7 +188,9 @@ impl HostedChat {
 }
 
 /// What `text` says, if `agent`'s own adapter would have written it so for
-/// a notice to a client that can't take one, exactly: Claude Code's a line
+/// a notice to a client that can't take one, exactly. clackatoo asks every
+/// agent for notices, and the adapters it installs send them so; this is
+/// for one run from elsewhere that can't: Claude Code's a line
 /// `**Title**` or `**Title:** what`, with a short title; Codex's
 /// `Config warning: …`, `Warning: …` or `*Context compacted to fit the
 /// model's context window.*`, each ending in a blank line, or a thought

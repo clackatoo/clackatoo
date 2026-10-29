@@ -19,7 +19,8 @@
 //!   `_meta.jetbrains.air.contextCompaction` (AIR) or
 //!   `_meta.claudeCode.toolName` `compact`, whose facts (trigger and
 //!   tokens) come as it ends, in that `_meta` or its `rawOutput`; Codex's,
-//!   the words "*Context compacted to fit the model's context window.*".
+//!   a notice "Context compacted", or to a client that can't take one, the
+//!   words "*Context compacted to fit the model's context window.*".
 //! - Exit codes: `_meta.terminal_exit.exit_code`, which both send for a
 //!   command run as a terminal (Claude Code's says 1 for any that failed,
 //!   to AIR), and Codex's `rawOutput.exit_code` for one that isn't.
@@ -39,6 +40,11 @@ use crate::agent::{Answer, Failure};
 /// What Codex's adapter says, as words, to a client that can't take a
 /// notice, when it compacted its context.
 const CODEX_COMPACTED: &str = "*Context compacted to fit the model's context window.*\n\n";
+
+/// The title of the notice Codex's adapter gives, to a client that can take
+/// one, when it compacted its context: "Context compacted", with "Conversation
+/// compacted to fit the model's context window." as what.
+const CODEX_COMPACTED_NOTICE: &str = "Context compacted";
 
 /// The most characters of what an agent says as it tries again kept.
 const RETRYING: usize = 200;
@@ -241,12 +247,23 @@ impl HostedChat {
     }
 
     /// Takes `text`, a piece of the agent's words, as the line that says
-    /// it compacted its context, if it's Codex's saying so. Returns
-    /// whether it was.
+    /// it compacted its context, if it's Codex's saying so to a client
+    /// that can't take a notice. Returns whether it was.
     pub(super) fn codex_compacted(&mut self, text: &str) -> bool {
-        if self.agent != "codex" || text != CODEX_COMPACTED {
-            return false;
-        }
+        self.agent == "codex" && text == CODEX_COMPACTED && self.compacted_line()
+    }
+
+    /// Takes the notice titled `title` as the line that says the agent
+    /// compacted its context, if it's Codex's saying so in a turn, as it
+    /// does to a client that can take notices. Returns whether it was.
+    pub(super) fn codex_compacted_notice(&mut self, title: &str) -> bool {
+        self.agent == "codex" && title == CODEX_COMPACTED_NOTICE && self.compacted_line()
+    }
+
+    /// Adds a line across the turn being answered saying the agent
+    /// compacted its context, with nothing more of it known. Returns
+    /// whether there's a turn to add it to.
+    fn compacted_line(&mut self) -> bool {
         let Some(turn) = self.answering_turn() else {
             return false;
         };

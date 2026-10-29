@@ -435,16 +435,21 @@ pub(crate) fn client_capabilities(files: bool, tasks: bool) -> Value {
     // Codex's adapter streams commands' output in this, which the daemon
     // adds to the tool's.
     let mut meta = json!({ "terminal_output_delta": true });
+    // ACP's notices (schema feature `unstable_session_notices`), asked of
+    // every agent: else Claude Code's adapter says its notices, such as
+    // that a task was stopped, as words, which would seem a turn of its
+    // own, and Codex's its warnings, that it compacted its context, and
+    // that its model was rerouted. Asking changes nothing else in either
+    // (codex-acp 2.2.2 reads it in one place, apart from AIR), Gemini
+    // CLI reads only `fs`, and Antigravity takes it. Where it goes keeps
+    // what an agent asked for tasks is told the same as before.
     let mut capabilities = json!({
         "fs": { "readTextFile": files, "writeTextFile": files },
         "terminal": false,
+        "session": { "notices": {} },
     });
     if tasks {
         meta["jetbrains"] = json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
-        // Else Claude Code's adapter says its notices, such as that a task
-        // was stopped, as words, which would seem a turn of its own.
-        // Codex's says its warnings so too: it isn't asked.
-        capabilities["session"] = json!({ "notices": {} });
     }
     // Claude Code's adapter takes its AskUserQuestion tool away from a
     // client that can't show forms; Codex's can't ask its questions. See
@@ -683,8 +688,8 @@ impl Agent {
         self.can_embed
     }
 
-    /// Whether it says when it takes a turn by itself, and gives its
-    /// notices as such (see `chat/woken.rs`).
+    /// Whether it says when it takes a turn by itself, so that any words
+    /// it says with no turn open are a notice (see `chat/woken.rs`).
     pub(crate) fn tells_turns(&self) -> bool {
         self.tasks
     }

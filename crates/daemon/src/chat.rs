@@ -2583,6 +2583,7 @@ impl HostedChat {
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
                 self.set_settings(settings_of(&update.config_options));
+                self.follow_agents_settings();
             }
             SessionUpdate::CurrentModeUpdate(update) => {
                 let mode = update.current_mode_id.0.to_string();
@@ -2592,10 +2593,16 @@ impl HostedChat {
                 if let Some(id) = id {
                     self.set_value(&id, &mode);
                 }
+                self.follow_agents_settings();
             }
             // Something to tell the user that belongs to no turn, such as
             // that a task was stopped as asked.
             SessionUpdate::Notice(notice) => {
+                // Codex's saying it compacted its context, in a turn, is
+                // a line across that turn, as Claude Code's is.
+                if self.codex_compacted_notice(&notice.title) {
+                    return None;
+                }
                 let mut said = clean(&notice.title);
                 if let Some(description) = &notice.description {
                     said = format!("{said}: {}", clean(description));
@@ -3371,6 +3378,24 @@ impl HostedChat {
         if self.node.question != question {
             self.node.question.clone_from(&question);
             self.journal.push(ChatPatch::Question(question));
+        }
+    }
+
+    /// The agent changed its settings by itself, as Codex leaves Plan mode
+    /// once its plan is approved, and Claude Code's Plan mode once it may
+    /// go ahead: what the chat chose of them follows, so a session opened
+    /// again isn't put back as it was.
+    fn follow_agents_settings(&mut self) {
+        for (id, value) in &mut self.chosen {
+            if chat_wide(id) {
+                continue;
+            }
+            let now = (self.node.settings.iter()).find(|setting| setting.id == *id);
+            if let Some(setting) = now
+                && setting.value != *value
+            {
+                value.clone_from(&setting.value);
+            }
         }
     }
 
@@ -6156,6 +6181,55 @@ mod tests {
                  "options":[{"value":"gpt-6-astra","name":"6 Astra"},{"value":"gpt-6-luna","name":"6 Luna"}]}]"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_setting_the_agent_changes_itself_isnt_put_back_in_a_session_opened_again() {
+        // Codex's Plan mode, as its adapter gives it.
+        let plan = |value: &str| {
+            format!(
+                r#"[{{"id":"collaboration_mode","name":"Collaboration mode","category":"collaboration_mode",
+                     "type":"select","currentValue":"{value}",
+                     "options":[{{"value":"default","name":"Default"}},{{"value":"plan","name":"Plan"}}]}}]"#
+            )
+        };
+        let opened = |value: &str| Opened {
+            session: String::new(),
+            settings: Some(serde_json::from_str(&plan(value)).unwrap()),
+        };
+        let mut chat = chat_with("codex");
+        chat.connected(Opened {
+            session: "s".into(),
+            ..opened("default")
+        });
+        let setting = chat.node.settings[0].clone();
+        assert!(setting.is_plan_mode() && !setting.planning());
+        let set = Action::Set {
+            setting: "collaboration_mode".into(),
+            value: "plan".into(),
+        };
+        let asked = chat.act(ChatAction::Set {
+            setting: "collaboration_mode".into(),
+            value: "plan".into(),
+        });
+        assert!(asked == [Action::Set {
+            setting: "collaboration_mode".into(),
+            value: "plan".into(),
+        }]);
+        assert!(chat.node.settings[0].planning());
+        // Opened again, as after the agent restarted, it's asked again.
+        assert!(chat.connected(opened("default")).contains(&set));
+        // Codex leaves Plan mode itself once its plan is approved: that
+        // holds in the next session too.
+        update(
+            &mut chat,
+            &format!(
+                r#"{{"sessionUpdate":"config_option_update","configOptions":{}}}"#,
+                plan("default")
+            ),
+        );
+        assert!(!chat.node.settings[0].planning());
+        assert!(!chat.connected(opened("default")).contains(&set));
     }
 
     /// A chat with Claude Code that has answered one message, `hi`, and
