@@ -31,6 +31,7 @@
 //! | `pid` | `pid` and its process ID |
 //! | `sleep-bg PATH` | As `background`, but what it runs is `sleep 1000`, in its process group, whose pid it writes to PATH, an absolute path; then `started` |
 //! | `stream-slow N MS` | As `stream N`, but MS milliseconds apart, reading nothing meanwhile |
+//! | `build PATH` | As `sleep-bg PATH`, but its task is named by PATH's file name, NAME, as `NAME`, "Serve NAME"; then says `building NAME` and goes on, reading on meanwhile, until the file `PATH.go` is there; then says `built NAME` |
 //! | `deploy PATH` | Runs a command in its turn, as `scripts/deploy --wait`, which goes on until the file `PATH.go` is there, writing its pid to PATH, an absolute path; then says it finished, and `deployed` |
 //! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
 //! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
@@ -148,7 +149,9 @@
 //! it never answers a request to list them. With `--slow-load MS`, it
 //! waits MS milliseconds before telling a session it loads again, and with
 //! `--replay-gap MS`, between its pieces, going on with what else it's
-//! asked meanwhile.
+//! asked meanwhile. With `--notices-wait FILE`, an absolute path, it
+//! answers a notice from clackatoo, `echo:` and what it says, only once
+//! FILE is there, reading on meanwhile.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -214,6 +217,7 @@ fn main() {
             .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
         replay_gap: value("--replay-gap")
             .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
+        notices_wait: value("--notices-wait"),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         planning: BTreeSet::new(),
@@ -307,6 +311,9 @@ struct Fake {
     slow_load: Option<std::time::Duration>,
     /// How long it waits between the pieces of a session it tells again.
     replay_gap: Option<std::time::Duration>,
+    /// The file, an absolute path, it answers a notice from clackatoo
+    /// only once it's there, if any.
+    notices_wait: Option<String>,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
@@ -452,6 +459,16 @@ fn stream(id: &Value, session: &str, asked: &str) {
     reason = "it's meant to outlive the turn, and be stopped with its agent"
 )]
 fn sleep_in_background(session: &str, path: &str) {
+    serve_in_background(session, path, "t1", "Sleep");
+}
+
+/// Starts `sleep` in the background as [`sleep_in_background`] does, as
+/// the task `task`, called `name`.
+#[allow(
+    clippy::zombie_processes,
+    reason = "it's meant to outlive the turn, and be stopped with its agent"
+)]
+fn serve_in_background(session: &str, path: &str, task: &str, name: &str) {
     let sleeping = Command::new("sleep")
         .arg("1000")
         .stdin(Stdio::null())
@@ -469,10 +486,32 @@ fn sleep_in_background(session: &str, path: &str) {
     );
     update(
         session,
-        &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "t1",
-                 "name": "Sleep", "taskType": "shell", "description": "Sleep",
+        &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": task,
+                 "name": name, "taskType": "shell", "description": name,
                  "showInTranscript": false, "canStop": true, "toolCallId": "bg" }),
     );
+}
+
+/// Answers `build PATH`, the message `id` in `session`, as a builder an
+/// agent started works: serves something in the background, as
+/// `sleep-bg PATH` does, as a task named by PATH's file name, NAME, says
+/// `building NAME`, and goes on, reading on meanwhile, until the file
+/// `PATH.go` is there, so a test says when it's done; then `built NAME`.
+fn build(id: Value, session: String, path: &str) {
+    let name = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    serve_in_background(&session, path, &name, &format!("Serve {name}"));
+    say(&session, &format!("building {name}\n"));
+    let gate = format!("{path}.go");
+    std::thread::spawn(move || {
+        while !Path::new(&gate).exists() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        say(&session, &format!("built {name}\n"));
+        done(&id, "end_turn");
+    });
 }
 
 /// Answers `background-out DIR`, in `session`: as `background`, but its
@@ -1715,6 +1754,19 @@ impl Fake {
     /// to carry on.
     #[allow(clippy::too_many_lines, reason = "one arm for each script, most short")]
     fn prompt(&mut self, id: Value, session: String, text: &str) -> bool {
+        if let Some(gate) = self.notices_wait.clone()
+            && text.starts_with("[Notice from clackatoo")
+        {
+            let said = format!("echo: {}\n", from_chat(text).1);
+            std::thread::spawn(move || {
+                while !Path::new(&gate).exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                say(&session, &said);
+                done(&id, "end_turn");
+            });
+            return true;
+        }
         let (sender, text) = from_chat(text);
         if let (Some(sender), "bounce") = (sender, text) {
             self.bounce(id, session, sender);
@@ -2077,6 +2129,7 @@ impl Fake {
                 done(&id, "end_turn");
             }
             _ if text.starts_with("stream-slow ") => stream_slowly(&id, &session, text),
+            _ if text.starts_with("build ") => build(id, session, &text["build ".len()..]),
             _ if text.starts_with("deploy ") => deploy(id, session, &text["deploy ".len()..]),
             "wait" => self.waits.push((id, session)),
             "busy" => self.busy(id, session),

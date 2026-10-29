@@ -6995,3 +6995,466 @@ fn a_background_tab_another_machine_lends_is_kept_through_its_upgrade() {
     });
     assert!(background_of(&shown, made).is_some());
 }
+
+// --- A PM agent running a builder through real upgrades (CLACKA-185) ----
+
+/// The processes the agents of a test ran in the background, killed as
+/// it ends: those of an agent carried through upgrades outlive the daemon.
+struct Sleepers(Vec<u32>);
+
+impl Drop for Sleepers {
+    fn drop(&mut self) {
+        for &pid in &self.0 {
+            if running(pid) {
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+            }
+        }
+    }
+}
+
+/// `chat`, once it has `turns` turns, all ended, answers nothing, and has
+/// nothing waiting to be sent: settled, as an agent waits for the user.
+fn settled(client: &mut Client, chat: TerminalId, turns: usize) -> ChatNode {
+    wait_for_chat(client, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+            && node.turns.len() == turns
+            && node.turns.iter().all(|turn| turn.end.is_some())
+            && node.delivery.queued.is_empty()
+    })
+}
+
+/// All `turn`'s words, and what clackatoo put in it, in order.
+fn words_of(turn: &clackatoo_protocol::Turn) -> String {
+    (turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Words(words) | Item::Other(words) => Some(words.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `turn` ended as it should have.
+fn done(turn: &clackatoo_protocol::Turn) -> bool {
+    matches!(
+        turn.end.as_ref().map(|end| &end.outcome),
+        Some(clackatoo_protocol::Outcome::Done)
+    )
+}
+
+/// Upgrades the daemon in `child`, at `socket`, and checks it answers at
+/// once after: a client following the PM's chat `pm` and its builder
+/// `builder` again, as a window reconnects.
+fn upgrade_mid_loop(child: &Killed, socket: &Path, pm: TerminalId, builder: TerminalId) -> Client {
+    upgrade_process(child, socket);
+    let mut client = follow_again(socket, pm);
+    let asked = Instant::now();
+    let alive = client.list_terminals().unwrap();
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the daemon took {:?} to answer after upgrading",
+        asked.elapsed()
+    );
+    assert!(
+        alive.iter().any(|terminal| terminal.id == builder),
+        "the builder went in the upgrade: {alive:#?}"
+    );
+    attach_to(&mut client, builder);
+    client
+}
+
+/// The PM's turn as it hears of a builder's answer in a notice from
+/// clackatoo: `which` the builder `builder` is to it.
+fn heard_in_notice(
+    turn: &clackatoo_protocol::Turn,
+    pm: TerminalId,
+    builder: TerminalId,
+    which: &str,
+) {
+    assert!(
+        turn.prompt.starts_with(&format!(
+            "[chat {builder} finished] Chat {builder}, {which}, has finished."
+        )),
+        "{turn:#?}"
+    );
+    let from = turn.from.as_ref().unwrap();
+    assert_eq!(
+        (from.chat, from.agent.as_str(), from.title.as_str()),
+        (pm, "Clackatoo", "Subagents finished")
+    );
+    assert!(done(turn), "{turn:#?}");
+}
+
+/// What `node`, the builder, runs in the background: each task's name
+/// and state.
+fn tasks_of(node: &ChatNode) -> Vec<(String, clackatoo_protocol::AgentTaskState)> {
+    (node.tasks.iter())
+        .map(|task| (task.title.clone(), task.state))
+        .collect()
+}
+
+/// Checks nothing the PM, `node`, did tripped a limit or failed: no tool it
+/// called was refused or failed, and no notice of its was held.
+fn nothing_tripped(node: &ChatNode) {
+    for turn in &node.turns {
+        let said = words_of(turn);
+        assert!(
+            !said.contains("failed:") && !said.contains("refused:") && !said.contains("no answer"),
+            "{said}"
+        );
+        assert!(done(turn), "{turn:#?}");
+    }
+    assert_eq!(node.notice, None, "{node:#?}");
+}
+
+/// A PM agent runs a builder it started, through real upgrades, as
+/// CLACKA-185 means it to, unattended: it starts the builder, which
+/// serves something in the background as it works, and waits for it; the
+/// daemon upgrades mid-wait; the builder finishes, and the PM hears it,
+/// once; it sends fixes, and waits, or doesn't and is told; the daemon
+/// upgrades as the builder works, and as it's idle with its background
+/// going; and the PM closes the builder at the end. Each round checks the
+/// builder is still there, every answer reaches the PM once and only
+/// once (a wait after a notice isn't told it again), what the builder
+/// runs in the background goes on with its agent (`carried`), or is
+/// lost, and the builder told (else), turns are counted right, nothing
+/// trips a limit, and the daemon answers at once after each upgrade.
+#[expect(clippy::too_many_lines, reason = "one PM loop, start to end")]
+fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
+    use clackatoo_protocol::{AgentTaskState, AgentTools};
+    let world = World::new();
+    let (child, socket) = if carried {
+        process_daemon(&world, "laptop")
+    } else {
+        process_daemon_with(&world, "laptop", stopping_agents)
+    };
+    let (mut client, pm) = ready_chat(&socket, AgentTools::Allow);
+    let builder = TerminalId(pm.0 + 1);
+    let mut sleepers = Sleepers(Vec::new());
+    let round = |n: usize| world.path().join(format!("r{n}"));
+    let finish = |n: usize| std::fs::write(world.path().join(format!("r{n}.go")), "").unwrap();
+    let build = |n: usize| format!("build {}", round(n).display());
+    let send = |n: usize| {
+        let send = serde_json::json!({ "chat": builder.0, "message": build(n) });
+        format!("mcp send_to_chat {send}")
+    };
+    let wait = format!("mcp wait_for_chat {{\"chat\":{builder},\"timeout\":60}}");
+    let serving = |n: usize| format!("Serve r{n}");
+    let lost_task = |n: usize| format!("`Serve r{n} (sleep 1000)`");
+    let answer = |turn: usize, n: usize| {
+        format!("Chat {builder}'s answer to your message, turn {turn}:\nbuilding r{n}\n")
+    };
+    // What the builder said, as its turn `n` ended: as it would have, or,
+    // if the upgrade stopped it, going on as clackatoo asks.
+    let ended = |n: usize| {
+        if carried {
+            format!("building r{n}\nbuilt r{n}\n")
+        } else {
+            format!("building r{n}\nContinuing after a daemon upgrade.echo: Clackatoo resumed")
+        }
+    };
+    let (mut pm_turns, mut builder_turns) = (0, 0);
+
+    // Each of the first three rounds: the builder works as the daemon
+    // upgrades, while the PM waits for it (1, 2), or has gone on (3).
+    for n in 1..=3 {
+        let message = match n {
+            1 => {
+                let start = serde_json::json!({ "prompt": build(1) });
+                format!("mcp start_chat {start}\n{wait}")
+            }
+            2 => format!("{}\n{wait}", send(2)),
+            _ => send(3),
+        };
+        client.chat(pm, ChatAction::Send(message)).unwrap();
+        let asked = pm_turns;
+        pm_turns += 1;
+        builder_turns += 1;
+        let first = if n == 1 {
+            format!("start_chat: Started chat {builder} (")
+        } else {
+            format!("send_to_chat: Sent to chat {builder}.")
+        };
+        wait_for_chat(&mut client, pm, |node| last_words(node).contains(&first));
+        if n == 1 {
+            attach_to(&mut client, builder);
+        }
+        let node = wait_for_chat(&mut client, builder, |node| {
+            node.turns.len() == builder_turns
+                && last_words(node).contains(&format!("building r{n}"))
+        });
+        assert_eq!(
+            node.turns[n - 1].from.as_ref().map(|from| from.chat),
+            Some(pm)
+        );
+        sleepers.0.push(pid_in(&round(n)));
+        if n == 3 {
+            settled(&mut client, pm, pm_turns);
+        }
+
+        let mut upgraded = upgrade_mid_loop(&child, &socket, pm, builder);
+        let node = wait_for_chat(&mut upgraded, builder, |node| {
+            node.turns.len() == builder_turns
+        });
+        let latest = *sleepers.0.last().unwrap();
+        if carried {
+            // The builder's turn goes on, its background with it.
+            assert!(node.turns[n - 1].end.is_none(), "{node:#?}");
+            assert!(sleepers.0.iter().all(|&pid| running(pid)), "a sleeper went");
+        } else {
+            let node = wait_for_chat(&mut upgraded, builder, |node| {
+                node.turns[n - 1].end.is_some()
+            });
+            let told = &node.turns[n - 1];
+            assert!(words_of(told).contains(&lost_task(n)), "{told:#?}");
+            let task = node
+                .tasks
+                .iter()
+                .find(|task| task.title == serving(n))
+                .unwrap();
+            assert_eq!(task.state, AgentTaskState::Lost, "{node:#?}");
+            assert_eq!(
+                task.summary.as_deref(),
+                Some("ended by the daemon's upgrade")
+            );
+            let deadline = Instant::now() + PATIENCE;
+            while running(latest) {
+                assert!(Instant::now() < deadline, "the lost task's process runs on");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        finish(n);
+        client = upgraded;
+        let node = wait_for_chat(&mut client, builder, |node| {
+            node.turns.len() == builder_turns && node.turns[n - 1].end.is_some()
+        });
+        let answered = &node.turns[n - 1];
+        assert!(done(answered), "{answered:#?}");
+        assert!(words_of(answered).starts_with(&ended(n)), "{answered:#?}");
+
+        // The PM hears the builder's answer once: on the call that waited,
+        // carried with its agent; or, its agent stopped, as the turn it
+        // waited in goes on, in a notice that the chat it waited for has
+        // finished; or, having gone on, in a notice that it has.
+        let waited = n < 3;
+        if !(waited && carried) {
+            pm_turns += 1;
+        }
+        let node = settled(&mut client, pm, pm_turns);
+        nothing_tripped(&node);
+        let asked = &node.turns[asked];
+        let heard = if waited && carried {
+            let said = words_of(asked);
+            assert!(!continued(&node), "{node:#?}");
+            said[said.find("wait_for_chat: ").expect(&said)..].to_owned()
+        } else {
+            let told = &node.turns[pm_turns - 1];
+            let which = if waited {
+                "which this chat was waiting for as the daemon restarted for an upgrade"
+            } else {
+                "which this chat started"
+            };
+            heard_in_notice(told, pm, builder, which);
+            if waited {
+                assert!(
+                    words_of(asked).contains("Continuing after a daemon upgrade."),
+                    "{asked:#?}"
+                );
+            }
+            told.prompt.clone()
+        };
+        assert!(heard.contains(&answer(n, n)), "{heard}");
+        assert!(heard.contains("[finished]"), "{heard}");
+        assert_eq!(heard.matches(&answer(n, n)).count(), 1, "{heard}");
+        if carried {
+            let going: Vec<String> = (1..=n).map(|n| format!("`Serve r{n}`")).collect();
+            let still = format!("[Still running in its background: {}.", going.join(", "));
+            assert!(heard.contains(&still), "{heard}");
+        }
+    }
+
+    // A wait after the notice isn't told the answer again as news: it
+    // has had it, so it's given the last answer, and nothing is told
+    // after.
+    client.chat(pm, ChatAction::Send(wait.clone())).unwrap();
+    pm_turns += 1;
+    let node = settled(&mut client, pm, pm_turns);
+    let said = last_words(&node);
+    assert!(
+        said.starts_with(&format!("wait_for_chat: {}", answer(3, 3))),
+        "{said}"
+    );
+    assert!(!said.contains("since you last heard"), "{said}");
+
+    // Round 4: the builder finishes as the PM waits, and the daemon
+    // upgrades as it's idle, with its background going.
+    client
+        .chat(pm, ChatAction::Send(format!("{}\n{wait}", send(4))))
+        .unwrap();
+    pm_turns += 1;
+    builder_turns += 1;
+    wait_for_chat(&mut client, builder, |node| {
+        node.turns.len() == builder_turns && last_words(node).contains("building r4")
+    });
+    sleepers.0.push(pid_in(&round(4)));
+    finish(4);
+    let node = settled(&mut client, pm, pm_turns);
+    nothing_tripped(&node);
+    let said = last_words(&node);
+    assert!(
+        said.contains(&format!(
+            "wait_for_chat: {}built r4\n[finished]",
+            answer(4, 4)
+        )),
+        "{said}"
+    );
+    settled(&mut client, builder, builder_turns);
+
+    let mut client = upgrade_mid_loop(&child, &socket, pm, builder);
+    let node = if carried {
+        // Nothing was lost, so nothing is told.
+        settled(&mut client, builder, builder_turns)
+    } else {
+        // The builder is told what the upgrade stopped, in a turn of its
+        // own, which answers the PM's message too: the PM is told, once.
+        builder_turns += 1;
+        pm_turns += 1;
+        let node = settled(&mut client, builder, builder_turns);
+        let told = &node.turns[builder_turns - 1];
+        assert!(told.prompt.starts_with("[daemon restarted]"), "{told:#?}");
+        assert!(told.prompt.contains(&lost_task(4)), "{told:#?}");
+        let from = told.from.as_ref().unwrap();
+        assert_eq!((from.chat, from.agent.as_str()), (builder, "Clackatoo"));
+        let pms = settled(&mut client, pm, pm_turns);
+        let notice = &pms.turns[pm_turns - 1];
+        heard_in_notice(notice, pm, builder, "which this chat started");
+        assert!(
+            notice.prompt.contains(&format!(
+                "Chat {builder} went on by itself after your message, in turn {builder_turns}:"
+            )),
+            "{notice:#?}"
+        );
+        node
+    };
+    let expected: Vec<(String, AgentTaskState)> = (1..=4)
+        .map(|n| {
+            let state = if carried {
+                AgentTaskState::Running
+            } else {
+                AgentTaskState::Lost
+            };
+            (serving(n), state)
+        })
+        .collect();
+    assert_eq!(tasks_of(&node), expected, "{node:#?}");
+    assert_eq!(
+        sleepers.0.iter().all(|&pid| running(pid)),
+        carried,
+        "what the builder ran in the background"
+    );
+
+    // The PM waits once more, hearing nothing new, and closes the builder.
+    let close = format!("{wait}\nmcp close_chat {{\"chat\":{builder}}}");
+    client.chat(pm, ChatAction::Send(close)).unwrap();
+    pm_turns += 1;
+    let node = settled(&mut client, pm, pm_turns);
+    nothing_tripped(&node);
+    let said = last_words(&node);
+    let last = if carried {
+        answer(4, 4)
+    } else {
+        format!("Chat {builder} went on by itself after your message, in turn {builder_turns}:\n")
+    };
+    assert!(
+        said.starts_with(&format!("wait_for_chat: {last}")),
+        "{said}"
+    );
+    assert!(!said.contains("since you last heard"), "{said}");
+    assert!(
+        said.ends_with(&format!("close_chat: Closed chat {builder}.\n")),
+        "{said}"
+    );
+    let alive = client.list_terminals().unwrap();
+    assert!(
+        !alive.iter().any(|terminal| terminal.id == builder),
+        "{alive:#?}"
+    );
+    // Nothing more comes: every answer was heard, once.
+    let node = ask_chat(&mut client, pm, "pid");
+    assert_eq!(node.turns.len(), pm_turns + 1, "{node:#?}");
+    let notices = (node.turns.iter())
+        .filter(|turn| {
+            turn.prompt
+                .starts_with(&format!("[chat {builder} finished]"))
+        })
+        .count();
+    assert_eq!(notices, if carried { 1 } else { 4 }, "{node:#?}");
+}
+
+/// The PM loop, its agents carried through each upgrade (CLACKA-188).
+#[test]
+fn a_pm_runs_a_builder_through_upgrades_that_carry_agents() {
+    a_pm_runs_a_builder_through_upgrades(true);
+}
+
+/// The PM loop, the daemon set to stop its agents as it upgrades, so each
+/// upgrade restarts them (CLACKA-187).
+#[test]
+fn a_pm_runs_a_builder_through_upgrades_that_restart_agents() {
+    a_pm_runs_a_builder_through_upgrades(false);
+}
+
+/// A message the user sends a chat while it answers a notice from
+/// clackatoo, after an upgrade that restarted its agent as it was idle,
+/// is sent once that turn ends, as one sent while any turn is answered
+/// is. The PM loop found it stuck: each chat's queue comes back from an
+/// upgrade paused, empty or not, and only a chat continuing a turn has
+/// that put back as it was; a message sent while the chat is busy joins
+/// the paused queue and never goes (CLACKA-185). The agent here answers
+/// notices only once the test says, so the message is sent mid-turn.
+#[test]
+#[ignore = "CLACKA-185: a message sent mid-turn after a restarting upgrade stays queued, paused (fails)"]
+fn a_message_sent_mid_turn_after_a_restarting_upgrade_is_sent() {
+    let world = World::new();
+    let gate = world.path().join("notices.go");
+    let agent = format!(
+        "{} --notices-wait {}",
+        example("fake_agent").display(),
+        gate.display()
+    );
+    let (child, socket) = process_daemon_with(&world, "laptop", |daemon| {
+        stopping_agents(daemon);
+        daemon.env("CLACKATOO_AGENT", &agent);
+    });
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    let path = world.path().join("sleep.pid");
+    let node = ask_chat(&mut client, id, &format!("sleep-bg {}", path.display()));
+    let _sleeper = Sleepers(vec![pid_in(&path)]);
+    assert!(!node.delivery.paused, "{:#?}", node.delivery);
+
+    // Idle as the daemon upgrades, it's told what the upgrade stopped, in
+    // a turn of its own, which its agent answers only once let.
+    upgrade_process(&child, &socket);
+    let mut client = follow_again(&socket, id);
+    wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 2 && node.turns[1].end.is_none()
+    });
+    client.chat(id, ChatAction::Send("hello".into())).unwrap();
+    std::fs::write(&gate, "").unwrap();
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 3 || (node.turns[1].end.is_some() && node.delivery.paused)
+    });
+    assert!(
+        node.turns[1].prompt.starts_with("[daemon restarted]"),
+        "{node:#?}"
+    );
+    assert!(
+        !node.delivery.paused,
+        "the message stayed queued, paused: {:#?}",
+        node.delivery
+    );
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 3 && node.turns[2].end.is_some()
+    });
+    assert_eq!(node.turns[2].prompt, "hello");
+    assert!(last_words(&node).contains("echo: hello"), "{node:#?}");
+}
