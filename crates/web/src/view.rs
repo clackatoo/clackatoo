@@ -8,8 +8,8 @@
 
 use clackatoo_protocol::{
     ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Field, FieldInput, FieldValue, Form,
-    FormAsk, Fullness, Item, Outcome, Said, SettingKind, Subagent, SubagentStatus, TerminalInfo,
-    TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
+    FormAsk, Fullness, Item, Outcome, Said, Setting, SettingKind, Subagent, SubagentStatus,
+    TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
 };
 
 use crate::action::{Action, RowKey};
@@ -1214,6 +1214,12 @@ pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -
                 .attr("title", "Model, permissions and tools")
                 .child(crate::provider_icon::mark(&node.agent))
                 .child(el("span").class("model-name").text(model))
+                // Codex's Plan mode, while it's on, as the window's
+                // permissions control says it.
+                .children(
+                    (node.settings.iter().any(Setting::planning))
+                        .then(|| el("span").class("plan-badge").text("Plan")),
+                )
                 .child(el("span").class("muted").text("⌄")),
         )
         .child(meter(node, now).unwrap_or_else(|| {
@@ -1971,6 +1977,39 @@ mod tests {
         let mut state = State::default();
         state.open_chat(TerminalId(1));
         state.open.unwrap()
+    }
+
+    #[test]
+    fn codexs_plan_mode_shows_on_the_box_while_its_on() {
+        let choice = |value: &str| clackatoo_protocol::SettingChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let mut plan = Setting {
+            id: "collaboration_mode".into(),
+            name: "Collaboration mode".into(),
+            kind: SettingKind::Other,
+            value: "default".into(),
+            choices: vec![choice("default"), choice("plan")],
+        };
+        assert!(plan.is_plan_mode() && !plan.planning());
+        let badge = |plan: &Setting| {
+            let node = ChatNode {
+                agent: "Codex".into(),
+                settings: vec![plan.clone()],
+                ..ChatNode::default()
+            };
+            let bar = box_bar(&node, &open(), 0, &|_| 0);
+            (bar.find_all("class").into_iter())
+                .any(|element| element.get("class") == Some("plan-badge"))
+        };
+        assert!(!badge(&plan));
+        plan.value = "plan".into();
+        assert!(plan.planning() && badge(&plan));
+        // Another setting of no known kind isn't it.
+        plan.id = "fast-mode".into();
+        assert!(!plan.is_plan_mode() && !badge(&plan));
     }
 
     #[test]
