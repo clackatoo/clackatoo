@@ -1055,6 +1055,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Typing / in a chat lists the agent's commands; /clear, /model, /diff and the like open their clackatoo equivalents",
     },
+    News {
+        id: "turn-facts",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Failed turns say why and what to do, R sends them again; retries, compaction, exit codes and cost show",
+    },
 ];
 
 impl News {

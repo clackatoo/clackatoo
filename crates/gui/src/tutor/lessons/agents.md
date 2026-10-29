@@ -219,6 +219,14 @@ When the agent asks to leave Plan mode, its plan shows above the question, scrol
 
 If you have a chat open, ask it to ask you, with its question tool, which of two colours you'd like, and answer from the form.
 
+## When a turn fails, and what it spent
+
+When the model is overloaded or the connection drops, the agent tries again by itself: the line above the box says so while it waits, as `Retrying Claude, attempt 2 of 10.` If a turn fails anyway, it says why in plain words and what to do, such as signing in again with the command it names, or that the account's usage limit is reached; what the agent itself said follows underneath. The last turn, if it failed, has a **Send again** button, and `R` in normal mode does the same: the same message, images and all, as a new turn.
+
+A line across a turn shows where the agent compacted its context to make room, with how many tokens before and after. A command that failed says its exit code on its card, as `$ cargo test · exit 101`. Under each turn, on the right, is what it spent, its tokens and, where the agent says, its cost; `K` shows the session's cost with its context and limits. `:set nochatcost` hides both.
+
+If a turn in a chat of yours has failed, press `Esc`, then `R` to send it again.
+
 ## Continuing after upgrades
 
 If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.

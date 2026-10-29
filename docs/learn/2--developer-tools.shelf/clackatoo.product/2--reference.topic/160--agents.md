@@ -298,6 +298,7 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 - A command moved to the background doesn't go on showing its output in its row once it has moved: the shelf says how it's going, and Claude Code reads what it printed when it ends.
 - A question it asks you with its own AskUserQuestion tool is titled `Asking for your input`, not by the question; the question shows under it.
 - A failed call of one of its tools for other agents, such as SendMessage, shows its error as plain text, not as code.
+- clackatoo also asks for AIR's session failures, so Claude Code says when it [tries a request again](#when-a-turn-fails), and why a turn failed by its kind. A turn that fails then ends as if well, with the failure beside, which clackatoo reads; and Claude Code's error for a failure leaves out the provider's words, which come with the failure instead.
 
 Commands' output, file changes and images are as before. To have none of this and no shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
 
@@ -313,6 +314,36 @@ Once every step is done, the list stays, as `Plan · all 5 done`, until your nex
 
 An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its notices, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn ends it there, rather than carrying it on. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
 
+### When a turn fails
+
+When the model is overloaded, rate limited or the connection drops, the agent tries its request again by itself. While it waits, the line above the box says what it says of that in place of what it's doing: Claude Code's `Retrying Claude, attempt 2 of 10.`, Codex's `Reconnecting... 2/5`. It goes as soon as the agent says anything more of the turn. Claude Code says this only to a client that asks for it as JetBrains AIR does, as clackatoo does unless `tasks = false` (see [Which agent](#which-agent)).
+
+A turn that fails anyway says why in plain words, with what to do, rather than the agent's error:
+
+| What went wrong | What the turn says |
+|---|---|
+| The sign-in ran out, also mid-turn | that the agent needs you to sign in again, with its login command to run in a terminal, such as `claude /login` |
+| Rate limited | to wait a moment, then send the message again |
+| The account's usage limit or credit is used up | that the usage limit is reached, with the agent's words for when it resets, as Codex's `Try again at 3:05 PM.` |
+| The model is overloaded, or its provider failed | to send the message again in a moment |
+| The connection to the model dropped mid-turn | to send the message again |
+| The conversation, or the answer, hit the model's limit | to start a new chat |
+| A Codex session open in another Codex client: the app, the CLI or an editor | to close it there, then send the message again |
+
+What the agent itself said follows underneath, `The agent said: …`, unless the plain words already say it; `clackatoo capture` and copying the turn keep it. A failure clackatoo doesn't know says `the agent failed:` and the agent's words, as before. A Codex session open in another Codex client is no longer taken for one that's gone: the chat says so and waits, rather than starting a new session in its place.
+
+The last turn, if it failed and was a message of yours, has a **Send again** button under it, and `R` in normal mode does the same: the same message, with its images, as a new turn below. Images can be sent again only until the daemon is upgraded; after that, paste them again.
+
+### What else a turn says
+
+Where the agent compacted its context to make room, dropping the conversation so far for a summary of it, a line across the turn says `Context compacted`, with how it was started and the tokens before and after, as `automatic · 182k → 31k tokens`, where the agent says: Claude Code does, Codex says only that it did. The line never folds away with the turn's work.
+
+A command that failed says its exit code at the end of its card's head, as `$ cargo test · exit 101`, where the agent says it: both do for a command they run as a terminal, and Claude Code says 1 for any command that failed.
+
+Under each finished turn, on the right, is what it spent, where the agent says: its tokens, and its cost, as `12k tokens · $0.04`. Claude Code gives both, and a turn's cost is what the session's grew by during it; Codex gives tokens only. `K` shows what the session has cost so far beside its context and limits. `:set nochatcost` hides both.
+
+An image the agent shows in its words, rather than from a tool, shows in a row of its own, `Image`, with the same caps as a tool's images.
+
 ### When the agent asks
 
 In Manual mode, before it does anything that changes something, such as writing a file or running a command that isn't only reading, the agent asks. Other modes ask about less, and Auto leaves it to Claude. Its question takes the box's place, with an answer on each button: the first way to say yes in the accent colour, and the ways to say no quieter.
@@ -320,6 +351,8 @@ In Manual mode, before it does anything that changes something, such as writing 
 Click an answer to give it. In insert mode, press an answer's number to give it, or Esc to say no. In normal mode, a number picks its answer out with a ring, and the bar says what it is: the same number again, or Enter, gives it, from a third of a second after to five seconds after, so a count such as `22j` typed in one go can't answer by chance; any other key, a click, the wheel or leaving the window drops it, and Esc leaves the question be. A number pressed within half a second of the question coming, of you arriving at its chat, or of the last key you typed, doesn't answer it; the bar says to press it again. Ctrl+C says no and stops the answer. Other keys go nowhere while it asks, and the bar says which numbers answer it.
 
 clackatoo's own questions about its tools say Reject, as Claude Code's do, and show what the agent wrote as code, so nothing in it can pass for clackatoo's words.
+
+An answer of a kind clackatoo doesn't know, which a newer agent may offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent colour, and Esc never picks it.
 
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
@@ -574,6 +607,8 @@ A chat that moved between agents keeps the sessions it had with each, and goes b
 When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, model, tools and Browser settings; it starts in the agent's own starting mode, and as a chat of its own, not another's subagent. Chats in no pane don't come back, but the start page lists their sessions.
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
+
+A line where the agent compacted its context comes through an upgrade as words saying so; a command's exit code, what turns spent and the agent's own words for a failure don't.
 
 The agent's [plan](#the-agent-s-plan) lasts through an upgrade. After the daemon stops, a chat going on with its session shows the plan again once the agent has told the conversation so far, if the agent tells its plans as it does: Claude Code does.
 
