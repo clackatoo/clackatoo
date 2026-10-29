@@ -1061,6 +1061,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Failed turns say why and what to do, R sends them again; retries, compaction, exit codes and cost show",
     },
+    News {
+        id: "agents-through-upgrades",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Agents go on through upgrades: background shells, deploys, turns and tool calls keep running as they were",
+    },
 ];
 
 impl News {

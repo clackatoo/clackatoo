@@ -46,7 +46,7 @@ A chat works in the directory a new terminal would start in: the one the pane it
 
 Like any new pane, a chat opens in the window's mode, so after `:Agent` it's in normal mode: `i` starts typing into it. A chat that's asking something is always arrived at in normal mode. The first chat starts the agent, which takes a second or two. Until then the chat says it's starting, and a message sent meanwhile waits and goes when it can.
 
-An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. An upgrade or `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. Before Linux 6.9, only the agent's own process is reached.
+An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. An upgrade doesn't: agents [go on through it](#through-an-upgrade), with all they run, unless the upgrade has to stop them (see below). Before Linux 6.9, only the agent's own process is reached.
 
 ## Gemini through Antigravity
 
@@ -312,7 +312,7 @@ Once every step is done, the list stays, as `Plan · all 5 done`, until your nex
 
 ### Turns the agent takes by itself
 
-An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its notices, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn ends it there, rather than carrying it on. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
+An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its notices, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn doesn't end it: the agent goes on through the upgrade, and so does its turn. Only an upgrade that stops the agent, as described [below](#through-an-upgrade), ends it there. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
 
 ### When a turn fails
 
@@ -557,7 +557,7 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 - Agents send each other as many messages as the work needs. A chat of yours can have at most 32 chats started under it open at once, and 64 started under it in all, 4 of them working at once, a message waking one counting too, 2 deep. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
 - A notice from clackatoo, such as that a subagent finished or an [activity](#managed-activities-and-recovery) ended, always reaches the chat it's for, and counts against none of these. A turn that a notice that subagents finished starts begins a new chain of messages, as yours does, so an agent going round with its builder isn't stopped after 6. Instead, notices that subagents finished start at most 100 turns under one of your chats between two of your messages there: past that, the next waits until you write again, there or in the chat it waits in, and that chat says so. Nothing is lost, and anything else waiting in that chat goes on meanwhile. An agent waiting for a chat holding such a notice isn't kept waiting: it's told why. An [activity](#managed-activities-and-recovery)'s notice, which nothing counts, leaves the chain of messages as it was.
 
-Which chat started which, messages waiting their turn, which answers each chat has had from each other, and the counts above, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` as the upgrade ends its agent hears when they settle, as a notice, whoever they were answering: each of them, or, waiting for the first, once. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
+Which chat started which, messages waiting their turn, which answers each chat has had from each other, and the counts above, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` goes on waiting through an upgrade, and its call is answered as it would have been. If the upgrade stops its agent instead, it hears when they settle, as a notice, whoever they were answering: each of them, or, waiting for the first, once. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
 
 ## Which agent
 
@@ -586,9 +586,12 @@ mode = "build"               # the mode a new chat asks for, if offered
 [agents.claude]
 command = ["claude-agent-acp"]
 tasks = false                # don't ask what it runs in the background
+
+[upgrade]
+keep_agents = false          # stop agents as the daemon upgrades
 ```
 
-The daemon reads it whenever a chat starts. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
+The daemon reads it whenever a chat starts, and as it upgrades. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
 
 Each agent runs one process for all its chats, and stops when its last chat closes. Claude Code's adapter also runs a Claude Code process per chat, of about 250 MB.
 
@@ -596,7 +599,7 @@ Each agent runs one process for all its chats, and stops when its last chat clos
 
 The daemon keeps chats, as it keeps terminals. Closing the window closes nothing: a chat keeps answering, and the next window shows it.
 
-[Upgrading](~clackatoo/reference/cli#upgrade) the daemon keeps each chat's conversation. An answer under way automatically continues in the same provider session and visible turn after the upgrade, without another message or an open window. The agent is told to check interrupted tool results before repeating actions. Messages still waiting to be sent, including images, remain intact; queued messages follow the continued turn. Unconfirmed steering stays paused for review. Idle, completed and manually stopped chats stay idle, as do chats restored after a crash or ordinary daemon restart. The first upgrade from a build without continuation records still needs another message to restart interrupted work. A chat from a build before chats were kept as turns comes through as one block of its text. Tools from a build before cards come through as lines, without their output or changes. Changes from a build before line numbers come through without them.
+[Upgrading](~clackatoo/reference/cli#upgrade) the daemon keeps each chat's conversation, and its agent goes on [through the upgrade](#through-an-upgrade), with all it runs: an answer under way goes on as if nothing had happened. Where the upgrade stops the agent instead, an answer under way automatically continues in the same provider session and visible turn after the upgrade, without another message or an open window, and the agent is told to check interrupted tool results before repeating actions. Messages still waiting to be sent, including images, remain intact; queued messages follow the continued turn. Unconfirmed steering stays paused for review. Idle, completed and manually stopped chats stay idle, as do chats restored after a crash or ordinary daemon restart. The first upgrade from a build without continuation records still needs another message to restart interrupted work. A chat from a build before chats were kept as turns comes through as one block of its text. Tools from a build before cards come through as lines, without their output or changes. Changes from a build before line numbers come through without them.
 
 If the agent stops on its own, the chat says so, and the next message starts it again, carrying on the same conversation.
 
@@ -614,7 +617,24 @@ A line where the agent compacted its context comes through an upgrade as words s
 
 The agent's [plan](#the-agent-s-plan) lasts through an upgrade. After the daemon stops, a chat going on with its session shows the plan again once the agent has told the conversation so far, if the agent tells its plans as it does: Claude Code does.
 
-An upgrade stops the browser; the next page starts it again. An upgrade, or the daemon stopping, ends what agents run in the background, as it ends the agents. After an upgrade the chat shows each lost, "ended by the daemon's upgrade", and the agent is told which: in the turn that goes on, if one was under way, or else in a turn of its own, a notice from clackatoo starting `[daemon restarted]`, once, so it can start again what it still needs. That turn counts towards the 100 notices may start under one of your chats between your messages, as agents can upgrade the daemon themselves; past them it waits for you. Nothing is told of a turn you had asked to stop. A turn an agent took by itself that the upgrade cut off isn't carried on; the agent is told the same way where it was cut off.
+An upgrade stops the browser; the next page starts it again. The daemon stopping ends what agents run in the background, as it ends the agents.
+
+### Through an upgrade
+
+An agent's process goes on through an upgrade, rather than being stopped: the new build takes over its pipes as it takes over terminals, and the agent never knows. Everything it runs goes on with it, the same processes: shells it left in the background, a dev server, a build, and a command it's waiting for in its turn, such as a deploy that upgrades the daemon itself. A turn under way goes on, its words coming into the same turn, which ends as it would have; no message is sent to carry it on. Its background tasks stay running. A question it asked you is still asked, and your answer reaches it. Calls to clackatoo's tools go on too, as the connections they're served on are taken over: a `wait_for_chat` or `wait_for_terminal` under way is answered as it would have been, and a question a tool asked you still waits for your answer. Only calls waiting on clackatoo's browser, which an upgrade stops, or on a window, fail, so the agent calls them again.
+
+An agent is stopped instead, as the daemon upgrades, with all it runs, if:
+
+- the build it upgrades to can't take agents over, as a build from before they could go on;
+- that build pins another version of the agent's adapter, as when an upgrade moves Claude Code's adapter on, or would declare other capabilities to it than it was told as it started, as when a build adds one;
+- it's set to: `CLACKATOO_LIVE_AGENTS=off` in the daemon's environment, or `keep_agents = false` under `[upgrade]` in [`agents.toml`](#which-agent);
+- the agent is still starting, has stopped listening, has left a request unanswered for two minutes, has no chat, or what it runs from has gone;
+- one of its chats is opening its session, connecting to clackatoo's tools, telling a past session's conversation again, or moving to another agent;
+- something it sent is still being parsed, two seconds after the upgrade asks.
+
+Then what it runs ends with it: a deploy an agent waits for is still killed by an upgrade that moves its adapter's pin or what's declared to it, so detach one that must outlive such an upgrade. Its chats go on as they did before agents could go on, and so do those of an agent that couldn't be taken back after the upgrade. An answer under way continues in the same session after the upgrade, as above, and the chat shows what the agent ran in the background as lost, "ended by the daemon's upgrade". The agent is told which: in the turn that goes on, if one was under way, or else in a turn of its own, a notice from clackatoo starting `[daemon restarted]`, once, so it can start again what it still needs. That turn counts towards the 100 notices may start under one of your chats between your messages, as agents can upgrade the daemon themselves; past them it waits for you. Nothing is told of a turn you had asked to stop. A turn an agent took by itself that the upgrade cut off isn't carried on; the agent is told the same way where it was cut off.
+
+If starting the new build fails, the daemon goes on as it was, agents and all.
 
 ## Not yet
 

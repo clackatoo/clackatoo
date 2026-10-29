@@ -227,9 +227,13 @@ A line across a turn shows where the agent compacted its context to make room, w
 
 If a turn in a chat of yours has failed, press `Esc`, then `R` to send it again.
 
-## Continuing after upgrades
+## Going on through upgrades
 
-If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.
+A daemon upgrade doesn't stop agents: each agent's process goes on, and so does everything it runs, such as shells in the background, a dev server, or a deploy it's waiting for. A turn under way keeps streaming into the same turn, a question it asked is still asked, and its calls to clackatoo's tools are still answered. Nothing is sent to carry it on, as nothing was lost.
+
+An upgrade does stop an agent if the new build can't take it over, pins another version of its adapter, or is told to with `keep_agents = false` under `[upgrade]` in the daemon's `agents.toml`. Then the agent reopens the same provider session and continues the same turn automatically, told to check interrupted tool results before repeating actions, and what it ran in the background shows as lost. Unsent messages and images are preserved either way. This applies to planned upgrades, not crashes or ordinary restarts.
+
+If you have a chat open, ask it to run `sleep 300` in the background, run `clackatoo upgrade`, and watch the shelf go on counting.
 
 
 ## Native window access
