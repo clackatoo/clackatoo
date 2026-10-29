@@ -482,4 +482,33 @@ mod tests {
         let notice = world.chat_node().notice.unwrap_or_default();
         assert_eq!(notice, "Redid what 2 turns changed in files.");
     }
+
+    #[test]
+    fn uids_numbered_again_after_an_upgrade_let_the_branches_go_and_say_so() {
+        let mut world = three_turns();
+        let chat = world.chat;
+        world.daemon.chat_act(chat, rewind(1)).unwrap();
+        let mut world = world.upgraded(|handover| {
+            assert_eq!(handover.state.branches.len(), 1);
+            // Uids that don't fit its turns, as a build that lost some
+            // would hand over: the chat's numbered again.
+            let uids = &mut handover.state.uids;
+            assert_eq!(uids.len(), 1, "a test daemon numbers turns from 1000");
+            let next = uids[0].next;
+            uids[0].uids.push(next);
+            uids[0].next = next + 1;
+        });
+        let node = world.chat_node();
+        assert_eq!(node.turns.len(), 1);
+        assert!(node.branches.is_empty(), "{:?}", node.branches);
+        let notice = node.notice.unwrap_or_default();
+        assert!(
+            notice.contains("other branches couldn't be kept"),
+            "{notice}"
+        );
+        // Nothing's kept by the old numbers: turn 1's change can't be undone.
+        assert!(world.daemon.agent_files.log.turns_of(chat).is_empty());
+        let hosted = world.daemon.chat(chat).unwrap();
+        assert!(hosted.switch_target(1, 1).is_err());
+    }
 }

@@ -802,6 +802,33 @@ pub(in crate::server) mod tests {
             }
         }
 
+        /// The world after an upgrade, its handover first changed by
+        /// `change`.
+        pub(in crate::server) fn upgraded(
+            self,
+            change: impl FnOnce(&mut crate::handover::Handover),
+        ) -> Self {
+            let Self {
+                _dir: dir,
+                root,
+                mut daemon,
+                chat,
+                tools,
+            } = self;
+            let config = daemon.config.clone();
+            let mut handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+            change(&mut handover);
+            drop(daemon);
+            let daemon = Daemon::resume(handover, config).unwrap();
+            Self {
+                _dir: dir,
+                root,
+                daemon,
+                chat,
+                tools,
+            }
+        }
+
         /// The uid of the chat's first turn.
         pub(in crate::server) fn first(&self) -> TurnUid {
             first_uid(&self.daemon, self.chat)
