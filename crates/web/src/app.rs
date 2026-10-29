@@ -219,12 +219,18 @@ impl ChatPage {
         }));
         self.steer_button.set_hidden(!busy || empty);
         self.steer_button.set_text_content(Some(
-            if node.is_some_and(|n| n.delivery.native_steering)
-                && state.images.get(&open.id).is_none_or(Vec::is_empty)
+            if !node.is_some_and(|n| n.delivery.native_steering)
+                || state
+                    .images
+                    .get(&open.id)
+                    .is_some_and(|images| !images.is_empty())
             {
-                "Steer now"
-            } else {
                 "Stop & continue"
+            } else if clackatoo_protocol::may_mention_files(&draft) {
+                // A file it mentions goes only with the message whole.
+                "Stop & send"
+            } else {
+                "Steer now"
             },
         ));
         changed
