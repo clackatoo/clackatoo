@@ -219,6 +219,10 @@ pub(crate) struct Tab {
 /// How a tab's space is shared between its panes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "read and written once a second at most, a few panes"
+)]
 pub(crate) enum Layout {
     /// One pane.
     Pane(Pane),
@@ -290,6 +294,12 @@ pub(crate) enum Pane {
         /// make it a chat of the user's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started: Option<Started>,
+        /// The branches of its conversation, if it was cut back
+        /// (CLACKA-198), as stubs: their turns come back as each is
+        /// switched to, from its session. Builds before then pass this
+        /// over, and come back with the branch the session knows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branches: Option<Box<Branches>>,
     },
     /// An editor, editing a file, or a buffer with no file yet, by an
     /// empty path.
@@ -359,6 +369,73 @@ pub(crate) struct Started {
     /// session opens, never the mode a new chat of the user's starts in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) mode: Option<Mode>,
+}
+
+/// The branches of a chat's conversation, as its tree of segments of
+/// turns (see `chat/branches.rs`), without the turns: each segment by its
+/// place in the list; the one the branch shown ends with; where a new
+/// branch not yet written to starts, at the end of the branch shown, if
+/// one does; how many branches were let go where; and the sessions of
+/// those let go, to keep off the start page. The chat's own `session` is
+/// the one that knows the branch shown, or, with one pending, the branch
+/// left.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Branches {
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) current: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) dropped: Vec<Dropped>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) gone: Vec<String>,
+}
+
+/// A segment of a chat's conversation: the segment it goes on from, by
+/// its place (none for the first), the index of its first turn, and how
+/// many it has; off the branch shown, the first line of its first
+/// message; the session that knows the branch ending with it, if it's a
+/// leaf; when it was made and last shown; and whether its session was
+/// made from a summary of the turns before.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Segment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent: Option<u32>,
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) first: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<BranchSession>,
+    #[serde(default)]
+    pub(crate) created: u64,
+    #[serde(default)]
+    pub(crate) used: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) summary: bool,
+}
+
+/// The agent session that knows a branch: its agent, by name; its ID, if
+/// it had one; how many of the branch's turns it has seen; and the values
+/// the user gave its settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BranchSession {
+    pub(crate) agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
+    #[serde(default)]
+    pub(crate) known: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) chosen: Vec<Mode>,
+}
+
+/// How many branches were let go where: off the segment `from`, by its
+/// place, at turn `at`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Dropped {
+    pub(crate) from: u32,
+    pub(crate) at: u32,
+    pub(crate) count: u16,
 }
 
 /// A mode an agent was in: its setting, and the value chosen.
@@ -751,6 +828,7 @@ mod tests {
                                         task: false,
                                         browser: true,
                                         started: None,
+                                        branches: None,
                                     }),
                                     Layout::Pane(Pane::Review {
                                         chat: Some(7),
@@ -903,6 +981,7 @@ mod tests {
             task: false,
             browser: false,
             started: Some(started),
+            branches: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);
@@ -926,11 +1005,84 @@ mod tests {
                 depth: 1,
                 ..Started::default()
             }),
+            branches: None,
         });
         let text = String::from_utf8(state.encode()).unwrap();
         for absent in ["parent", "turn", "profile", "limits", "kept", "mode"] {
             assert!(!text.contains(&format!("\"{absent}\"")), "{absent}: {text}");
         }
+    }
+
+    #[test]
+    fn a_chats_branches_read_back_as_stubs_and_are_left_out_for_one_never_cut_back() {
+        let encoded = String::from_utf8(state().encode()).unwrap();
+        assert!(!encoded.contains("\"branches\""), "{encoded}");
+        let mut state = state();
+        let branches = Branches {
+            segments: vec![
+                Segment {
+                    start: 0,
+                    len: 1,
+                    created: 1,
+                    used: 3,
+                    ..Segment::default()
+                },
+                Segment {
+                    parent: Some(0),
+                    start: 1,
+                    len: 2,
+                    first: "try it this way".into(),
+                    session: Some(BranchSession {
+                        agent: "claude".into(),
+                        session: Some("5f0c".into()),
+                        known: 3,
+                        chosen: vec![Mode {
+                            setting: "model".into(),
+                            value: "haiku".into(),
+                        }],
+                    }),
+                    created: 1,
+                    used: 2,
+                    summary: false,
+                },
+            ],
+            current: 0,
+            pending: Some(1),
+            dropped: vec![Dropped {
+                from: 0,
+                at: 1,
+                count: 2,
+            }],
+            gone: vec!["5f0a".into()],
+        };
+        state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Chat {
+            id: 8,
+            agent: "claude".into(),
+            session: Some("5f0c".into()),
+            title: "Read the parser".into(),
+            cwd: "/src/clackatoo".into(),
+            model: None,
+            tools: Tools::Ask,
+            task: false,
+            browser: false,
+            started: None,
+            branches: Some(Box::new(branches.clone())),
+        });
+        let encoded = state.encode();
+        let text = String::from_utf8_lossy(&encoded);
+        assert!(text.contains("\"pending\": 1"), "{text}");
+        // Only what's known is written: the first segment has no parent,
+        // first message, session or summary.
+        assert_eq!(text.matches("\"parent\"").count(), 1, "{text}");
+        assert_eq!(State::decode(&encoded).unwrap(), state);
+        // What a later build adds, this one passes over, as one before
+        // branches passes over these.
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let chat = &mut value["workspaces"][1]["tabs"][0]["layout"]["pane"]["chat"];
+        chat["branches"]["segments"][1]["later"] = serde_json::json!(true);
+        chat["later"] = serde_json::json!({ "anything": 1 });
+        let read = State::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(read, state);
     }
 
     /// Written by the first build that wrote version 1. It must always be

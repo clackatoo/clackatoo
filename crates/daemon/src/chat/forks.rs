@@ -44,6 +44,16 @@ impl ForkPoints {
     pub(super) fn forget(&mut self, uid: TurnUid) {
         self.0.remove(&uid);
     }
+
+    /// Moves turn `was`'s to `now`, as a turn told again takes the uid it
+    /// had: or forgets it, with none.
+    pub(super) fn renumber(&mut self, was: TurnUid, now: Option<TurnUid>) {
+        if let Some(point) = self.0.remove(&was)
+            && let Some(now) = now
+        {
+            self.0.insert(now, point);
+        }
+    }
 }
 
 impl HostedChat {

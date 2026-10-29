@@ -23,10 +23,20 @@
 //! the turns before as a digest.
 //!
 //! A chat that has never been cut back has no tree at all.
+//!
+//! Past the bounds, the least recently shown branches' turns are let go:
+//! such a branch is a stub, which keeps its turns' uids (and so what's
+//! kept by them: their fork points, what they changed in files), the
+//! cards on them and its first message, and whose turns come back by
+//! loading its session (`session/load`) as it's switched to. Past the
+//! most branches, the least recently shown is let go whole. The saved
+//! workspaces keep a chat's tree as stubs, so a cold start comes back
+//! with its branches, and on the branch it showed.
 
-use clackatoo_protocol::{BranchSummary, Divergence, Subagent, Turn};
+use clackatoo_protocol::{BranchSummary, Divergence, ForkFiles, Outcome, Subagent, Turn, TurnEnd};
 
 use super::{HostedChat, Link, TurnUid, handover, now, turn_from_handover, turn_to_handover};
+use crate::saved;
 
 /// The most branches a chat keeps besides the one shown: past it, the
 /// least recently shown is let go.
@@ -36,8 +46,16 @@ pub(crate) const MOST_BRANCHES: usize = 16;
 /// past it, the least recently shown are let go.
 pub(crate) const MOST_BRANCH_BYTES: usize = 4 * 1024 * 1024;
 
+/// The most bytes of turns all chats keep of their branches not shown,
+/// about: past it, the least recently shown anywhere are let go.
+pub(crate) const MOST_ALL_BRANCH_BYTES: usize = 64 * 1024 * 1024;
+
 /// The most characters of a branch's first message its summary says.
 const FIRST_CHARS: usize = 200;
+
+/// The most segments a tree the saved workspaces keep may have: far more
+/// than the bounds leave.
+const MOST_SAVED_SEGMENTS: usize = 8 * MOST_BRANCHES;
 
 /// The agent session that knows a branch, as it was left.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,6 +89,8 @@ struct Seg {
     len: usize,
     /// Its turns, off the branch shown, and the cards on them.
     held: Option<Held>,
+    /// Off the branch shown, what's kept of its turns once they're let go.
+    stub: Option<Stub>,
     /// The session that knows the branch ending here, if it's a leaf
     /// whose session was recorded as it was left.
     session: Option<BranchSession>,
@@ -87,6 +107,43 @@ struct Held {
     bytes: usize,
 }
 
+/// What's kept of a segment's turns let go: the first line of the first
+/// one's message, cut short; their uids, which they come back with, or
+/// none for a segment the saved workspaces kept, whose turns come back
+/// numbered anew; and the cards on them.
+#[derive(Debug, Default)]
+struct Stub {
+    first: String,
+    uids: Vec<TurnUid>,
+    cards: Vec<Subagent>,
+}
+
+/// A branch switched to whose turns were let go, as its session tells
+/// them again: it parts at `at`, and has `count` turns after, numbered
+/// `uids` (or anew, if empty), with `cards` on them; what was undone of
+/// them in files is to be made again as `files` says. Its session knows
+/// the whole conversation, if `whole`, rather than some of it from a
+/// digest.
+#[derive(Debug)]
+struct Reload {
+    at: usize,
+    count: usize,
+    whole: bool,
+    uids: Vec<TurnUid>,
+    cards: Vec<Subagent>,
+    files: ForkFiles,
+}
+
+/// A branch's turns have come back: the uids they have, from where it
+/// parts, for the server to tell them what they changed in files, and
+/// redo what was undone of them as `files` says.
+#[derive(Debug)]
+pub(crate) struct Told {
+    pub(crate) at: usize,
+    pub(crate) uids: Vec<TurnUid>,
+    pub(crate) files: ForkFiles,
+}
+
 /// A chat's branches: see the module.
 #[derive(Debug, Default)]
 pub(super) struct Tree {
@@ -101,6 +158,13 @@ pub(super) struct Tree {
     pub(super) plan: Option<ForkPlan>,
     /// The sessions of branches let go, the latest [`MOST_GONE`].
     gone: Vec<String>,
+    /// A branch switched to whose turns its session is telling again.
+    reload: Option<Reload>,
+    /// The tree the saved workspaces kept, waiting for the turns of the
+    /// branch it showed, which loading the chat's session tells.
+    saved: Option<Box<Tree>>,
+    /// The turns of a branch let go came back, for the server.
+    told: Option<Told>,
 }
 
 /// The most sessions of branches let go a chat remembers, to keep off
@@ -180,6 +244,50 @@ impl Tree {
     /// Whether there's anything to keep: a branch besides the one shown.
     pub(super) fn branched(&self) -> bool {
         self.pending.is_some() || self.live().count() > 1
+    }
+
+    /// The bytes of turns kept of branches not shown.
+    fn held_bytes(&self) -> usize {
+        (self.live())
+            .filter_map(|(_, seg)| seg.held.as_ref())
+            .map(|held| held.bytes)
+            .sum()
+    }
+
+    /// The least recently shown segment whose turns are kept, to let go,
+    /// with when it was: never one under a segment in `keep`, unless
+    /// `kept_too`, and those last; never a leaf with no session, whose
+    /// turns couldn't come back, which is let go whole instead, unless
+    /// it's kept.
+    fn oldest_held(&self, keep: &[usize], kept_too: bool) -> Option<(u64, usize)> {
+        (self.live())
+            .filter(|(_, seg)| seg.held.is_some())
+            .filter_map(|(id, seg)| {
+                let kept = self.under(id, keep);
+                let lost = self.children(id).is_empty()
+                    && seg
+                        .session
+                        .as_ref()
+                        .is_none_or(|session| session.session.is_none());
+                if kept && (!kept_too || lost) {
+                    return None;
+                }
+                Some(((kept, self.newest_under(id), id), id))
+            })
+            .min()
+            .map(|((_, used, _), id)| (used, id))
+    }
+
+    /// Whether segment `id` is under one of `keep`, or one of them.
+    fn under(&self, id: usize, keep: &[usize]) -> bool {
+        let mut at = Some(id);
+        while let Some(step) = at {
+            if keep.contains(&step) {
+                return true;
+            }
+            at = self.seg(step).parent;
+        }
+        false
     }
 }
 
@@ -288,6 +396,7 @@ impl HostedChat {
                 start: 0,
                 len: self.node.turns.len(),
                 held: None,
+                stub: None,
                 session: None,
                 created: at,
                 used: at,
@@ -361,7 +470,7 @@ impl HostedChat {
         self.tree.current = current;
         self.tree.pending = Some(at);
         self.heard = None;
-        // Never the branch just left.
+        // Never the branch just left, whole: its turns may go.
         self.keep_to_bounds(&[first_off]);
         if let Some((words, images)) = edited {
             let draft = match self.draft() {
@@ -464,19 +573,197 @@ impl HostedChat {
             down.push(seg.parent.expect("under the target"));
         }
         down.reverse();
-        for id in down {
-            self.lay_in(id);
+        let let_go = (down.iter()).any(|&id| self.tree.seg(id).stub.is_some());
+        if let_go {
+            self.reload_from(at, &down);
+        } else {
+            for &id in &down {
+                self.lay_in(id);
+            }
         }
         self.tree.current = leaf;
         let used = now();
         self.tree.seg_mut(leaf).used = used;
-        let actions = self.take_branch_session(wanted);
+        let mut actions = self.take_branch_session(wanted);
         self.heard = None;
-        // Never the branch just left, nor the one shown.
+        if let_go {
+            self.load_branch(&mut actions);
+        }
+        // Never the branch just left, whole, nor the one shown.
         let left = self.tree.children(parent);
         self.keep_to_bounds(&left);
         self.publish_cut();
         actions
+    }
+
+    /// The branch switched to, parting at `at` and down through `down`,
+    /// has turns let go: what's kept of them all waits for its session to
+    /// tell them again.
+    fn reload_from(&mut self, at: usize, down: &[usize]) {
+        let mut uids = Vec::new();
+        let mut cards = Vec::new();
+        let mut numbered = true;
+        for &id in down {
+            let seg = self.tree.seg_mut(id);
+            if let Some(held) = seg.held.take() {
+                uids.extend(held.turns.into_iter().map(|(uid, _)| uid));
+                cards.extend(held.cards);
+            } else if let Some(stub) = seg.stub.take() {
+                numbered &= stub.uids.len() == seg.len;
+                uids.extend(stub.uids);
+                cards.extend(stub.cards);
+            }
+        }
+        let last = *down.last().expect("one");
+        let count = self.tree.seg(last).start + self.tree.seg(last).len - at;
+        let mut whole = true;
+        let mut step = Some(last);
+        while let Some(id) = step {
+            whole &= !self.tree.seg(id).summary;
+            step = self.tree.seg(id).parent;
+        }
+        // Numbered anew if any are, as after a cold start, where none
+        // was kept: uids only grow along a branch.
+        if !numbered || uids.len() != count {
+            uids.clear();
+        }
+        self.tree.reload = Some(Reload {
+            at,
+            count,
+            whole,
+            uids,
+            cards,
+            files: ForkFiles::Keep,
+        });
+    }
+
+    /// Asks for the session of the branch switched to, to tell its turns
+    /// again: the one open goes first, even if it's that session, as
+    /// only a session being opened tells them.
+    fn load_branch(&mut self, actions: &mut Vec<super::Action>) {
+        if self.session.is_none() {
+            // Nothing to tell them: they're shown as not told.
+            self.branches_told();
+            return;
+        }
+        self.load_again();
+        match self.link {
+            Link::Open => {
+                if let Some(open) = self.session.clone() {
+                    self.link = Link::Closing;
+                    actions.push(super::Action::LetGo(open));
+                }
+            }
+            Link::Closed => {
+                self.link = Link::Opening;
+                actions.push(super::Action::Connect);
+            }
+            // Asked for again once it's closed (see `session_closed`).
+            Link::Closing | Link::Opening => {}
+        }
+        self.set_state(clackatoo_protocol::ChatState::Starting);
+    }
+
+    /// Whether a branch switched to waits for its session to tell its
+    /// turns, which were let go.
+    pub(crate) fn branch_reloading(&self) -> bool {
+        self.tree.reload.is_some()
+    }
+
+    /// What the branch switched to, waiting for its turns, has undone in
+    /// files is to be made again as `files` says once they've come.
+    pub(crate) fn redo_when_told(&mut self, files: ForkFiles) {
+        if let Some(reload) = &mut self.tree.reload {
+            reload.files = files;
+        }
+    }
+
+    /// Whether the turns of a branch let go have come back, since last
+    /// asked.
+    pub(crate) fn branch_told_back(&self) -> bool {
+        self.tree.told.is_some()
+    }
+
+    /// The turns of a branch let go have come back, since last asked.
+    pub(crate) fn take_told(&mut self) -> Option<Told> {
+        self.tree.told.take()
+    }
+
+    /// The chat's session has told what it would of the conversation, as
+    /// it was loaded: a branch switched to whose turns were let go takes
+    /// those it told, and the tree the saved workspaces kept, those of
+    /// the branch it showed.
+    pub(super) fn branches_told(&mut self) {
+        if let Some(reload) = self.tree.reload.take() {
+            self.reloaded(reload);
+        }
+        if let Some(saved) = self.tree.saved.take() {
+            self.take_saved(*saved);
+        }
+    }
+
+    /// Takes the turns told again as those of the branch `reload` waited
+    /// for: the session tells the conversation it knows, so the branch's
+    /// are the last it told, after those before where it parts, if it
+    /// knows them all. Any it didn't tell are shown as such, so the tree
+    /// still fits: the last, if it knows them all, as when it stopped
+    /// telling, or else the first, which a digest told it.
+    fn reloaded(&mut self, reload: Reload) {
+        let Reload {
+            at,
+            count,
+            whole,
+            uids,
+            cards,
+            files,
+        } = reload;
+        let shown = self.node.turns.len();
+        let told = shown.saturating_sub(at);
+        let mut before = told.saturating_sub(count);
+        if whole {
+            before = before.max(at.min(told));
+        }
+        let missing = count.saturating_sub(told - before);
+        let told_uids = self.uids.within(at..shown).to_vec();
+        self.node.turns.drain(at..at + before);
+        let not_told = (0..missing).map(|_| not_told_turn());
+        let (pad_at, first_told) = if whole {
+            (at + count - missing, at)
+        } else {
+            (at, at + missing)
+        };
+        self.node.turns.splice(pad_at..pad_at, not_told);
+        self.uids.truncate(at);
+        for index in 0..count {
+            match uids.get(index) {
+                Some(&uid) => self.uids.push_kept(uid),
+                None => {
+                    self.uids.push();
+                }
+            }
+        }
+        // Where the turns told can be forked is theirs, by their uids.
+        for (index, &was) in told_uids.iter().enumerate() {
+            let now = (index >= before)
+                .then(|| self.uids.of(first_told + index - before))
+                .flatten();
+            self.forks.renumber(was, now);
+        }
+        self.node.subagents.extend(cards);
+        if missing > 0 {
+            self.set_notice(Some(format!(
+                "{} told {} of this branch's {count} turns again: those it didn't are shown \
+                 empty.",
+                self.node.agent,
+                count - missing
+            )));
+        }
+        self.tree.told = Some(Told {
+            at,
+            uids: self.uids.within(at..at + count).to_vec(),
+            files,
+        });
+        self.publish_cut();
     }
 
     /// Goes on with `wanted`, the session of the branch switched to: lets
@@ -521,6 +808,7 @@ impl HostedChat {
             start: at,
             len: 0,
             held: None,
+            stub: None,
             session: None,
             created: used,
             used,
@@ -558,6 +846,11 @@ impl HostedChat {
     /// pending branch, as the agent taking one by itself: the branch left
     /// is shown again, as the turn is its session's.
     pub(super) fn before_push(&mut self) {
+        // The turns a branch switched to has told again: they're laid in
+        // as its own once they've all come.
+        if self.tree.reload.is_some() {
+            return;
+        }
         if let Some(at) = self.tree.pending {
             let latest = (self.alternatives(at).map(|(_, alternatives)| alternatives)).and_then(
                 |alternatives| {
@@ -588,6 +881,7 @@ impl HostedChat {
             start: at,
             len: seg.start + seg.len - at,
             held: None,
+            stub: None,
             session: seg.session.take(),
             created: seg.created,
             used: seg.used,
@@ -734,9 +1028,10 @@ impl HostedChat {
     /// What a client is told of the branch whose first segment is `id`.
     fn summary(&self, id: usize) -> BranchSummary {
         let seg = self.tree.seg(id);
-        let first = match &seg.held {
-            Some(held) => held.turns.first().map(|(_, turn)| turn.prompt.as_str()),
-            None => self
+        let first = match (&seg.held, &seg.stub) {
+            (Some(held), _) => held.turns.first().map(|(_, turn)| turn.prompt.as_str()),
+            (None, Some(stub)) => Some(stub.first.as_str()),
+            (None, None) => self
                 .node
                 .turns
                 .get(seg.start)
@@ -769,51 +1064,86 @@ impl HostedChat {
         }
     }
 
-    /// Lets the least recently shown branches go while there are more
-    /// than [`MOST_BRANCHES`] besides the one shown, or their turns take
-    /// more than [`MOST_BRANCH_BYTES`]: each with its turns' fork points.
-    /// Returns their turns' uids, whose records the server forgets.
+    /// Keeps to the bounds: past [`MOST_BRANCHES`] besides the one shown,
+    /// the least recently shown are let go whole, with their turns' fork
+    /// points, and the server forgets what else was kept by their uids;
+    /// past [`MOST_BRANCH_BYTES`] of turns, the least recently shown
+    /// segments' turns are let go, leaving stubs. Never is a branch under
+    /// a segment in `keep` let go whole, as the branch just left; its
+    /// turns are let go only after the others'.
     fn keep_to_bounds(&mut self, keep: &[usize]) {
-        // Under a segment kept: the branch just left, which may be over the
-        // bound by itself, and is kept whole all the same.
-        let kept = |tree: &Tree, id: usize| {
-            let mut at = Some(id);
-            while let Some(step) = at {
-                if keep.contains(&step) {
-                    return true;
-                }
-                at = tree.seg(step).parent;
-            }
-            false
-        };
         loop {
             let path = self.tree.path();
             let leaves: Vec<usize> = (self.tree.live())
                 .filter(|(id, _)| !path.contains(id) && self.tree.children(*id).is_empty())
-                .collect::<Vec<_>>()
-                .into_iter()
                 .map(|(id, _)| id)
                 .collect();
-            let droppable: Vec<usize> = (leaves.iter().copied())
-                .filter(|&id| !kept(&self.tree, id))
-                .collect();
-            let bytes: usize = (self.tree.live())
-                .filter(|(id, _)| !kept(&self.tree, *id))
-                .filter_map(|(_, seg)| seg.held.as_ref())
-                .map(|held| held.bytes)
-                .sum();
-            if leaves.len() <= MOST_BRANCHES && bytes <= MOST_BRANCH_BYTES {
-                return;
+            if leaves.len() <= MOST_BRANCHES {
+                break;
             }
-            let leaves = droppable;
-            let Some(&oldest) = leaves
-                .iter()
+            let Some(&oldest) = (leaves.iter())
+                .filter(|&&id| !self.tree.under(id, keep))
                 .min_by_key(|&&id| (self.tree.seg(id).used, id))
             else {
-                return;
+                break;
             };
             self.drop_branch(oldest);
         }
+        while self.tree.held_bytes() > MOST_BRANCH_BYTES {
+            let Some((_, id)) = self.tree.oldest_held(keep, true) else {
+                break;
+            };
+            self.let_turns_go(id, keep);
+        }
+    }
+
+    /// Lets segment `id`'s turns go, leaving a stub: or the whole branch,
+    /// if it's a leaf with no session to tell them again, and not under
+    /// one of `keep`.
+    fn let_turns_go(&mut self, id: usize, keep: &[usize]) {
+        let seg = self.tree.seg(id);
+        let lost = self.tree.children(id).is_empty()
+            && (seg.session.as_ref()).is_none_or(|session| session.session.is_none());
+        if lost && !self.tree.under(id, keep) {
+            self.drop_branch(id);
+            return;
+        }
+        let seg = self.tree.seg_mut(id);
+        let Some(held) = seg.held.take() else {
+            return;
+        };
+        let first = (held.turns.first())
+            .map(|(_, turn)| first_line(&turn.prompt))
+            .unwrap_or_default();
+        seg.stub = Some(Stub {
+            first,
+            uids: held.turns.into_iter().map(|(uid, _)| uid).collect(),
+            cards: held.cards,
+        });
+    }
+
+    /// The bytes of turns kept of the branches not shown.
+    pub(crate) fn branch_bytes(&self) -> usize {
+        self.tree.held_bytes()
+    }
+
+    /// When the least recently shown segment of the branches not shown
+    /// whose turns are kept was last shown, if there's one.
+    pub(crate) fn oldest_branch(&self) -> Option<u64> {
+        let all: Vec<usize> = (self.tree.live()).map(|(id, _)| id).collect();
+        self.tree.oldest_held(&all, true).map(|(used, _)| used)
+    }
+
+    /// Lets the turns of the least recently shown segment of the branches
+    /// not shown go, leaving a stub, to keep to the bound on all chats'
+    /// ([`MOST_ALL_BRANCH_BYTES`]): never a branch whole.
+    pub(crate) fn let_oldest_branch_go(&mut self) -> bool {
+        let all: Vec<usize> = (self.tree.live()).map(|(id, _)| id).collect();
+        let Some((_, id)) = self.tree.oldest_held(&all, true) else {
+            return false;
+        };
+        self.let_turns_go(id, &all);
+        true
     }
 
     /// Lets the leaf `id` go, and those above it that have nothing else
@@ -833,7 +1163,9 @@ impl HostedChat {
                 }
                 self.tree.gone.push(session);
             }
-            for (uid, _) in seg.held.map(|held| held.turns).unwrap_or_default() {
+            let held = seg.held.map(|held| held.turns).unwrap_or_default();
+            let stub = seg.stub.map(|stub| stub.uids).unwrap_or_default();
+            for uid in (held.into_iter().map(|(uid, _)| uid)).chain(stub) {
                 self.forks.forget(uid);
                 self.forgotten.push(uid);
             }
@@ -864,17 +1196,24 @@ impl HostedChat {
     /// turn of a branch not shown: its finish isn't told to the branch
     /// shown, whose agent never started it, until its own is shown again.
     pub(crate) fn holds_card(&self, child: clackatoo_protocol::TerminalId) -> bool {
-        (self.tree.live())
-            .filter_map(|(_, seg)| seg.held.as_ref())
-            .any(|held| held.cards.iter().any(|card| card.chat == child))
+        let held = (self.tree.live()).flat_map(|(_, seg)| {
+            let held = seg.held.iter().flat_map(|held| &held.cards);
+            held.chain(seg.stub.iter().flat_map(|stub| &stub.cards))
+        });
+        let reloading = self.tree.reload.iter().flat_map(|reload| &reload.cards);
+        held.chain(reloading).any(|card| card.chat == child)
     }
 
     /// The agent sessions of the branches not shown, so the start page
     /// doesn't list them as conversations of their own.
     pub(crate) fn branch_sessions(&self) -> Vec<String> {
-        (self.tree.live())
-            .filter_map(|(_, seg)| seg.session.as_ref()?.session.clone())
-            .chain(self.tree.gone.iter().cloned())
+        let trees = std::iter::once(&self.tree).chain(self.tree.saved.as_deref());
+        trees
+            .flat_map(|tree| {
+                (tree.live())
+                    .filter_map(|(_, seg)| seg.session.as_ref()?.session.clone())
+                    .chain(tree.gone.iter().cloned())
+            })
             .filter(|session| self.session.as_ref() != Some(session))
             .collect()
     }
@@ -896,6 +1235,13 @@ impl HostedChat {
                             .map(|(_, turn)| turn_to_handover(turn.clone()))
                             .collect(),
                         cards: (held.cards.iter())
+                            .filter_map(|card| serde_json::to_string(card).ok())
+                            .collect(),
+                    }),
+                    stub: seg.stub.as_ref().map(|stub| handover::StubTurns {
+                        first: stub.first.clone(),
+                        uids: stub.uids.iter().map(|uid| uid.0).collect(),
+                        cards: (stub.cards.iter())
                             .filter_map(|card| serde_json::to_string(card).ok())
                             .collect(),
                     }),
@@ -964,6 +1310,13 @@ impl HostedChat {
                             bytes,
                         }
                     }),
+                    stub: seg.stub.map(|stub| Stub {
+                        first: stub.first.chars().take(FIRST_CHARS).collect(),
+                        uids: stub.uids.into_iter().map(TurnUid).collect(),
+                        cards: (stub.cards.iter())
+                            .filter_map(|card| serde_json::from_str(card).ok())
+                            .collect(),
+                    }),
                     session: seg.session.map(|session| BranchSession {
                         agent: session.agent,
                         session: session.session,
@@ -990,8 +1343,11 @@ impl HostedChat {
                 sent: plan.sent,
             }),
             gone: record.gone.into_iter().take(MOST_GONE).collect(),
+            reload: None,
+            saved: None,
+            told: None,
         };
-        if fits(&tree, self.node.turns.len()) {
+        if fits(&tree, Some(self.node.turns.len())) {
             self.tree = tree;
             self.node.branches = self.divergences();
         } else {
@@ -1003,10 +1359,243 @@ impl HostedChat {
     }
 }
 
+impl HostedChat {
+    /// The tree, for the saved workspaces, as stubs: nothing for a chat
+    /// never cut back, nor for one with no session to come back with.
+    pub(crate) fn saved_branches(&self) -> Option<saved::Branches> {
+        let tree = self.tree.saved.as_deref().unwrap_or(&self.tree);
+        if !tree.branched() || self.session.is_none() {
+            return None;
+        }
+        let place: std::collections::HashMap<usize, u32> = (tree.live())
+            .enumerate()
+            .map(|(at, (id, _))| (id, u32::try_from(at).unwrap_or(u32::MAX)))
+            .collect();
+        let number = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        let segments = (tree.live())
+            .map(|(_, seg)| {
+                let first = match (&seg.held, &seg.stub) {
+                    (Some(held), _) => (held.turns.first())
+                        .map(|(_, turn)| first_line(&turn.prompt))
+                        .unwrap_or_default(),
+                    (None, Some(stub)) => stub.first.clone(),
+                    (None, None) => String::new(),
+                };
+                saved::Segment {
+                    parent: seg.parent.and_then(|parent| place.get(&parent).copied()),
+                    start: number(seg.start),
+                    len: number(seg.len),
+                    first,
+                    session: seg.session.as_ref().map(|session| saved::BranchSession {
+                        agent: session.agent.clone(),
+                        session: session.session.clone(),
+                        known: number(session.known),
+                        chosen: (session.chosen.iter())
+                            .map(|(setting, value)| saved::Mode {
+                                setting: setting.clone(),
+                                value: value.clone(),
+                            })
+                            .collect(),
+                    }),
+                    created: seg.created,
+                    used: seg.used,
+                    summary: seg.summary,
+                }
+            })
+            .collect();
+        Some(saved::Branches {
+            segments,
+            current: place.get(&tree.current).copied().unwrap_or_default(),
+            pending: tree.pending.map(number),
+            dropped: (tree.dropped.iter())
+                .filter_map(|&(from, at, count)| {
+                    Some(saved::Dropped {
+                        from: *place.get(&from)?,
+                        at: number(at),
+                        count,
+                    })
+                })
+                .collect(),
+            gone: tree.gone.clone(),
+        })
+    }
+
+    /// Takes the tree the saved workspaces kept, every branch not shown a
+    /// stub, to wait for the turns of the branch shown, which loading the
+    /// chat's session tells: one that doesn't hold together isn't
+    /// believed.
+    pub(crate) fn restore_branches(&mut self, kept: &saved::Branches) {
+        if kept.segments.len() > MOST_SAVED_SEGMENTS || self.session.is_none() {
+            return;
+        }
+        let index = |at: u32| usize::try_from(at).unwrap_or(usize::MAX);
+        let segs: Vec<Option<Seg>> = (kept.segments.iter())
+            .map(|seg| {
+                Some(Seg {
+                    parent: seg.parent.map(index),
+                    start: index(seg.start),
+                    len: index(seg.len),
+                    held: None,
+                    stub: None,
+                    session: seg.session.as_ref().map(|session| BranchSession {
+                        agent: session.agent.clone(),
+                        session: session.session.clone(),
+                        known: index(session.known),
+                        chosen: (session.chosen.iter())
+                            .map(|mode| (mode.setting.clone(), mode.value.clone()))
+                            .collect(),
+                    }),
+                    created: seg.created,
+                    used: seg.used,
+                    summary: seg.summary,
+                })
+            })
+            .collect();
+        let mut tree = Tree {
+            segs,
+            current: index(kept.current),
+            pending: kept.pending.map(index),
+            dropped: (kept.dropped.iter())
+                .map(|dropped| (index(dropped.from), index(dropped.at), dropped.count))
+                .collect(),
+            gone: kept.gone.iter().take(MOST_GONE).cloned().collect(),
+            ..Tree::default()
+        };
+        // Its shape first: every parent there, before the path is walked.
+        let count = tree.segs.len();
+        let shaped = count > 0
+            && tree.current < count
+            && (tree.segs.iter().flatten()).all(|seg| {
+                seg.parent.is_none_or(|parent| parent < count)
+                    && seg.start.checked_add(seg.len).is_some()
+            });
+        if !shaped {
+            log::warn!("chat {}: the branches kept didn't hold together", self.id);
+            return;
+        }
+        // Every segment off the branch shown is a stub, numbered anew as
+        // its turns come back.
+        let path = tree.path_checked();
+        let Some(path) = path else {
+            log::warn!("chat {}: the branches kept didn't hold together", self.id);
+            return;
+        };
+        for (id, seg) in tree.segs.iter_mut().enumerate() {
+            if let Some(seg) = seg
+                && !path.contains(&id)
+            {
+                let first = kept.segments[id].first.chars().take(FIRST_CHARS).collect();
+                seg.stub = Some(Stub {
+                    first,
+                    ..Stub::default()
+                });
+            }
+        }
+        if fits(&tree, None) {
+            self.tree.saved = Some(Box::new(tree));
+        } else {
+            log::warn!("chat {}: the branches kept didn't hold together", self.id);
+        }
+    }
+
+    /// Takes `tree`, the saved workspaces', now that the session has told
+    /// the turns it knows: those of the branch shown, or, with a branch
+    /// pending, those of the branch left, which its stubs take, as the
+    /// branch shown is cut back to where it parts. If too few came, the
+    /// branches aren't kept.
+    fn take_saved(&mut self, mut tree: Tree) {
+        let told = self.node.turns.len();
+        let leaf = tree.current;
+        let start = tree.seg(leaf).start;
+        match tree.pending {
+            Some(at) if told >= at => {
+                self.tree = tree;
+                if told > at {
+                    self.take_left(at);
+                }
+                self.cut_to(at);
+                self.publish_cut();
+            }
+            None if told >= start
+                && (tree.children(leaf).is_empty() || told == start + tree.seg(leaf).len) =>
+            {
+                tree.seg_mut(leaf).len = told - start;
+                self.tree = tree;
+                self.publish_branches();
+            }
+            _ => {
+                log::warn!(
+                    "chat {}: its session told too few turns for the branches kept",
+                    self.id
+                );
+                self.set_notice(Some(
+                    "Its other branches couldn't be kept: its agent told fewer turns than \
+                     they part at."
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
+    /// The turns told after `at`, where a branch is pending, are the
+    /// branch left's, whose session told them: its stubs take them, if
+    /// they're as many as it had.
+    fn take_left(&mut self, at: usize) {
+        let session = self.session.clone();
+        let parent = self.tree.current;
+        let left = (self.tree.children(parent).into_iter()).find(|&child| {
+            let leaf = self.tree.latest_leaf(child);
+            let seg = self.tree.seg(leaf);
+            seg.session.as_ref().map(|kept| &kept.session) == Some(&session)
+                && self.tree.seg(child).start == at
+        });
+        let Some(first) = left else {
+            return;
+        };
+        let leaf = self.tree.latest_leaf(first);
+        let end = self.tree.seg(leaf).start + self.tree.seg(leaf).len;
+        if end != self.node.turns.len() {
+            return;
+        }
+        let mut down = vec![leaf];
+        while *down.last().expect("one") != first {
+            let seg = self.tree.seg(*down.last().expect("one"));
+            down.push(seg.parent.expect("under the first"));
+        }
+        for id in down {
+            self.tree.seg_mut(id).stub = None;
+            self.hold(id);
+        }
+    }
+}
+
+impl Tree {
+    /// The segments of the branch shown, from the root, if every step up
+    /// is to a live segment and reaches the root.
+    fn path_checked(&self) -> Option<Vec<usize>> {
+        let mut path = vec![self.current];
+        loop {
+            let at = *path.last().expect("one");
+            let seg = self.segs.get(at)?.as_ref()?;
+            match seg.parent {
+                None => break,
+                Some(parent) => {
+                    if path.len() > self.segs.len() {
+                        return None;
+                    }
+                    path.push(parent);
+                }
+            }
+        }
+        path.reverse();
+        Some(path)
+    }
+}
+
 /// Whether `tree` fits a chat showing `turns` turns: its segments' parents
 /// are live, each starts where its parent ends, and the branch shown ends
-/// at `turns`.
-fn fits(tree: &Tree, turns: usize) -> bool {
+/// at `turns`, if that's known yet.
+fn fits(tree: &Tree, turns: Option<usize>) -> bool {
     if tree.segs.is_empty() {
         return tree.pending.is_none();
     }
@@ -1037,13 +1626,46 @@ fn fits(tree: &Tree, turns: usize) -> bool {
     let path = tree.path();
     let shown_end = tree.seg(tree.current).start + tree.seg(tree.current).len;
     let held_right = (tree.live()).all(|(id, seg)| {
-        path.contains(&id) == seg.held.is_none()
+        let off = seg.held.is_some() || seg.stub.is_some();
+        path.contains(&id) != off
+            && !(seg.held.is_some() && seg.stub.is_some())
             && seg
                 .held
                 .as_ref()
                 .is_none_or(|held| held.turns.len() == seg.len)
+            && (seg.stub.as_ref())
+                .is_none_or(|stub| stub.uids.is_empty() || stub.uids.len() == seg.len)
     });
-    rooted && held_right && shown_end == turns && tree.pending.is_none_or(|at| at == turns)
+    let ends = turns.is_none_or(|turns| shown_end == turns);
+    rooted && held_right && ends && tree.pending.is_none_or(|at| at == shown_end)
+}
+
+/// The first line of `prompt`, cut short, as a stub keeps it.
+fn first_line(prompt: &str) -> String {
+    (prompt.lines().next().unwrap_or_default().chars())
+        .take(FIRST_CHARS)
+        .collect()
+}
+
+/// A turn of a branch whose turns were let go that its session didn't
+/// tell again.
+fn not_told_turn() -> Turn {
+    Turn {
+        woke: None,
+        previews: Vec::new(),
+        prompt: String::new(),
+        sent: 0,
+        items: Vec::new(),
+        end: Some(TurnEnd {
+            at: 0,
+            outcome: Outcome::Failed("its agent didn't tell this turn again".to_owned()),
+            raw: None,
+            spent: None,
+        }),
+        files: None,
+        from: None,
+        switch: None,
+    }
 }
 
 /// About how many bytes `turn` takes, as its parts' text does.
@@ -1061,6 +1683,7 @@ mod tests {
     use super::super::{Action, Prompt};
     use super::*;
     use crate::agent::Opened;
+    use clackatoo_protocol::Outcome;
 
     /// A chat in session `s1` that has answered `words`, one turn each,
     /// each turn's answer with a message ID the session can be forked at.
@@ -1303,20 +1926,204 @@ mod tests {
         assert!(chat.fork_plan().is_none());
     }
 
-    #[test]
-    fn the_branch_just_left_is_kept_however_big() {
+    /// The user's message `text`, told again as a session loads.
+    fn replay_user(chat: &mut HostedChat, text: &str) {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        chat.replay(SessionUpdate::UserMessageChunk(chunk));
+    }
+
+    /// The agent's answer, its message `id`, told again as a session
+    /// loads.
+    fn replay_answer(chat: &mut HostedChat, id: &str) {
+        let mut chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("ok")));
+        chunk.message_id = Some(MessageId::new(id));
+        chat.replay(SessionUpdate::AgentMessageChunk(chunk));
+    }
+
+    /// Tells `words` again, each a turn answered by the message `msg-N`,
+    /// N its place, and ends the load.
+    fn told_again(chat: &mut HostedChat, words: &[&str]) {
+        for (at, word) in words.iter().enumerate() {
+            replay_user(chat, word);
+            replay_answer(chat, &format!("msg-{at}"));
+        }
+        chat.opened_again(true);
+    }
+
+    /// A chat that answered "apple" and a message over the bound by
+    /// itself, its card on that turn, cut back to before it.
+    fn cut_back_from_big() -> (HostedChat, String, TurnUid) {
         let mut chat = talked(&["apple"]);
-        send(
-            &mut chat,
-            &"x".repeat(MOST_BRANCH_BYTES + MOST_BRANCH_BYTES / 4),
-        );
-        answer(&mut chat, "msg-big");
+        let big = "x".repeat(MOST_BRANCH_BYTES + MOST_BRANCH_BYTES / 4);
+        send(&mut chat, &big);
+        answer(&mut chat, "msg-1");
+        let uid = chat.turn_uid(1).unwrap();
+        chat.set_subagent(card(1));
         chat.rewind(1, false, false).unwrap();
+        (chat, big, uid)
+    }
+
+    #[test]
+    fn a_branch_over_the_bound_is_a_stub_whose_session_tells_its_turns_again() {
+        let (mut chat, big, uid) = cut_back_from_big();
+        // The branch just left is never let go whole, but its turns are.
         let place = &chat.node.branches[0];
         assert_eq!((place.count, place.dropped), (2, 0));
-        assert!(chat.take_forgotten().is_empty());
+        assert_eq!(place.branches[0].first.chars().count(), FIRST_CHARS);
+        assert_eq!(place.branches[0].turns, 1);
+        assert!(chat.take_forgotten().is_empty(), "what's kept by uid stays");
+        assert_eq!(chat.branch_bytes(), 0);
+        assert!(chat.holds_card(card(1).chat), "its subagent's finish waits");
+        // Switching back loads its session: s1, open still, goes first.
+        let actions = chat.switch_branch(1, 1, false).unwrap();
+        assert_eq!(actions, [Action::LetGo("s1".into())]);
+        assert!(chat.branch_reloading() && chat.loading());
+        assert_eq!(prompts(&chat), ["apple"]);
+        assert_eq!(chat.session_closed(), [Action::Connect]);
+        // It tells the whole conversation again: the branch's turns are
+        // the last, with the uids, cards and fork points they had.
+        told_again(&mut chat, &["apple", &big]);
+        assert_eq!(prompts(&chat), ["apple", big.as_str()]);
+        assert_eq!(chat.turn_uid(1), Some(uid));
+        assert_eq!(chat.node.subagents, [card(1)]);
+        assert_eq!(chat.fork_point(1).unwrap().message, "msg-1");
+        assert_eq!(chat.known, 2);
+        assert!(!chat.branch_reloading());
+        assert!(fits(&chat.tree, Some(2)));
+        let told = chat.take_told().unwrap();
+        assert_eq!((told.at, told.uids), (1, vec![uid]));
+        assert!(chat.node.notice.is_none(), "{:?}", chat.node.notice);
+    }
+
+    #[test]
+    fn turns_of_a_stub_its_session_doesnt_tell_again_are_shown_as_not_told() {
+        let (mut chat, _, uid) = cut_back_from_big();
         chat.switch_branch(1, 1, false).unwrap();
+        chat.session_closed();
+        // Only the turn before: none of the branch's own.
+        told_again(&mut chat, &["apple"]);
         assert_eq!(chat.node.turns.len(), 2);
+        assert!(fits(&chat.tree, Some(2)), "the tree still fits");
+        assert_eq!(chat.turn_uid(1), Some(uid));
+        let outcome = chat.node.turns[1].end.as_ref().map(|end| &end.outcome);
+        assert!(matches!(outcome, Some(Outcome::Failed(_))), "{outcome:?}");
+        let notice = chat.node.notice.clone().unwrap_or_default();
+        assert!(notice.contains("0 of this branch's 1 turns"), "{notice}");
+    }
+
+    #[test]
+    fn the_least_recently_shown_branches_turns_go_first_past_the_bytes() {
+        let mut chat = talked(&["apple"]);
+        let half = "y".repeat(MOST_BRANCH_BYTES / 2 + 1024);
+        // Three branches at turn 1, each of half the bound.
+        for at in 0..3 {
+            if at > 0 {
+                chat.rewind(1, false, false).unwrap();
+            }
+            send(&mut chat, &format!("{at}{half}"));
+            reopened(&mut chat, &format!("s-{at}"));
+            answer(&mut chat, &format!("m-{at}"));
+        }
+        chat.rewind(1, false, false).unwrap();
+        // The two oldest can't both be kept: the oldest is a stub.
+        assert!(chat.branch_bytes() <= MOST_BRANCH_BYTES);
+        let stubs: Vec<bool> = (chat.tree.children(chat.tree.current).into_iter())
+            .map(|id| chat.tree.seg(id).stub.is_some())
+            .collect();
+        assert_eq!(stubs, [true, true, false]);
+        // The daemon-wide bound lets the newest go too, never whole.
+        assert!(chat.let_oldest_branch_go());
+        assert_eq!(chat.branch_bytes(), 0);
+        assert!(!chat.let_oldest_branch_go());
+        assert_eq!(chat.node.branches[0].count, 4);
+    }
+
+    #[test]
+    fn a_cold_start_with_a_branch_pending_comes_back_on_it_and_keeps_the_branch_left() {
+        let mut chat = talked(&["apple", "banana", "cherry"]);
+        chat.rewind(1, false, false).unwrap();
+        let kept = chat.saved_branches().unwrap();
+        assert_eq!((kept.pending, kept.segments.len()), (Some(1), 2));
+        assert_eq!(kept.segments[1].first, "banana");
+        // As a cold start makes it again: its session, the branch left's,
+        // loads as it's shown.
+        let mut again = super::super::tests::chat();
+        again.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "s1".to_owned(),
+            title: String::new(),
+        });
+        again.restore_branches(&kept);
+        assert!(again.branch_sessions().is_empty(), "s1 is its own");
+        told_again(&mut again, &["apple", "banana", "cherry"]);
+        // Never the turns abandoned: the new branch, still to write.
+        assert_eq!(prompts(&again), ["apple"]);
+        assert!(again.branch_pending());
+        let place = &again.node.branches[0];
+        assert_eq!((place.at, place.current, place.count), (1, 2, 2));
+        assert_eq!(place.branches[0].turns, 2);
+        // Kept whole, from what the session told.
+        connect(&mut again, "s1");
+        again.switch_branch(1, 1, false).unwrap();
+        assert!(!again.branch_reloading());
+        assert_eq!(prompts(&again), ["apple", "banana", "cherry"]);
+        assert!(fits(&again.tree, Some(3)));
+        assert_eq!(again.fork_point(2).unwrap().message, "msg-2");
+        // And cut back again, the next message forks at turn 1's answer.
+        again.rewind(1, false, false).unwrap();
+        let mut actions = Vec::new();
+        again.send("date".into(), &mut actions);
+        let plan = again.fork_plan().unwrap();
+        assert_eq!(
+            (plan.from.as_str(), plan.message.as_deref()),
+            ("s1", Some("msg-0"))
+        );
+    }
+
+    #[test]
+    fn a_cold_start_comes_back_on_the_branch_shown_with_the_others_stubs() {
+        let mut chat = talked(&["apple", "banana"]);
+        chat.rewind(1, false, false).unwrap();
+        let mut actions = Vec::new();
+        chat.send("cherry".into(), &mut actions);
+        chat.session_closed();
+        chat.fork_answered(true);
+        connect(&mut chat, "s2");
+        answer(&mut chat, "msg-c");
+        let kept = chat.saved_branches().unwrap();
+        assert_eq!(kept.pending, None);
+        let mut again = super::super::tests::chat();
+        again.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "s2".to_owned(),
+            title: String::new(),
+        });
+        again.restore_branches(&kept);
+        assert_eq!(again.branch_sessions(), ["s1"], "kept off the start page");
+        // The forked session tells the turn it was forked with, and its own.
+        told_again(&mut again, &["apple", "cherry"]);
+        connect(&mut again, "s2");
+        assert_eq!(prompts(&again), ["apple", "cherry"]);
+        let place = &again.node.branches[0];
+        assert_eq!((place.current, place.count), (2, 2));
+        assert_eq!(place.branches[0].first, "banana");
+        // The branch left is a stub: s1 tells it again, numbered anew.
+        let actions = again.switch_branch(1, 1, false).unwrap();
+        assert_eq!(actions, [Action::LetGo("s2".into())]);
+        assert_eq!(again.session_closed(), [Action::Connect]);
+        told_again(&mut again, &["apple", "banana"]);
+        assert_eq!(prompts(&again), ["apple", "banana"]);
+        assert!(fits(&again.tree, Some(2)));
+        let uids = again.turn_uids(0..2).to_vec();
+        assert!(uids[0] < uids[1]);
+        // A tree that doesn't hold together isn't believed.
+        let mut broken = kept.clone();
+        broken.segments[0].parent = Some(1);
+        let mut other = super::super::tests::chat();
+        other.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "s2".to_owned(),
+            title: String::new(),
+        });
+        other.restore_branches(&broken);
+        assert!(other.branch_sessions().is_empty());
     }
 
     #[test]

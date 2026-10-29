@@ -73,6 +73,17 @@ impl Daemon {
             .switch_branch(at, to, stop_tasks)
             .map_err(Error::Other)?;
         self.act(id, actions);
+        // A branch whose turns were let go has them told again first.
+        if let Some(chat) = self.chat(id)
+            && chat.branch_reloading()
+        {
+            chat.redo_when_told(files);
+            if let Some(undone) = undone {
+                chat.notify(undone);
+            }
+            self.after_cut(id);
+            return Ok(());
+        }
         let redone = self.reverse_turns(id, at, files, true);
         let said = match (undone, redone) {
             (_, Err(why)) => Some(why),
@@ -137,6 +148,57 @@ impl Daemon {
         Ok((done > 0).then(|| format!("{verb} what {done} {turns} changed in files.")))
     }
 
+    /// The turns of a branch of chat `id` whose turns were let go have
+    /// come back, if they have: they're told what they changed in files,
+    /// and what was undone of them is made again, as the switch to it
+    /// asked.
+    pub(super) fn branch_told(&mut self, id: TerminalId) {
+        let Some(told) = self.chat(id).and_then(crate::chat::HostedChat::take_told) else {
+            return;
+        };
+        self.refresh_files(id, told.uids.iter().copied());
+        let said = match self.reverse_turns(id, told.at, told.files, true) {
+            Ok(said) => said,
+            Err(why) => Some(why),
+        };
+        if let (Some(said), Some(chat)) = (said, self.chat(id)) {
+            chat.notify(said);
+        }
+        self.after_cut(id);
+    }
+
+    /// Keeps all chats' branches not shown to [`MOST_ALL_BRANCH_BYTES`]
+    /// of turns, or `most`: the least recently shown anywhere have their
+    /// turns let go, leaving stubs.
+    ///
+    /// [`MOST_ALL_BRANCH_BYTES`]: crate::chat::branches::MOST_ALL_BRANCH_BYTES
+    pub(super) fn keep_branches_within(&mut self, most: usize) {
+        loop {
+            let chats: Vec<(TerminalId, usize, Option<u64>)> = (self.terminals.iter())
+                .filter_map(|(&id, slot)| {
+                    let chat = slot.terminal.chat_ref()?;
+                    Some((id, chat.branch_bytes(), chat.oldest_branch()))
+                })
+                .collect();
+            let all: usize = chats.iter().map(|&(_, bytes, _)| bytes).sum();
+            if all <= most {
+                return;
+            }
+            let Some((oldest, ..)) = (chats.into_iter())
+                .filter_map(|(id, _, used)| Some((id, used?)))
+                .min_by_key(|&(id, used)| (used, id))
+            else {
+                return;
+            };
+            if !self
+                .chat(oldest)
+                .is_some_and(crate::chat::HostedChat::let_oldest_branch_go)
+            {
+                return;
+            }
+        }
+    }
+
     /// The turns chat `id` shows changed from where its branches part:
     /// what was kept of turns let go is forgotten, and windows hear the
     /// turns of its agent's hunks again, by their indexes now.
@@ -159,6 +221,7 @@ impl Daemon {
             .flat_map(|chat| chat.node().subagents.iter().map(|card| card.chat))
             .collect();
         self.recheck_finished(children);
+        self.keep_branches_within(crate::chat::branches::MOST_ALL_BRANCH_BYTES);
         self.collect_damage(id);
         self.keep_soon();
     }
@@ -204,7 +267,7 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{BufferUpdate, ChatAction, ForkFiles, TURN_NOT_SHOWN};
+    use clackatoo_protocol::{BufferUpdate, ChatAction, ForkFiles, TURN_NOT_SHOWN, TurnFilesState};
 
     use super::*;
     use crate::server::turn_undo::tests::World;
@@ -361,5 +424,62 @@ mod tests {
             .unwrap();
         assert_eq!(world.chat_node().turns.len(), 1);
         assert_eq!(world.disk("b.txt").as_deref(), Some("yours\n"));
+    }
+
+    /// Tells the chat's session's load again, as an agent does: `turns`
+    /// turns, each a message answered.
+    fn tell_again(world: &mut World, turns: usize) {
+        use agent_client_protocol_schema::v1::{
+            ContentBlock, ContentChunk, SessionUpdate, TextContent,
+        };
+        let chat = world.daemon.chat(world.chat).unwrap();
+        for at in 0..turns {
+            let text = |text: &str| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+            chat.replay(SessionUpdate::UserMessageChunk(text(&format!("turn {at}"))));
+            chat.replay(SessionUpdate::AgentMessageChunk(text("ok")));
+        }
+        chat.opened_again(true);
+    }
+
+    #[test]
+    fn a_switch_to_a_stub_redoes_its_files_once_its_turns_are_told_again() {
+        let mut world = three_turns();
+        let chat = world.chat;
+        let uids = world
+            .daemon
+            .chat_ref(chat)
+            .unwrap()
+            .turn_uids(1..3)
+            .to_vec();
+        world
+            .daemon
+            .chat_act(chat, rewind_undoing(1, ForkFiles::Undo))
+            .unwrap();
+        assert_eq!(world.disk("c.txt").as_deref(), Some("x\n"));
+        // Past the bound on all chats' branches, its turns are let go.
+        world.daemon.keep_branches_within(0);
+        let hosted = world.daemon.chat_ref(chat).unwrap();
+        assert_eq!(hosted.branch_bytes(), 0);
+        assert_eq!(hosted.node().branches[0].branches[0].turns, 2);
+        world
+            .daemon
+            .chat_act(chat, switch(1, 1, ForkFiles::Undo))
+            .unwrap();
+        // Nothing redone until its turns are back.
+        assert_eq!(world.chat_node().turns.len(), 1);
+        assert_eq!(world.disk("b.txt").as_deref(), Some("x\n"));
+        let hosted = world.daemon.chat(chat).unwrap();
+        assert!(hosted.branch_reloading());
+        hosted.session_closed();
+        tell_again(&mut world, 3);
+        world.daemon.collect_damage(chat);
+        assert_eq!(world.chat_node().turns.len(), 3);
+        let hosted = world.daemon.chat_ref(chat).unwrap();
+        assert_eq!(hosted.turn_uids(1..3), &uids[..], "the uids they had");
+        assert_eq!(world.disk("b.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("X\n"));
+        assert_eq!(world.state(2), Some(TurnFilesState::Made));
+        let notice = world.chat_node().notice.unwrap_or_default();
+        assert_eq!(notice, "Redid what 2 turns changed in files.");
     }
 }

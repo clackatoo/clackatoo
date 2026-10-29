@@ -521,6 +521,7 @@ impl Daemon {
                     task: chat.task(),
                     browser: chat.browser(),
                     started: self.kept_standing(terminal, chat),
+                    branches: chat.saved_branches().map(Box::new),
                 }),
             },
             Content::Buffer(buffer) => {
@@ -933,6 +934,7 @@ impl Daemon {
                 task,
                 browser,
                 started: _,
+                branches,
             }) => {
                 if *room == 0 || chats.contains_key(id) {
                     return;
@@ -955,6 +957,10 @@ impl Daemon {
                         session: session.clone(),
                         title: title.clone(),
                     });
+                    // Its branches wait for the turns its session tells.
+                    if let Some(branches) = branches {
+                        hosted.restore_branches(branches);
+                    }
                 }
                 hosted.wait_to_be_shown();
                 self.add_chat(hosted);
@@ -1728,6 +1734,56 @@ mod tests {
         assert_eq!(chat("chain 51").relations().parent, None);
         assert_eq!(chat("chain 52").relations().parent, Some(id("chain 53")));
         assert_eq!(chat("chain 59").relations().parent, Some(id("chain 60")));
+    }
+
+    /// A chat kept with branches comes back with them waiting for its
+    /// session to tell the turns of the branch shown, every other a stub;
+    /// one with no session to tell them comes back without them.
+    #[test]
+    fn a_chat_comes_back_with_the_branches_kept_waiting_for_its_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let branches = serde_json::json!({
+            "segments": [
+                { "start": 0, "len": 1 },
+                { "parent": 0, "start": 1, "len": 2, "first": "the first way",
+                  "session": { "agent": "claude", "session": "s-50", "known": 3 } },
+            ],
+            "current": 0,
+            "pending": 1,
+        });
+        let mut pending = kept_chat(50, "pending", None);
+        pending["pane"]["chat"]["branches"] = branches.clone();
+        let mut lost = kept_chat(51, "no session", None);
+        lost["pane"]["chat"]["branches"] = branches;
+        lost["pane"]["chat"]["session"] = serde_json::Value::Null;
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [kept_workspace("here", &[pending, lost])],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let chat = |title: &str| {
+            (daemon.terminals.values())
+                .filter_map(|slot| slot.terminal.chat_ref())
+                .find(|chat| chat.info().title == title)
+                .unwrap_or_else(|| panic!("no chat {title}"))
+        };
+        let pending = chat("pending");
+        assert!(pending.node().turns.is_empty(), "not loaded until shown");
+        let kept = pending.saved_branches().unwrap();
+        assert_eq!((kept.pending, kept.segments.len()), (Some(1), 2));
+        assert_eq!(kept.segments[1].first, "the first way");
+        // The one with no session, which has no title either, hasn't them.
+        let kept = (daemon.terminals.values())
+            .filter_map(|slot| slot.terminal.chat_ref())
+            .filter(|chat| chat.saved_branches().is_some())
+            .count();
+        assert_eq!(kept, 1);
     }
 
     #[test]

@@ -310,14 +310,15 @@ pub(crate) struct ChatBranches {
 
 /// A segment of a chat's conversation: the one it goes on from, the index
 /// of its first turn, how many it has, and, off the branch shown, its
-/// turns; with the session that knows the branch ending there, if it's a
-/// leaf.
+/// turns, or what's kept of them once let go; with the session that knows
+/// the branch ending there, if it's a leaf.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BranchSegment {
     pub(crate) parent: Option<u64>,
     pub(crate) start: u64,
     pub(crate) len: u64,
     pub(crate) held: Option<HeldTurns>,
+    pub(crate) stub: Option<StubTurns>,
     pub(crate) session: Option<BranchSessionRecord>,
     pub(crate) created: u64,
     pub(crate) used: u64,
@@ -332,6 +333,17 @@ pub(crate) struct BranchSegment {
 pub(crate) struct HeldTurns {
     pub(crate) uids: Vec<u32>,
     pub(crate) turns: Vec<ChatTurn>,
+    pub(crate) cards: Vec<String>,
+}
+
+/// What's kept of the turns of a segment off the branch shown once
+/// they're let go: the first line of the first one's message, their uids
+/// (none if they're to be numbered anew as they come back), and the
+/// subagent cards on them, as [`HeldTurns`] has them.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StubTurns {
+    pub(crate) first: String,
+    pub(crate) uids: Vec<u32>,
     pub(crate) cards: Vec<String>,
 }
 
@@ -4636,6 +4648,7 @@ mod tests {
                         start: 0,
                         len: 1,
                         held: None,
+                        stub: None,
                         session: None,
                         created: 1,
                         used: 1,
@@ -4650,6 +4663,7 @@ mod tests {
                             turns: vec![],
                             cards: vec![],
                         }),
+                        stub: None,
                         session: Some(BranchSessionRecord {
                             agent: "claude".to_owned(),
                             session: Some("s-left".to_owned()),
@@ -4661,6 +4675,26 @@ mod tests {
                         summary: false,
                     }),
                     None,
+                    Some(BranchSegment {
+                        parent: Some(0),
+                        start: 1,
+                        len: 2,
+                        held: None,
+                        stub: Some(StubTurns {
+                            first: "try the other way".to_owned(),
+                            uids: vec![4, 5],
+                            cards: vec![],
+                        }),
+                        session: Some(BranchSessionRecord {
+                            agent: "claude".to_owned(),
+                            session: Some("s-stub".to_owned()),
+                            known: 3,
+                            chosen: vec![],
+                        }),
+                        created: 4,
+                        used: 4,
+                        summary: false,
+                    }),
                 ],
                 current: 0,
                 pending: Some(1),
@@ -5099,7 +5133,12 @@ mod tests {
             (2, 9, &[0, 7][..])
         );
         let branches = &read.branches[0];
-        assert_eq!((branches.segs.len(), branches.pending), (3, Some(1)));
+        assert_eq!((branches.segs.len(), branches.pending), (4, Some(1)));
+        let stub = branches.segs[3].as_ref().unwrap().stub.as_ref().unwrap();
+        assert_eq!(
+            (stub.first.as_str(), &stub.uids[..]),
+            ("try the other way", &[4, 5][..])
+        );
         let left = branches.segs[1].as_ref().unwrap();
         assert_eq!(left.held.as_ref().unwrap().uids, [3]);
         assert_eq!(

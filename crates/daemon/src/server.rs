@@ -2275,6 +2275,10 @@ impl Daemon {
         }
         if chat {
             self.glance(id);
+            // A branch whose turns were let go may have them back.
+            if (self.chat_ref(id)).is_some_and(HostedChat::branch_told_back) {
+                self.branch_told(id);
+            }
         }
     }
 

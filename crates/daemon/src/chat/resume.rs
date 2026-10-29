@@ -390,7 +390,19 @@ impl HostedChat {
     fn finish_loading(&mut self) {
         self.told.load = false;
         self.end_turn(Outcome::Done);
+        // A branch whose turns were let go, or the branches kept from the
+        // last run, take the turns told.
+        self.branches_told();
         self.known = self.node.turns.len();
+    }
+
+    /// Its session, the one it has now, is to be loaded again as it next
+    /// opens, telling the turns of a branch switched to that were let go
+    /// (see `chat/branches.rs`).
+    pub(super) fn load_again(&mut self) {
+        self.told.load = true;
+        self.told.skip = false;
+        self.told.replayed = false;
     }
 
     /// Holds `text`, a message sent while the session is to load, as the

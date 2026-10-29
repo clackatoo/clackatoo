@@ -33,7 +33,7 @@ use crate::agents::AgentSpec;
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
-mod branches;
+pub(crate) mod branches;
 mod commands;
 mod draft;
 mod elicit;
@@ -2152,7 +2152,8 @@ impl HostedChat {
         }
         self.tasks_lost();
         self.elicitations_lost();
-        if self.queued.is_some() {
+        // A branch switched to, whose turns were let go, loads them again.
+        if self.queued.is_some() || self.branch_reloading() {
             self.link = Link::Opening;
             vec![Action::Connect]
         } else {
