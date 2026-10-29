@@ -1,10 +1,12 @@
 //! Sending a draft and controlling the daemon-owned pending messages,
 //! and taking one back into the box to edit, as Claude Code's Up does:
-//! the daemon takes it out of the queue first, and only once it has does
-//! its text go in the box, so it's never both waiting and being edited.
+//! the daemon moves it out of the queue into the chat's draft in one step
+//! (`ChatAction::TakeBack`), before what the box told it was typed, and
+//! every box that hasn't changed since takes it, as any draft. Nothing of
+//! it lives only in a window.
 use clackatoo_protocol::{ChatAction, ChatTarget, QueuedMessage, Response};
 
-use super::{ChatView, Input, Settled, handoff};
+use super::{ChatView, Settled, handoff};
 
 /// Why `message`, waiting in the queue, can't be taken back into the box,
 /// if it can't: the box would lose what it has beside its words.
@@ -62,9 +64,10 @@ impl super::ChatView {
     }
 
     /// Whether Up, in the box, takes back the newest message waiting: the
-    /// box is empty, and one waits.
+    /// box is empty, and one waits, and the daemon keeps drafts.
     pub(super) fn takes_back(&self) -> bool {
         self.queue_supported
+            && self.drafts_supported
             && self.memory.taking_back.is_none()
             && self.handoff_sent.is_none()
             && self.editor.raw_text().is_empty()
@@ -72,8 +75,9 @@ impl super::ChatView {
             && self.node.delivery.queued.last().is_some()
     }
 
-    /// Asks the daemon to take the message `id` out of the queue, to put
-    /// its text in the box once it has; or says why it can't be.
+    /// Asks the daemon to move the message `id` out of the queue and into
+    /// the draft, telling it first what's typed, for the message to go
+    /// before it; or says why it can't be.
     pub(super) fn take_back(&mut self, id: u64, settled: &mut Settled) {
         let Some(message) = (self.node.delivery.queued.iter()).find(|message| message.id == id)
         else {
@@ -87,55 +91,39 @@ impl super::ChatView {
             self.say(why.into());
             return;
         }
+        if !self.drafts_supported {
+            self.say("Taking a queued message back needs a newer daemon".into());
+            return;
+        }
         if self.memory.taking_back.is_some() {
             return;
         }
-        self.memory.taking_back = Some((id, message.text.clone()));
-        settled.actions.push(ChatAction::RemoveQueued { id });
+        if let Some((text, by)) = self.take_draft(true) {
+            settled.actions.push(ChatAction::Draft { text, by });
+        }
+        self.memory.taking_back = Some(id);
+        settled.actions.push(ChatAction::TakeBack { queued: id });
     }
 
     /// Whether the message `id` is being taken back into the box.
+    #[cfg(test)]
     pub(crate) fn taking_back(&self, id: u64) -> bool {
-        self.memory
-            .taking_back
-            .as_ref()
-            .is_some_and(|(taking, _)| *taking == id)
+        self.memory.taking_back == Some(id)
     }
 
-    /// The daemon went out of reach while a queued message was being
-    /// taken back, so whether it's out of the queue isn't known: its text
-    /// goes in the box all the same, rather than be lost, and the bar
-    /// says to check the queue.
-    pub(super) fn take_back_lost(&mut self) {
-        if let Some(id) = self.memory.taking_back.as_ref().map(|(id, _)| *id) {
-            self.taken_back(id, Response::Done);
-            self.say(
-                "Disconnected while taking a queued message back: check the queue, as it may still be there"
-                    .into(),
-            );
-        }
-    }
-
-    /// Takes the daemon's answer to taking the message `id` out of the
-    /// queue: once it's out, its text goes in the box, before anything
-    /// typed since, as a draft refused comes back.
+    /// Takes the daemon's answer to taking the message `id` back: once
+    /// it's done, the draft it made comes as any draft does.
     pub(crate) fn taken_back(&mut self, id: u64, response: Response) {
-        let Some((_, text)) = self.memory.taking_back.take_if(|(taking, _)| *taking == id) else {
+        if self
+            .memory
+            .taking_back
+            .take_if(|taking| *taking == id)
+            .is_none()
+        {
             return;
-        };
+        }
         match response {
-            Response::Done => {
-                let typed = self.editor.raw_text();
-                let text = if typed.is_empty() {
-                    text
-                } else {
-                    format!("{text}\n{typed}")
-                };
-                self.editor.set_text(&text);
-                self.memory.recall = None;
-                self.queued.push(Input::CaretToEnd);
-                self.note_draft();
-            }
+            Response::Done => {}
             Response::Error(error) => {
                 self.say(error.to_string());
             }

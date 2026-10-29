@@ -834,8 +834,8 @@ impl ChatView {
                                 }
                             }
                             self.node.apply(patch.clone());
-                            if let clackatoo_protocol::ChatPatch::Draft(draft) = patch {
-                                self.draft_came(draft);
+                            if let clackatoo_protocol::ChatPatch::Draft { text, rev, by } = patch {
+                                self.draft_came(text, *rev, *by);
                             }
                         }
                         clackatoo_protocol::Patch::Grid { .. }
@@ -926,7 +926,7 @@ impl ChatView {
             self.handoff_failed(
                 "Disconnected before send was confirmed. Check the history before retrying.",
             );
-            self.take_back_lost();
+            self.drafts_offline();
             if let Some(viewer) = &mut self.image_viewer {
                 viewer.offline();
             }
@@ -2819,7 +2819,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Plan(_)
         | ChatPatch::Commands(_)
         | ChatPatch::Retrying(_)
-        | ChatPatch::Draft(_)
+        | ChatPatch::Draft { .. }
         | ChatPatch::History { .. } => None,
     }
 }

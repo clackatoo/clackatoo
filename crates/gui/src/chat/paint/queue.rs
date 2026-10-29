@@ -13,6 +13,9 @@ impl ChatView {
         }
         let total = self.node.delivery.queued.len();
         self.queue_page = self.queue_page.min(total.saturating_sub(1) / 3);
+        // A message is taken back into the draft, which only a daemon
+        // keeping drafts has.
+        let drafts = self.drafts_supported;
         // Only shape a bounded excerpt from the visible rows, never copy or
         // shape eight potentially 64-KiB drafts on every animation frame.
         let messages: Vec<_> = self
@@ -23,7 +26,7 @@ impl ChatView {
             .skip(self.queue_page * 3)
             .take(3)
             .map(|message| {
-                let editable = super::super::queue::editable(message);
+                let editable = drafts && super::super::queue::editable(message);
                 (message.id, excerpt(message), editable)
             })
             .collect();

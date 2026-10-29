@@ -227,7 +227,7 @@ The box remembers what you've sent, as a shell does. In insert mode, Up on the b
 
 Up in an empty box while messages are queued takes the newest back out of the queue to edit, as Claude Code does; so does the pencil on its row.
 
-What you type and don't send is kept by the daemon, so closing the window, upgrading, or opening the chat on another machine or the phone finds it still in the box. Sending it clears it.
+What you type and don't send is kept by the daemon, so closing the window, upgrading, or opening the chat on another machine or the phone finds it still in the box. A box you're typing in is never changed by what's typed elsewhere; one you haven't touched follows, so sending from one window empties the others.
 
 If you have a chat open, press `i`, then Up to bring back your last message, and Ctrl+R to search them all.
 
