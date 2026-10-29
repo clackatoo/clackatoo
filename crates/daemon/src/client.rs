@@ -765,7 +765,7 @@ impl Client {
     }
 
     /// Takes the message `queued` out of chat `terminal`'s queue and into
-    /// its draft (`ChatAction::TakeBack`), returning the draft it makes.
+    /// its draft (`ChatAction::TakeBack`), returning the message's text.
     ///
     /// # Errors
     ///

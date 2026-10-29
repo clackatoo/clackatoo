@@ -6352,7 +6352,7 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
     client.set_read_timeout(Some(PATIENCE)).unwrap();
     attach_to(&mut client, chat);
     let node = wait_for_chat(&mut client, chat, |node| !node.turns.is_empty());
-    assert_eq!(node.draft, "and then NEWS");
+    assert_eq!(node.draft.as_deref(), Some("and then NEWS"));
     assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
     // Sent, it's no one's draft any more, and it's the newest message to
     // recall.
@@ -6360,7 +6360,7 @@ fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
         .chat(chat, ChatAction::Send("and then NEWS".into()))
         .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| {
-        node.turns.len() == 3 && node.draft.is_empty()
+        node.turns.len() == 3 && node.draft.as_deref() == Some("")
     });
     assert_eq!(
         node.prompts,

@@ -638,6 +638,8 @@ impl HostedChat {
             node: ChatNode {
                 agent: agent.title.clone(),
                 settings: vec![tools_setting(tools), browser_setting(browser)],
+                // It keeps one, empty to begin with.
+                draft: Some(String::new()),
                 ..ChatNode::default()
             },
             asking: VecDeque::new(),
@@ -4228,20 +4230,20 @@ mod tests {
         let mut chat = chat();
         let end = chat.journal.end();
         chat.set_draft("and then".into());
-        assert_eq!(chat.node.draft, "and then");
+        assert_eq!(chat.draft(), "and then");
         // Typing isn't sent to viewers.
         assert_eq!(chat.journal.end(), end);
         // Too long is cut at a character's edge.
         let long = "é".repeat(clackatoo_protocol::DRAFT_LONGEST);
         chat.set_draft(long);
-        assert!(chat.node.draft.len() <= clackatoo_protocol::DRAFT_LONGEST);
-        assert!(chat.node.draft.chars().all(|c| c == 'é'));
+        assert!(chat.draft().len() <= clackatoo_protocol::DRAFT_LONGEST);
+        assert!(chat.draft().chars().all(|c| c == 'é'));
         // Through an upgrade.
         chat.set_draft("the docs".into());
         let mut drafts: Vec<_> = chat.hand_over_draft().into_iter().collect();
         let mut resumed = chat_with("claude");
         resumed.resume_draft(&mut drafts);
-        assert_eq!(resumed.node.draft, "the docs");
+        assert_eq!(resumed.draft(), "the docs");
         assert!(drafts.is_empty());
         // The agent hears of none of it; nothing typed is nothing to hand
         // over.
@@ -4258,7 +4260,7 @@ mod tests {
         let mut chat = chat();
         chat.set_draft("fix it".into());
         chat.draft_sent("fix it".into());
-        assert_eq!(chat.node.draft, "");
+        assert_eq!(chat.draft(), "");
         assert_eq!(
             chat.journal.patches.back(),
             Some(&ChatPatch::DraftCleared {
@@ -4276,12 +4278,17 @@ mod tests {
             .unwrap();
         // No window holds it: the daemon does, in one step, and says what
         // it made.
-        let made = chat.take_back(id).unwrap();
-        assert_eq!(made, "review the tests\nand the lint");
+        let text = chat.take_back(id).unwrap();
+        assert_eq!(text, "review the tests");
         assert!(chat.user_queue.messages.is_empty());
-        assert_eq!(chat.node.draft, made);
+        assert_eq!(chat.draft(), "review the tests\nand the lint");
         // Gone already, or with images, it isn't taken back.
         assert!(chat.take_back(id).is_err());
+        // Another client's draft stays in the daemon's, never in the answer.
+        chat.set_draft("B words".into());
+        let id = chat.enqueue_user("first".into(), Vec::new(), None).unwrap();
+        assert_eq!(chat.take_back(id).unwrap(), "first");
+        assert_eq!(chat.draft(), "first\nB words");
         let image = clackatoo_protocol::ChatImage {
             preview: None,
             data: "cG5n".into(),

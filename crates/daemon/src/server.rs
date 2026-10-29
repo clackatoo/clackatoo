@@ -3334,7 +3334,7 @@ impl Daemon {
                 .ok_or_else(|| Error::Other("Original image is no longer available".into())),
             Request::Chat { terminal, action } => {
                 self.note_device_action(token, terminal, &action);
-                // Answered with the draft it makes, for the box asking.
+                // Answered with the message's text, for the box asking.
                 if let ChatAction::TakeBack { queued } = action {
                     self.take_back_queued(terminal, queued).map(Response::Text)
                 } else {
@@ -3653,7 +3653,7 @@ impl Daemon {
     }
 
     /// Takes the message `queued` out of the chat `id`'s queue and into its
-    /// draft, returning the draft it makes (see `HostedChat::take_back`).
+    /// draft, returning the message's text (see `HostedChat::take_back`).
     fn take_back_queued(&mut self, id: TerminalId, queued: u64) -> Result<String, Error> {
         let chat = self.chat(id).ok_or(Error::NotAChat(id))?;
         let made = chat.take_back(queued).map_err(Error::Other)?;

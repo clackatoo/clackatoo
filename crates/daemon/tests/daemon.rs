@@ -22431,15 +22431,15 @@ fn a_queued_message_taken_back_is_the_next_clients_draft() {
     let id = node.delivery.queued[0].id;
     let text = "and the lint".to_owned();
     client.chat(chat, ChatAction::Draft { text }).unwrap();
-    let made = client.take_back(chat, id).unwrap();
-    assert_eq!(made, "after\nand the lint");
+    let text = client.take_back(chat, id).unwrap();
+    assert_eq!(text, "after");
     // Gone already, it's refused.
     assert!(client.take_back(chat, id).is_err());
     drop(client);
     let mut client = daemon.client();
     let view = attach(&mut client, chat);
     let node = view.chat().expect("a chat");
-    assert_eq!(node.draft, "after\nand the lint");
+    assert_eq!(node.draft.as_deref(), Some("after\nand the lint"));
     assert!(node.delivery.queued.is_empty());
 }
 

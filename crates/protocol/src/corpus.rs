@@ -1424,7 +1424,7 @@ fn prompt_box() -> Vec<Sample> {
                 cwd: None,
                 root: Node::Chat(Box::new(ChatNode {
                     prompts: vec!["fix the tests".into(), "now the docs\nand NEWS".into()],
-                    draft: "and then ".into(),
+                    draft: Some("and then ".into()),
                     ..chat()
                 })),
             }),
@@ -3530,7 +3530,7 @@ fn chat() -> ChatNode {
         plan: Vec::new(),
         commands: Vec::new(),
         prompts: Vec::new(),
-        draft: String::new(),
+        draft: None,
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

@@ -128,13 +128,15 @@ pub struct ChatNode {
     /// client opening the chat with nothing typed starts with it. Changes
     /// to it aren't sent to viewers as they're made, as typing isn't
     /// mirrored from box to box: only sending, which empties it (see
-    /// [`ChatPatch::DraftCleared`]).
+    /// [`ChatPatch::DraftCleared`]). `None` from a daemon that keeps no
+    /// drafts, as an older one, the chat's or the one lending it: what the
+    /// draft is isn't known, which isn't the same as there being none.
     #[serde(
         default,
         skip_serializing_if = "wire::before::<{ wire::PROMPT_BOX }, _>",
         deserialize_with = "wire::since::<{ wire::PROMPT_BOX }, _, _>"
     )]
-    pub draft: String,
+    pub draft: Option<String>,
 }
 
 /// How many of the user's messages a chat keeps for Up to recall, as
@@ -1947,8 +1949,8 @@ pub enum ChatAction {
     },
     /// Take the message `queued`, waiting in the queue, out of it and into
     /// the chat's draft, before what the draft held, in one step: answered
-    /// with the draft that makes, `Response::Text`, for the client asking
-    /// to put in its box. Refused for a message with images or one that
+    /// with the message's text, `Response::Text`, for the client asking to
+    /// put before what's typed in its own box. Refused for a message with images or one that
     /// moves the chat to another agent, which a draft can't hold. Requires
     /// `wire::PROMPT_BOX`.
     TakeBack {
@@ -2142,7 +2144,7 @@ impl ChatNode {
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
-            ChatPatch::DraftCleared { .. } => self.draft.clear(),
+            ChatPatch::DraftCleared { .. } => self.draft = Some(String::new()),
             ChatPatch::History {
                 first,
                 before,
@@ -2735,9 +2737,9 @@ mod tests {
             turn: Box::new(turn("two", vec![Item::Words("done".into())])),
         });
         assert_eq!(chat.prompts, ["one", "two"]);
-        chat.draft = "and".into();
+        chat.draft = Some("and".into());
         chat.apply(ChatPatch::DraftCleared { sent: "two".into() });
-        assert_eq!(chat.draft, "");
+        assert_eq!(chat.draft.as_deref(), Some(""));
     }
 
     #[test]
