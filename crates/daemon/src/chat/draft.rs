@@ -27,6 +27,15 @@ impl HostedChat {
         }
     }
 
+    /// A client sent `text`: if it's what was typed in the box, it's
+    /// gone from the box, whichever client sent it, so none starts with
+    /// it again, as a phone that doesn't say what's typed would leave it.
+    pub(crate) fn sent_from_box(&mut self, text: &str) {
+        if !self.node.draft.is_empty() && self.node.draft.trim() == text.trim() {
+            self.set_draft(String::new());
+        }
+    }
+
     /// What's typed in the box, for the next build, if anything is.
     pub(crate) fn hand_over_draft(&self) -> Option<handover::ChatDraft> {
         (!self.node.draft.is_empty()).then(|| handover::ChatDraft {

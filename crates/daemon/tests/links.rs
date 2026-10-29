@@ -6318,6 +6318,59 @@ fn an_agents_deploy_survives_the_upgrade_it_starts() {
     );
 }
 
+/// What's typed in a chat's box and not sent, and the messages Up
+/// recalls, are kept through a real upgrade: the draft handed over, the
+/// messages worked out again from the turns (CLACKA-192). Another client
+/// sees the draft as it's said, and sending it empties it.
+#[test]
+fn a_chats_draft_and_messages_sent_are_kept_through_a_real_upgrade() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    client.new_workspace(Some("work".into()), chat()).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter())
+        .find(|workspace| workspace.name == "work")
+        .unwrap();
+    let chat = first_terminal(work);
+    attach_to(&mut client, chat);
+    wait_for_chat(&mut client, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    for text in ["fix the tests", "then the docs"] {
+        client.chat(chat, ChatAction::Send(text.into())).unwrap();
+        let turns = if text == "fix the tests" { 1 } else { 2 };
+        wait_for_chat(&mut client, chat, |node| {
+            node.turns.len() == turns && node.turns[turns - 1].end.is_some()
+        });
+    }
+    let text = "and then NEWS".to_owned();
+    client.chat(chat, ChatAction::Draft { text }).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| !node.draft.is_empty());
+    assert_eq!(node.draft, "and then NEWS");
+    assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
+
+    upgrade_process(&child, &socket);
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    attach_to(&mut client, chat);
+    let node = wait_for_chat(&mut client, chat, |node| !node.turns.is_empty());
+    assert_eq!(node.draft, "and then NEWS");
+    assert_eq!(node.prompts, ["fix the tests", "then the docs"]);
+    // Sent, from whichever client, it's no one's draft any more, and it's
+    // the newest message to recall.
+    client
+        .chat(chat, ChatAction::Send("and then NEWS".into()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.turns.len() == 3);
+    assert_eq!(node.draft, "");
+    assert_eq!(
+        node.prompts,
+        ["fix the tests", "then the docs", "and then NEWS"]
+    );
+}
+
 #[test]
 fn a_chat_of_this_machine_in_another_machines_layout_goes_on_after_this_one_restarts() {
     let mut mixed = Mixed::new();

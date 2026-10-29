@@ -3655,6 +3655,14 @@ impl Daemon {
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         let chat = slot.terminal.chat().ok_or(Error::NotAChat(id))?;
+        // What was typed in the box is sent: no client starts with it.
+        if let ChatAction::Send(text)
+        | ChatAction::SendImages { text, .. }
+        | ChatAction::Submit { text, .. }
+        | ChatAction::SendTo { text, .. } = &action
+        {
+            chat.sent_from_box(text);
+        }
         // Undoing is about files, so the daemon's, not the agent's.
         if let ChatAction::Undo { turn, force } | ChatAction::Redo { turn, force } = action {
             let redo = matches!(action, ChatAction::Redo { .. });
