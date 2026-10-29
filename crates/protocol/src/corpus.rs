@@ -1408,6 +1408,23 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::PROMPT_BOX, sample)),
     );
+    samples.push((
+        crate::wire::CHAT_PATHS,
+        Server(ServerMessage::Event(Event::View {
+            terminal: TerminalId(3),
+            update: ViewUpdate::Snapshot(View {
+                title: "paths".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    paths: Some(crate::ChatPaths {
+                        cwd: "/home/j/p/src".into(),
+                        project: "/home/j/p".into(),
+                    }),
+                    ..chat()
+                })),
+            }),
+        })),
+    ));
     samples
 }
 
@@ -3531,6 +3548,7 @@ fn chat() -> ChatNode {
         commands: Vec::new(),
         prompts: Vec::new(),
         draft: None,
+        paths: None,
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

@@ -137,6 +137,25 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::PROMPT_BOX }, _, _>"
     )]
     pub draft: Option<String>,
+    /// Where it works, made absolute on the daemon's machine, for a window
+    /// to write a file it mentions from there (see [`crate::mentions`]).
+    /// `None` from a daemon older than protocol 119.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_PATHS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_PATHS }, _, _>"
+    )]
+    pub paths: Option<ChatPaths>,
+}
+
+/// Where a chat works, made absolute on the daemon's machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPaths {
+    /// Its agent's working directory.
+    pub cwd: String,
+    /// Its project: the git repository the working directory is in, or
+    /// else that directory.
+    pub project: String,
 }
 
 /// How many of the user's messages a chat keeps for Up to recall, as
@@ -2052,6 +2071,7 @@ impl ChatNode {
             retrying: self.retrying.clone(),
             prompts: self.prompts.clone(),
             draft: self.draft.clone(),
+            paths: self.paths.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),

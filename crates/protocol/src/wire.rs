@@ -307,6 +307,9 @@ gates! {
     /// `ChatNode`'s `draft`, `ChatAction::Draft`, `ChatPatch::DraftCleared`
     /// and taking a queued message back into it, `ChatAction::TakeBack`.
     PROMPT_BOX = 118,
+    /// Where a chat works, made absolute, for a window to mention files
+    /// from it (CLACKA-193): `ChatNode`'s `paths`.
+    CHAT_PATHS = 119,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

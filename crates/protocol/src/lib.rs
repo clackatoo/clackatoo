@@ -95,8 +95,8 @@ pub use buffer::{
 };
 pub use chat::{
     AMBER, AgentCommand, AgentSession, AgentTask, AgentTaskKind, AgentTaskState, ChatAction,
-    ChatChoices, ChatDelivery, ChatImage, ChatNode, ChatPatch, ChatPreview, ChatState, ChatSummary,
-    ChatTarget, Choice, ChoiceKind, Code, Cost, DECLINE, Diff, Effect, Fullness,
+    ChatChoices, ChatDelivery, ChatImage, ChatNode, ChatPatch, ChatPaths, ChatPreview, ChatState,
+    ChatSummary, ChatTarget, Choice, ChoiceKind, Code, Cost, DECLINE, Diff, Effect, Fullness,
     INTERFACE_COMMANDS, Item, KNOWN_COMMANDS, Limit, Location, NestedWork, Outcome, PlanState,
     PlanStep, Provider, ProviderModels, ProviderUsage, Question, QueuedMessage, RED, ResumeSession,
     Said, Sender, Setting, SettingChoice, SettingKind, Spent, Subagent, SubagentStatus, Switch,
@@ -124,7 +124,9 @@ pub use form::{
 };
 pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
-pub use mention::{MOST_MENTIONS, Mention, lines_suffix, mention, mention_lines, mentions};
+pub use mention::{
+    MOST_MENTIONS, Mention, lines_suffix, may_mention_files, mention, mention_lines, mentions,
+};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -141,7 +143,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 118;
+pub const PROTOCOL_VERSION: u32 = 119;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

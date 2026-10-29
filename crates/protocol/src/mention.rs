@@ -134,6 +134,18 @@ pub fn mention_lines(written: &str) -> Option<(u32, u32)> {
     (first >= 1 && last >= first).then_some((first, last))
 }
 
+/// Whether `text`, a message, mentions what looks like a file, with a `/`
+/// or a `.` in its path, to label steering with it: steering sends words
+/// alone, so the daemon stops the turn and sends a message whole if what
+/// it mentions turns out to be a file. Only a guess: the daemon decides by
+/// the disk.
+#[must_use]
+pub fn may_mention_files(text: &str) -> bool {
+    mentions(text)
+        .iter()
+        .any(|mention| mention.path.contains(['/', '.']))
+}
+
 /// `lines` as a mention ends with them: `#L12`, or `#L12-L20`.
 #[must_use]
 pub fn lines_suffix(lines: Option<(u32, u32)>) -> String {
@@ -224,6 +236,14 @@ mod tests {
         }
         assert_eq!(mention("a.rs", Some((2, 5))), "@a.rs#L2-L5");
         assert_eq!(mention("a b.rs", None), "@\"a b.rs\"");
+    }
+
+    #[test]
+    fn a_path_with_a_dot_or_slash_may_be_a_file() {
+        assert!(may_mention_files("look at @src/main"));
+        assert!(may_mention_files("look at @main.rs"));
+        assert!(!may_mention_files("ask @jack about it"));
+        assert!(!may_mention_files("mail jack@example.com"));
     }
 
     #[test]
