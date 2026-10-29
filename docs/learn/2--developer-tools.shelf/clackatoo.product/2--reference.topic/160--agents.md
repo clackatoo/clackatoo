@@ -117,7 +117,37 @@ In insert mode, what you type goes in the box at the bottom.
 
 Clicking in the box puts the cursor there, dragging selects, and a double or triple click selects a word or a line. A paste goes into the message whole, lines and all, without sending it. Text can be typed through an input method: what's being composed shows in the box, at the cursor, until it's committed.
 
-A message beginning with `/` goes to the agent as typed, which is how agents take their own commands, such as Claude Code's `/compact`.
+### Slash commands
+
+Agents take commands in a message that begins with `/`: Claude Code's `/compact` and `/init`, Codex's `/review`, your skills, and prompts your MCP servers offer. Type `/` at the start of a message and a menu opens over the box: the commands the agent says it has, then clackatoo's own (marked `clackatoo`). It narrows as you type the name, those starting with what you typed first, each with what it does and, if it takes something after it, a hint such as `‹branch name›`.
+
+| Key | Does |
+|---|---|
+| Down, Up; Ctrl+N, Ctrl+P | The next or previous command, round the ends. |
+| Tab | Puts the command picked in the box, with a space after it for what follows. |
+| Enter | The same; or if you've typed the whole name already, sends it. |
+| Esc | Closes the menu, staying in insert mode, until what you've typed changes. |
+
+A click on a command puts it in, as Tab does. Once there's a space after the name, the menu closes. The menu lists what the agent last said it has; a chat that has moved to another agent lists none of the old one's, and after a daemon upgrade or restart, the agent's own come back once its session opens again with your next message.
+
+Claude Code's and Codex's own terminal interfaces have commands their adapters don't, so sent to the agent they'd reach the model as words. Unless the agent says it has a command of that name, in which case it's the agent's and is sent, clackatoo does what each is for itself instead of sending it:
+
+| Command | In clackatoo |
+|---|---|
+| `/clear`, `/new` | Opens the [start page](#the-start-page), to start a new chat. |
+| `/resume` | Opens the start page, which lists the agent's past sessions under the new chat. |
+| `/rewind` | Undoes what the last turn changed in files, as `u` does in normal mode (see [Undoing a turn](#undoing-a-turn)). |
+| `/context` | Shows how full the agent's context is, as `K` does. |
+| `/status`, `/cost`, `/usage` | Opens **Usage & limits**. |
+| `/diff` | Opens [`:Review`](#reviewing-its-changes) of what the chat's agents changed. |
+| `/model` | Opens the model menu. |
+| `/export` | Copies the conversation, as text, to the clipboard. `clackatoo capture` prints all of it, older turns not loaded too. |
+
+Others, such as `/exit`, `/help`, `/config`, `/permissions` and `/login`, aren't sent either: the bar says what to use instead, such as `:q`, Ctrl+?, `:set` or the mode chip. Every other message beginning with `/` goes to the agent as typed.
+
+A command goes to the agent on its own. The first message after a chat moves to another agent, or a profile's first message, usually goes after the conversation so far or the profile's instructions; a command waits with those for your next message instead, as Codex reads a command only when it comes first, Claude Code only when it comes last, and some of Claude Code's only when they come alone.
+
+The phone lists the agent's commands too, as you type `/` and a name, and a tap puts one in your message. It doesn't send the commands clackatoo does itself: use those in the window.
 
 One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter keeps what you typed until it's done. Clicking the button with nothing being answered sends the message, as Enter does.
 

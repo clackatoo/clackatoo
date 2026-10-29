@@ -1049,6 +1049,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Agents ask you questions as forms in the chat (j/k, numbers, Submit), and plans show before you approve them",
     },
+    News {
+        id: "slash-commands",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Typing / in a chat lists the agent's commands; /clear, /model, /diff and the like open their clackatoo equivalents",
+    },
 ];
 
 impl News {

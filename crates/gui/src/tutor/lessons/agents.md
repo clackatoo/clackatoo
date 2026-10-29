@@ -199,6 +199,12 @@ When one ends, Claude Code may go on by itself to look at it: that shows as a tu
 
 If you have a chat open, ask it to run `sleep 30` in the background, watch the shelf count, then stop it with `:stoptask`.
 
+## Slash commands
+
+Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
+
+If you have a chat open, type `/` in its box, then `/model` and Enter to open the model menu.
+
 ## The agent's plan
 
 On a long task, Claude Code keeps a to-do list, and Codex a plan. It shows on a shelf above the box, folded to one line: how many steps are done, and the one being worked on, as `Plan · 2/5 done · ◐ Write the tests`. Click it, or type `:plan`, to open it: a line a step, ☐ to do, ◐ being worked on, ☑ done and dimmed. Click or `:plan` again folds it. Each time the agent changes its list, the shelf follows. Once every step is done, the list stays until your next message. It survives an upgrade, and a chat going on with an old session shows the list as its agent last gave it. The phone shows it too.
