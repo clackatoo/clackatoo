@@ -6318,6 +6318,376 @@ fn an_agents_deploy_survives_the_upgrade_it_starts() {
     );
 }
 
+// --- A real agent through a real upgrade (CLACKA-188) --------------------
+//
+// The tests above upgrade with the fake agent. These run the real Claude
+// Code, on haiku, through an upgrade to this same build, so what's
+// declared to it and its pins match and it's carried on, or, with the
+// daemon set to stop its agents as it upgrades, through the fallback. Set
+// `CLACKATOO_REAL_AGENT` to the adapter's command, or to `1` for the one
+// at `~/.t/acp98` (claude-agent-acp 0.98), and run each on its own with
+// `--ignored --exact`. Its ACP traffic goes to `$CLACKATOO_ACP_TRACE`, if
+// that's set, to a directory only its owner may write in (or the daemon
+// traces nothing), the carried adapter's traffic after the upgrade to
+// `claude-PID.log.2`; and the daemon's log about the upgrade is printed.
+
+/// How long a real agent may take to open its session or end a turn.
+const REAL_PATIENCE: Duration = Duration::from_mins(2);
+
+/// The real Claude Code's adapter's command, on haiku, as
+/// `CLACKATOO_REAL_AGENT` says, run with the user's own home, where its
+/// login is, whatever home the daemon has.
+fn real_claude_command() -> String {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command, or 1");
+    };
+    let home = std::env::var("HOME").expect("a home");
+    let command = if command == "1" {
+        format!("{home}/.t/acp98/node_modules/.bin/claude-agent-acp")
+    } else {
+        command
+    };
+    format!("env HOME={home} ANTHROPIC_MODEL=haiku {command}")
+}
+
+/// Every process below `pid`: its pid, its parent's and its command line.
+fn processes_below(pid: u32) -> Vec<(u32, u32, String)> {
+    let mut found = Vec::new();
+    let mut todo = vec![pid];
+    while let Some(parent) = todo.pop() {
+        for task in std::fs::read_dir(format!("/proc/{parent}/task"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for child in list.split_whitespace().filter_map(|pid| pid.parse().ok()) {
+                let command = std::fs::read(format!("/proc/{child}/cmdline")).unwrap_or_default();
+                let command = String::from_utf8_lossy(&command).replace('\0', " ");
+                found.push((child, parent, command.trim().to_owned()));
+                todo.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// The pid of the real adapter the daemon `daemon` runs: its child running
+/// `claude-agent-acp`.
+fn real_adapter_pid(daemon: u32) -> u32 {
+    let below = processes_below(daemon);
+    let adapters: Vec<u32> = (below.iter())
+        .filter(|(_, parent, command)| *parent == daemon && command.contains("claude-agent-acp"))
+        .map(|(pid, ..)| *pid)
+        .collect();
+    let [adapter] = adapters[..] else {
+        panic!("not one adapter: {below:#?}");
+    };
+    adapter
+}
+
+/// The pid of `command`, running below the daemon `daemon`, once it runs.
+fn pid_running_below(daemon: u32, command: &str) -> u32 {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let found = processes_below(daemon);
+        if let Some((pid, ..)) = found.iter().find(|(.., each)| each == command) {
+            return *pid;
+        }
+        assert!(Instant::now() < deadline, "no {command}: {found:#?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Stops all that runs below a daemon as it's dropped, before the daemon
+/// itself is, so no adapter is left running.
+struct Reaped(u32);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        for (pid, ..) in processes_below(self.0) {
+            let _ = Command::new("kill")
+                .arg(pid.to_string())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// `chat`'s view, as `client` is shown it, once it's as `done` says,
+/// within `limit`, saying yes to anything the agent asks meanwhile.
+fn real_wait(
+    client: &mut Client,
+    chat: TerminalId,
+    limit: Duration,
+    done: impl Fn(&ChatNode) -> bool,
+) -> ChatNode {
+    let deadline = Instant::now() + limit;
+    let mut answered = None;
+    loop {
+        for event in client.take_events() {
+            if let Event::View { terminal, .. } = event {
+                client.frame_done(terminal).unwrap();
+            }
+        }
+        let captured = client.capture(chat);
+        if let Ok(view) = &captured
+            && let Some(node) = view.chat()
+        {
+            if done(node) {
+                return node.clone();
+            }
+            if let Some(question) = &node.question
+                && answered != Some(question.id)
+            {
+                let yes = (question.choices.iter())
+                    .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+                    .unwrap_or(&question.choices[0]);
+                let answer = ChatAction::Answer {
+                    question: question.id,
+                    option: Some(yes.id.clone()),
+                };
+                client.chat(chat, answer).unwrap();
+                answered = Some(question.id);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out; the chat: {captured:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `node`'s last turn has ended and the chat waits again.
+fn real_idle(node: &ChatNode) -> bool {
+    node.turns.last().is_some_and(|turn| turn.end.is_some())
+        && node.state == clackatoo_protocol::ChatState::Ready
+}
+
+/// Sends `text` to `chat` and waits for its turn to end.
+fn real_ask(client: &mut Client, chat: TerminalId, text: &str) -> ChatNode {
+    client.chat(chat, ChatAction::Send(text.into())).unwrap();
+    real_wait(client, chat, REAL_PATIENCE, |node| {
+        (node.turns.last()).is_some_and(|turn| turn.prompt == text) && real_idle(node)
+    })
+}
+
+/// The numbers in `words`, one a line.
+fn numbers_in(words: &str) -> Vec<u32> {
+    (words.lines())
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// Prints the lines of the daemon's log in `world` about the upgrade and
+/// its agents, and returns the whole log.
+fn upgrade_log(world: &World) -> String {
+    let log = std::fs::read_to_string(world.path().join("laptop.log")).unwrap_or_default();
+    let said = |line: &&str| {
+        ["upgrade", "agent", "hand", "resum", "carr", "stop"]
+            .iter()
+            .any(|word| line.contains(word))
+    };
+    for line in log.lines().filter(said) {
+        eprintln!("log: {line}");
+    }
+    log
+}
+
+/// A real Claude Code with a shell in the background goes on through a
+/// real upgrade of its daemon to this same build, mid-stream: the same
+/// adapter, the same shell, its task still running, all the turn's words
+/// coming into the same turn, which ends as it would have, and the same
+/// session, tools and all, after it (CLACKA-188). With the daemon set to
+/// stop its agents as it upgrades, as `stop` says, it's the fallback: the
+/// adapter started again, the shell lost, and the agent told.
+#[expect(clippy::too_many_lines, reason = "one session, turn by turn")]
+fn real_agent_through_an_upgrade(stop: bool) {
+    use clackatoo_protocol::{AgentTaskKind, AgentTaskState, ToolStatus};
+    let world = World::new();
+    let agent = real_claude_command();
+    let (child, socket) = process_daemon_with(&world, "laptop", |daemon| {
+        daemon.env("CLACKATOO_AGENT", &agent);
+        if let Some(trace) = std::env::var_os("CLACKATOO_ACP_TRACE") {
+            daemon.env("CLACKATOO_ACP_TRACE", trace);
+        }
+        if stop {
+            stopping_agents(daemon);
+        }
+    });
+    let daemon = child.0.id();
+    let _reaped = Reaped(daemon);
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    let new = match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent {
+            tools: clackatoo_protocol::AgentTools::Allow,
+            ..new
+        }),
+        other => other,
+    };
+    client.new_workspace(Some("work".into()), new).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter())
+        .find(|workspace| workspace.name == "work")
+        .unwrap();
+    let id = first_terminal(work);
+    attach_to(&mut client, id);
+    real_wait(&mut client, id, REAL_PATIENCE, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+
+    // Long enough to outlast the turns up to the upgrade.
+    let sleep = "sleep 90";
+    let node = real_ask(
+        &mut client,
+        id,
+        &format!(
+            "Use the Bash tool once, with run_in_background set to true, to run exactly: \
+             {sleep}. Then reply with the single word started. Don't check on it."
+        ),
+    );
+    let shell = (node.tasks.iter())
+        .find(|task| task.kind == AgentTaskKind::Shell)
+        .unwrap_or_else(|| panic!("no shell task: {node:#?}"))
+        .clone();
+    assert_eq!(shell.state, AgentTaskState::Running, "{shell:#?}");
+    let sleeping = pid_running_below(daemon, sleep);
+    let adapter = real_adapter_pid(daemon);
+    eprintln!(
+        "before: adapter {adapter}, {sleep} {sleeping}, task {}",
+        shell.id
+    );
+
+    let count = "Count from 1 to 150, one number per line, with nothing else. Use no tools.";
+    client.chat(id, ChatAction::Send(count.into())).unwrap();
+    let node = real_wait(&mut client, id, REAL_PATIENCE, |node| {
+        (node.turns.last()).is_some_and(|turn| turn.prompt == count)
+            && numbers_in(&last_words(node)).len() >= 3
+    });
+    let turns = node.turns.len();
+    assert!(
+        node.turns[turns - 1].end.is_none(),
+        "it ended before the upgrade: {node:#?}"
+    );
+    let before = numbers_in(&last_words(&node)).len();
+
+    upgrade_process(&child, &socket);
+    let log = upgrade_log(&world);
+    let mut client = follow_again(&socket, id);
+    let node = real_wait(&mut client, id, REAL_PATIENCE, |node| {
+        node.turns.len() >= turns
+    });
+    let task = (node.tasks.iter())
+        .find(|task| task.id == shell.id)
+        .cloned();
+    eprintln!("after: task {task:#?}");
+    let task = task.expect("the task is still shown");
+
+    if stop {
+        // The next build, set so too, says it can't take them, so that's
+        // the reason given.
+        assert!(
+            log.contains("the agents stop: the next build can't take them as they are"),
+            "{log}"
+        );
+        assert_eq!(task.state, AgentTaskState::Lost, "{task:#?}");
+        assert_eq!(
+            task.summary.as_deref(),
+            Some("ended by the daemon's upgrade")
+        );
+        let node = real_wait(&mut client, id, REAL_PATIENCE, |node| {
+            continued(node) && real_idle(node)
+        });
+        let restarted = real_adapter_pid(daemon);
+        eprintln!("after: adapter {restarted}");
+        let prompts: Vec<&str> = (node.turns.iter())
+            .map(|turn| turn.prompt.as_str())
+            .collect();
+        eprintln!("turns: {prompts:#?}");
+        assert_ne!(restarted, adapter, "the adapter wasn't started again");
+        assert!(!running(adapter), "the old adapter still runs");
+        assert!(!running(sleeping), "{sleep} still runs");
+        return;
+    }
+
+    assert_eq!(task.state, AgentTaskState::Running, "{task:#?}");
+    assert!(running(sleeping), "{sleep} went");
+    assert_eq!(
+        real_adapter_pid(daemon),
+        adapter,
+        "the adapter was started again"
+    );
+    assert!(!log.contains("stops for the upgrade"), "{log}");
+    let node = real_wait(&mut client, id, REAL_PATIENCE, real_idle);
+    let numbers = numbers_in(&last_words(&node));
+    eprintln!(
+        "counted {before} before the upgrade, {} in all",
+        numbers.len()
+    );
+    assert_eq!(node.turns.len(), turns, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+    let ended = node.turns[turns - 1].end.as_ref().map(|end| &end.outcome);
+    assert!(
+        matches!(ended, Some(clackatoo_protocol::Outcome::Done)),
+        "{node:#?}"
+    );
+    let expected: Vec<u32> = (1..=150).collect();
+    assert_eq!(numbers, expected, "words were lost: {}", last_words(&node));
+
+    // The same session goes on.
+    let node = real_ask(
+        &mut client,
+        id,
+        "What number did you stop counting at? Reply with just the number. Use no tools.",
+    );
+    assert!(last_words(&node).contains("150"), "{node:#?}");
+
+    // And clackatoo's tools still work for it.
+    let node = real_ask(
+        &mut client,
+        id,
+        "Call clackatoo's list_chats tool once, then reply with the number of chats it lists.",
+    );
+    let tool = (node.turns.last().unwrap().items.iter()).find_map(|item| match item {
+        Item::Tool(tool) if tool.title.contains("list_chats") => Some(tool),
+        _ => None,
+    });
+    eprintln!("list_chats: {tool:#?}");
+    assert_eq!(
+        tool.map(|tool| tool.status),
+        Some(ToolStatus::Done),
+        "{node:#?}"
+    );
+    assert_eq!(real_adapter_pid(daemon), adapter);
+    let task = (node.tasks.iter())
+        .find(|task| task.id == shell.id)
+        .unwrap();
+    eprintln!(
+        "at the end: task {:?}, {sleep} running {}",
+        task.state,
+        running(sleeping)
+    );
+}
+
+/// A real Claude Code goes on through a real upgrade: see
+/// [`real_agent_through_an_upgrade`].
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_goes_on_through_a_real_upgrade() {
+    real_agent_through_an_upgrade(false);
+}
+
+/// A real Claude Code is stopped by a real upgrade, if the daemon is set
+/// to stop its agents as it upgrades, as before they went on: see
+/// [`real_agent_through_an_upgrade`].
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_stops_for_a_real_upgrade_if_set_to() {
+    real_agent_through_an_upgrade(true);
+}
+
 /// What's typed in a chat's box and not sent, and the messages Up
 /// recalls, are kept through a real upgrade: the draft handed over, the
 /// messages worked out again from the turns (CLACKA-192).
