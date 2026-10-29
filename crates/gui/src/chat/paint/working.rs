@@ -103,7 +103,9 @@ impl ChatView {
         if self.offline {
             return None;
         }
-        let doing = self.node.doing()?;
+        // Waiting on the agent trying again says so in place of what it
+        // was doing.
+        let doing = self.node.doing().map(|doing| self.node.retrying.clone().unwrap_or(doing))?;
         let seconds = (self.node.counted_from()).map(|sent| duration(now.saturating_sub(sent)));
         Some((doing, seconds))
     }
@@ -351,6 +353,18 @@ mod tests {
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 61_000, true).as_deref(),
             Some("Working · 1m 1s")
+        );
+    }
+
+    #[test]
+    fn the_agent_trying_again_is_said_in_place_of_what_its_doing() {
+        let mut fonts = fonts();
+        let mut node = answering(vec![Item::Thought("Let me look.".into())]);
+        node.retrying = Some("Retrying Claude, attempt 2 of 10.".into());
+        let mut chat = ChatView::new(String::new(), node);
+        assert_eq!(
+            drawn(&mut chat, &mut fonts, SENT + 12_000, true).as_deref(),
+            Some("Retrying Claude, attempt 2 of 10. · 12s")
         );
     }
 

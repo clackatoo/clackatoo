@@ -84,6 +84,8 @@ pub(crate) enum ChatKey {
         right: bool,
         half: bool,
     },
+    /// `R`: the last message, which failed, sent again.
+    Resend,
 }
 
 /// How a chat reads keys in normal and visual mode: the moves it has, by
@@ -130,6 +132,7 @@ impl Dialect for ChatKeys {
                 right: false,
                 half: true,
             } => "Scroll table left half a view",
+            ChatKey::Resend => "Send the failed message again",
         }
         .into()
     }
@@ -149,6 +152,7 @@ impl Dialect for ChatKeys {
                 'O' if !visual => return Some(Read::No),
                 'u' => ChatKey::Undo { redo: false },
                 'K' if !visual => ChatKey::Detail,
+                'R' if !visual => ChatKey::Resend,
                 'K' => return Some(Read::No),
                 _ => return None,
             },
@@ -641,6 +645,12 @@ impl ChatView {
                 }
             }
             ChatKey::Undo { redo } => self.undo_key(redo),
+            ChatKey::Resend => {
+                if !self.resend() {
+                    self.say("the last message didn't fail, so there's nothing to send again".into());
+                    return (false, false);
+                }
+            }
             ChatKey::Fold(fold) => return (self.fold_key(fold), false),
             ChatKey::Sideways { right, half } => {
                 let pixels = if half {

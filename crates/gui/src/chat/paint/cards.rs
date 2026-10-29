@@ -179,12 +179,16 @@ impl ChatView {
             inner,
         );
         let head_wide = (head_wide - chevron.width - m.em(0.8)).max(m.em(2.0));
-        let (title, look) = match &card {
+        let (mut title, look) = match &card {
             Some(Card::Command { command, .. }) => {
                 (format!("$ {command}"), Look::Mono(Tone::Plain))
             }
             _ => (tool.title.clone(), Look::Plain(Tone::Muted)),
         };
+        // A command that failed says how.
+        if let Some(code) = tool.exit.filter(|&code| code != 0) {
+            title = format!("{title}  · exit {code}");
+        }
         let head = if open {
             w.text(&title, look, head_wide)
         } else {

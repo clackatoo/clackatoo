@@ -191,6 +191,9 @@ enum Hit {
     CopyCode(TextKey),
     /// The button under a turn that copies its answer, by the turn.
     CopyAnswer(usize),
+    /// The button under the last turn, which failed, that sends its
+    /// message again.
+    Resend,
     /// The meter of how much context the chat fills, which shows its
     /// detail.
     Usage,
@@ -259,6 +262,12 @@ pub(crate) struct ChatView {
     handoff_sent: Option<handoff::Draft>,
     pub(crate) handoff_supported: bool,
     pub(crate) queue_supported: bool,
+    /// Whether the daemon can send a failed message again
+    /// (`ChatAction::Resend`).
+    resend_supported: bool,
+    /// Whether what a turn spent and what the session cost are shown
+    /// (`chatcost`).
+    show_cost: bool,
     queue_page: usize,
     /// Whether the agent's plan's shelf above the box is open, listing
     /// every step, rather than folded to a line.
@@ -512,6 +521,8 @@ impl ChatView {
             handoff_sent: None,
             handoff_supported: cfg!(test),
             queue_supported: false,
+            resend_supported: cfg!(test),
+            show_cost: true,
             queue_page: 0,
             plan_open: false,
             slash: slash::Slash::default(),
@@ -731,6 +742,14 @@ impl ChatView {
                                 .and_then(|t| t.checked_sub(self.node.first_turn as usize))
                             {
                                 self.restyled(turn);
+                                // A turn whole, as a new one comes: the one
+                                // before may have been last, and its button
+                                // that sends it again goes.
+                                if let clackatoo_protocol::ChatPatch::Turn { .. } = patch
+                                    && turn > 0
+                                {
+                                    self.restyled(turn - 1);
+                                }
                             }
                             if let clackatoo_protocol::ChatPatch::History {
                                 first,
@@ -2343,6 +2362,11 @@ impl ChatView {
                     self.copied_answer = Some(turn);
                 }
             }
+            Some(Hit::Resend) => {
+                if self.can_resend() {
+                    settled.actions.push(ChatAction::Resend);
+                }
+            }
             Some(Hit::RemoveImage(index)) => self.remove_image(index),
             Some(Hit::CancelHandoff) => {
                 if self.handoff_sent.is_none() {
@@ -2606,6 +2630,38 @@ impl ChatView {
             .collect();
         self.toggle_menu(ids)
     }
+}
+
+impl ChatView {
+    /// Whether the last turn's message can be sent again: it failed, it
+    /// was the user's, and the daemon can.
+    pub(crate) fn can_resend(&self) -> bool {
+        self.resend_supported
+            && self.node.state != ChatState::Answering
+            && self.node.turns.last().is_some_and(|last| resendable(last, true))
+    }
+
+    /// Sends the last turn's message again, if it can be: returns whether
+    /// it was.
+    pub(crate) fn resend(&mut self) -> bool {
+        let can = self.can_resend();
+        if can {
+            self.queued.push(Input::Act(ChatAction::Resend));
+        }
+        can
+    }
+}
+
+/// Whether `turn` is one whose message can be sent again: the chat's
+/// `last`, which failed, with a message of the user's own.
+pub(crate) fn resendable(turn: &clackatoo_protocol::Turn, last: bool) -> bool {
+    last && matches!(
+        turn.end.as_ref().map(|end| &end.outcome),
+        Some(clackatoo_protocol::Outcome::Failed(_))
+    ) && turn.from.is_none()
+        && turn.switch.is_none()
+        && turn.woke.is_none()
+        && !turn.prompt.trim().is_empty()
 }
 
 /// The turn `patch` changes, if it changes one.
@@ -4236,6 +4292,52 @@ mod tests {
             force: false,
         };
         assert_eq!(view.settle(&mut fonts).actions, [redo]);
+    }
+
+    /// A chat whose one turn failed as `why`, which the agent put as `raw`.
+    fn failed(why: &str, raw: Option<&str>) -> ChatView {
+        use clackatoo_protocol::{Outcome, TurnEnd};
+        let mut node = ChatNode::default();
+        node.turns.push(Turn {
+            woke: None,
+            previews: Vec::new(),
+            from: None,
+            prompt: "fix it".into(),
+            sent: 0,
+            items: Vec::new(),
+            end: Some(TurnEnd {
+                at: 0,
+                outcome: Outcome::Failed(why.into()),
+                raw: raw.map(Into::into),
+                spent: None,
+            }),
+            files: None,
+            switch: None,
+        });
+        node.state = ChatState::Ready;
+        ChatView::new(String::new(), node)
+    }
+
+    #[test]
+    fn a_failed_turn_has_a_button_and_a_key_that_send_its_message_again() {
+        let mut fonts = fonts();
+        let mut view = failed("Claude Code's model is overloaded", None);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+
+        let at = drawn_at(&view, &Hit::Resend).expect("the button is drawn");
+        assert_eq!(view.pointer(at), Pointer::Hand);
+        view.press(at, 1, false);
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Resend]);
+        // R in normal mode does the same.
+        assert_eq!(fixtures::read(&mut view, "R"), (true, false));
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Resend]);
+        // Not to a daemon that can't, nor once a turn went well.
+        view.set_resend_supported(false);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        assert_eq!(drawn_at(&view, &Hit::Resend), None);
+        let mut view = with_files(&[clackatoo_protocol::TurnFilesState::Made]);
+        fixtures::read(&mut view, "R");
+        assert!(view.settle(&mut fonts).actions.is_empty());
     }
 
     /// The middle of where `wanted` was drawn, if it was.

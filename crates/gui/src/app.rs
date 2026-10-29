@@ -2431,6 +2431,8 @@ impl App {
         let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
         let handoff = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_HANDOFF);
         let queue = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_QUEUE);
+        let resend = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_FACTS);
+        let cost = self.desk.options().chatcost;
         let usage = self
             .desk
             .daemon_has(clackatoo_protocol::wire::PROVIDER_USAGE);
@@ -2444,6 +2446,8 @@ impl App {
             view.set_quoted(quoted);
             view.handoff_supported = handoff;
             view.queue_supported = queue;
+            view.set_resend_supported(resend);
+            view.set_show_cost(cost);
             view.usage_supported = usage;
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.

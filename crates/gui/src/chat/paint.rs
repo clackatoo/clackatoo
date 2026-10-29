@@ -203,6 +203,11 @@ struct TurnLaid {
     /// Whether the button that copies its answer is under it.
     copy: bool,
     copy_origin: [f32; 2],
+    /// What it spent, on the right of the line under it, if shown.
+    spent: Option<Laid>,
+    /// The button that sends its message again, if it's the last and it
+    /// failed, and where it is in the line under it.
+    resend: Option<(Laid, [f32; 2])>,
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
     handoff: Option<handoff::LaidHandoff>,
@@ -210,6 +215,28 @@ struct TurnLaid {
 }
 
 impl ChatView {
+    /// Shows what turns spent and what the session cost, or not, as
+    /// `chatcost` says: the turns are laid out again if that changed.
+    pub(crate) fn set_show_cost(&mut self, show: bool) {
+        if self.show_cost != show {
+            self.show_cost = show;
+            for index in 0..self.cache.turns.len() {
+                self.restyled(index);
+            }
+        }
+    }
+
+    /// Whether the daemon can send a failed message again: the last turn
+    /// is laid out again if that changed, for its button.
+    pub(crate) fn set_resend_supported(&mut self, supported: bool) {
+        if self.resend_supported != supported {
+            self.resend_supported = supported;
+            if let Some(last) = self.cache.turns.len().checked_sub(1) {
+                self.restyled(last);
+            }
+        }
+    }
+
     /// Lays the turns whose code was waiting for colours out again, when
     /// next they're near the view, as some have come.
     pub(super) fn recolour(&mut self) {
@@ -622,6 +649,8 @@ impl ChatView {
             files: None,
             copy: false,
             copy_origin: [0.0; 2],
+            spent: None,
+            resend: None,
             badge: None,
             handoff: None,
             height: 0.0,
@@ -730,6 +759,13 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Agents, y, height));
             y += height;
         }
+        // The last turn, if it failed, has the button that sends its
+        // message again.
+        let last = index + 1 == turns.len();
+        if self.resend_supported && super::resendable(turn, last) {
+            let label = self.note(fonts, m, RESEND, Tone::Accent, column);
+            laid.resend = Some((label, [0.0, 0.0]));
+        }
         y = self.lay_out_ending(fonts, (m, column), (index, turn), &mut laid, y);
         laid.height = y;
         let slot = &mut self.cache.turns[index];
@@ -831,7 +867,12 @@ impl ChatView {
         // with the buttons that undo and redo it.
         laid.copy = answer_to_copy(turn).is_some();
         let files = turn.files.filter(|_| turn.end.is_some());
-        if laid.copy || files.is_some() {
+        let spent = (turn.end.as_ref())
+            .and_then(|end| end.spent)
+            .filter(|_| self.show_cost)
+            .map(|spent| spent.label());
+        laid.spent = spent.map(|spent| self.note(fonts, m, &spent, Tone::Muted, column));
+        if laid.copy || files.is_some() || laid.spent.is_some() || laid.resend.is_some() {
             y += m.em(0.75);
             let copy_width = if laid.copy {
                 self.copy_width(fonts, m)
@@ -850,6 +891,14 @@ impl ChatView {
                     laid.copy_origin = [0.0, height + m.em(0.4)];
                     height += m.em(0.4) + fold::height(m);
                 }
+            }
+            // The button that sends it again comes after what it changed,
+            // and before the one that copies: it's what to do next.
+            if let Some((label, origin)) = &mut laid.resend {
+                let row = (height - fold::height(m)).max(0.0) / 2.0;
+                let left = files.as_ref().map_or(0.0, |files| files.width + m.em(0.8));
+                *origin = [left, row];
+                laid.copy_origin = [left + label.width + m.em(0.8), row];
             }
             laid.spans.push(Span::of(Piece::Footer, y, height));
             y += height;
@@ -1135,6 +1184,16 @@ impl ChatView {
                     // The summary stays aligned even when Copy is hidden.
                     if let Some(files) = &laid.files {
                         files::draw(canvas, m, files, [origin[0], top], self.mouse, drawn);
+                    }
+                    if let Some((label, at)) = &laid.resend {
+                        let at = [origin[0] + at[0], top + at[1]];
+                        draw_laid(canvas, m, label, at, label.width);
+                        let rect = [at[0], at[1], label.width, fold::height(m)];
+                        drawn.hit(canvas.clip, Hit::Resend, rect);
+                    }
+                    if let Some(spent) = &laid.spent {
+                        let at = [origin[0] + column - spent.width, top];
+                        draw_laid(canvas, m, spent, at, spent.width);
                     }
                 }
             }
@@ -2477,12 +2536,31 @@ fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
     match &turn.end.as_ref()?.outcome {
         Outcome::Done => None,
         Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
-        Outcome::Failed(why) => Some((format!("⚠ {}", capitalised(why)), Tone::Warning)),
+        Outcome::Failed(why) => {
+            let mut said = format!("⚠ {}", capitalised(why));
+            // The agent's own words go beside, for what they say more.
+            // Not if they're said already, as Codex's usage limit is.
+            let raw = turn.end.as_ref().and_then(|end| end.raw.as_deref());
+            if let Some(raw) = raw.filter(|raw| !why.contains(raw.trim())) {
+                let raw: String = raw.chars().take(RAW).collect();
+                said.push_str("\n\nThe agent said: ");
+                said.push_str(&raw);
+            }
+            Some((said, Tone::Warning))
+        }
     }
 }
 
 /// What the button under each answer says: before it's clicked, and after.
 const COPY: [&str; 2] = ["Copy", "Copied"];
+
+/// The most characters of what an agent said of a failure shown under
+/// the turn: all of it can be copied.
+const RAW: usize = 600;
+
+/// What the button that sends a failed message again says, with the key
+/// in a chat that does it too.
+const RESEND: &str = "↻ Send again (R)";
 
 /// Where in `turn`'s items its answer is, if it's done and has one to
 /// copy: its last, the agent's words.

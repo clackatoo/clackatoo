@@ -1,0 +1,28 @@
+# What an agent says of a turn beyond its words (CLACKA-196): a line where
+# it compacted its context, a failed command's exit code, what a turn
+# spent, an image in its words, and a failed turn in plain words with the
+# button that sends it again, which R in normal mode does too.
+size 1100x1000
+keys <C-;>:Agent claude<CR>
+keys i
+type compact
+keys <CR>
+wait-for compacted
+type fail-command 2
+keys <CR>
+wait-for failed
+type cost
+keys <CR>
+wait-for spent
+keys <Esc>zR
+sleep 300
+shot facts-turns
+keys i
+type signed-out
+keys <CR>
+sleep 1200
+sleep 300
+shot facts-failed
+keys <Esc>R
+sleep 800
+shot facts-resent

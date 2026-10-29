@@ -136,7 +136,16 @@ impl ChatView {
             return;
         };
         let (now, zone) = (self.now(), local_zone());
-        let lines = usage.detail(now, |at| resets(at, now, &zone));
+        let mut lines = usage.detail(now, |at| resets(at, now, &zone));
+        // What the session has cost, where the agent says, unless
+        // `chatcost` is off.
+        if let Some(cost) = usage.cost.filter(|_| self.show_cost) {
+            lines.push(clackatoo_protocol::UsageLine {
+                name: "Session cost".to_owned(),
+                said: cost.label(),
+                fullness: None,
+            });
+        }
         let laid: Vec<(Laid, Laid)> = (lines.into_iter())
             .map(|line| {
                 let mut lay = |text: &str, tone| {

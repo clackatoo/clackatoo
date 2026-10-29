@@ -2248,6 +2248,25 @@ mod tests {
         assert_eq!(usage(u64::MAX, u64::MAX).percent(), Some(100));
     }
 
+    #[test]
+    fn a_cost_is_said_in_its_currency_to_the_cent_or_below_one() {
+        let usd = |amount: f64| Cost::of(amount, "usd").unwrap().label();
+        assert_eq!(usd(0.0421), "$0.04");
+        assert_eq!(usd(12.345), "$12.35");
+        assert_eq!(usd(0.0031), "$0.0031");
+        assert_eq!(usd(0.0), "$0.00");
+        assert_eq!(Cost::of(1.2, "EUR").unwrap().label(), "1.20 EUR");
+        for (amount, currency) in [(-1.0, "USD"), (f64::NAN, "USD"), (1.0, "US"), (1e9, "USD")] {
+            assert_eq!(Cost::of(amount, currency), None, "{amount} {currency}");
+        }
+        // What a turn cost is what the session's grew by, in one currency.
+        let at = |amount| Cost::of(amount, "USD");
+        assert_eq!(at(0.05).unwrap().since(at(0.02)), at(0.03));
+        assert_eq!(at(0.05).unwrap().since(None), at(0.05));
+        assert_eq!(at(0.01).unwrap().since(at(0.02)), None);
+        assert_eq!(at(0.05).unwrap().since(Cost::of(0.01, "EUR")), None);
+    }
+
     fn usage(used: u64, size: u64) -> Usage {
         Usage {
             used,

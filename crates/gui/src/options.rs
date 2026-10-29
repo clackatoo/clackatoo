@@ -462,6 +462,10 @@ options! {
     /// the window resizes. 0, as it starts, opens it at 30 cells, or a
     /// quarter of the tab if that's narrower, but never under 10.
     explorerwidth("ew", "Initial width of the file explorer"): OrZero (10..=200) = 0;
+    /// What each turn of a chat spent, its tokens and, where the agent
+    /// says, its cost, under the turn; and what the session has cost, in
+    /// the chat's usage, where the agent says.
+    chatcost("chc", "Show what chat turns spend, and session cost"): bool = true;
     /// File explorers show hidden files, those whose names start with `.`,
     /// as they open. `.` shows or hides them in each.
     explorerhidden("eh", "Show hidden files in new explorers"): bool = false;
