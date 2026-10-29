@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.10.110 (2026-10-29)
+
+### Features
+
+- **gui:** rewind a chat with dG, edit a message with cc, and switch its branches (CLACKA-198) (2a8956be)
+- **daemon:** copy a chat's turns into a new chat with ChatAction::Fork, protocol 122 (CLACKA-198) (a7db038c)
+- **gui:** :fork and :|fork copy a chat into a new chat, and /fork and /branch do too (CLACKA-198) (83d5445a)
+
+### Fixes
+
+- **daemon:** a cut or a switch sends the chat whole to viewers that had everything (CLACKA-198) (22beac90)
+- **gui:** a rewind names its turn and asks, a switch asks about files, and paging keeps the question's turn (CLACKA-198) (aed8a363)
+- **daemon:** a closed copy gives its turns' undo back, a copy not shown is undone, and grants aren't copied (CLACKA-198) (b0b46f81)
+
 ## 2026.10.109 (2026-10-29)
 
 ### Features
