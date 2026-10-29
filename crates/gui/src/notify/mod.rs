@@ -248,13 +248,20 @@ impl Thread {
             })
             .map_err(|err| err.to_string())?;
         let hello = bus.hello().map_err(|err| err.to_string())?;
-        let rule = format!("type='signal',interface='{NOTIFICATIONS}',path='{NOTIFICATIONS_PATH}'");
-        bus.add_match(&rule).map_err(|err| err.to_string())?;
         self.bus = Some(bus);
         match self.wait_for(inputs, hello) {
-            Some(reply) if reply.is(Kind::Reply) => Ok(()),
-            Some(reply) => Err(format!("the bus said {:?} to hello", reply.error)),
-            None => Err("the bus didn't answer".to_owned()),
+            Some(reply) if reply.is(Kind::Reply) => {}
+            Some(reply) => return Err(format!("the bus said {:?} to hello", reply.error)),
+            None => return Err("the bus didn't answer".to_owned()),
+        }
+        // Only once the bus has said hello back, as nothing may come before.
+        let rule = format!("type='signal',interface='{NOTIFICATIONS}',path='{NOTIFICATIONS_PATH}'");
+        match self.bus.as_mut() {
+            Some(bus) => bus
+                .add_match(&rule)
+                .map(drop)
+                .map_err(|err| err.to_string()),
+            None => Err("the bus's connection ended".to_owned()),
         }
     }
 
