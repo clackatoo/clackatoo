@@ -30,7 +30,10 @@ keys <CR>
 wait-for context: [
 sleep 300
 shot mention-sent
-keys <Esc><C-;>:-Editor src/main.rs<CR>
+keys <Esc>gg0f@gf
+sleep 800
+shot mention-opened
+keys <C-b>2<C-;>:-Editor src/main.rs<CR>
 sleep 600
 keys jVj<Space>a
 sleep 600
