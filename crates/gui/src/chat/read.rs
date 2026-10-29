@@ -668,13 +668,11 @@ impl ChatView {
             }
             ChatKey::OpenLink => {
                 let found = (self.cursor).and_then(|cursor| self.link_at_spot(cursor));
-                match found {
-                    Some(found) => self.opening = Some(found.target),
-                    None => {
-                        self.say("no file or link under the cursor".to_owned());
-                        return (false, false);
-                    }
-                }
+                let Some(found) = found else {
+                    self.say("no file or link under the cursor".to_owned());
+                    return (false, false);
+                };
+                self.opening = Some(found.target);
             }
             ChatKey::Fold(fold) => return (self.fold_key(fold), false),
             ChatKey::Sideways { right, half } => {

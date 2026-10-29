@@ -1421,16 +1421,7 @@ impl ChatView {
                 }
                 Input::Image(image) => self.settle_image(image),
                 Input::Paste(text) => self.settle_paste(fonts, &text),
-                Input::Append(text) => {
-                    let space = !self.editor.raw_text().is_empty()
-                        && !self.editor.raw_text().ends_with(char::is_whitespace);
-                    let text = if space { format!(" {text}") } else { text };
-                    self.drive(fonts, |driver| {
-                        driver.move_to_text_end();
-                        driver.insert_or_replace_selection(&text);
-                    });
-                    self.refresh_slash();
-                }
+                Input::Append(text) => self.settle_append(fonts, text),
                 Input::Press { at, clicks, shift } => {
                     self.pressed(fonts, at, clicks, shift, &mut settled);
                 }
@@ -1526,6 +1517,33 @@ impl ChatView {
             .refresh_layout(&mut fonts.font_cx, &mut self.layout_cx);
         let mut driver = self.editor.driver(&mut fonts.font_cx, &mut self.layout_cx);
         edit(&mut driver);
+    }
+
+    /// Attaches `image`, pasted, to the message, unless it's past what a
+    /// message holds, or a question waits.
+    fn settle_image(&mut self, image: clackatoo_protocol::ChatImage) {
+        if self.node.question.is_some() {
+            self.typed_while_asking();
+        } else if !image.valid()
+            || self.images.len()
+                + self
+                    .handoff_sent
+                    .as_ref()
+                    .map_or(0, |draft| draft.images.len())
+                >= clackatoo_protocol::ChatImage::MAX_COUNT
+            || self
+                .images
+                .iter()
+                .chain(self.handoff_sent.iter().flat_map(|draft| &draft.images))
+                .map(|image| image.data.len())
+                .sum::<usize>()
+                + image.data.len()
+                > clackatoo_protocol::ChatImage::MAX_DATA
+        {
+            self.say("Paste up to four images, 8 MiB encoded in total.".into());
+        } else {
+            self.images.push(image);
+        }
     }
 
     fn settle_paste(&mut self, fonts: &mut Fonts, text: &str) {

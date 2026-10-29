@@ -298,6 +298,19 @@ impl super::ChatView {
         self.queued.push(super::Input::Append(text));
     }
 
+    /// Puts `text` at the end of the message being typed, after a space if
+    /// the message doesn't end in one.
+    pub(super) fn settle_append(&mut self, fonts: &mut Fonts, text: String) {
+        let message = self.editor.raw_text();
+        let space = !message.is_empty() && !message.ends_with(char::is_whitespace);
+        let text = if space { format!(" {text}") } else { text };
+        self.drive(fonts, |driver| {
+            driver.move_to_text_end();
+            driver.insert_or_replace_selection(&text);
+        });
+        self.refresh_slash();
+    }
+
     /// The folder its agent works in, as people write it.
     pub(crate) fn folder(&self) -> Option<&str> {
         self.folder.as_deref()
@@ -369,6 +382,42 @@ impl super::ChatView {
         self.refresh_mentions();
         true
     }
+}
+
+/// `path`, a file on the daemon's machine, made absolute, as a chat
+/// working in `folder`, as people write it (`~/p`), mentions it: from the
+/// folder if it's in it, or else whole. A folder in the home directory is
+/// matched by what follows `~`, under a directory that looks like one.
+pub(crate) fn from_chat_folder(path: &str, folder: Option<&str>) -> String {
+    let Some(folder) = folder.map(|folder| folder.trim_end_matches('/')) else {
+        return path.to_owned();
+    };
+    let inside = |root: &str| {
+        (path.strip_prefix(root))
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(str::to_owned)
+    };
+    if folder.starts_with('/') {
+        return inside(folder).unwrap_or_else(|| path.to_owned());
+    }
+    let Some(rest) = folder
+        .strip_prefix('~')
+        .filter(|rest| rest.starts_with('/'))
+    else {
+        return path.to_owned();
+    };
+    let homes = ["/home/", "/Users/", "/root"];
+    let found = path.match_indices(&format!("{rest}/")).find_map(|(at, _)| {
+        let home = &path[..at];
+        let looks = homes.iter().any(|start| {
+            home == "/root"
+                || home
+                    .strip_prefix(start)
+                    .is_some_and(|user| !user.is_empty() && !user.contains('/'))
+        });
+        looks.then(|| inside(&format!("{home}{rest}"))).flatten()
+    });
+    found.unwrap_or_else(|| path.to_owned())
 }
 
 #[cfg(test)]
@@ -464,40 +513,4 @@ mod tests {
         assert_eq!(from_folder("a/b/c.rs", "a/x/y"), "../../b/c.rs");
         assert_eq!(from_folder("top.rs", "a/b"), "../../top.rs");
     }
-}
-
-/// `path`, a file on the daemon's machine, made absolute, as a chat
-/// working in `folder`, as people write it (`~/p`), mentions it: from the
-/// folder if it's in it, or else whole. A folder in the home directory is
-/// matched by what follows `~`, under a directory that looks like one.
-pub(crate) fn from_chat_folder(path: &str, folder: Option<&str>) -> String {
-    let Some(folder) = folder.map(|folder| folder.trim_end_matches('/')) else {
-        return path.to_owned();
-    };
-    let inside = |root: &str| {
-        (path.strip_prefix(root))
-            .and_then(|rest| rest.strip_prefix('/'))
-            .map(str::to_owned)
-    };
-    if folder.starts_with('/') {
-        return inside(folder).unwrap_or_else(|| path.to_owned());
-    }
-    let Some(rest) = folder
-        .strip_prefix('~')
-        .filter(|rest| rest.starts_with('/'))
-    else {
-        return path.to_owned();
-    };
-    let homes = ["/home/", "/Users/", "/root"];
-    let found = path.match_indices(&format!("{rest}/")).find_map(|(at, _)| {
-        let home = &path[..at];
-        let looks = homes.iter().any(|start| {
-            home == "/root"
-                || home
-                    .strip_prefix(start)
-                    .is_some_and(|user| !user.is_empty() && !user.contains('/'))
-        });
-        looks.then(|| inside(&format!("{home}{rest}"))).flatten()
-    });
-    found.unwrap_or_else(|| path.to_owned())
 }

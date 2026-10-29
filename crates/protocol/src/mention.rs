@@ -165,7 +165,10 @@ pub fn mention(path: &str, lines: Option<(u32, u32)>) -> String {
 mod tests {
     use super::*;
 
-    fn read_all(text: &str) -> Vec<(&str, Option<(u32, u32)>, &str)> {
+    /// A mention read: its path, its lines, and all of it as written.
+    type Read<'a> = (&'a str, Option<(u32, u32)>, &'a str);
+
+    fn read_all(text: &str) -> Vec<Read<'_>> {
         mentions(text)
             .into_iter()
             .map(|found| (found.path, found.lines, &text[found.range]))

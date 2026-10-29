@@ -371,12 +371,6 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let line = line.trim();
-    // The one of the window's commands that takes the lines selected.
-    if let Some(rest) = line.strip_prefix("'<,'>")
-        && canonical(rest.trim()) == "Ask"
-    {
-        return Ok(Command::Ask { selection: true });
-    }
     let (word, argument) = match line.split_once(char::is_whitespace) {
         Some((word, argument)) => (word, Some(argument.trim())),
         None => (line, None),
@@ -434,7 +428,6 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control allows clicks and typing throughout this window.".into()),
         },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
-        "Ask" if argument.is_none() => return Ok(Command::Ask { selection: false }),
         "devices" => return devices_command(argument).map(Command::Devices),
         "portforward" | "portforward!" => {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
@@ -772,6 +765,20 @@ fn chat_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
     (agent_undo(word, argument))
         .or_else(|| stop_task(word, argument))
         .or_else(|| plan_command(word, argument))
+        .or_else(|| ask_command(word, argument))
+}
+
+/// `:Ask`, or `:'<,'>Ask`, the one of the window's commands that takes
+/// the lines selected, if `word` is it.
+fn ask_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    let (selection, name) = match word.strip_prefix("'<,'>") {
+        Some(name) => (true, canonical(name)),
+        None => (false, word),
+    };
+    (name == "Ask").then(|| match argument {
+        Some(argument) => Err(format!("Ask takes nothing after it, but has {argument:?}")),
+        None => Ok(Command::Ask { selection }),
+    })
 }
 
 /// `:plan`, if `word` is it.

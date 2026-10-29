@@ -736,6 +736,25 @@ impl Daemon {
         }
     }
 
+    /// Whether `action`, a message to the chat in `id` with images, is
+    /// refused, as its agent `agent` takes none: the chat's told so.
+    fn refuses_images(&mut self, id: TerminalId, agent: Option<AgentId>, action: &Action) -> bool {
+        let images = match action {
+            Action::Prompt(prompt)
+            | Action::Briefed { text: prompt, .. }
+            | Action::Carry { text: prompt, .. } => !prompt.images.is_empty(),
+            _ => false,
+        };
+        let refused = images
+            && agent
+                .and_then(|agent| self.agents.running.get(&agent))
+                .is_some_and(|slot| !slot.agent.can_image());
+        if refused && let Some(chat) = self.chat(id) {
+            chat.answered(Err("This agent does not support image messages.".into()));
+        }
+        refused
+    }
+
     /// Carries out what a chat asked for.
     pub(super) fn act(&mut self, id: TerminalId, mut actions: Vec<Action>) {
         if self.holding_for_mentions(id, &mut actions) {
@@ -749,20 +768,7 @@ impl Daemon {
             if gone && self.act_on_gone(id, &action) {
                 continue;
             }
-            let images = match &action {
-                Action::Prompt(prompt)
-                | Action::Briefed { text: prompt, .. }
-                | Action::Carry { text: prompt, .. } => !prompt.images.is_empty(),
-                _ => false,
-            };
-            if images
-                && agent
-                    .and_then(|agent| self.agents.running.get(&agent))
-                    .is_some_and(|slot| !slot.agent.can_image())
-            {
-                if let Some(chat) = self.chat(id) {
-                    chat.answered(Err("This agent does not support image messages.".into()));
-                }
+            if self.refuses_images(id, agent, &action) {
                 continue;
             }
             // The files it mentions are read first, off the loop, and it
@@ -784,28 +790,24 @@ impl Daemon {
                 }
                 (Action::Install, _, _) => self.install_agent(id),
                 (Action::Prompt(text), Some(slot), Some(session)) => {
-                    let blocks = (&[text.text.as_str()][..], &context[..]);
-                    slot.agent.prompt(id, &session, blocks, &text.images);
+                    let words = [text.text.as_str()];
+                    slot.agent
+                        .prompt(id, &session, (&words, &context), &text.images);
                 }
                 (Action::Briefed { role, text }, Some(slot), Some(session)) => {
-                    let blocks = (&[role.as_str(), &text.text][..], &context[..]);
-                    slot.agent.prompt(id, &session, blocks, &text.images);
+                    let words = [role.as_str(), &text.text];
+                    slot.agent
+                        .prompt(id, &session, (&words, &context), &text.images);
                 }
                 (Action::Carry { text, from, to }, Some(_), Some(session)) => {
                     let files = self.agent_files.log.changed_in(id, from..to);
                     let digest = self.chat(id).and_then(|chat| chat.digest(from, to, &files));
                     let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
                     if let Some(slot) = slot {
-                        match &digest {
-                            Some(digest) => {
-                                let blocks = (&[digest.as_str(), &text.text][..], &context[..]);
-                                slot.agent.prompt(id, &session, blocks, &text.images);
-                            }
-                            None => {
-                                let blocks = (&[text.text.as_str()][..], &context[..]);
-                                slot.agent.prompt(id, &session, blocks, &text.images);
-                            }
-                        }
+                        let words: Vec<&str> = digest.iter().map(String::as_str).collect();
+                        let words = [&words[..], &[text.text.as_str()]].concat();
+                        slot.agent
+                            .prompt(id, &session, (&words, &context), &text.images);
                     }
                 }
                 (Action::Cancel, Some(slot), Some(session)) => slot.agent.cancel(&session),

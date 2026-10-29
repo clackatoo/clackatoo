@@ -89,11 +89,15 @@ pub(crate) struct Read {
     pub(crate) outside: Vec<String>,
 }
 
+/// The thread that reads mentions: where jobs go to it, and where what
+/// it read comes back, by chat.
+type Worker = (mpsc::Sender<Job>, mpsc::Receiver<(TerminalId, Read)>);
+
 /// The messages waiting for their mentions to be read, and the thread
 /// that reads them.
 #[derive(Debug, Default)]
 pub(super) struct Mentioning {
-    worker: Option<(mpsc::Sender<Job>, mpsc::Receiver<(TerminalId, Read)>)>,
+    worker: Option<Worker>,
     /// Each chat's actions waiting, from the message being read for.
     held: HashMap<TerminalId, VecDeque<Action>>,
     /// What was read for each chat's message, until it's sent.
