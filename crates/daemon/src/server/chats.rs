@@ -1134,6 +1134,12 @@ impl Daemon {
             self.take_written(id, &wrote);
         }
         let chat = self.chat(id)?;
+        // A mode the agent raised itself, put back as the user chose.
+        let put_back = chat.take_put_back();
+        if !put_back.is_empty() {
+            self.act(id, put_back);
+        }
+        let chat = self.chat(id)?;
         if chat.woken() && !chat.woken_says_when_it_ends() {
             let quiet = Instant::now() + self.config.quiet_turn;
             self.agents.woken.insert(id, quiet);
@@ -1232,7 +1238,9 @@ impl Daemon {
                     return;
                 };
                 chat.settings_changed(result);
+                let put_back = chat.take_put_back();
                 self.note_settings(terminal);
+                self.act(terminal, put_back);
                 terminal
             }
             Incoming::Update { session, update } => {

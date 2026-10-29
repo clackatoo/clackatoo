@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
 use agent_client_protocol_schema::v1::{
@@ -40,6 +40,7 @@ mod facts;
 pub(crate) mod failure;
 mod limits;
 mod live;
+mod modes;
 mod nested;
 mod originals;
 mod plan;
@@ -401,10 +402,24 @@ pub(crate) struct HostedChat {
     /// when it stops.
     chosen: Vec<(String, String)>,
     /// The changes to settings asked of the agent and not yet answered, in
-    /// order, by setting ID and value: the agent answers each in turn.
-    /// Nothing the agent says by itself of these is followed meanwhile.
-    /// Not handed over: a session opened again asks again.
-    setting_asked: VecDeque<(String, String)>,
+    /// order, by setting ID, with when each was asked: the agent answers
+    /// each in turn. Nothing the agent says by itself of these is followed
+    /// meanwhile, for [`ASKED_FOR`] at most, so an answer lost doesn't hold
+    /// it for good. Not handed over: a session opened again asks again.
+    setting_asked: VecDeque<(String, Instant)>,
+    /// The mode the user said to leave Plan mode for, answering the
+    /// agent's plan's question, until the agent does (see
+    /// `modes::leaving_plan_for`). Not handed over.
+    leaving_plan: Option<String>,
+    /// The mode the user had chosen before Plan, which is as far as the
+    /// agent's leaving Plan by itself is followed, with no answer to its
+    /// plan's question to say otherwise. Not handed over.
+    before_plan: Option<String>,
+    /// Changes to settings to ask of the agent, put back as the user chose
+    /// them after the agent changed them by itself (see
+    /// [`follow_agents_settings`](Self::follow_agents_settings)), for the
+    /// server to take with [`take_put_back`](Self::take_put_back).
+    put_back: Vec<Action>,
     /// The mode a new chat asks for when its session first opens.
     starting_mode: Option<String>,
     journal: Journal,
@@ -652,6 +667,9 @@ impl HostedChat {
             left_forms: Vec::new(),
             told_too_big: false,
             setting_asked: VecDeque::new(),
+            leaving_plan: None,
+            before_plan: None,
+            put_back: Vec::new(),
             chosen: vec![
                 (TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()),
                 (
@@ -1065,8 +1083,16 @@ impl HostedChat {
             // or as the question was taken back, isn't the next one's.
             ChatAction::Answer { question, option } => {
                 if (self.asking.front()).is_some_and(|(_, asked)| asked.id == question)
-                    && let Some((asker, _)) = self.asking.pop_front()
+                    && let Some((asker, asked)) = self.asking.pop_front()
                 {
+                    // Leaving Plan mode, the user says for which mode.
+                    if asked.plan.is_some()
+                        && matches!(asker, Asker::Agent(_))
+                        && let Some(option) = &option
+                    {
+                        self.leaving_plan =
+                            modes::leaving_plan_for(&self.agent, option).map(str::to_owned);
+                    }
                     self.show_question();
                     if asker == Asker::Slow {
                         self.slow_answered(option.as_deref(), &mut actions);
@@ -1108,12 +1134,17 @@ impl HostedChat {
             ChatAction::Resend => self.resend(&mut actions),
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
+                let was = (self.node.settings.iter())
+                    .find(|known| known.id == setting && known.kind == SettingKind::Mode)
+                    .map(|known| known.value.clone());
                 if self.set_value(&setting, &value) {
+                    if let Some(was) = was {
+                        self.mode_chosen(&was, &value);
+                    }
                     self.chosen.retain(|(id, _)| *id != setting);
                     self.chosen.push((setting.clone(), value.clone()));
                     if self.link == Link::Open {
-                        self.setting_asked
-                            .push_back((setting.clone(), value.clone()));
+                        self.asked(&setting);
                         actions.push(Action::Set { setting, value });
                     }
                 }
@@ -1475,13 +1506,17 @@ impl HostedChat {
             && self.relations.parent.is_some()
             && let Some(setting) = self.setting_of(SettingKind::Mode)
             && !self.chosen.iter().any(|(id, _)| *id == setting.id)
-            && let Some(safest) = setting.choices.first()
+            && let Some(safest) = modes::safest(
+                &self.agent,
+                setting.choices.iter().map(|choice| choice.value.as_str()),
+            )
         {
             // A chat an agent started, with no mode of its parent's to
             // start in, as with another agent: never the agent's own
             // choice, which may let it do more than its parent could, but
-            // its safest, the first it offers, as Manual or Read-only.
-            let safest = (setting.id.clone(), safest.value.clone());
+            // its safest, as Manual or Read-only, where its modes are
+            // known; else the agent's own, never the first it lists.
+            let safest = (setting.id.clone(), safest.to_owned());
             self.chosen.push(safest);
         }
         // A chat that may run no commands opens each new session in its
@@ -1498,8 +1533,7 @@ impl HostedChat {
             let differs = (self.node.settings.iter())
                 .any(|known| known.id == setting && known.value != value);
             if differs && self.set_value(&setting, &value) {
-                self.setting_asked
-                    .push_back((setting.clone(), value.clone()));
+                self.asked(&setting);
                 actions.push(Action::Set { setting, value });
             }
         }
@@ -1627,7 +1661,15 @@ impl HostedChat {
             .cloned()
             .collect();
         let own = self.agent_settings();
-        let of = |kind| own.iter().find(|setting| setting.kind == kind).cloned();
+        // As the user chose them, not as the agent may have changed them
+        // by itself since.
+        let of = |kind| {
+            let mut setting = own.iter().find(|setting| setting.kind == kind).cloned()?;
+            if let Some((_, chosen)) = (self.chosen.iter()).find(|(id, _)| *id == setting.id) {
+                setting.value.clone_from(chosen);
+            }
+            Some(setting)
+        };
         let (mode, effort) = (of(SettingKind::Mode), of(SettingKind::Effort));
         let left = Parked {
             agent: std::mem::replace(&mut self.agent, to.name.clone()),
@@ -2147,6 +2189,7 @@ impl HostedChat {
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
         self.setting_asked.clear();
+        self.put_back.clear();
         self.tasks_lost();
         self.elicitations_lost();
         self.queue_disconnected();
@@ -3413,21 +3456,21 @@ impl HostedChat {
     }
 
     /// The agent says what its settings are now, by itself, as Codex
-    /// leaves Plan mode once its plan is approved, and Claude Code's Plan
-    /// mode once it may go ahead, or answering a change asked for: what
-    /// the chat chose of them follows, so a session opened again isn't
-    /// put back as it was, unless [`follows`](Self::follows) says it may
-    /// not, as for an agent raising its own mode. A setting with a change
-    /// on its way isn't followed until the agent answers it, nor is
-    /// anything a session tells again.
+    /// leaves Plan mode once its plan is approved, or answering a change
+    /// asked for: what the chat chose of them follows, so a session opened
+    /// again isn't put back as it was, unless [`follows`](Self::follows)
+    /// says it may not, as for an agent raising its own mode. Then it's put
+    /// back as the user chose at once, and the chat says so. A setting with
+    /// a change on its way isn't followed until the agent answers it, nor
+    /// is anything a session tells again.
     fn follow_agents_settings(&mut self) {
         if self.told_again() || self.link != Link::Open {
             return;
         }
-        let mut kept = None;
+        let mut put_back = Vec::new();
         for at in 0..self.chosen.len() {
             let (id, value) = &self.chosen[at];
-            if chat_wide(id) || self.setting_asked.iter().any(|(asked, _)| asked == id) {
+            if chat_wide(id) || self.awaits_answer(id) {
                 continue;
             }
             let Some(setting) = (self.node.settings.iter()).find(|setting| setting.id == *id)
@@ -3438,7 +3481,10 @@ impl HostedChat {
                 continue;
             }
             if self.follows(setting, value) {
-                let now = setting.value.clone();
+                let (was, now) = (value.clone(), setting.value.clone());
+                if setting.kind == SettingKind::Mode {
+                    self.mode_chosen(&was, &now);
+                }
                 self.chosen[at].1 = now;
             } else {
                 let name = |value: &str| {
@@ -3446,38 +3492,83 @@ impl HostedChat {
                         .find(|choice| choice.value == value)
                         .map_or_else(|| value.to_owned(), |choice| choice.name.clone())
                 };
-                kept = Some((name(&setting.value), name(value)));
+                let said = (name(&setting.value), name(value));
+                put_back.push((id.clone(), value.clone(), said));
             }
         }
-        if let Some((now, chosen)) = kept {
+        for (id, value, (now, chosen)) in put_back {
             let agent = self.node.agent.clone();
             self.set_notice(Some(format!(
-                "{agent} switched itself to {now}; your choice, {chosen}, stays for its next session"
+                "{agent} switched itself to {now}; put back to {chosen}"
             )));
+            self.set_value(&id, &value);
+            self.asked(&id);
+            self.put_back.push(Action::Set { setting: id, value });
         }
     }
 
     /// Whether what the chat chose of `setting`, `chosen`, may follow the
     /// value the agent says it has now. Any setting but the mode may. The
-    /// mode may move only to one no higher among the modes the agent
-    /// offers, the safest first, as an agent may not raise what it may do
-    /// itself; or out of Plan, which the agent leaves as the user says in
-    /// the question that asks. A chat an agent started never leaves Plan
-    /// by following, so it never goes above the mode it started in, its
-    /// parent's or its agent's safest.
+    /// mode, only for an agent whose modes are known (see `modes`), and
+    /// only to one that may do no more; or out of Plan to the mode the user
+    /// said in the plan's question, or with none said, to one no higher
+    /// than the user's before Plan. A chat an agent started never leaves
+    /// Plan by following, so it never goes above the mode it started in.
     fn follows(&self, setting: &Setting, chosen: &str) -> bool {
         if setting.kind != SettingKind::Mode {
             return true;
         }
-        let planning = chosen.eq_ignore_ascii_case("plan")
-            || (setting.choices.iter())
-                .find(|choice| choice.value == chosen)
-                .is_some_and(|choice| choice.name.eq_ignore_ascii_case("plan"));
-        if planning {
-            return self.relations.parent.is_none();
+        let (agent, now) = (self.agent.as_str(), setting.value.as_str());
+        let (Some(rank), Some(chosen_rank)) = (modes::rank(agent, now), modes::rank(agent, chosen))
+        else {
+            return false;
+        };
+        if !modes::is_plan(agent, chosen) {
+            return rank <= chosen_rank;
         }
-        let rank = |value: &str| (setting.choices.iter()).position(|choice| choice.value == value);
-        matches!((rank(&setting.value), rank(chosen)), (Some(now), Some(chosen)) if now <= chosen)
+        if self.relations.parent.is_some() {
+            return false;
+        }
+        if let Some(said) = &self.leaving_plan {
+            return said == now;
+        }
+        (self.before_plan.as_deref())
+            .and_then(|before| modes::rank(agent, before))
+            .is_some_and(|before| rank <= before)
+    }
+
+    /// The chat's mode was `was`, and is `now`, as the user chose it or
+    /// it followed the agent's: notes what leaving Plan may follow.
+    fn mode_chosen(&mut self, was: &str, now: &str) {
+        let agent = self.agent.clone();
+        if modes::is_plan(&agent, now) {
+            if !modes::is_plan(&agent, was) {
+                self.before_plan = Some(was.to_owned());
+            }
+        } else {
+            self.leaving_plan = None;
+        }
+    }
+
+    /// The chat asks the agent to change its setting `id`.
+    fn asked(&mut self, id: &str) {
+        if self.setting_asked.len() >= MOST_ASKED {
+            self.setting_asked.pop_front();
+        }
+        self.setting_asked
+            .push_back((id.to_owned(), Instant::now()));
+    }
+
+    /// Whether a change to setting `id` asked of the agent waits for its
+    /// answer, as it has for less than [`ASKED_FOR`].
+    fn awaits_answer(&self, id: &str) -> bool {
+        (self.setting_asked.iter()).any(|(asked, at)| asked == id && at.elapsed() < ASKED_FOR)
+    }
+
+    /// Changes to settings to ask of the agent, put back as the user chose
+    /// them after it changed them by itself.
+    pub(crate) fn take_put_back(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.put_back)
     }
 
     /// The agent's settings are `settings`, and the chat's own goes after
@@ -3548,6 +3639,13 @@ impl HostedChat {
         }
     }
 }
+
+/// How long a change to a setting asked of the agent holds what the agent
+/// says of that setting by itself: an answer lost holds it no longer.
+const ASKED_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The most changes to settings waiting for the agent's answers kept.
+const MOST_ASKED: usize = 64;
 
 /// A tag for the lines a message or a digest goes between, that whoever
 /// wrote what's between them can't know, so it can't end itself early and
@@ -6359,8 +6457,70 @@ mod tests {
         assert_eq!(reopened(&mut chat, &codex_modes("agent", false)), [plan]);
     }
 
+    /// The agent sets its mode to `mode` by itself.
+    fn mode_said(chat: &mut HostedChat, mode: &str) {
+        update(
+            chat,
+            &format!(r#"{{"sessionUpdate":"current_mode_update","currentModeId":"{mode}"}}"#),
+        );
+    }
+
+    fn set_back(chat: &mut HostedChat) -> Vec<(String, String)> {
+        (chat.take_put_back().into_iter())
+            .filter_map(|action| match action {
+                Action::Set { setting, value } => Some((setting, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Claude Code's modes, as its adapter lists them, Plan third, with
+    /// `mode` chosen.
+    fn claude_modes(mode: &str) -> String {
+        format!(
+            r#"[{{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"{mode}",
+                 "options":[{{"value":"default","name":"Manual"}},{{"value":"acceptEdits","name":"Accept edits"}},
+                            {{"value":"plan","name":"Plan"}},{{"value":"auto","name":"Auto"}},
+                            {{"value":"bypassPermissions","name":"Bypass permissions"}}]}}]"#
+        )
+    }
+
+    /// A Claude Code chat whose user chose Auto, then Plan, both answered.
+    fn claude_planning() -> HostedChat {
+        let mut chat = chat_with("claude");
+        chat.connected(Opened {
+            session: "s".into(),
+            settings: Some(serde_json::from_str(&claude_modes("default")).unwrap()),
+        });
+        // Its starting mode, Auto, asked for as it opened.
+        options_answered(&mut chat, &claude_modes("auto"));
+        chat.act(ChatAction::Set {
+            setting: "mode".into(),
+            value: "plan".into(),
+        });
+        options_answered(&mut chat, &claude_modes("plan"));
+        chat
+    }
+
+    /// Claude Code asks to leave Plan mode, and the user answers `option`.
+    fn plan_answered(chat: &mut HostedChat, option: &str) {
+        send(chat, "go");
+        let options: Vec<PermissionOption> = serde_json::from_str(
+            r#"[{"optionId":"exit-plan-bypass","name":"Yes, and bypass permissions","kind":"allow_always"},
+                {"optionId":"exit-plan-default","name":"Yes, and manually approve edits","kind":"allow_once"},
+                {"optionId":"reject","name":"No, keep planning","kind":"reject_once"}]"#,
+        )
+        .unwrap();
+        let tool: ToolCallUpdate = serde_json::from_str(
+            r#"{"toolCallId":"t","title":"Ready to code?","rawInput":{"plan":"1. Test"}}"#,
+        )
+        .unwrap();
+        chat.ask(Value::from(7), &tool, &options, &[]);
+        answer(chat, Some(option.to_owned()));
+    }
+
     #[test]
-    fn an_agent_raising_its_own_mode_isnt_followed_but_lowering_it_is() {
+    fn an_agent_raising_its_own_mode_is_put_back_at_once_but_lowering_it_is_followed() {
         let mut chat = chat_with("codex");
         chat.connected(Opened {
             session: "s".into(),
@@ -6371,19 +6531,19 @@ mod tests {
             value: "read-only".into(),
         });
         options_answered(&mut chat, &codex_modes("read-only", false));
-        // It gives itself full access: the next session is Read-only
-        // again, and the chat says so.
+        // It gives itself full access: it's put back at once, and the chat
+        // says so.
         options_said(&mut chat, &codex_modes("agent-full-access", false));
+        assert_eq!(set_back(&mut chat), [pair("mode", "read-only")]);
         assert_eq!(
             chat.node.notice.as_deref(),
-            Some(
-                "Codex switched itself to Full access; your choice, Read-only, stays for its next session"
-            )
+            Some("Codex switched itself to Full access; put back to Read-only")
         );
-        let read_only = pair("mode", "read-only");
+        assert_eq!(chat.mode(), Some("read-only"));
+        options_answered(&mut chat, &codex_modes("read-only", false));
         assert_eq!(
             reopened(&mut chat, &codex_modes("agent", false)),
-            [read_only]
+            [pair("mode", "read-only")]
         );
         options_answered(&mut chat, &codex_modes("read-only", false));
         // Lower is followed.
@@ -6393,63 +6553,148 @@ mod tests {
         });
         options_answered(&mut chat, &codex_modes("agent", false));
         options_said(&mut chat, &codex_modes("read-only", false));
+        assert!(set_back(&mut chat).is_empty());
         assert!(reopened(&mut chat, &codex_modes("read-only", false)).is_empty());
     }
 
     #[test]
-    fn leaving_plan_is_followed_except_in_a_chat_an_agent_started() {
-        // Claude Code's modes, Plan among them, not first.
-        let claude = |mode: &str| {
-            format!(
-                r#"[{{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"{mode}",
-                     "options":[{{"value":"default","name":"Manual"}},{{"value":"acceptEdits","name":"Accept edits"}},
-                                {{"value":"plan","name":"Plan"}},{{"value":"auto","name":"Auto"}}]}}]"#
-            )
-        };
-        let plan = |chat: &mut HostedChat| {
-            chat.act(ChatAction::Set {
-                setting: "mode".into(),
-                value: "plan".into(),
-            });
-            options_answered(chat, &claude("plan"));
-            // Approved, it leaves Plan for Auto, as asked in the question.
-            update(
-                chat,
-                r#"{"sessionUpdate":"current_mode_update","currentModeId":"auto"}"#,
-            );
-        };
-        let mut chat = chat_with("claude");
-        chat.connected(Opened {
-            session: "s".into(),
-            settings: Some(serde_json::from_str(&claude("default")).unwrap()),
-        });
-        // Its starting mode, asked for as it opened.
-        options_answered(&mut chat, &claude("auto"));
-        plan(&mut chat);
-        assert_eq!(
-            reopened(&mut chat, &claude("default")),
-            [pair("mode", "auto")]
-        );
+    fn leaving_plan_is_followed_only_to_the_mode_the_user_said() {
+        // A one-step plan to Bypass permissions, with no question answered:
+        // above Auto, the mode before Plan, so put back.
+        let mut chat = claude_planning();
+        mode_said(&mut chat, "bypassPermissions");
+        assert_eq!(set_back(&mut chat), [pair("mode", "plan")]);
+        // No question answered, but no higher than before Plan: followed.
+        let mut chat = claude_planning();
+        mode_said(&mut chat, "acceptEdits");
+        assert!(set_back(&mut chat).is_empty());
+        assert!(reopened(&mut chat, &claude_modes("acceptEdits")).is_empty());
+        // Answered Manual, it's followed to Manual, but not to another.
+        let mut chat = claude_planning();
+        plan_answered(&mut chat, "exit-plan-default");
+        mode_said(&mut chat, "auto");
+        assert_eq!(set_back(&mut chat), [pair("mode", "plan")]);
+        options_answered(&mut chat, &claude_modes("plan"));
+        mode_said(&mut chat, "default");
+        assert!(set_back(&mut chat).is_empty());
+        assert!(reopened(&mut chat, &claude_modes("default")).is_empty());
+        // Answered Bypass permissions, it's followed there, above Auto.
+        let mut chat = claude_planning();
+        plan_answered(&mut chat, "exit-plan-bypass");
+        mode_said(&mut chat, "bypassPermissions");
+        assert!(set_back(&mut chat).is_empty());
+    }
 
-        // One an agent started, in Plan, stays in it, as its parent was.
+    #[test]
+    fn a_chat_an_agent_started_stays_in_plan_and_gets_the_safest_known_mode() {
         let mut kid = chat_with("claude");
         kid.started_by(TerminalId(7), TerminalId(7), 1, Some("plan".into()));
         let asked: Vec<Action> = kid.connected(Opened {
             session: "k".into(),
-            settings: Some(serde_json::from_str(&claude("default")).unwrap()),
+            settings: Some(serde_json::from_str(&claude_modes("auto")).unwrap()),
         });
         assert!(asked.contains(&Action::Set {
             setting: "mode".into(),
             value: "plan".into(),
         }));
-        options_answered(&mut kid, &claude("plan"));
-        update(
-            &mut kid,
-            r#"{"sessionUpdate":"current_mode_update","currentModeId":"auto"}"#,
+        options_answered(&mut kid, &claude_modes("plan"));
+        plan_answered(&mut kid, "exit-plan-default");
+        mode_said(&mut kid, "default");
+        assert_eq!(set_back(&mut kid), [pair("mode", "plan")]);
+        // With no mode of its parent's, Claude Code's safest is Manual,
+        // though it lists Plan among them.
+        let mut kid = chat_with("claude");
+        kid.started_by(TerminalId(7), TerminalId(7), 1, None);
+        let asked = kid.connected(Opened {
+            session: "k".into(),
+            settings: Some(serde_json::from_str(&claude_modes("auto")).unwrap()),
+        });
+        assert!(asked.contains(&Action::Set {
+            setting: "mode".into(),
+            value: "default".into(),
+        }));
+    }
+
+    #[test]
+    fn an_agent_whose_modes_arent_known_is_never_followed_nor_given_its_first() {
+        let modes = |mode: &str| {
+            format!(
+                r#"[{{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"{mode}",
+                     "options":[{{"value":"yolo","name":"YOLO"}},{{"value":"careful","name":"Careful"}}]}}]"#
+            )
+        };
+        // Started by an agent with no mode of its parent's: the agent's
+        // own, not the first it lists.
+        let mut kid = chat_with("gemini");
+        kid.started_by(TerminalId(7), TerminalId(7), 1, None);
+        let asked = kid.connected(Opened {
+            session: "k".into(),
+            settings: Some(serde_json::from_str(&modes("careful")).unwrap()),
+        });
+        assert!(
+            !asked
+                .iter()
+                .any(|action| matches!(action, Action::Set { .. }))
         );
-        assert_eq!(
-            reopened(&mut kid, &claude("default")),
-            [pair("mode", "plan")]
+        // Its own change of the mode the user chose is put back.
+        let mut chat = chat_with("gemini");
+        chat.connected(Opened {
+            session: "s".into(),
+            settings: Some(serde_json::from_str(&modes("yolo")).unwrap()),
+        });
+        chat.act(ChatAction::Set {
+            setting: "mode".into(),
+            value: "careful".into(),
+        });
+        options_answered(&mut chat, &modes("careful"));
+        options_said(&mut chat, &modes("yolo"));
+        assert_eq!(set_back(&mut chat), [pair("mode", "careful")]);
+    }
+
+    #[test]
+    fn a_move_to_another_agent_carries_the_mode_the_user_chose() {
+        let mut chat = chat_with("codex");
+        chat.connected(Opened {
+            session: "s".into(),
+            settings: Some(serde_json::from_str(&codex_modes("agent", false)).unwrap()),
+        });
+        chat.act(ChatAction::Set {
+            setting: "mode".into(),
+            value: "read-only".into(),
+        });
+        // A raise said while the change is on its way isn't taken.
+        options_said(&mut chat, &codex_modes("agent-full-access", false));
+        assert_eq!(chat.mode(), Some("agent-full-access"));
+        let claude = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        chat.switch(&claude, None, None, handoff::BUDGET);
+        let carried = chat.carry.as_ref().and_then(|carry| carry.mode.as_ref());
+        assert_eq!(carried.map(|mode| mode.value.as_str()), Some("read-only"));
+    }
+
+    #[test]
+    fn a_change_whose_answer_is_lost_holds_its_setting_for_a_while_only() {
+        let mut chat = chat_with("codex");
+        chat.connected(Opened {
+            session: "s".into(),
+            settings: Some(serde_json::from_str(&codex_modes("agent", false)).unwrap()),
+        });
+        chat.act(ChatAction::Set {
+            setting: "collaboration_mode".into(),
+            value: "plan".into(),
+        });
+        options_said(&mut chat, &codex_modes("agent", false));
+        let plan = pair("collaboration_mode", "plan");
+        assert!(chat.chosen.contains(&plan), "held while it waits");
+        let long_ago = Instant::now()
+            .checked_sub(ASKED_FOR + std::time::Duration::from_secs(1))
+            .unwrap();
+        chat.setting_asked[0].1 = long_ago;
+        options_said(&mut chat, &codex_modes("agent", false));
+        assert!(
+            !chat.chosen.contains(&plan),
+            "followed once it's waited too long"
         );
     }
 
