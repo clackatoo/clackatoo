@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_own_write_heard_again_while_a_big_change_is_merged_is_still_its() {
+        let mut world = World::new();
+        let (id, _, second) = merging(&mut world);
+        // Heard of while its tool runs, then again once it's long done, as
+        // inotify says one write more than once.
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        let done = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+        });
+        says(&mut world.daemon, world.chat, done);
+        world.daemon.check_disk();
+        world.daemon.check_disk();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        assert_eq!(world.text(id), second);
+        assert!(!world.daemon.buffers[&id].stale());
+    }
+
+    #[test]
     fn another_chats_change_while_a_big_change_is_merged_is_from_outside() {
         let mut world = World::new();
         let (id, second) = contested(&mut world, |world| {

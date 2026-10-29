@@ -77,6 +77,10 @@ struct Noted {
     chat: TerminalId,
     /// The turn it was found in.
     turn: usize,
+    /// The file as the chat last left it, as far as is known: the same
+    /// change heard of again, as inotify says one write more than once,
+    /// isn't another.
+    seen: Option<DiskStamp>,
     /// The tool it was found while has finished, while the chat's change
     /// to the file was being merged into the buffer.
     finished: bool,
@@ -292,34 +296,40 @@ impl Daemon {
             return;
         };
         let path = slot.buffer.path().to_owned();
-        match DiskStamp::now(&path) {
-            Ok(Some(now)) if Some(now) != slot.buffer.disk() => {}
+        let now = match DiskStamp::now(&path) {
+            Ok(Some(now)) if Some(now) != slot.buffer.disk() => now,
             // As the buffer last read or wrote it, or gone.
             Ok(_) => return,
             Err(err) => {
                 log::debug!("buffer {id}: {}: {err}", path.display());
                 return;
             }
-        }
+        };
         let by = if slot.stale() {
             None
         } else {
             self.writer_in_project(&path)
         };
-        match (by, self.disk.noted.get(&id)) {
+        let seen = Some(now);
+        match (by, self.disk.noted.get(&id).copied()) {
             (Some(by), None) => {
-                self.disk.noted.insert(id, by);
+                self.disk.noted.insert(id, Noted { seen, ..by });
             }
-            (Some(by), Some(noted)) if noted.chat == by.chat => {}
+            (Some(by), Some(noted)) if noted.chat == by.chat => {
+                self.disk.noted.insert(id, Noted { seen, ..noted });
+            }
             // An agent's change to it is still being merged into the
             // buffer, which doesn't know the file as it is yet: nothing is
             // taken as from outside until it's made, and the file looked
             // at again. A change noted as a chat's, changed again by
             // someone else, is taken as from outside then, as it would
             // have been now.
-            _ if self.agent_files.pending(&path) => {
-                if let Some(noted) = self.disk.noted.get_mut(&id) {
-                    noted.contested = true;
+            (_, noted) if self.agent_files.pending(&path) => {
+                if let Some(noted) = noted
+                    && noted.seen != seen
+                {
+                    let contested = true;
+                    self.disk.noted.insert(id, Noted { contested, ..noted });
                 }
             }
             _ => {
@@ -351,6 +361,7 @@ impl Daemon {
             found = Some(Noted {
                 chat: id,
                 turn,
+                seen: None,
                 finished: false,
                 contested: false,
             });
