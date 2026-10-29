@@ -15,7 +15,7 @@
 //! and sends them to the agent with it (see
 //! [`clackatoo_protocol::mentions`]).
 
-use clackatoo_protocol::{Found, mention};
+use clackatoo_protocol::{ChatPaths, Found, mention};
 use winit::keyboard::{Key, NamedKey};
 
 use super::paint::{PROMPT, Position};
@@ -317,6 +317,11 @@ impl super::ChatView {
         self.refresh_slash();
     }
 
+    /// Where it works, made absolute, if the daemon says.
+    pub(crate) fn paths(&self) -> Option<&ChatPaths> {
+        self.node.paths.as_ref()
+    }
+
     /// The folder its agent works in, as people write it.
     pub(crate) fn folder(&self) -> Option<&str> {
         self.folder.as_deref()
@@ -391,39 +396,30 @@ impl super::ChatView {
 }
 
 /// `path`, a file on the daemon's machine, made absolute, as a chat
-/// working in `folder`, as people write it (`~/p`), mentions it: from the
-/// folder if it's in it, or else whole. A folder in the home directory is
-/// matched by what follows `~`, under a directory that looks like one.
-pub(crate) fn from_chat_folder(path: &str, folder: Option<&str>) -> String {
-    let Some(folder) = folder.map(|folder| folder.trim_end_matches('/')) else {
-        return path.to_owned();
-    };
-    let inside = |root: &str| {
+/// working where `paths` say mentions it: from its folder, going up out
+/// of it as far as it must within its project, or else whole. Whole too
+/// when where it works isn't known, as from a daemon older than protocol
+/// 119.
+pub(crate) fn from_chat_paths(path: &str, paths: Option<&ChatPaths>) -> String {
+    let under = |root: &str| {
+        let root = root.trim_end_matches('/');
         (path.strip_prefix(root))
             .and_then(|rest| rest.strip_prefix('/'))
             .map(str::to_owned)
     };
-    if folder.starts_with('/') {
-        return inside(folder).unwrap_or_else(|| path.to_owned());
-    }
-    let Some(rest) = folder
-        .strip_prefix('~')
-        .filter(|rest| rest.starts_with('/'))
-    else {
+    let Some(paths) = paths else {
         return path.to_owned();
     };
-    let homes = ["/home/", "/Users/", "/root"];
-    let found = path.match_indices(&format!("{rest}/")).find_map(|(at, _)| {
-        let home = &path[..at];
-        let looks = homes.iter().any(|start| {
-            home == "/root"
-                || home
-                    .strip_prefix(start)
-                    .is_some_and(|user| !user.is_empty() && !user.contains('/'))
-        });
-        looks.then(|| inside(&format!("{home}{rest}"))).flatten()
-    });
-    found.unwrap_or_else(|| path.to_owned())
+    if let Some(inside) = under(&paths.cwd) {
+        return inside;
+    }
+    match (
+        under(&paths.project),
+        paths.cwd.strip_prefix(paths.project.trim_end_matches('/')),
+    ) {
+        (Some(file), Some(folder)) => from_folder(&file, folder.trim_matches('/')),
+        _ => path.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -499,17 +495,16 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_mentioned_from_the_chats_folder_if_its_in_it() {
-        let path = "/home/j/p/src/a.rs";
-        assert_eq!(from_chat_folder(path, Some("~/p")), "src/a.rs");
-        assert_eq!(from_chat_folder(path, Some("/home/j/p/")), "src/a.rs");
-        assert_eq!(from_chat_folder(path, Some("~/q")), path);
-        assert_eq!(from_chat_folder(path, None), path);
-        assert_eq!(
-            from_chat_folder("/data/p/x.rs", Some("~/p")),
-            "/data/p/x.rs"
-        );
-        assert_eq!(from_chat_folder("/root/p/x.rs", Some("~/p")), "x.rs");
+    fn a_file_is_mentioned_from_the_chats_folder_as_far_as_its_project_goes() {
+        let paths = ChatPaths {
+            cwd: "/w/p/src".into(),
+            project: "/w/p".into(),
+        };
+        let paths = Some(&paths);
+        assert_eq!(from_chat_paths("/w/p/src/a.rs", paths), "a.rs");
+        assert_eq!(from_chat_paths("/w/p/docs/b.md", paths), "../docs/b.md");
+        assert_eq!(from_chat_paths("/w/q/c.rs", paths), "/w/q/c.rs");
+        assert_eq!(from_chat_paths("/w/p/src/a.rs", None), "/w/p/src/a.rs");
     }
 
     #[test]

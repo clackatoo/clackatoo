@@ -1498,6 +1498,9 @@ pub fn queue(node: &ChatNode, online: Online) -> Element {
         let busy = matches!(node.state, ChatState::Answering | ChatState::Starting);
         let label = if !busy {
             "Send now"
+        } else if steering && clackatoo_protocol::may_mention_files(&message.text) {
+            // A file it mentions goes only with the message whole.
+            "Stop & send"
         } else if steering {
             "Steer now"
         } else {

@@ -175,7 +175,14 @@ impl ChatView {
         let right = frame.left + frame.place.column - frame.pad;
         let native =
             self.node.delivery.native_steering && self.images.is_empty() && self.handoff.is_none();
-        let label = if native { "Steer" } else { "Stop & continue" };
+        // A file a message mentions goes only with the message whole.
+        let label = if !native {
+            "Stop & continue"
+        } else if clackatoo_protocol::may_mention_files(self.editor.raw_text()) {
+            "Stop & send"
+        } else {
+            "Steer"
+        };
         let wide = frame.inner >= m.em(26.0);
         let text = if wide {
             format!("{label}  ·  Ctrl+Enter")

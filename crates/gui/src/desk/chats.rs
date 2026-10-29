@@ -252,7 +252,7 @@ impl Desk {
         let Some(chat) = self.chats.get_mut(&terminal) else {
             return;
         };
-        let written = crate::chat::mentions::from_chat_folder(&path, chat.view().folder());
+        let written = crate::chat::mentions::from_chat_paths(&path, chat.view().paths());
         let lines = lines.map(|(first, last)| {
             let line = |line: u64| u32::try_from(line + 1).unwrap_or(u32::MAX);
             (line(first), line(last))
