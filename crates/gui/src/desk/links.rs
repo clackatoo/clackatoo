@@ -41,10 +41,17 @@ impl Desk {
             return;
         };
         let cwd = pane.cwd().map(str::to_owned);
+        self.open_link_of(terminal, target, cwd.as_deref());
+    }
+
+    /// Opens `target`, a link in the terminal or chat `terminal`: a
+    /// relative path is from `cwd`, or if that isn't known, the daemon
+    /// finds it from the pane's working directory.
+    pub(super) fn open_link_of(&mut self, terminal: TerminalId, target: Target, cwd: Option<&str>) {
         match target {
             Target::Url(url) => self.opened.push(url),
             Target::File { path, line, col } => {
-                self.open_file_at(terminal, &path, cwd.as_deref(), line, col);
+                self.open_file_at(terminal, &path, cwd, line, col);
             }
             Target::Elsewhere { uri, host } => {
                 self.say(format!("{uri} is on {host}, not this machine"));

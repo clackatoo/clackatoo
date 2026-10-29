@@ -94,6 +94,28 @@ pub(crate) fn find_at(text: &str, at: usize) -> Option<Found> {
     url_at(text, at).or_else(|| path_at(text, at))
 }
 
+/// The file a message to a chat mentions at byte `at` of `text`, `@path`
+/// (see [`clackatoo_protocol::mentions`]), if one does, at its first line
+/// if it names lines; or else the link there, as [`find_at`] finds it.
+/// Only for a chat's text: a terminal's `@` is a program's, as npm's
+/// `@types/node`.
+pub(crate) fn mention_at(text: &str, at: usize) -> Option<Found> {
+    let mentioned = clackatoo_protocol::mentions(text)
+        .into_iter()
+        .find(|mention| mention.range.contains(&at));
+    match mentioned {
+        Some(mention) => Some(Found {
+            bytes: mention.range,
+            target: Target::File {
+                path: mention.path.to_owned(),
+                line: mention.lines.map(|(first, _)| u64::from(first)),
+                col: None,
+            },
+        }),
+        None => find_at(text, at),
+    }
+}
+
 /// Every link in `text`, in order.
 #[cfg(test)]
 pub(crate) fn find_all(text: &str) -> Vec<Found> {
@@ -330,6 +352,26 @@ mod tests {
             .into_iter()
             .map(|found| (&text[found.bytes], found.target))
             .collect()
+    }
+
+    #[test]
+    fn a_chats_mentions_are_files_at_their_first_line() {
+        let text = "see @src/a.rs#L4-L9 and https://x.org";
+        let found = mention_at(text, 6).unwrap();
+        assert_eq!(found.bytes, 4..19);
+        assert_eq!(
+            found.target,
+            Target::File {
+                path: "src/a.rs".into(),
+                line: Some(4),
+                col: None
+            }
+        );
+        assert!(matches!(
+            mention_at(text, 30).unwrap().target,
+            Target::Url(_)
+        ));
+        assert_eq!(mention_at(text, 0), None);
     }
 
     #[test]

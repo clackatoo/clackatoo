@@ -444,6 +444,9 @@ pub(crate) struct Desk {
     /// How many searches the window has asked the daemon for, which
     /// numbers them.
     searches: u64,
+    /// The search for a chat's project's files, for its `@` menu, by its
+    /// number, and the chat's terminal.
+    chat_files: Option<(u64, TerminalId)>,
     /// When the finder's grep is to search for what's been typed, a moment
     /// after the last key.
     grep_at: Option<std::time::Instant>,
@@ -2928,6 +2931,10 @@ impl Desk {
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),
+            Command::Ask { selection } => {
+                let lines = selection.then(|| self.selected_lines()).flatten();
+                self.ask_chat(lines);
+            }
             Command::Background(command) => self.background_command(command),
             Command::BackgroundStart(command) => self.start_in_background(command),
             Command::Keep(how) => self.keep_running(how),
@@ -4714,6 +4721,7 @@ mod tests {
                 ("b", "+file symbols"),
                 ("h", "+git hunks"),
                 ("e", "explorer"),
+                ("a", "ask chat"),
                 ("t", "+toggles"),
                 ("g", "+agent changes"),
                 ("c", "comment"),

@@ -69,10 +69,13 @@ impl ChatView {
             } else {
                 let mut context = bindings::from_presses("Agent composer", |press| {
                     let slash = self.describe_slash_key(press.key, press.modifiers);
+                    let mention = self.describe_mention_key(press.key, press.modifiers);
                     if self.leaves_composer(press) {
                         Hint::Action("Enter normal mode")
                     } else if slash != Hint::None {
                         slash
+                    } else if mention != Hint::None {
+                        mention
                     } else {
                         self.describe_composer_key(press.key, press.modifiers)
                     }

@@ -42,7 +42,9 @@
 //! `<Space>hp` shows it, `<Space>hr` puts its lines back as they are in
 //! git's index, and `<Space>hs` stages it. `<Space>e` opens the tab's
 //! file explorer down its left, goes to it, or closes it if it has the
-//! focus (see [`super::explorers`]). `<Space>gr` opens a review of what
+//! focus (see [`super::explorers`]). `<Space>a` sends the focused
+//! editor's selection, or its file, to the chat beside it, as `:Ask`
+//! does (see [`super::chats`]). `<Space>gr` opens a review of what
 //! agents changed, `<Space>ga` keeps the agent's change at the cursor and
 //! `<Space>gx` rejects it, and `<Space>c` comments on the cursor's line
 //! for the agent (see [`super::reviews`]).
@@ -131,6 +133,9 @@ pub(crate) enum Action {
     Background(crate::command::BackgroundCommand),
     /// From a subagent's pane to the chat that started it.
     ParentChat,
+    /// The focused editor's selection, or file, to the chat beside it, as
+    /// `:Ask` does.
+    AskChat,
 }
 
 /// What a key does in reviewing what agents changed.
@@ -247,6 +252,8 @@ fn defaults() -> Keymap<Binding> {
     );
     // As nvim-tree's and neo-tree's are often bound.
     bind("nv", "<Space>e", Action::Explore, Some("explorer"));
+    // As avante.nvim's and codecompanion's `<leader>a`: ask the agent.
+    bind("nv", "<Space>a", Action::AskChat, Some("ask chat"));
     // As kickstart.nvim's `<leader>th`.
     bind(
         "nv",
@@ -496,6 +503,7 @@ impl Desk {
             Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::Hunk(action) => self.editor_hunk(action),
             Action::Explore => self.toggle_explorer(),
+            Action::AskChat => self.ask_chat(None),
             Action::Review(key) => match key {
                 ReviewKey::Open => self.toggle_review(),
                 ReviewKey::Keep => self.review_act(true, false, ReviewWhich::Here),

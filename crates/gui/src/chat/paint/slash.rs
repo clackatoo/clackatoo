@@ -1,8 +1,10 @@
-//! The `/` menu, over the box a message is typed in, as wide as the box:
-//! a line for each command, `/name`, what to type after it, if anything,
-//! and what it does, cut to fit; those the window does itself say so at
-//! the line's end. The one picked is lit, and a click picks one and puts
-//! it in. See [`crate::chat::slash`].
+//! The completion menus over the box a message is typed in, as wide as
+//! the box: the `/` menu, a line for each command, `/name`, what to type
+//! after it, if anything, and what it does, cut to fit, those the window
+//! does itself saying so at the line's end (see [`crate::chat::slash`]);
+//! and the `@` menu, a line for each file (see
+//! [`crate::chat::mentions`]). Both are drawn the same way: the one picked
+//! is lit, and a click picks one and puts it in.
 
 use super::{Canvas, ChatView, Fill, Hit, Measures, Paint, Place, Tone};
 use crate::chat::slash::{HEIGHT, Item};
@@ -12,6 +14,29 @@ use crate::markdown::layout::{TextPaint, draw_laid};
 /// A line's height, and the pad above and below them, in ems.
 const ROW: f32 = 1.75;
 const PAD: f32 = 0.35;
+
+/// A line of a completion menu.
+struct Row {
+    name: String,
+    /// What to type after it, if anything.
+    hint: Option<String>,
+    description: String,
+    /// Whether the window does it, rather than the agent.
+    ours: bool,
+    picked: bool,
+}
+
+impl From<(Item, Vec<u32>, bool)> for Row {
+    fn from((item, _, picked): (Item, Vec<u32>, bool)) -> Self {
+        Self {
+            name: format!("/{}", item.name),
+            hint: item.hint,
+            description: item.description,
+            ours: item.ours,
+            picked,
+        }
+    }
+}
 
 impl ChatView {
     /// Draws the `/` menu, if it shows, upward from just above the box,
@@ -28,6 +53,61 @@ impl ChatView {
             return;
         }
         let (rows, count) = self.slash.in_view(HEIGHT);
+        let rows = rows.into_iter().map(Row::from).collect();
+        let said = format!("{count} commands: ↑↓ for more");
+        self.draw_completions(
+            paint,
+            fonts,
+            (m, place, box_top),
+            (rows, count, said),
+            Hit::Slash,
+        );
+    }
+
+    /// Draws the `@` menu, if it shows, as the `/` menu is drawn.
+    pub(super) fn draw_mentions(
+        &mut self,
+        paint: &mut TextPaint,
+        fonts: &mut Fonts,
+        m: Measures,
+        place: Place,
+        box_top: f32,
+    ) {
+        if !self.mentions.showing() {
+            return;
+        }
+        let (rows, count) = self.mentions.in_view(crate::chat::mentions::HEIGHT);
+        let rows = (rows.into_iter())
+            .map(|(name, picked)| Row {
+                name,
+                hint: None,
+                description: String::new(),
+                ours: false,
+                picked,
+            })
+            .collect();
+        let said = format!("{count} files: ↑↓ for more");
+        self.draw_completions(
+            paint,
+            fonts,
+            (m, place, box_top),
+            (rows, count, said),
+            Hit::Mention,
+        );
+    }
+
+    /// Draws a completion menu of `rows`, of `count` in all, saying
+    /// `more` if there are more than show, upward from just above the
+    /// box, whose top is `box_top`; each line clicked is `hit` of its
+    /// place in view.
+    fn draw_completions(
+        &mut self,
+        paint: &mut TextPaint,
+        fonts: &mut Fonts,
+        (m, place, box_top): (Measures, Place, f32),
+        (rows, count, more_said): (Vec<Row>, usize, String),
+        hit: fn(usize) -> Hit,
+    ) {
         if rows.is_empty() {
             return;
         }
@@ -66,22 +146,21 @@ impl ChatView {
         let inner = left + m.em(0.7);
         let room = width - m.em(1.4);
         let mut y = top + pad;
-        for (index, (item, _, picked)) in rows.into_iter().enumerate() {
+        for (index, item) in rows.into_iter().enumerate() {
             let rect = [left + pad, y, width - 2.0 * pad, row];
-            if picked {
+            if item.picked {
                 canvas.fill(Fill::rounded(rect, Paint::Chosen, m.em(0.5)));
             }
-            self.hits.push((Hit::Slash(index), place.in_pane(rect)));
+            self.hits.push((hit(index), place.in_pane(rect)));
             self.draw_slash_row(&mut canvas, m, &item, [inner, y, room, row]);
             y += row;
         }
         if more {
-            let said = format!("{count} commands: ↑↓ for more");
             let mut x = inner;
             self.slash_label(
                 &mut canvas,
                 m,
-                (&said, Tone::Muted),
+                (&more_said, Tone::Muted),
                 [inner, y, room, row],
                 &mut x,
             );
@@ -92,23 +171,22 @@ impl ChatView {
     /// its name, the hint of what to type after it, and what it does,
     /// cut to fit; and if the window does it, says so at the end, which
     /// the rest leaves room for.
-    fn draw_slash_row(
-        &mut self,
-        canvas: &mut Canvas<'_>,
-        m: Measures,
-        item: &Item,
-        line: [f32; 4],
-    ) {
+    fn draw_slash_row(&mut self, canvas: &mut Canvas<'_>, m: Measures, item: &Row, line: [f32; 4]) {
         let [inner, top, room, row] = line;
         let tag = if item.ours { m.em(5.5) } else { 0.0 };
         let end = inner + room - tag;
         let mut x = inner;
-        let name = format!("/{}", item.name);
+        // A line with nothing said after its name has all the room.
+        let share = if item.description.is_empty() && item.hint.is_none() {
+            1.0
+        } else {
+            0.6
+        };
         self.slash_label(
             canvas,
             m,
-            (&name, Tone::Plain),
-            [x, top, (end - x) * 0.6, row],
+            (&item.name, Tone::Plain),
+            [x, top, (end - x) * share, row],
             &mut x,
         );
         if let Some(hint) = &item.hint {

@@ -86,6 +86,9 @@ pub(crate) enum ChatKey {
     },
     /// `R`: the last message, which failed, sent again.
     Resend,
+    /// `gf` and `gx`: the file a message mentions under the cursor, or the
+    /// link there, opened.
+    OpenLink,
 }
 
 /// How a chat reads keys in normal and visual mode: the moves it has, by
@@ -133,6 +136,7 @@ impl Dialect for ChatKeys {
                 half: true,
             } => "Scroll table left half a view",
             ChatKey::Resend => "Send the failed message again",
+            ChatKey::OpenLink => "Open file or link under cursor",
         }
         .into()
     }
@@ -159,6 +163,15 @@ impl Dialect for ChatKeys {
             _ => return None,
         };
         Some(Read::Yes(key))
+    }
+
+    fn after_g(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ChatKey>> {
+        matches!(stroke.plain()?, 'f' | 'x').then_some(Read::Yes(ChatKey::OpenLink))
     }
 
     fn after_z(
@@ -651,6 +664,16 @@ impl ChatView {
                         "the last message didn't fail, so there's nothing to send again".into(),
                     );
                     return (false, false);
+                }
+            }
+            ChatKey::OpenLink => {
+                let found = (self.cursor).and_then(|cursor| self.link_at_spot(cursor));
+                match found {
+                    Some(found) => self.opening = Some(found.target),
+                    None => {
+                        self.say("no file or link under the cursor".to_owned());
+                        return (false, false);
+                    }
                 }
             }
             ChatKey::Fold(fold) => return (self.fold_key(fold), false),

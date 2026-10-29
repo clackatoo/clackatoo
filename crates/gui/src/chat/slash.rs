@@ -304,6 +304,7 @@ impl super::ChatView {
             && self.handoff_sent.is_none()
             && !self.viewing_modal();
         (self.slash).typed(self.editor.raw_text(), &self.node.commands, typing);
+        self.refresh_mentions();
     }
 
     crate::shortcuts::bindings::described_keys! {

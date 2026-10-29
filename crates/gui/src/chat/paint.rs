@@ -41,7 +41,7 @@ use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
 use crate::markdown::layout::{
     Canvas, LINE, Laid, Look, Measures, TextPaint, draw_laid, draw_scrolled, intersection, lay_out,
-    lay_out_coloured,
+    lay_out_coloured, lay_out_message,
 };
 pub(super) use crate::markdown::layout::{body_style, text_size};
 use crate::markdown::tables::TableLaid;
@@ -382,6 +382,8 @@ impl ChatView {
             self.draw_menu(paint, fonts, m, place, anchor);
         } else if self.slash.showing() {
             self.draw_slash(paint, fonts, m, place, self.box_top);
+        } else if self.mentions.showing() {
+            self.draw_mentions(paint, fonts, m, place, self.box_top);
         } else if let Some(anchor) = self.detail_anchor.take() {
             self.draw_detail(paint, fonts, m, place, anchor);
         }
@@ -667,7 +669,16 @@ impl ChatView {
         if !turn.prompt.is_empty() {
             let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
             let old = old_pieces.remove(&PROMPT);
-            let piece = self.reuse(fonts, m, old, &turn.prompt, Look::Plain(Tone::Plain), width);
+            let piece = match old {
+                Some(laid) if laid.source == turn.prompt => laid,
+                old => {
+                    // Its mentions of files are links (see
+                    // `chat::mentions`).
+                    let mut cells = old.map(Laid::into_cells).unwrap_or_default();
+                    let words = (turn.prompt.as_str(), Tone::Plain);
+                    lay_out_message(&mut self.layout_cx, fonts, m, words, (width, &mut cells))
+                }
+            };
             let height = piece.height + m.em(1.2);
             laid.spans.push(Span::of(Piece::Prompt, y, height));
             laid.pieces.insert(PROMPT, piece);

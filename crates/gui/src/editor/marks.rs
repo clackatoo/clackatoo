@@ -264,6 +264,14 @@ pub(crate) struct Selected {
     pub(crate) shape: Shape,
 }
 
+impl Selected {
+    /// The lines it covers, the first and the last, from 0.
+    pub(crate) fn lines(&self) -> (u64, u64) {
+        let [first, last] = &self.marked;
+        (first.line.min(last.line), first.line.max(last.line))
+    }
+}
+
 /// How an edit came to a file, as the window it's in sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Came {

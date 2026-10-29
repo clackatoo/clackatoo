@@ -197,6 +197,10 @@ pub(crate) enum Command {
     Marks,
     /// `:Messages`: what the bar has said lately, above it.
     Messages,
+    /// `:Ask`: the focused editor's file, or with `'<,'>`, the lines
+    /// selected last, to the chat beside it, as a mention in the message
+    /// being typed.
+    Ask { selection: bool },
     /// One of the focused editor's commands, for lines, as typed: `:s`,
     /// `:g`, `:d`, `:m` and their kin, with any range.
     Editor(String),
@@ -367,6 +371,12 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let line = line.trim();
+    // The one of the window's commands that takes the lines selected.
+    if let Some(rest) = line.strip_prefix("'<,'>")
+        && canonical(rest.trim()) == "Ask"
+    {
+        return Ok(Command::Ask { selection: true });
+    }
     let (word, argument) = match line.split_once(char::is_whitespace) {
         Some((word, argument)) => (word, Some(argument.trim())),
         None => (line, None),
@@ -424,6 +434,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control allows clicks and typing throughout this window.".into()),
         },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
+        "Ask" if argument.is_none() => return Ok(Command::Ask { selection: false }),
         "devices" => return devices_command(argument).map(Command::Devices),
         "portforward" | "portforward!" => {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
@@ -920,6 +931,7 @@ command_names! {
     "reviewkeep" => "Keep the selected agent changes",
     "reviewreject" => "Reject the selected agent changes",
     "reviewsend" => "Send review comments to the agent",
+    "Ask" => "Mention the file, or the lines selected, in the chat beside",
     "blame" => "Toggle attribution for agent changes",
     "gitsigns" => "Preview, stage, reset or jump between Git changes",
     "Files" => "Find a file in the project",
@@ -1116,6 +1128,7 @@ mod tests {
         ("plan", ""),
         ("Review", ""),
         ("reviewsend", ""),
+        ("Ask", ""),
         ("blame", ""),
         ("reviewkeep", ""),
         ("reviewreject", ""),
@@ -1161,6 +1174,13 @@ mod tests {
         for name in NAMES {
             assert!(PARSED.iter().any(|(word, _)| word == name), "{name}");
         }
+    }
+
+    #[test]
+    fn ask_mentions_the_file_or_the_lines_selected() {
+        assert_eq!(parse("Ask"), Ok(Command::Ask { selection: false }));
+        assert_eq!(parse("'<,'>Ask"), Ok(Command::Ask { selection: true }));
+        assert_eq!(parse("'<,'>ask "), Ok(Command::Ask { selection: true }));
     }
 
     #[test]

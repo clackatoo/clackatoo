@@ -519,6 +519,45 @@ pub(crate) fn lay_out_coloured(
     )
 }
 
+/// A message as it was typed, laid out as plain text in `tone`, `width`
+/// wide, but with each file it mentions, `@path` (see
+/// [`clackatoo_protocol::mentions`]), as a link to the file, drawn as a
+/// chip: code's background, the links' colour.
+pub(crate) fn lay_out_message(
+    layout_cx: &mut parley::LayoutContext<Brush>,
+    fonts: &mut Fonts,
+    m: Measures,
+    (text, tone): (&str, Tone),
+    (width, cells): (f32, &mut Cells),
+) -> Laid {
+    let mentioned = clackatoo_protocol::mentions(text);
+    let block = markdown::Block {
+        kind: BlockKind::Paragraph,
+        text: text.to_owned(),
+        spans: (mentioned.iter())
+            .map(|mention| markdown::Span {
+                range: mention.range.clone(),
+                style: markdown::Style {
+                    code: true,
+                    link: true,
+                    ..markdown::Style::default()
+                },
+            })
+            .collect(),
+        indent: 0,
+        at: 0,
+        links: (mentioned.iter())
+            .map(|mention| markdown::Link {
+                range: mention.range.clone(),
+                to: mention.path.to_owned(),
+            })
+            .collect(),
+        starts_list: false,
+    };
+    let look = (vec![block], text.to_owned(), Look::Plain(tone));
+    lay_out_blocks(layout_cx, fonts, m, look, (width, cells), None)
+}
+
 /// Lays out `blocks`, read from `source`, as [`lay_out_coloured`] lays
 /// out the blocks it reads.
 pub(crate) fn lay_out_blocks(
@@ -885,9 +924,11 @@ pub(crate) fn lay_out_block(
         if style.code {
             builder.push(StyleProperty::FontFamily(mono.clone()), range.clone());
             builder.push(StyleProperty::FontSize(size * 0.93), range.clone());
+            // Code that's a link, as a file a message mentions, is in the
+            // links' colour on code's background.
             builder.push(
                 StyleProperty::Brush(Brush {
-                    tone,
+                    tone: if style.link { Tone::Link } else { tone },
                     code: true,
                     syntax: None,
                 }),

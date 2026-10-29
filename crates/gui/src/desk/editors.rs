@@ -265,6 +265,14 @@ impl Desk {
         Some((editor, self.editors.buffers.get(&editor.buffer())?))
     }
 
+    /// The lines of the focused editor's file selected last, `'<` to `'>`,
+    /// the first and the last, from 0.
+    pub(super) fn selected_lines(&self) -> Option<(u64, u64)> {
+        let (_, copy) = self.focused_editor()?;
+        let selected = self.editors.shared.marks.selected(copy.file())?;
+        Some(selected.lines())
+    }
+
     /// The editor of the focused pane, to change, if it shows one.
     pub(super) fn focused_editor_mut(&mut self) -> Option<&mut Editor> {
         self.editors.panes.get_mut(&self.shown?.pane)

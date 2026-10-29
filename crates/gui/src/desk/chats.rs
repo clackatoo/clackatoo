@@ -13,7 +13,7 @@
 //!
 //! [`Content::Terminal`]: clackatoo_protocol::Content::Terminal
 
-use clackatoo_protocol::{TerminalId, ViewUpdate, wire};
+use clackatoo_protocol::{PaneId, TerminalId, ViewUpdate, wire};
 
 use super::Desk;
 use crate::chat::ChatPane;
@@ -157,12 +157,27 @@ impl Desk {
             #[cfg(test)]
             SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
             let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
-            for chat in self.chats.values_mut() {
+            let (mut wanting, mut opening) = (Vec::new(), Vec::new());
+            for (&terminal, chat) in &mut self.chats {
                 redraw |= chat.settle(fonts);
                 copied.extend(chat.take_copies());
                 self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
                 commands.extend(chat.take_commands());
+                if chat.view_mut().take_wants_files() {
+                    wanting.push(terminal);
+                }
+                if let Some(target) = chat.view_mut().take_opening() {
+                    opening.push((terminal, target, chat.view().folder().map(str::to_owned)));
+                }
+            }
+            // What a chat's `@` menu offers, and what `gf` on a mention
+            // opens (see `chat::mentions`).
+            for terminal in wanting {
+                self.ask_chat_files(terminal);
+            }
+            for (terminal, target, folder) in opening {
+                self.open_link_of(terminal, target, folder.as_deref());
             }
             // What a chat's `/clear` or `/diff` is for, as the window
             // does it (see `chat::slash`).
@@ -199,6 +214,59 @@ impl Desk {
             }
         }
         redraw
+    }
+
+    /// `:Ask`, and `<Space>a`: the focused editor's file, or the lines
+    /// `lines` of it (from 0), go to the chat beside it, or the one last
+    /// used in the tab, as a mention at the end of the message being typed
+    /// (see `chat::mentions`), and the chat takes the focus, in insert
+    /// mode, to say what to do with them. The daemon sends the lines' text
+    /// with the message, as they are when it's sent.
+    pub(super) fn ask_chat(&mut self, lines: Option<(u64, u64)>) {
+        let Some((editor, copy)) = self.focused_editor() else {
+            self.refuse("this pane has no file to ask a chat about".into());
+            return;
+        };
+        let Some(shown) = self.shown else { return };
+        let path = copy.path().to_owned();
+        if path.is_empty() {
+            self.refuse("this buffer has no file yet: write it first".into());
+            return;
+        }
+        // A selection made with the keys, or the one `:'<,'>` was typed
+        // from.
+        let lines = editor.visual_lines().or(lines);
+        let chat_of = |desk: &Self, pane: PaneId| -> Option<TerminalId> {
+            let (_, _, found) = desk.workspaces.find_pane(pane)?;
+            let terminal = found.content.terminal()?;
+            desk.chats.contains_key(&terminal).then_some(terminal)
+        };
+        let Some(pane) = self.recent_in_tab(shown.pane, |desk, pane| chat_of(desk, pane).is_some())
+        else {
+            self.refuse("there's no chat in this tab to ask: Ctrl+B a opens one".into());
+            return;
+        };
+        let Some(terminal) = chat_of(self, pane) else {
+            return;
+        };
+        let Some(chat) = self.chats.get_mut(&terminal) else {
+            return;
+        };
+        let written = crate::chat::mentions::from_chat_folder(&path, chat.view().folder());
+        let lines = lines.map(|(first, last)| {
+            let line = |line: u64| u32::try_from(line + 1).unwrap_or(u32::MAX);
+            (line(first), line(last))
+        });
+        chat.view_mut()
+            .append(format!("{} ", clackatoo_protocol::mention(&written, lines)));
+        if let Some(editor) = self.focused_editor_mut() {
+            editor.leave_visual();
+        }
+        self.show_pane(pane);
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            chat.enter_insert_mode();
+            self.mode = super::WindowMode::Insert;
+        }
     }
 
     /// `:nohlsearch`: the focused pane, a chat, an editor, a terminal or a

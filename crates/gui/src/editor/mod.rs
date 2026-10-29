@@ -4207,7 +4207,7 @@ impl Editor {
         }
     }
 
-    fn leave_visual(&mut self) {
+    pub(crate) fn leave_visual(&mut self) {
         if matches!(self.mode, Mode::Visual(_)) {
             self.mode = Mode::Normal;
         }
@@ -5760,6 +5760,16 @@ impl Editor {
 
     /// The cursor's line, counting from 0, and where it starts in the
     /// text, for a comment on it.
+    /// The lines the visual selection covers, the first and the last,
+    /// from 0, if it's in visual mode.
+    pub(crate) fn visual_lines(&self) -> Option<(u64, u64)> {
+        if !matches!(self.mode, Mode::Visual(_)) {
+            return None;
+        }
+        let (anchor, at) = (self.anchor?.line, self.cursor.at.line);
+        Some((anchor.min(at), anchor.max(at)))
+    }
+
     pub(crate) fn line_here(&self, copy: &BufferCopy) -> (u64, usize) {
         let line = self.cursor.at.line;
         let text = copy.text();

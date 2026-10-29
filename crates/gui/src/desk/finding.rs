@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::wire::SYMBOLS;
 use clackatoo_protocol::{
-    ClientMessage, FileLocation, Found, OpenFile, PaneTerminal, Query, Request, Search,
+    ClientMessage, FileLocation, Found, OpenFile, PaneId, PaneTerminal, Query, Request, Search,
+    TerminalId,
 };
 
 use super::{Asked, Desk};
@@ -294,17 +295,41 @@ impl Desk {
     /// Asks the daemon for `search`, from the focused pane. Returns the
     /// search's number.
     fn send_search(&mut self, search: Search) -> u64 {
+        let pane = self.shown.map(|shown| shown.pane);
+        self.send_search_from(pane, search)
+    }
+
+    /// Asks the daemon for `search`, from `pane`. Returns the search's
+    /// number.
+    fn send_search_from(&mut self, pane: Option<PaneId>, search: Search) -> u64 {
         self.searches += 1;
         let id = self.searches;
         if self.connected {
             // From an editor's folder, the search is from the folder shown.
-            let pane = self.shown.map(|shown| shown.pane);
             if let Some(pane) = pane {
                 self.root_folder_first(pane);
             }
             (self.outbox).push(ClientMessage::Find { id, pane, search });
         }
         id
+    }
+
+    /// Asks the daemon for the files of the project of the chat in
+    /// `terminal`, shown in the tab shown, for its `@` menu, in place of
+    /// any it asked for before.
+    pub(super) fn ask_chat_files(&mut self, terminal: TerminalId) {
+        if let Some((id, _)) = self.chat_files.take() {
+            self.stop_search(id);
+        }
+        let pane = (self.shown_tab()).and_then(|tab| {
+            (tab.layout.panes().iter())
+                .find(|pane| pane.content.terminal() == Some(terminal))
+                .map(|pane| pane.id)
+        });
+        if pane.is_some() {
+            let id = self.send_search_from(pane, Search::Files);
+            self.chat_files = Some((id, terminal));
+        }
     }
 
     fn stop_search(&mut self, id: u64) {
@@ -316,6 +341,17 @@ impl Desk {
     /// Takes in what the daemon's search numbered `id` found. Returns
     /// whether the window must be redrawn.
     pub(crate) fn found(&mut self, id: u64, found: Found) -> bool {
+        if let Some((asked, terminal)) = self.chat_files
+            && asked == id
+        {
+            if matches!(found, Found::Done(_)) {
+                self.chat_files = None;
+            }
+            if let Some(chat) = self.chats.get_mut(&terminal) {
+                chat.view_mut().found_files(found);
+            }
+            return true;
+        }
         let Some(finder) = &mut self.finder else {
             return false;
         };

@@ -19,6 +19,7 @@ mod filling;
 pub(crate) mod fixtures;
 mod handoff;
 mod images;
+pub(crate) mod mentions;
 mod paint;
 mod pane;
 mod picker;
@@ -59,6 +60,9 @@ enum Input {
         modifiers: Modifiers,
     },
     Paste(String),
+    /// Puts this at the end of the message being typed, after a space if
+    /// it doesn't end in one: a mention `:Ask` attached.
+    Append(String),
     Clipboard,
     PasteFailed(String),
     Image(clackatoo_protocol::ChatImage),
@@ -208,6 +212,8 @@ enum Hit {
     Usage,
     /// A command in the `/` menu, by its line in view.
     Slash(usize),
+    /// A file in the `@` menu, by its line in view.
+    Mention(usize),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -288,6 +294,12 @@ pub(crate) struct ChatView {
     plan_open: bool,
     /// The `/` menu of the agent's commands, over the box.
     slash: slash::Slash,
+    /// The `@` menu of the project's files, over the box.
+    mentions: mentions::Mentions,
+    /// The project's files are to be asked for, for the `@` menu.
+    wants_files: bool,
+    /// A link to open, as `gf` on a mention asks, for the window.
+    opening: Option<crate::links::Target>,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -546,6 +558,9 @@ impl ChatView {
             queue_page: 0,
             plan_open: false,
             slash: slash::Slash::default(),
+            mentions: mentions::Mentions::default(),
+            wants_files: false,
+            opening: None,
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -1170,6 +1185,11 @@ impl ChatView {
             Some(Hit::Editor | Hit::ModelSearch) => Pointer::Text,
             Some(Hit::MenuSurface | Hit::ModelRail) => Pointer::Arrow,
             Some(_) => Pointer::Hand,
+            None if (self.spot_at(at, false))
+                .is_some_and(|spot| self.mention_at_spot(spot).is_some()) =>
+            {
+                Pointer::Hand
+            }
             None if self.over_text(at) => Pointer::Text,
             None => Pointer::Arrow,
         }
@@ -1401,6 +1421,16 @@ impl ChatView {
                 }
                 Input::Image(image) => self.settle_image(image),
                 Input::Paste(text) => self.settle_paste(fonts, &text),
+                Input::Append(text) => {
+                    let space = !self.editor.raw_text().is_empty()
+                        && !self.editor.raw_text().ends_with(char::is_whitespace);
+                    let text = if space { format!(" {text}") } else { text };
+                    self.drive(fonts, |driver| {
+                        driver.move_to_text_end();
+                        driver.insert_or_replace_selection(&text);
+                    });
+                    self.refresh_slash();
+                }
                 Input::Press { at, clicks, shift } => {
                     self.pressed(fonts, at, clicks, shift, &mut settled);
                 }
@@ -1530,7 +1560,7 @@ impl ChatView {
             return;
         }
         self.refresh_slash();
-        if !self.slash_key(key, modifiers, fonts) {
+        if !self.slash_key(key, modifiers, fonts) && !self.mention_key(key, modifiers, fonts) {
             self.composer_key(key, modifiers, fonts, text, settled);
         }
         self.refresh_slash();
@@ -2370,6 +2400,10 @@ impl ChatView {
                 self.slash.click(row);
                 self.complete_slash(fonts);
             }
+            Some(Hit::Mention(row)) => {
+                self.mentions.click(row);
+                self.complete_mention(fonts);
+            }
             Some(Hit::Chip(settings)) => {
                 if self.toggle_menu(settings) {
                     settled.actions.push(ChatAction::LearnModels);
@@ -2487,6 +2521,16 @@ impl ChatView {
             self.picked = None;
             return;
         };
+        // A file a message mentions opens, as a link does.
+        if clicks == 1
+            && !shift
+            && let Some(target) = self.mention_at_spot(spot)
+        {
+            self.picked = None;
+            self.cursor = Some(spot);
+            self.opening = Some(target);
+            return;
+        }
         let (anchor, head) = match (clicks, self.picked) {
             (_, Some(picked)) if shift => (picked.anchor, spot),
             (2, _) => self.word_at(at, false).unwrap_or((spot, spot)),
@@ -3067,6 +3111,53 @@ mod tests {
         enter(&mut view, false);
         let settled = view.settle(&mut fonts);
         assert_eq!(settled.actions, [ChatAction::Send("/review main".into())]);
+    }
+
+    #[test]
+    fn an_at_offers_the_projects_files_and_tab_mentions_the_one_picked() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        view.folder = Some("~/p/src".into());
+        typed(&mut view, "fix @");
+        view.settle(&mut fonts);
+        assert!(view.take_wants_files(), "the files are asked for");
+        assert!(!view.take_wants_files(), "once");
+        view.found_files(clackatoo_protocol::Found::Root {
+            path: "/home/j/p".into(),
+            name: "~/p".into(),
+        });
+        view.found_files(clackatoo_protocol::Found::Files(vec![
+            "src/main.rs".into(),
+            "docs/read me.md".into(),
+        ]));
+        typed(&mut view, "ma");
+        view.settle(&mut fonts);
+        assert!(view.mentions.showing());
+        named(&mut view, NamedKey::Tab);
+        view.settle(&mut fonts);
+        // From the chat's folder, as its agent reads it.
+        assert_eq!(view.editor.raw_text(), "fix @main.rs ");
+        assert!(!view.mentions.showing());
+        typed(&mut view, "and @rea");
+        view.settle(&mut fonts);
+        assert!(view.take_wants_files(), "asked again, as it opened again");
+        view.found_files(clackatoo_protocol::Found::Files(vec![
+            "docs/read me.md".into(),
+        ]));
+        named(&mut view, NamedKey::Enter);
+        view.settle(&mut fonts);
+        assert_eq!(
+            view.editor.raw_text(),
+            "fix @main.rs and @\"../docs/read me.md\" "
+        );
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(
+            settled.actions,
+            [ChatAction::Send(
+                "fix @main.rs and @\"../docs/read me.md\"".into()
+            )]
+        );
     }
 
     #[test]
