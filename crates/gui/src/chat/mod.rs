@@ -1519,33 +1519,6 @@ impl ChatView {
         edit(&mut driver);
     }
 
-    /// Attaches `image`, pasted, to the message, unless it's past what a
-    /// message holds, or a question waits.
-    fn settle_image(&mut self, image: clackatoo_protocol::ChatImage) {
-        if self.node.question.is_some() {
-            self.typed_while_asking();
-        } else if !image.valid()
-            || self.images.len()
-                + self
-                    .handoff_sent
-                    .as_ref()
-                    .map_or(0, |draft| draft.images.len())
-                >= clackatoo_protocol::ChatImage::MAX_COUNT
-            || self
-                .images
-                .iter()
-                .chain(self.handoff_sent.iter().flat_map(|draft| &draft.images))
-                .map(|image| image.data.len())
-                .sum::<usize>()
-                + image.data.len()
-                > clackatoo_protocol::ChatImage::MAX_DATA
-        {
-            self.say("Paste up to four images, 8 MiB encoded in total.".into());
-        } else {
-            self.images.push(image);
-        }
-    }
-
     fn settle_paste(&mut self, fonts: &mut Fonts, text: &str) {
         if self.viewing_modal() {
             return;
@@ -3176,6 +3149,20 @@ mod tests {
                 "fix @main.rs and @\"../docs/read me.md\"".into()
             )]
         );
+    }
+
+    #[test]
+    fn up_walks_through_messages_sent_that_mention_files_not_through_the_menu() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        view.node.prompts = vec!["older".into(), "see @src/a.rs".into()];
+        named(&mut view, NamedKey::ArrowUp);
+        view.settle(&mut fonts);
+        assert_eq!(view.editor.raw_text(), "see @src/a.rs");
+        assert!(!view.take_wants_files(), "the @ menu stays closed");
+        named(&mut view, NamedKey::ArrowUp);
+        view.settle(&mut fonts);
+        assert_eq!(view.editor.raw_text(), "older");
     }
 
     #[test]

@@ -258,7 +258,8 @@ impl super::ChatView {
             && self.menu.is_none()
             && self.handoff_sent.is_none()
             && !self.viewing_modal()
-            && !self.slash.showing();
+            && !self.slash.showing()
+            && !self.recalling();
         let cursor = self.editor.raw_selection().focus().index();
         if self.mentions.typed(self.editor.raw_text(), cursor, typing) {
             self.wants_files = true;

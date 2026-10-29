@@ -297,6 +297,13 @@ impl ChatView {
         changed
     }
 
+    /// Whether Up or Down is walking through the messages sent, the box
+    /// showing one it put there: the `/` and `@` menus stay closed
+    /// meanwhile, so Up and Down go on walking, not through a menu.
+    pub(super) fn recalling(&self) -> bool {
+        (self.memory.recall.as_ref()).is_some_and(|(_, shown)| shown == self.editor.raw_text())
+    }
+
     /// Puts `text`, a message sent before, in at the caret, as picked in
     /// the finder.
     pub(crate) fn put_recalled(&mut self, text: String) {

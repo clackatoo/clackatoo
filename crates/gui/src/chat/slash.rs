@@ -302,7 +302,8 @@ impl super::ChatView {
             && self.node.question.is_none()
             && self.menu.is_none()
             && self.handoff_sent.is_none()
-            && !self.viewing_modal();
+            && !self.viewing_modal()
+            && !self.recalling();
         (self.slash).typed(self.editor.raw_text(), &self.node.commands, typing);
         self.refresh_mentions();
     }
