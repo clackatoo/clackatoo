@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026.10.101 (2026-10-29)
+
+### Features
+
+- **gui:** desktop notifications for chats you can't see (CLACKA-194) (2949e62d)
+- **protocol:** the list of chats says whether a chat's last turn failed (protocol 118, CLACKA-194) (56ff7e49)
+
+### Fixes
+
+- **gui:** ask for notification signals only once the bus has said hello (CLACKA-194) (a5056308)
+- **gui:** notifications from review: only the server's signals, its restarts, late answers (CLACKA-194) (e835b3f4)
+
 ## 2026.10.100 (2026-10-29)
 
 ### Features
