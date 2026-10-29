@@ -1052,6 +1052,14 @@ impl Daemon {
                 if self.waited_by(listener, child) {
                     continue;
                 }
+                // Started on a branch of the conversation not shown, its
+                // agent never started it: held until that branch is.
+                if self
+                    .chat_ref(listener)
+                    .is_some_and(|of| of.holds_card(child))
+                {
+                    continue;
+                }
                 // A wait the upgrade cut off is told the chat settled,
                 // whoever started its turn, as the wait would have been.
                 if !self.wait_cut_off(listener, child) && !unheard(kid, listener, child) {
@@ -1126,6 +1134,13 @@ impl Daemon {
     /// front, until they write there or in `id`, and the chat says so; what
     /// waits behind it goes on. Returns whether it goes on too: false if
     /// it's held.
+    /// Looks again at whether chats `chats` have finished, for those
+    /// that started them to hear, as after a branch they were started on
+    /// is shown again.
+    pub(in crate::server) fn recheck_finished(&mut self, chats: Vec<TerminalId>) {
+        self.tools.talk.finished.extend(chats);
+    }
+
     fn fill_notice(&mut self, id: TerminalId) -> bool {
         if !self
             .chat_ref(id)
@@ -1141,7 +1156,9 @@ impl Daemon {
                 let kid = slot.terminal.chat_ref()?;
                 let cut = self.wait_cut_off(id, child);
                 let ours = kid.relations().parent == Some(id) || cut;
+                let held = (self.chat_ref(id)).is_some_and(|of| of.holds_card(child));
                 let told = ours
+                    && !held
                     && idle(kid)
                     && (cut || unheard(kid, id, child))
                     && !self.waited_by(id, child);
@@ -2269,6 +2286,55 @@ mod tests {
         for _ in 0..3 {
             daemon.relay_chats();
         }
+    }
+
+    /// A chat started on a branch of the conversation not shown finishes
+    /// unheard by the branch shown, whose agent never started it: it's
+    /// told once its own branch is shown again (CLACKA-198).
+    #[test]
+    fn a_subagent_of_a_branch_not_shown_is_heard_of_when_its_branch_is() {
+        use clackatoo_protocol::{ChatAction, ForkFiles};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        answers(&mut daemon, a, "done");
+        daemon.chat(a).unwrap().act(ChatAction::Send("more".into()));
+        let b = building(&mut daemon, 2, a);
+        assert_eq!(daemon.chat_ref(a).unwrap().subagent(b).unwrap().turn, 1);
+        answers(&mut daemon, a, "started b");
+        relay(&mut daemon);
+        let rewind = ChatAction::Rewind {
+            at: 1,
+            files: ForkFiles::Keep,
+            edit: false,
+            stop_tasks: false,
+        };
+        daemon.chat_act(a, rewind).unwrap();
+        finishes(&mut daemon, b, "built it");
+        relay(&mut daemon);
+        let turns = |daemon: &Daemon| daemon.chat_ref(a).unwrap().node().turns.len();
+        assert_eq!(turns(&daemon), 1, "held");
+        assert!(
+            daemon.chat_ref(a).unwrap().relations().inbox.is_empty(),
+            "held"
+        );
+        let back = ChatAction::SwitchBranch {
+            at: 1,
+            to: 1,
+            files: ForkFiles::Keep,
+            stop_tasks: false,
+        };
+        daemon.chat_act(a, back).unwrap();
+        relay(&mut daemon);
+        // Told as its next turn, the chat being idle.
+        let node = daemon.chat_ref(a).unwrap().node();
+        assert_eq!(node.turns.len(), 3, "{:#?}", node.turns);
+        let from = node.turns[2].from.as_ref().unwrap();
+        assert_eq!(from.agent, "Clackatoo");
+        assert!(
+            node.turns[2].prompt.contains("built it"),
+            "{}",
+            node.turns[2].prompt
+        );
     }
 
     /// A chat that started another is told when it finishes, and no wait

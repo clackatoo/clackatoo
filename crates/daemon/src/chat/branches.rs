@@ -807,6 +807,15 @@ impl HostedChat {
         std::mem::take(&mut self.forgotten)
     }
 
+    /// Whether the card of chat `child`, which its agent started, is on a
+    /// turn of a branch not shown: its finish isn't told to the branch
+    /// shown, whose agent never started it, until its own is shown again.
+    pub(crate) fn holds_card(&self, child: clackatoo_protocol::TerminalId) -> bool {
+        (self.tree.live())
+            .filter_map(|(_, seg)| seg.held.as_ref())
+            .any(|held| held.cards.iter().any(|card| card.chat == child))
+    }
+
     /// The agent sessions of the branches not shown, so the start page
     /// doesn't list them as conversations of their own.
     pub(crate) fn branch_sessions(&self) -> Vec<String> {

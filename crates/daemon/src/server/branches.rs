@@ -65,6 +65,12 @@ impl Daemon {
             self.tell_agents(buffer);
         }
         self.chat_reviews_stale(id);
+        // Subagents of the branch shown now may have finished meanwhile,
+        // held while it wasn't.
+        let children: Vec<TerminalId> = (self.chat_ref(id).into_iter())
+            .flat_map(|chat| chat.node().subagents.iter().map(|card| card.chat))
+            .collect();
+        self.recheck_finished(children);
         self.collect_damage(id);
         self.keep_soon();
     }
