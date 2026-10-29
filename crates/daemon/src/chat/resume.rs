@@ -159,14 +159,22 @@ impl HostedChat {
             SessionUpdate::UserMessageChunk(chunk) if nested::told_a_subagent(&chunk) => {}
             SessionUpdate::UserMessageChunk(chunk) => {
                 // A file the message mentioned comes back as what the
-                // adapter made of it: a link, or as Claude's and Codex's
-                // adapters keep them, the words they gave the model.
-                let mentioned = match &chunk.content {
+                // adapter made of it. As Claude's and Codex's adapters keep
+                // those clackatoo sent, it's the words they gave the model:
+                // left out, as the message's own `@path` says it, but only
+                // if it does, so nothing else shaped so is taken for one. A
+                // link of the agent's own interface is a mention.
+                let shaped = match &chunk.content {
                     ContentBlock::Text(text) => match replayed_context(&text.text) {
                         Replayed::Words => None,
-                        Replayed::Link(uri) => Some(uri),
-                        Replayed::Text => return,
+                        Replayed::Link(uri) | Replayed::Text(uri) => Some(uri),
                     },
+                    _ => None,
+                };
+                if shaped.is_some_and(|uri| self.mentioned_already(uri)) {
+                    return;
+                }
+                let mentioned = match &chunk.content {
                     ContentBlock::ResourceLink(link) => Some(link.uri.as_str()),
                     ContentBlock::Resource(resource) => match &resource.resource {
                         EmbeddedResourceResource::TextResourceContents(text) => {
@@ -240,23 +248,15 @@ impl HostedChat {
         let Some((path, lines)) = file_of(uri) else {
             return;
         };
-        let cwd = PathBuf::from(&self.cwd);
+        let cwd = self.real_cwd();
         let written = match path.strip_prefix(&cwd) {
             Ok(inside) if path.starts_with(&self.project) => inside.display().to_string(),
             _ => path.display().to_string(),
         };
-        let open = (self.answering_turn()).filter(|&index| self.node.turns[index].items.is_empty());
-        if let Some(index) = open {
-            let prompt = &self.node.turns[index].prompt;
-            let already = mentions(prompt).iter().any(|mentioned| {
-                mentioned.lines == lines
-                    && [cwd.as_path(), self.project.as_path()]
-                        .iter()
-                        .any(|from| crate::find::lexical(&from.join(mentioned.path)) == path)
-            });
-            if already {
-                return;
-            }
+        if self.mentioned_already(uri) {
+            return;
+        }
+        if let Some(index) = self.open_replayed() {
             let prompt = &mut self.node.turns[index].prompt;
             if !prompt.is_empty() {
                 prompt.push(' ');
@@ -268,6 +268,28 @@ impl HostedChat {
         self.end_turn(Outcome::Done);
         self.forget_finished_plan();
         self.push_replayed(mention(&written, lines));
+    }
+
+    /// The turn being told again whose message is still coming, if one is.
+    fn open_replayed(&self) -> Option<usize> {
+        (self.answering_turn()).filter(|&index| self.node.turns[index].items.is_empty())
+    }
+
+    /// Whether the message being told again mentions the file `uri` names,
+    /// and the same lines, as `@path`.
+    fn mentioned_already(&self, uri: &str) -> bool {
+        let (Some((path, lines)), Some(index)) = (file_of(uri), self.open_replayed()) else {
+            return false;
+        };
+        let cwd = self.real_cwd();
+        mentions(&self.node.turns[index].prompt)
+            .iter()
+            .any(|mentioned| {
+                mentioned.lines == lines
+                    && [cwd.as_path(), self.project.as_path()]
+                        .iter()
+                        .any(|from| crate::find::lexical(&from.join(mentioned.path)) == path)
+            })
     }
 
     fn push_replayed(&mut self, prompt: String) {
@@ -528,8 +550,9 @@ enum Replayed<'a> {
     /// text sent, with the text after it.
     Link(&'a str),
     /// The text of a file sent, as Claude's adapter put it after the
-    /// message: `<context ref="file:///…">…</context>`.
-    Text,
+    /// message: `<context ref="file:///…">…</context>`, of the file at
+    /// this URI.
+    Text(&'a str),
 }
 
 /// What the block of words `text` is, of [`Replayed`].
@@ -539,14 +562,14 @@ fn replayed_context(text: &str) -> Replayed<'_> {
     }
     if let Some((first, rest)) = text.split_once('\n')
         && let Some(uri) = link(first)
-        && context(rest, Some(uri))
+        && context(rest) == Some(uri)
     {
         return Replayed::Link(uri);
     }
-    if context(text.strip_prefix('\n').unwrap_or(text), None) {
-        return Replayed::Text;
+    match context(text.strip_prefix('\n').unwrap_or(text)) {
+        Some(uri) => Replayed::Text(uri),
+        None => Replayed::Words,
     }
-    Replayed::Words
 }
 
 /// The file URI `line` links to, if it's all an adapter's link to a
@@ -559,18 +582,13 @@ fn link(line: &str) -> Option<&str> {
     (plain && uri.starts_with("file://")).then_some(uri)
 }
 
-/// Whether `text` is all a file's text as an adapter gives it the model,
-/// `<context ref="file:///…">…</context>`, and of `uri` if it's given.
-fn context(text: &str, uri: Option<&str>) -> bool {
-    let Some(rest) = text.strip_prefix("<context ref=\"") else {
-        return false;
-    };
-    let Some((reference, _)) = rest.split_once('"') else {
-        return false;
-    };
-    reference.starts_with("file://")
-        && uri.is_none_or(|uri| uri == reference)
-        && rest.ends_with("</context>")
+/// The file URI of the text `text` is all of, as an adapter gives a
+/// file's text to the model, `<context ref="file:///…">…</context>`, if
+/// it's that.
+fn context(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("<context ref=\"")?;
+    let (reference, _) = rest.split_once('"')?;
+    (reference.starts_with("file://") && rest.ends_with("</context>")).then_some(reference)
 }
 
 /// The file a `file://` URI names, and the lines its fragment says,
@@ -601,7 +619,7 @@ mod tests {
         );
         assert_eq!(
             replayed_context("\n<context ref=\"file:///p/a.rs\">\nx\n</context>"),
-            Replayed::Text
+            Replayed::Text(uri)
         );
         for words in [
             "[@a.rs](https://example.com)",
