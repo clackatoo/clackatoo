@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026.10.98 (2026-10-29)
+
+### Features
+
+- **daemon:** keep the agent's slash commands in the chat's view, and send a command alone (CLACKA-189) (43b364cb)
+- **gui:** a / menu of the agent's commands in the chat's box, and its own done natively (CLACKA-189) (83dbc00c)
+- **web:** list the agent's slash commands as / is typed on the phone (CLACKA-189) (1e332a21)
+
+### Fixes
+
+- slash commands from review: words after a name go as words, and only real commands hold the role back (CLACKA-189) (0af71bbd)
+
 ## 2026.10.97 (2026-10-28)
 
 ### Features
