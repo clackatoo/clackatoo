@@ -20428,7 +20428,20 @@ fn boards_come_back_and_a_pane_whose_board_has_gone_closes_once_theyre_read() {
         let daemon = start();
         let mut client = daemon.client();
         let board = PaneTerminal::Board(clackatoo_protocol::OpenBoard::Named("plan".into()));
-        client.new_workspace(None, board).unwrap();
+        // A board's pane asked for before the boards are read is refused, to
+        // ask again, so it's asked until they are.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match client.new_workspace(None, board.clone()) {
+                Ok(_) => break,
+                Err(ClientError::Daemon(Error::Boards(why)))
+                    if why.contains("still being read") && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("no board's pane: {err}"),
+            }
+        }
         wait_for_kept(&file, |kept| kept.contains("\"board\""));
     }
     let mut state: serde_json::Value =
