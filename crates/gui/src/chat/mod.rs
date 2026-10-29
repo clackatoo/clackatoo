@@ -296,10 +296,6 @@ pub(crate) struct ChatView {
     slash: slash::Slash,
     /// The `@` menu of the project's files, over the box.
     mentions: mentions::Mentions,
-    /// The project's files are to be asked for, for the `@` menu.
-    wants_files: bool,
-    /// A link to open, as `gf` on a mention asks, for the window.
-    opening: Option<crate::links::Target>,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -559,8 +555,6 @@ impl ChatView {
             plan_open: false,
             slash: slash::Slash::default(),
             mentions: mentions::Mentions::default(),
-            wants_files: false,
-            opening: None,
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -2519,7 +2513,7 @@ impl ChatView {
         {
             self.picked = None;
             self.cursor = Some(spot);
-            self.opening = Some(target);
+            self.mentions.opening = Some(target);
             return;
         }
         let (anchor, head) = match (clicks, self.picked) {

@@ -672,7 +672,7 @@ impl ChatView {
                     self.say("no file or link under the cursor".to_owned());
                     return (false, false);
                 };
-                self.opening = Some(found.target);
+                self.mentions.opening = Some(found.target);
             }
             ChatKey::Fold(fold) => return (self.fold_key(fold), false),
             ChatKey::Sideways { right, half } => {

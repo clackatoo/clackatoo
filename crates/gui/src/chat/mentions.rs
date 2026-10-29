@@ -52,6 +52,11 @@ pub(crate) struct Mentions {
     /// The message as it was when Esc closed the menu, which stays closed
     /// until it changes.
     closed: Option<String>,
+    /// The project's files are to be asked for, for the window to ask.
+    wants_files: bool,
+    /// A file a mention names, or a link, to open, as a click or `gf`
+    /// asks, for the window to open.
+    pub(super) opening: Option<Target>,
 }
 
 /// The mention being typed in `text` with the cursor at byte `cursor`:
@@ -262,7 +267,7 @@ impl super::ChatView {
             && !self.recalling();
         let cursor = self.editor.raw_selection().focus().index();
         if self.mentions.typed(self.editor.raw_text(), cursor, typing) {
-            self.wants_files = true;
+            self.mentions.wants_files = true;
         }
     }
 
@@ -319,13 +324,13 @@ impl super::ChatView {
 
     /// The link `gf` or a click asked to open, for the window to open.
     pub(crate) fn take_opening(&mut self) -> Option<Target> {
-        self.opening.take()
+        self.mentions.opening.take()
     }
 
     /// Whether the project's files are to be asked of the daemon, for the
     /// `@` menu, since this was last asked.
     pub(crate) fn take_wants_files(&mut self) -> bool {
-        std::mem::take(&mut self.wants_files)
+        std::mem::take(&mut self.mentions.wants_files)
     }
 
     crate::shortcuts::bindings::described_keys! {
