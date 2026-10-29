@@ -59,6 +59,22 @@ const LIST_EVERY: i32 = 5_000;
 /// before a fitted terminal is fitted again to it.
 const REFIT_AFTER: i32 = 300;
 
+/// How long typing pauses, in milliseconds, before what's typed in a
+/// chat's box is told the daemon, as in the window.
+const DRAFT_PAUSE: i32 = 600;
+
+/// A random number, other than 0, which is the daemon's, for this page to
+/// know the drafts it told by.
+fn own_number() -> u64 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a random number below 2^53"
+    )]
+    let random = (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
+    random.max(1)
+}
+
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
@@ -298,6 +314,9 @@ struct App {
     term_page: Option<TermPage>,
     /// When the app looks again at whether keys go, if it's to.
     check_at: f64,
+    /// How many times what's typed in the box changed, for a pause in
+    /// typing to tell the daemon it once (see [`App::typed_draft`]).
+    drafts_typed: u64,
     /// The form question shown, by its chat and number, and when it came,
     /// in milliseconds: for [`FORM_PAUSE`] after, its buttons don't answer
     /// it, as a tap meant for what was there before mustn't.
@@ -395,13 +414,14 @@ pub(crate) fn start() {
             document: document.clone(),
             root: root.clone(),
             screen: Screen::Boot,
-            state: State::default(),
+            state: State::with_number(own_number()),
             session: Session::default(),
             socket: None,
             retry: 1,
             page: None,
             term_page: None,
             check_at: 0.0,
+            drafts_typed: 0,
             form_since: None,
             count_at: 0.0,
             pressed: None,
@@ -462,6 +482,7 @@ fn listen_for_chat_input(root: &DomElement) {
                 if let Some(open) = &app.state.open {
                     app.state.drafts.insert(open.id, area.value());
                     app.save_draft(open.id);
+                    app.typed_draft();
                     app.draw_soon();
                 }
             });
@@ -1351,6 +1372,10 @@ impl App {
                 self.save_draft(chat);
             }
         }
+        // Drafts typed elsewhere, taken into boxes here.
+        for chat in std::mem::take(&mut self.state.drafts_changed) {
+            self.save_draft(chat);
+        }
         self.send();
         self.draw_soon();
     }
@@ -1361,7 +1386,7 @@ impl App {
         // The device was unpaired, its password is to be given again, or the
         // daemon refused it: the daemon says which, and the app shows it.
         if (4001..=4003).contains(&code) {
-            self.state = State::default();
+            self.state = State::with_number(own_number());
             spawn_local(boot());
             return;
         }
@@ -2238,6 +2263,27 @@ impl App {
             self.state.dirty.footer = true;
             self.draw_soon();
         }
+    }
+
+    /// What's typed in the box changed: once typing pauses, it's told the
+    /// daemon, as the window tells it.
+    fn typed_draft(&mut self) {
+        self.drafts_typed += 1;
+        let typed = self.drafts_typed;
+        let tell = Closure::once_into_js(move || {
+            with_app(|app| {
+                if app.drafts_typed == typed {
+                    app.state.tell_draft();
+                    app.send();
+                }
+            });
+        });
+        let _ = self
+            .window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                tell.unchecked_ref(),
+                DRAFT_PAUSE,
+            );
     }
 
     fn save_draft(&self, chat: TerminalId) {
