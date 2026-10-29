@@ -1115,6 +1115,58 @@ fn chat_action_since(action: &crate::ChatAction) -> u32 {
     }
 }
 
+/// `message` without what it says was made in a turn not on the branch of
+/// its chat's conversation shown, [`TURN_NOT_SHOWN`], for a peer from
+/// before branches (CLACKA-198), which would take that for a turn's index:
+/// a buffer's agent hunks leave such a hunk out, and a review its hunks,
+/// and a file left with none. Never kept nor rejected unseen, so leaving
+/// them out is the safe side. `None` if there's none.
+///
+/// [`TURN_NOT_SHOWN`]: crate::TURN_NOT_SHOWN
+fn without_turns_not_shown(message: &ServerMessage) -> Option<ServerMessage> {
+    use crate::TURN_NOT_SHOWN;
+    let not_shown =
+        |made: Option<crate::Made>| made.is_some_and(|made| made.turn == TURN_NOT_SHOWN);
+    match message {
+        ServerMessage::Event(Event::Buffer {
+            buffer,
+            update:
+                BufferUpdate::Agents {
+                    version,
+                    hunks,
+                    chats,
+                },
+        }) if hunks.iter().any(|hunk| hunk.turn == TURN_NOT_SHOWN) => {
+            let hunks = (hunks.iter())
+                .filter(|hunk| hunk.turn != TURN_NOT_SHOWN)
+                .cloned()
+                .collect();
+            Some(ServerMessage::Event(Event::Buffer {
+                buffer: *buffer,
+                update: BufferUpdate::Agents {
+                    version: *version,
+                    hunks,
+                    chats: chats.clone(),
+                },
+            }))
+        }
+        ServerMessage::Event(Event::Review { review, list })
+            if (list.files.iter()).any(|file| file.hunks.iter().any(|hunk| not_shown(hunk.by))) =>
+        {
+            let mut list = list.clone();
+            for file in &mut list.files {
+                file.hunks.retain(|hunk| !not_shown(hunk.by));
+            }
+            list.files.retain(|file| !file.hunks.is_empty());
+            Some(ServerMessage::Event(Event::Review {
+                review: *review,
+                list,
+            }))
+        }
+        _ => None,
+    }
+}
+
 /// Replace image pixels with a readable label for older clients, in both
 /// snapshots and incremental tool/turn updates.
 fn without_tool_images(message: &ServerMessage) -> ServerMessage {
@@ -1333,6 +1385,16 @@ impl Downgrade for ServerMessage {
         reason = "an arm for each kind of message grown since"
     )]
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        // Unchanged bytes with a new meaning, so before the check by
+        // version, which they pass.
+        if wire < CHAT_BRANCHES
+            && let Some(shown) = without_turns_not_shown(self)
+        {
+            return match shown.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(shown),
+                other => other,
+            };
+        }
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
@@ -1915,6 +1977,76 @@ mod tests {
             message
         );
         assert!(frame::encode(CHAT_HANDOFF - 1, &message).is_err());
+    }
+
+    #[test]
+    fn turns_not_shown_are_left_out_for_peers_from_before_branches() {
+        use crate::{
+            AgentHunk, BufferId, Made, ReviewFile, ReviewHunk, ReviewId, ReviewList,
+            TURN_NOT_SHOWN, TerminalId,
+        };
+        let hunk = |id: u64, turn: u32| AgentHunk {
+            id,
+            start: 0,
+            end: 1,
+            base: String::new(),
+            chat: 3,
+            turn,
+            reviewed: false,
+        };
+        let agents = ServerMessage::Event(Event::Buffer {
+            buffer: BufferId(1),
+            update: BufferUpdate::Agents {
+                version: 4,
+                hunks: vec![hunk(1, 0), hunk(2, TURN_NOT_SHOWN)],
+                chats: Vec::new(),
+            },
+        });
+        assert!(matches!(agents.downgrade(CHAT_BRANCHES), Downgraded::AsIs));
+        let Downgraded::To(ServerMessage::Event(Event::Buffer {
+            update: BufferUpdate::Agents { hunks, .. },
+            ..
+        })) = agents.downgrade(CHAT_BRANCHES - 1)
+        else {
+            panic!("not downgraded");
+        };
+        assert_eq!(hunks, [hunk(1, 0)]);
+        let made = |turn: u32| ReviewHunk {
+            line: 1,
+            before: Vec::new(),
+            base: String::new(),
+            text: "x\n".into(),
+            after: Vec::new(),
+            agents: vec![1],
+            by: Some(Made {
+                chat: TerminalId(3),
+                turn,
+            }),
+            reviewed: false,
+        };
+        let file = |hunks: Vec<ReviewHunk>| ReviewFile {
+            path: "/a".into(),
+            shown: "a".into(),
+            buffer: None,
+            hunks,
+        };
+        let review = ServerMessage::Event(Event::Review {
+            review: ReviewId(1),
+            list: ReviewList {
+                files: vec![
+                    file(vec![made(0), made(TURN_NOT_SHOWN)]),
+                    file(vec![made(TURN_NOT_SHOWN)]),
+                ],
+                ..ReviewList::default()
+            },
+        });
+        assert!(matches!(review.downgrade(CHAT_BRANCHES), Downgraded::AsIs));
+        let Downgraded::To(ServerMessage::Event(Event::Review { list, .. })) =
+            review.downgrade(CHAT_BRANCHES - 1)
+        else {
+            panic!("not downgraded");
+        };
+        assert_eq!(list.files, [file(vec![made(0)])]);
     }
 
     #[test]
