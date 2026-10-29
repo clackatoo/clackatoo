@@ -3372,7 +3372,11 @@ fn a_background_shells_output_file_reaches_windows_and_a_terminal_follows_it() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    let dir = daemon.dir.path();
+    // In Claude Code's temp area, as the daemon takes no other.
+    let area = std::env::temp_dir().join(format!("claude-{}", rustix::process::getuid().as_raw()));
+    std::fs::create_dir_all(&area).unwrap();
+    let project = tempfile::tempdir_in(&area).unwrap();
+    let dir = project.path();
     let node = ask(
         &mut client,
         chat,
@@ -3390,7 +3394,7 @@ fn a_background_shells_output_file_reaches_windows_and_a_terminal_follows_it() {
     let terminal = client
         .new_terminal(NewTerminal {
             size: Size::new(60, 10).unwrap(),
-            command: shell.follow_output(),
+            command: shell.follow_output("tail"),
             cwd: None,
             record_to: None,
         })
@@ -17911,7 +17915,7 @@ fn a_real_background_shells_output_is_followed_from_the_file_its_adapter_names()
     let terminal = client
         .new_terminal(NewTerminal {
             size: Size::new(60, 10).unwrap(),
-            command: shell.follow_output(),
+            command: shell.follow_output("tail"),
             cwd: None,
             record_to: None,
         })

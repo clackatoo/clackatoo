@@ -4,7 +4,7 @@
 size 1100x900
 keys <C-;>:Agent claude<CR>
 keys i
-type background-out $PROJECT
+type background-out tmp
 keys <CR>
 wait-for started
 sleep 600

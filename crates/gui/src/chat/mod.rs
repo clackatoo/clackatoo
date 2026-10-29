@@ -468,6 +468,11 @@ pub(crate) struct ChatView {
     filling: Option<crate::form::Filling>,
     /// Links to open, as a form's Open asks, for the window to take.
     opened: Vec<String>,
+    /// The tasks whose lines on the shelf were clicked, to follow their
+    /// output, by the agent's names for them: the window pairs them with
+    /// this chat, so a click opens the task it was on, whichever chat has
+    /// the focus and however the shelf moves.
+    pub(crate) follows: Vec<String>,
     /// The plan the question shows, laid out, for the question, width and
     /// size it was laid out for.
     proposal_laid: Option<((u64, u32, u32), crate::markdown::layout::Laid)>,
@@ -626,6 +631,7 @@ impl ChatView {
             armed: None,
             filling: None,
             opened: Vec::new(),
+            follows: Vec::new(),
             proposal_laid: None,
             proposal_scroll: 0.0,
             proposal_rect: None,
@@ -2469,11 +2475,7 @@ impl ChatView {
             Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
             Some(Hit::EditQueued(id)) => self.take_back(id, settled),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
-            Some(Hit::TaskOutput(id)) => {
-                if let Some(line) = self.shelf().iter().position(|task| task.id == id) {
-                    (settled.commands).push(crate::command::Command::TaskOutput(Some(line)));
-                }
-            }
+            Some(Hit::TaskOutput(id)) => self.follows.push(id),
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
                 id,

@@ -14,7 +14,7 @@
 //! [`Content::Terminal`]: clackatoo_protocol::Content::Terminal
 
 use clackatoo_protocol::{
-    NewTerminal, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate, wire,
+    Content, NewTerminal, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate, wire,
 };
 
 use super::{Asked, Desk};
@@ -160,8 +160,10 @@ impl Desk {
             SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
             let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
             let (mut wanting, mut opening) = (Vec::new(), Vec::new());
+            let mut follows = Vec::new();
             for (&terminal, chat) in &mut self.chats {
                 redraw |= chat.settle(fonts);
+                follows.extend(chat.take_follows().into_iter().map(|id| (terminal, id)));
                 copied.extend(chat.take_copies());
                 self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
@@ -186,6 +188,11 @@ impl Desk {
             }
             for (terminal, target, folder) in opening {
                 self.open_link_of(terminal, target, folder.as_deref());
+            }
+            // A click on a task's line on a chat's shelf.
+            for (chat, id) in follows {
+                self.follow_task(chat, &id);
+                redraw = true;
             }
             // What a chat's `/clear` or `/diff` is for, as the window
             // does it (see `chat::slash`).
@@ -481,21 +488,43 @@ impl Desk {
         }
     }
 
-    /// Opens what the focused chat's agent's background task on line
-    /// `line` of the shelf printed, or the newest with output, in a new
-    /// terminal below `pane`, the chat's, following it as it grows: the
-    /// daemon makes it on the chat's machine, where the agent writes it.
-    pub(super) fn task_output(&mut self, pane: PaneId, line: Option<usize>) {
+    /// `:taskoutput`: follows what the focused chat's agent's background
+    /// task on line `line` of the shelf printed, or the newest with
+    /// output (see [`Self::follow_task`]).
+    pub(super) fn task_output(&mut self, line: Option<usize>) {
+        let asked = (self.focused_chat()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| Ok((chat.terminal(), chat.task_on_shelf(line)?)),
+        );
+        match asked {
+            Ok((chat, id)) => self.follow_task(chat, &id),
+            Err(why) => self.refuse(why),
+        }
+    }
+
+    /// Opens what task `id` of chat `chat` printed in a new terminal below
+    /// the chat's pane, following it as it grows: the daemon makes it on
+    /// the chat's machine, where the agent writes it.
+    pub(super) fn follow_task(&mut self, chat: TerminalId, id: &str) {
         if !self.needs_daemon("a background task's output", wire::TASK_OUTPUT) {
             return;
         }
-        let follow = (self.focused_chat()).map_or_else(
-            || Err("that's for a chat with an agent".to_owned()),
-            |chat| chat.task_output(line),
+        let tail = tail_program(self.remote);
+        let follow = (self.chats.get(&chat)).map_or_else(
+            || Err("that chat is no longer open".to_owned()),
+            |pane| pane.follow_task(id, tail),
         );
         let command = match follow {
             Ok(command) => command,
             Err(why) => return self.refuse(why),
+        };
+        let pane = self.shown_tab().and_then(|tab| {
+            (tab.layout.panes().iter())
+                .find(|pane| pane.content == Content::Terminal(chat))
+                .map(|pane| pane.id)
+        });
+        let Some(pane) = pane else {
+            return self.refuse("the chat isn't in the tab shown".to_owned());
         };
         let terminal = PaneTerminal::New(NewTerminal {
             size: self.new_pane_size(Some(Side::Below)),
@@ -645,4 +674,18 @@ fn one_line(prompt: &str) -> String {
         }
     }
     text
+}
+
+/// Where `tail` is, to follow a task's output with: on this machine, the
+/// first of `/usr/bin/tail` and `/bin/tail` there is, so a `tail` earlier
+/// on the `PATH` isn't run; for a daemon on another machine, or with
+/// neither here, the name, which that daemon looks up on its `PATH`.
+pub(super) fn tail_program(remote: bool) -> &'static str {
+    const KNOWN: [&str; 2] = ["/usr/bin/tail", "/bin/tail"];
+    if remote {
+        return "tail";
+    }
+    (KNOWN.into_iter())
+        .find(|path| std::path::Path::new(path).is_file())
+        .unwrap_or("tail")
 }

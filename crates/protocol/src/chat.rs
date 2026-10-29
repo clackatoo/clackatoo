@@ -407,16 +407,19 @@ impl AgentTask {
         )
     }
 
-    /// The program a terminal on the daemon's machine runs to follow its
-    /// output, if the agent said where that goes: `tail`, from the last
+    /// The program and its arguments, run with no shell, that a terminal
+    /// on the daemon's machine runs to follow its output, if the agent said
+    /// where that goes: `tail`, the program at `tail` (a path, or a name
+    /// looked up on the daemon's `PATH`), from the last
     /// [`TASK_OUTPUT_TAIL`] bytes, following the file as it grows, and
-    /// waiting for it if it isn't there yet. The terminal reads what it
-    /// prints as it would any program's, colours and all.
+    /// waiting for it if it isn't there yet. The path comes after `--`, so
+    /// it's never taken for an option. The terminal reads what it prints as
+    /// it would any program's, colours and all.
     #[must_use]
-    pub fn follow_output(&self) -> Option<Vec<String>> {
+    pub fn follow_output(&self, tail: &str) -> Option<Vec<String>> {
         let path = self.output.as_ref()?;
-        let tail = TASK_OUTPUT_TAIL.to_string();
-        Some(["tail", "-c", &tail, "-F", "--", path].map(str::to_owned).to_vec())
+        let bytes = TASK_OUTPUT_TAIL.to_string();
+        Some([tail, "-c", &bytes, "-F", "--", path].map(str::to_owned).to_vec())
     }
 }
 
@@ -2613,6 +2616,36 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Following a task's output is a program and its arguments, never a
+    /// command line a shell reads: whatever the path holds is one
+    /// argument, after `--`, so it's neither run nor taken for an option
+    /// (CLACKA-199).
+    #[test]
+    fn following_a_tasks_output_runs_tail_with_the_path_as_one_argument_and_no_shell() {
+        let path = "/tmp/claude-1/x/tasks/-rf $(touch y); `z` | w.output";
+        let task = AgentTask {
+            id: "t".into(),
+            kind: AgentTaskKind::Shell,
+            title: "t".into(),
+            command: None,
+            state: AgentTaskState::Running,
+            summary: None,
+            started: 0,
+            ended: None,
+            can_stop: true,
+            output: Some(path.into()),
+        };
+        assert_eq!(
+            task.follow_output("/usr/bin/tail").unwrap(),
+            ["/usr/bin/tail", "-c", "262144", "-F", "--", path]
+        );
+        let none = AgentTask {
+            output: None,
+            ..task
+        };
+        assert_eq!(none.follow_output("tail"), None);
+    }
 
     #[test]
     fn a_tasks_line_says_what_its_subagent_does_now_and_how_many_tools_it_used() {

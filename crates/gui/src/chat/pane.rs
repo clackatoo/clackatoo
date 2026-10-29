@@ -193,12 +193,10 @@ impl ChatPane {
         Ok(())
     }
 
-    /// The program that follows what the task on line `line` of the shelf
-    /// above the box printed, counting from 0, or the newest that says
-    /// where its output goes; or why there's none. ACP carries no output,
-    /// only where Claude Code writes it, so a task that doesn't say has
-    /// none to follow: the agent's own `TaskOutput` tool reads it.
-    pub(crate) fn task_output(&self, line: Option<usize>) -> Result<Vec<String>, String> {
+    /// The task on line `line` of the shelf above the box, counting from
+    /// 0, or the newest that says where its output goes, by the agent's
+    /// name for it; or why there's none.
+    pub(crate) fn task_on_shelf(&self, line: Option<usize>) -> Result<String, String> {
         let listed = self.view.shelf();
         let task = match line {
             Some(line) => *listed
@@ -212,12 +210,29 @@ impl ChatPane {
                     "the agent didn't say where any of it prints: ask it to show the output"
                 })?,
         };
-        task.follow_output().ok_or_else(|| {
+        Ok(task.id.clone())
+    }
+
+    /// The program, `tail` at `tail`, that follows what task `id` printed;
+    /// or why there's none. ACP carries no output, only where Claude Code
+    /// writes it, so a task that doesn't say has none to follow: the
+    /// agent's own `TaskOutput` tool reads it.
+    pub(crate) fn follow_task(&self, id: &str, tail: &str) -> Result<Vec<String>, String> {
+        let task = (self.view.node.tasks.iter())
+            .find(|task| task.id == id)
+            .ok_or("that task is no longer listed above the box")?;
+        task.follow_output(tail).ok_or_else(|| {
             format!(
                 "the agent didn't say where {} prints: ask it to show the output",
                 task.title
             )
         })
+    }
+
+    /// Takes the tasks whose lines were clicked, to follow their output,
+    /// oldest first, by the agent's names for them.
+    pub(crate) fn take_follows(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.view.follows)
     }
 
     /// Opens the agent's plan's shelf above the box, or folds it, or says

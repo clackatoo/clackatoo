@@ -1834,21 +1834,73 @@ fn task(params: &Value) -> Option<(String, Task)> {
 const MOST_OUTPUT_PATH: usize = 1024;
 
 /// `path`, if it can be where task `id`'s output goes, as Claude Code's
-/// adapter says in `outputFilePath`: an absolute path, with no `..` or
-/// control characters, to a file named for the task in a `tasks`
-/// directory, `…/tasks/ID.output`, which is where Claude Code writes a
-/// background command's output, and the only path its adapter takes for
-/// one. Windows open that file to follow it, on the agent's machine, so
-/// anything else the agent might name is left out.
+/// adapter says in `outputFilePath` (see [`output_file_in`]), in the temp
+/// areas Claude Code would use, run by this daemon ([`agent_temp_areas`]).
 fn output_file<'a>(path: &'a str, id: &str) -> Option<&'a str> {
+    output_file_in(path, id, agent_temp_areas())
+}
+
+/// `path`, if it can be where task `id`'s output goes: an absolute path,
+/// with no `..`, `.` or control characters, in one of `areas`, to a file
+/// named for the task in a `tasks` directory, `…/tasks/ID.output`, which
+/// is where Claude Code writes a background command's output, and the
+/// only path its adapter takes for one; and, if something's there
+/// already, a file, not a link, a pipe, a device or a directory. Windows
+/// follow that file with `tail`, on the agent's machine, so anything else
+/// the agent might name is left out.
+///
+/// The look at what's there is a `stat` in the agent's own temp area, not
+/// a read: it can't wait on a pipe.
+fn output_file_in<'a>(path: &'a str, id: &str, areas: &[String]) -> Option<&'a str> {
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
     let file = path.strip_suffix(".output")?.strip_suffix(id)?;
     let ok = path.len() <= MOST_OUTPUT_PATH
         && path.starts_with('/')
         && file.ends_with("/tasks/")
         && !path.contains(char::is_control)
         && !path.split('/').any(|part| part == ".." || part == ".")
-        && !id.contains('/');
-    ok.then_some(path)
+        && areas.iter().any(|area| path.starts_with(area.as_str()));
+    if !ok {
+        return None;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(found) if !found.file_type().is_file() => None,
+        Ok(_) => Some(path),
+        // Not there yet: `tail -F` waits for it.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(path),
+        Err(_) => None,
+    }
+}
+
+/// The temp areas Claude Code keeps its background tasks' output in, run
+/// by this daemon, each ending `/`: `claude-UID` in `$CLAUDE_CODE_TMPDIR`
+/// or `$CLAUDE_TMPDIR` if set, in the temp directory (`$TMPDIR`), and in
+/// `/tmp`. An agent inherits the daemon's environment; one whose command
+/// sets another temp directory has output no window follows.
+fn agent_temp_areas() -> &'static [String] {
+    static AREAS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    AREAS.get_or_init(|| {
+        let uid = rustix::process::getuid().as_raw();
+        let mut roots: Vec<std::path::PathBuf> = ["CLAUDE_CODE_TMPDIR", "CLAUDE_TMPDIR"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .filter(|dir| !dir.is_empty())
+            .map(Into::into)
+            .collect();
+        roots.push(std::env::temp_dir());
+        roots.push("/tmp".into());
+        let mut areas: Vec<String> = (roots.iter())
+            .filter(|root| root.is_absolute())
+            .filter_map(|root| {
+                let area = root.join(format!("claude-{uid}"));
+                area.to_str().map(|area| format!("{area}/"))
+            })
+            .collect();
+        areas.dedup();
+        areas
+    })
 }
 
 /// `text` on one line, its runs of spaces, line breaks and other controls
@@ -2038,7 +2090,9 @@ mod task_tests {
     /// task: anything else the agent names is left out.
     #[test]
     fn a_tasks_output_file_is_taken_only_as_claude_codes_own_for_it() {
-        let path = "/tmp/claude-1000/-home-jack-app/0d9c/tasks/b1.output";
+        // In the agent's own temp area, where nothing's there yet.
+        let path = format!("{}no-such-project/0d9c/tasks/b1.output", agent_temp_areas()[0]);
+        let path = path.as_str();
         let said = |update: Value| task(&json!({"sessionId": "s", "update": update}));
         let spawned = said(json!({"sessionUpdate": "async_task_spawned", "asyncTaskId": "b1",
             "name": "npm test", "taskType": "shell", "outputFilePath": path}));
@@ -2059,21 +2113,65 @@ mod task_tests {
             "outputFilePath": "/etc/passwd"}));
         assert!(matches!(other, Some((_, Task::Progress { output: None, .. }))));
 
-        assert_eq!(output_file(path, "b1"), Some(path));
+        let areas = ["/tmp/claude-1000/".to_owned()];
+        let path = "/tmp/claude-1000/-home-jack-app/0d9c/tasks/b1.output";
+        assert_eq!(output_file_in(path, "b1", &areas), Some(path));
         for wrong in [
-            "/tmp/x/tasks/b2.output",
-            "tmp/x/tasks/b1.output",
-            "/tmp/x/b1.output",
-            "/tmp/x/tasks/b1.out",
-            "/tmp/x/../tasks/b1.output",
-            "/tmp/./tasks/b1.output",
-            "/tmp/x/tasks/\nb1.output",
+            "/tmp/claude-1000/x/tasks/b2.output",
+            "tmp/claude-1000/x/tasks/b1.output",
+            "/tmp/claude-1000/x/b1.output",
+            "/tmp/claude-1000/x/tasks/b1.out",
+            "/tmp/claude-1000/x/../tasks/b1.output",
+            "/tmp/claude-1000/./tasks/b1.output",
+            "/tmp/claude-1000/\u{1}/tasks/b1.output",
+            "/tmp/claude-1001/x/tasks/b1.output",
+            "/home/jack/tasks/b1.output",
             "/etc/passwd",
         ] {
-            assert_eq!(output_file(wrong, "b1"), None, "{wrong}");
+            assert_eq!(output_file_in(wrong, "b1", &areas), None, "{wrong}");
         }
-        let long = format!("/{}/tasks/b1.output", "a".repeat(MOST_OUTPUT_PATH));
-        assert_eq!(output_file(&long, "b1"), None);
-        assert_eq!(output_file("/tmp/tasks/a/b.output", "a/b"), None);
+        let long = format!(
+            "/tmp/claude-1000/{}/tasks/b1.output",
+            "a".repeat(MOST_OUTPUT_PATH)
+        );
+        assert_eq!(output_file_in(&long, "b1", &areas), None);
+        let slash = "/tmp/claude-1000/tasks/a/b.output";
+        assert_eq!(output_file_in(slash, "a/b", &areas), None);
+        let empty = "/tmp/claude-1000/tasks/.output";
+        assert_eq!(output_file_in(empty, "", &areas), None);
+    }
+
+    /// What's at the path already must be a file: not a link, which could
+    /// lead anywhere, a pipe `tail` would wait on, or a directory.
+    #[test]
+    fn a_tasks_output_file_that_isnt_a_file_is_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join("tasks");
+        std::fs::create_dir(&tasks).unwrap();
+        let areas = [format!("{}/", dir.path().display())];
+        let at = |id: &str| {
+            let path = tasks.join(format!("{id}.output"));
+            path.to_str().unwrap().to_owned()
+        };
+        std::fs::write(at("file"), "out\n").unwrap();
+        std::os::unix::fs::symlink("/dev/zero", at("link")).unwrap();
+        std::fs::create_dir(at("dir")).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            at("fifo").as_str(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        for (id, kept) in [
+            ("file", true),
+            ("absent", true),
+            ("link", false),
+            ("dir", false),
+            ("fifo", false),
+        ] {
+            assert_eq!(output_file_in(&at(id), id, &areas).is_some(), kept, "{id}");
+        }
     }
 }

@@ -27,7 +27,7 @@
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
 //! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
 //! | `finish` | Says task `t1` completed, then `finished` |
-//! | `background-out DIR` | As `background`, to a client that asked for AIR's `asyncTasks`, but writes `listening on :3000` to `DIR/tasks/t1.output`, DIR an absolute path, and says that's where `t1`'s output goes in a progress beat after the spawn; then spawns `t2`, "Watch", whose output it says is `/etc/passwd`; then `started` |
+//! | `background-out DIR` | As `background`, to a client that asked for AIR's `asyncTasks`, but writes `listening on :3000` to `DIR/tasks/t1.output`, DIR an absolute path (or `tmp`, a folder of its own in `$TMPDIR/claude-UID`), and says that's where `t1`'s output goes in a progress beat after the spawn; then spawns `t2`, "Watch", whose output it says is `/etc/passwd`; then `started` |
 //! | `pid` | `pid` and its process ID |
 //! | `sleep-bg PATH` | As `background`, but what it runs is `sleep 1000`, in its process group, whose pid it writes to PATH, an absolute path; then `started` |
 //! | `stream-slow N MS` | As `stream N`, but MS milliseconds apart, reading nothing meanwhile |
@@ -469,10 +469,19 @@ fn sleep_in_background(session: &str, path: &str) {
 /// output goes to `DIR/tasks/t1.output`, DIR an absolute path, which it
 /// writes `listening on :3000`, and says where in a progress beat after
 /// the spawn, as Claude Code's adapter does once the tool call's result
-/// names the file. Then it says, of `t2`, an output file that isn't
-/// Claude Code's, which the daemon leaves out.
+/// names the file; `tmp` for DIR is a folder of its own in Claude Code's
+/// temp area, `$TMPDIR/claude-UID`. Then it says, of `t2`, an output
+/// file that isn't Claude Code's, which the daemon leaves out.
 fn background_with_output(session: &str, dir: &str) {
-    let tasks = Path::new(dir).join("tasks");
+    // `tmp`: in Claude Code's own temp area, as the daemon has it.
+    let dir = if dir == "tmp" {
+        let uid = rustix::process::getuid().as_raw();
+        let area = std::env::temp_dir().join(format!("claude-{uid}"));
+        area.join(format!("fake-{}", std::process::id()))
+    } else {
+        Path::new(dir).to_owned()
+    };
+    let tasks = dir.join("tasks");
     std::fs::create_dir_all(&tasks).unwrap();
     let file = tasks.join("t1.output");
     std::fs::write(&file, "listening on :3000\n").unwrap();

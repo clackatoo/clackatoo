@@ -225,7 +225,7 @@ mod tests {
     }
 
     /// A click on the line of a task that says where its output goes
-    /// follows it, as `:taskoutput` with the line's number does; one that
+    /// follows it, by the task's name, not its line; one that
     /// doesn't say has nothing to click (CLACKA-199).
     #[test]
     fn a_click_on_a_tasks_line_follows_its_output_if_it_says_where_that_goes() {
@@ -250,11 +250,9 @@ mod tests {
         chat.release();
         let settled = chat.settle(&mut fonts);
         assert!(settled.actions.is_empty(), "{:?}", settled.actions);
-        // The newest is the first line.
-        assert_eq!(
-            settled.commands,
-            [crate::command::Command::TaskOutput(Some(0))]
-        );
+        assert!(settled.commands.is_empty(), "{:?}", settled.commands);
+        // By the task's name, for the window to pair with this chat.
+        assert_eq!(chat.follows, ["t2"]);
     }
 
     #[test]
