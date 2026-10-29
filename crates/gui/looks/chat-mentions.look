@@ -1,0 +1,37 @@
+# The `@` menu: the project's files over the box, narrowed as a path is
+# typed; the message's mentions as chips in the conversation, sent to the
+# agent as links or lines' text; and `<Space>a`, an editor's selection to
+# the chat beside it.
+size 1100x900
+file src/main.rs <<END
+fn main() {
+    println!("hello");
+}
+END
+file src/parser.rs <<END
+pub fn parse() {}
+END
+file docs/read me.md <<END
+# Read me
+END
+keys <C-;>:Agent claude<CR>
+keys i
+type context what does @ma
+sleep 600
+shot mention-menu
+keys <Tab>
+type do, beside @rea
+sleep 600
+shot mention-quoted-menu
+keys <Tab>
+sleep 300
+shot mention-completed
+keys <CR>
+wait-for context: [
+sleep 300
+shot mention-sent
+keys <Esc><C-;>:-Editor src/main.rs<CR>
+sleep 600
+keys jVj<Space>a
+sleep 600
+shot mention-asked
