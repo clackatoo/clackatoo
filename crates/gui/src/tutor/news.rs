@@ -123,7 +123,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "claude-task",
         date: "2026-10-13",
         lesson: "agents",
-        what: "Claude Code's hidden Task helpers are off unless you :set claudetask, so it hands work on in chats you can watch",
+        what: "Claude Code's own Task helpers are off unless you :set claudetask, so it hands work on in chats you can watch",
     },
     News {
         id: "remote-reconnect",
