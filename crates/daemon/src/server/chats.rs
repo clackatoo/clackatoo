@@ -773,6 +773,9 @@ impl Daemon {
         let mut agent = self.agent_of(id);
         let mut actions = actions.into_iter();
         while let Some(action) = actions.next() {
+            // What was read is the first action's alone: gone with it if it
+            // isn't sent, never another's.
+            let read = context.take();
             let gone = (agent.and_then(|agent| self.agents.running.get(&agent)))
                 .is_some_and(|slot| slot.agent.has_gone());
             if gone && self.act_on_gone(id, &action) {
@@ -783,7 +786,7 @@ impl Daemon {
             }
             // The files it mentions are read first, off the loop, and it
             // and what follows wait.
-            let (action, context) = match context.take() {
+            let (action, context) = match read {
                 Some(context) => (action, context),
                 None => match self.mentioned(id, action, &mut actions) {
                     Ok(mentioned) => mentioned,
@@ -2494,6 +2497,11 @@ impl Daemon {
             && pending.target.is_none()
             && pending.prompt.images.is_empty();
         let text = pending.prompt.text.clone();
+        if self.reading_to_steer(chat, id) {
+            return Err(Error::Other(
+                "The files the message mentions are being read, to steer with it.".into(),
+            ));
+        }
         if native && self.read_for_steering(chat, id, &text) {
             return Ok(());
         }

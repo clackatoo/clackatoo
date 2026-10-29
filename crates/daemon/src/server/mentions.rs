@@ -320,6 +320,13 @@ impl Daemon {
         .is_some()
     }
 
+    /// Whether the chat in `id`'s queued message `message` is being read,
+    /// to steer with: it isn't steered with again meanwhile.
+    pub(super) fn reading_to_steer(&self, id: TerminalId, message: u64) -> bool {
+        (self.mentioning.reading.iter())
+            .any(|reading| reading.chat == id && reading.purpose == For::Steer(message))
+    }
+
     /// What's to be read for `text`, a message to the chat in `id`, if it
     /// mentions anything and isn't a slash command.
     fn mention_job(&mut self, id: TerminalId, text: &str) -> Option<Job> {
@@ -335,7 +342,10 @@ impl Daemon {
         let embed = (agent.and_then(|agent| self.agents_can_embed(agent))).unwrap_or(false);
         let chat = self.chat(id)?;
         let cwd = chat.real_cwd();
+        // Made absolute with links followed, as the chat's working directory
+        // is, so a project reached through a link isn't all outside.
         let project = chat.project().to_owned();
+        let project = project.canonicalize().unwrap_or(project);
         let embed_saved = crate::agents::embeds_saved(chat.agent());
         let mentions: Vec<(String, Option<(u32, u32)>)> = (found.iter())
             .map(|found| (found.path.to_owned(), found.lines))
@@ -783,6 +793,35 @@ mod tests {
             }
             daemon.take_mentions();
             assert!(!held(&daemon, chat));
+        }
+
+        #[test]
+        fn what_was_read_for_a_message_not_sent_never_goes_with_the_next() {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, chat) = daemon_with_chat(dir.path());
+            daemon.mentioning.reader = hangs;
+            // An agent that hasn't said it takes images refuses the first.
+            let spec = crate::AgentConfig::default().find("claude").unwrap();
+            let fake = crate::server::stopping::tests::example("fake_agent");
+            daemon
+                .start_agent(spec, vec![fake.into_os_string()])
+                .unwrap();
+            let image = clackatoo_protocol::ChatImage {
+                preview: None,
+                data: "iVBORw0KGgo=".into(),
+                width: 1,
+                height: 1,
+            };
+            let refused = Prompt {
+                text: "look at @a.rs".into(),
+                images: vec![image],
+            };
+            let next = Action::Prompt(Prompt::from("and @b.rs"));
+            let read =
+                vec![json!({ "type": "resource_link", "uri": "file:///a.rs", "name": "a.rs" })];
+            daemon.act_with(chat, vec![Action::Prompt(refused), next], Some(read));
+            assert!(held(&daemon, chat), "the next reads its own files");
+            daemon.stop_agents(&[]);
         }
 
         #[test]
