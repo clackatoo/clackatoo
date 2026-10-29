@@ -209,7 +209,8 @@ impl ChatView {
             | Piece::Note
             | Piece::Footer
             | Piece::Badge
-            | Piece::Divider => false,
+            | Piece::Divider
+            | Piece::Switcher { .. } => false,
         })?;
         if key.piece == AGENTS {
             let card = slot.agents.as_ref()?;
@@ -309,7 +310,8 @@ impl ChatView {
                 | Piece::Note
                 | Piece::Footer
                 | Piece::Badge
-                | Piece::Divider => {}
+                | Piece::Divider
+                | Piece::Switcher { .. } => {}
             }
         }
         keys

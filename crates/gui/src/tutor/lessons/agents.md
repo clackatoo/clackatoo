@@ -151,6 +151,12 @@ When an agent changes a file you have open, the change lands in the editor as th
 
 Under each turn that changed files, a compact summary shows how many, with Undo or Redo beside the count. Hover over the answer to show Copy alongside it. In the chat's normal mode, `u` undoes what the last turn changed in files, keeping what you or later turns changed since, and Ctrl+R makes it again. `:agentundo 3` and `:agentredo 3` name a turn.
 
+## Rewinding, and branches
+
+`u` takes a turn out of the files, but the agent still remembers it. To take turns out of the conversation too, press `dG` on a turn in the chat's normal mode: the chat goes back to before it, and asks whether to undo the files those turns changed (`y` undoes them, `n` keeps them, any other key stays). `cc` or `S` on a message of yours does the same and puts the message back in the box, to change and send again. `/rewind` or `:rewind` rewinds the last turn.
+
+Nothing is lost: what you rewound from stays in the chat as another branch. Where branches part, `‹ 2/3 ›` shows over the turn; click an arrow, or press `[b` and `]b`, to switch, and `:branches` lists them all. The agent goes on with each branch's own session.
+
 ## Subagents
 
 An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working · 12s ›`. Click it, or press Enter or `za` on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going; `zR` opens every card in the chat. Click one, or press Enter on its line, to open it as a pane.
@@ -225,7 +231,7 @@ If you have a chat open, ask it to run `for i in 1 2 3 4 5; do echo $i; sleep 2;
 
 ## Slash commands
 
-Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
+Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` rewinds the conversation to before its last turn, and `/export` copies the conversation.
 
 If you have a chat open, type `/` in its box, then `/model` and Enter to open the model menu.
 

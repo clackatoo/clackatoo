@@ -32,6 +32,9 @@
 //! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
 //! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
+//! | `dG` | Rewind the conversation to before the turn, keeping what follows as another branch (see [`super::branches`]) |
+//! | `cc`, `S` | Edit your message: rewind to before it, with it in the box to send again |
+//! | `[b` `]b` | The branch before or after, where the conversation's branches part |
 //! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 //! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
@@ -89,6 +92,18 @@ pub(crate) enum ChatKey {
     /// `gf` and `gx`: the file a message mentions under the cursor, or the
     /// link there, opened.
     OpenLink,
+    /// `[b`, or `]b` if not `back`: the branch before or after, where the
+    /// conversation's branches part.
+    Branch {
+        back: bool,
+    },
+    /// `dG`, or `cc` and `S` if `edit`: the conversation rewound to before
+    /// the turn under the cursor, with its message in the box if `edit`
+    /// (see [`super::branches`]). A chat's text isn't the user's to
+    /// change, so these are its own keys, not Vim's operators.
+    Rewind {
+        edit: bool,
+    },
 }
 
 /// How a chat reads keys in normal and visual mode: the moves it has, by
@@ -137,11 +152,15 @@ impl Dialect for ChatKeys {
             } => "Scroll table left half a view",
             ChatKey::Resend => "Send the failed message again",
             ChatKey::OpenLink => "Open file or link under cursor",
+            ChatKey::Branch { back: true } => "Previous branch of the conversation",
+            ChatKey::Branch { back: false } => "Next branch of the conversation",
+            ChatKey::Rewind { edit: false } => "Rewind the conversation to before this turn",
+            ChatKey::Rewind { edit: true } => "Edit this message and send it again",
         }
         .into()
     }
 
-    fn own(&self, stroke: Stroke, _keys: &mut Reader<'_>, visual: bool) -> Option<Read<ChatKey>> {
+    fn own(&self, stroke: Stroke, keys: &mut Reader<'_>, visual: bool) -> Option<Read<ChatKey>> {
         let key = match stroke {
             Stroke::Enter => ChatKey::Enter,
             Stroke::Escape => ChatKey::Escape,
@@ -155,6 +174,18 @@ impl Dialect for ChatKeys {
                 'o' if !visual => ChatKey::Compose,
                 'O' if !visual => return Some(Read::No),
                 'u' => ChatKey::Undo { redo: false },
+                // `dG` and `cc` read on; `S` alone.
+                'd' | 'c' if !visual => {
+                    let again = if ch == 'd' { 'G' } else { 'c' };
+                    return Some(match keys.next() {
+                        None => Read::More,
+                        Some(next) if next == Stroke::char(again) => {
+                            Read::Yes(ChatKey::Rewind { edit: ch == 'c' })
+                        }
+                        Some(_) => Read::No,
+                    });
+                }
+                'S' if !visual => ChatKey::Rewind { edit: true },
                 'K' if !visual => ChatKey::Detail,
                 'R' if !visual => ChatKey::Resend,
                 'K' => return Some(Read::No),
@@ -196,6 +227,16 @@ impl Dialect for ChatKeys {
             _ => return None,
         };
         Some(Read::Yes(key))
+    }
+
+    fn after_bracket(
+        &self,
+        backward: bool,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        visual: bool,
+    ) -> Option<Read<ChatKey>> {
+        (stroke.plain()? == 'b' && !visual).then_some(Read::Yes(ChatKey::Branch { back: backward }))
     }
 
     fn object(&self, key: char) -> Option<Object> {
@@ -489,6 +530,11 @@ impl ChatView {
             // it. Any other key forgets it, as in a terminal.
             let mouse = self.mouse_selecting();
             let y = stroke == Stroke::char('y');
+            // What a command typed began with, after its count, for a cut
+            // the chat doesn't take to say why.
+            let began = (self.keys.so_far().iter().copied())
+                .find(|stroke| !matches!(stroke.plain(), Some('0'..='9')))
+                .unwrap_or(stroke);
             let parsed = self.keys.read(stroke, visual || (mouse && y), &ChatKeys);
             let waits = parsed == Parsed::Incomplete
                 && crate::vim::only_count_and_register(self.keys.so_far());
@@ -504,6 +550,12 @@ impl ChatView {
                 Parsed::Nothing => {
                     redraw |= was_pending;
                     self.failed |= stroke != Stroke::Escape;
+                    if stroke != Stroke::Escape
+                        && matches!(began.plain(), Some('d' | 'c' | 'D' | 'C' | 'x' | 's'))
+                    {
+                        self.cut_refused();
+                        redraw = true;
+                    }
                 }
                 Parsed::Command(command) => {
                     let (drawn, insert) = self.execute(command);
@@ -616,6 +668,10 @@ impl ChatView {
             }
             Action::Search { backward } => self.start_search(backward, command.count),
             Action::SearchAgain { reverse } => self.search_again(reverse, command.count),
+            Action::Own(ChatKey::Branch { back }) => {
+                self.branch_step(back, command.count);
+                return (true, false);
+            }
             Action::Own(own) => return self.own(own),
             // Nothing else is taken (see `ChatKeys::takes`).
             _ => return (false, false),
@@ -658,6 +714,8 @@ impl ChatView {
                 }
             }
             ChatKey::Undo { redo } => self.undo_key(redo),
+            ChatKey::Branch { back } => self.branch_step(back, None),
+            ChatKey::Rewind { edit } => self.rewind_key(edit),
             ChatKey::Resend => {
                 if !self.resend() {
                     self.say(

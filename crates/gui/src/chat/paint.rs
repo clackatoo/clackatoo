@@ -22,6 +22,7 @@ mod queue;
 mod select;
 mod shelf;
 mod slash;
+mod switcher;
 mod tables;
 mod tasks;
 mod usage;
@@ -150,6 +151,18 @@ impl Cache {
         }
         self.bounded = 0;
     }
+
+    /// The turns from `turn` on are other turns now, as after a rewind:
+    /// what was laid out of them, and how tall they were, goes, to be
+    /// guessed and laid out afresh.
+    pub(super) fn cut(&mut self, turn: usize) {
+        self.turns.truncate(turn);
+        self.laid.retain(|&index| index < turn);
+        self.bounded = self.bounded.min(turn);
+        if self.anchor.is_some_and(|(index, _)| index >= turn) {
+            self.anchor = None;
+        }
+    }
 }
 
 /// Short lines of the box's own, such as its chips' labels and the
@@ -212,6 +225,10 @@ struct TurnLaid {
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
     handoff: Option<handoff::LaidHandoff>,
+    /// The switcher over it, where the conversation's branches part.
+    switcher: Option<switcher::SwitcherLaid>,
+    /// The row under it, the last, of a new branch not written to yet.
+    pending: Option<switcher::SwitcherLaid>,
     height: f32,
 }
 
@@ -366,7 +383,7 @@ impl ChatView {
             self.draw_empty(
                 &mut canvas,
                 m,
-                [origin[0] + left, origin[1]],
+                ([origin[0] + left, origin[1]], origin),
                 [column, view_height],
             );
         }
@@ -656,6 +673,8 @@ impl ChatView {
             resend: None,
             badge: None,
             handoff: None,
+            switcher: None,
+            pending: None,
             height: 0.0,
         };
         let mut y = self.lay_out_head(fonts, (m, column), (index, turns), &mut laid);
@@ -797,6 +816,18 @@ impl ChatView {
             laid.resend = Some((label, [0.0, 0.0]));
         }
         y = self.lay_out_ending(fonts, (m, column), (index, turn), &mut laid, y);
+        // After the last, the row of a new branch not written to yet.
+        if last && let Some(pending) = self.lay_out_switcher(fonts, m, column, (turns.len(), true))
+        {
+            y += m.em(1.0);
+            laid.spans.push(Span::of(
+                Piece::Switcher { pending: true },
+                y,
+                pending.height,
+            ));
+            y += pending.height;
+            laid.pending = Some(pending);
+        }
         laid.height = y;
         let slot = &mut self.cache.turns[index];
         if slot.laid.is_none() {
@@ -844,6 +875,16 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Badge, y, badge.height));
             y += badge.height + m.em(0.3);
             laid.badge = Some(badge);
+        }
+        // Where the conversation's branches part, the switcher.
+        if let Some(switcher) = self.lay_out_switcher(fonts, m, column, (index, false)) {
+            laid.spans.push(Span::of(
+                Piece::Switcher { pending: false },
+                y,
+                switcher.height,
+            ));
+            y += switcher.height + m.em(0.3);
+            laid.switcher = Some(switcher);
         }
         y
     }
@@ -1015,12 +1056,12 @@ impl ChatView {
 
     /// Draws what a chat with no turns says (see [`empty_note`]) in the
     /// middle of the view, whose left and top are `origin`, `size` wide
-    /// and high.
+    /// and high, in the pane whose top left is `pane`.
     fn draw_empty(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,
-        origin: [f32; 2],
+        (origin, pane): ([f32; 2], [f32; 2]),
         size: [f32; 2],
     ) {
         let [with, start] = empty_note(self.agent(), self.folder.as_deref(), self.reading);
@@ -1037,6 +1078,17 @@ impl ChatView {
             }
             y += laid.height + gap;
             self.cache.notes.insert((text, tone), laid);
+        }
+        // Rewound to before the first turn: the new branch's row, with
+        // the switcher back to the others.
+        if let Some(pending) = self.lay_out_switcher(canvas.fonts, m, size[0], (0, true)) {
+            let hits = switcher::draw(canvas, m, &pending, [origin[0], y + gap], size[0]);
+            self.hits.extend(hits.into_iter().map(|(hit, rect)| {
+                (
+                    hit,
+                    [rect[0] - pane[0], rect[1] - pane[1], rect[2], rect[3]],
+                )
+            }));
         }
     }
 
@@ -1191,6 +1243,20 @@ impl ChatView {
                     }
                 }
                 Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
+                Piece::Switcher { pending } => {
+                    let shown = if pending {
+                        &laid.pending
+                    } else {
+                        &laid.switcher
+                    };
+                    if let Some(shown) = shown {
+                        for (hit, rect) in
+                            switcher::draw(canvas, m, shown, [origin[0], top], column)
+                        {
+                            drawn.hit(canvas.clip, hit, rect);
+                        }
+                    }
+                }
                 Piece::Rule(piece) => {
                     if let Some(label) = laid.pieces.get(&piece) {
                         let height = span.bottom - span.top;
@@ -2366,6 +2432,10 @@ enum Piece {
     /// A line across it, by piece, with what it says in its middle: where
     /// the agent compacted its context.
     Rule(usize),
+    /// The switcher over it, where the conversation's branches part; or,
+    /// if `pending`, the row under the last of a new branch not written
+    /// to yet.
+    Switcher { pending: bool },
 }
 
 impl Span {

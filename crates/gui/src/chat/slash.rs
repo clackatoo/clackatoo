@@ -41,8 +41,9 @@ pub(crate) enum Native {
     /// `/resume`: the start page too, which lists the agent's past
     /// sessions under the new chat.
     Sessions,
-    /// `/rewind`: undoes what the last turn changed in files, as `u` does.
-    Undo,
+    /// `/rewind`: rewinds the conversation to before its last turn, as
+    /// `:rewind` does, asking whether to undo what it changed in files.
+    Rewind,
     /// `/context`: how full the agent's context is, as `K` shows it.
     Context,
     /// `/status`, `/cost`, `/usage`: the account's usage limits.
@@ -77,8 +78,8 @@ const OURS: &[(&str, &str, Native)] = &[
     ),
     (
         "rewind",
-        "Undo what the last turn changed in files, as u does",
-        Native::Undo,
+        "Rewind the conversation to before the last turn",
+        Native::Rewind,
     ),
     (
         "context",
@@ -433,7 +434,11 @@ impl super::ChatView {
                 kind: Kind::Agent,
                 agent: None,
             }),
-            Native::Undo => self.undo_turn(self.turn_to_undo(false), false),
+            Native::Rewind => {
+                if let Err(why) = self.rewind_numbered(None, false) {
+                    self.say(why);
+                }
+            }
             Native::Context => {
                 if !self.usage_modal
                     && self.detail != Some(super::paint::Detail::Asked)

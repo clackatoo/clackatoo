@@ -587,7 +587,8 @@ mod tests {
                 "Review",
                 "reviewkeep",
                 "reviewreject",
-                "reviewsend"
+                "reviewsend",
+                "rewind",
             ]
         );
         // Commands always match in any case.

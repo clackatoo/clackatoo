@@ -44,6 +44,9 @@ enum Pending {
     TakeBack(u64),
     /// Older turns, before the one numbered so.
     History(u32),
+    /// A rewind, or a switch to another branch, whose refusal is said
+    /// (see `chat::branches`).
+    Branch,
 }
 
 /// A chat shown in the window.
@@ -119,6 +122,7 @@ impl ChatPane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.carryover = options.carryover;
+        self.view.set_rewind_files(options.rewindfiles);
         self.view.set_case(crate::options::Case::of(options));
         self.view.set_search_options(options);
     }
@@ -317,7 +321,11 @@ impl ChatPane {
                 .request(Request::CancelActivity { terminal, id }, Pending::Other);
         }
         for mut action in settled.actions {
-            if let ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. } = &mut action {
+            if let ChatAction::Undo { turn, .. }
+            | ChatAction::Redo { turn, .. }
+            | ChatAction::Rewind { at: turn, .. }
+            | ChatAction::SwitchBranch { at: turn, .. } = &mut action
+            {
                 *turn += first_turn;
             }
             if let ChatAction::Switch { budget, .. } | ChatAction::SendTo { budget, .. } =
@@ -336,6 +344,7 @@ impl ChatPane {
                 ChatAction::SendTo { .. } | ChatAction::Submit { .. } => Pending::Handoff,
                 ChatAction::TakeBack { queued } => Pending::TakeBack(queued),
                 ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. } => Pending::Control,
+                ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => Pending::Branch,
                 _ => Pending::Other,
             };
             self.ask(action, pending);
@@ -448,6 +457,13 @@ impl ChatPane {
     /// normal or visual mode, it reads the conversation. Returns whether
     /// it must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
+        // What a rewind asks takes the next key, in any mode.
+        if self.view.branch_asking().is_some() {
+            if let Some(&stroke) = vim::strokes(press, false).first() {
+                self.view.answer_branch(stroke);
+            }
+            return true;
+        }
         if self.mode == Mode::Insert {
             if self.view.leaves_composer(press) {
                 self.mode = Mode::Normal;
@@ -651,6 +667,11 @@ impl ChatPane {
             }
             (Some(Pending::Control), response) => self.view.queue_answer(response),
             (Some(Pending::TakeBack(id)), response) => self.view.taken_back(id, response),
+            (Some(Pending::Branch), response) => {
+                if self.view.branch_answered(response) {
+                    self.mode = Mode::Insert;
+                }
+            }
 
             (Some(Pending::Handoff), response) => self.view.handoff_answer(response),
             (Some(Pending::Original(serial)), response) => {

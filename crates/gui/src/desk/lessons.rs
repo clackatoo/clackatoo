@@ -1286,6 +1286,7 @@ impl Facts for DeskFacts<'_> {
             finder::Kind::ProjectSymbols => "projectsymbols",
             finder::Kind::Background => "background",
             finder::Kind::Prompts => "prompts",
+            finder::Kind::Branches => "branches",
         })
     }
 

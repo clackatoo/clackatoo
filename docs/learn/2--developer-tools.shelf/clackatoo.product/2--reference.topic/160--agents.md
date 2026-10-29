@@ -138,7 +138,7 @@ Claude Code's and Codex's own terminal interfaces have commands their adapters d
 |---|---|
 | `/clear`, `/new` | Opens the [start page](#the-start-page), to start a new chat. |
 | `/resume` | Opens the start page, which lists the agent's past sessions under the new chat. |
-| `/rewind` | Undoes what the last turn changed in files, as `u` does in normal mode (see [Undoing a turn](#undoing-a-turn)). |
+| `/rewind` | Rewinds the conversation to before its last turn, as `:rewind` does, asking whether to undo what it changed in files (see [Rewinding and branches](#rewinding-and-branches)). `u` still undoes only the files. |
 | `/context` | Shows how full the agent's context is, as `K` does. |
 | `/status`, `/cost`, `/usage` | Opens **Usage & limits**. |
 | `/diff` | Opens [`:Review`](#reviewing-its-changes) of what the chat's agents changed. |
@@ -268,6 +268,9 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways: a few characters, or half the column. |
 | `u` | Undoes what the turn under the cursor changed in files, if it's in view, or else the last turn's, keeping your edits since. The bar says which. |
 | Ctrl+R | Makes it again. |
+| `dG` | Rewinds the conversation to before the turn under the cursor, or the last (see [Rewinding and branches](#rewinding-and-branches)). Other `d` and `c` commands say what the chat takes instead. |
+| `cc` `S` | Edits your message under the cursor: rewinds to before it, and puts it in the box to change and send. |
+| `[b` `]b` | The branch before or after where the conversation's branches part, at the turn under the cursor or the nearest above; with a count, that many. |
 | `K` | Opens Usage & limits. Escape or Ctrl+; closes it. |
 | `i`, `a`, `o`, Enter | Back to insert mode. |
 
@@ -491,6 +494,28 @@ Claude Code and Codex read files from disk, so they don't see what you haven't s
 ### Undoing a turn
 
 Under each turn that changed files, a compact summary shows how many, with Undo or Redo beside the count. Hover over the answer to show Copy alongside it. Undo takes the turn's changes out of every file it changed, and keeps what you or later turns changed since. If something since changed the same lines, nothing is undone, and the chat says which lines: `:agentundo! 3` undoes the turn's other files anyway. A file the turn made goes to the trash, and a file that changes while the undo is being written is left as it is, and the chat says so. Once a turn is undone, Redo puts it back. `:agentundo` and `:agentredo` take a turn's number, from 1, or else take the last turn there is to undo or the first to redo. In an open file, an undo is one edit of the agent's, beside your unsaved changes. Undoing waits for the agent to finish answering.
+
+### Rewinding and branches
+
+Undoing a turn takes it out of the files, but the agent still remembers it. Rewinding takes turns out of the conversation too, so the agent goes on as if they'd never been, as Claude Code's `/rewind` and Codex's Esc Esc do. What you rewind from isn't lost: it stays in the same chat as another branch, and the chat never splits into a pile of chats.
+
+| Key / command | Does |
+|---|---|
+| `dG` on a turn | Rewinds to before it. |
+| `cc`, `S` on a message of yours | Rewinds to before it and puts it in the box, before anything you'd typed, to change and send again. |
+| `:rewind N`, `:rewind` | Rewinds to before turn N, or the last turn. `/rewind`, typed as the whole message, is `:rewind`. |
+| `:rewind! N` | The same, undoing the files without asking, leaving out any that can't be. |
+| `[b` `]b`, a click on ‹ or › | Shows the branch before or after where branches part. |
+| `:branch N` | Shows branch N where they part, at the turn under the cursor or the nearest above. |
+| `:branches` | The finder over every branch: where it parts, its first message, its turns, when it was last shown. Enter shows it. |
+
+If the turns taken out changed files, the bar asks whether to undo them: `y` undoes them, newest first, as undoing each turn does, `n` leaves them, and any other key changes nothing. The `rewindfiles` option (`ask`, `undo` or `keep`) answers for you. A turn whose files can't be undone, as when you've changed the same lines since, stops the rewind before anything is rewound; the turns after it that were undone stay undone, and the chat says so. If the agent runs anything in the background, the bar says leaving the branch stops it, and asks first. Nothing can be rewound while the agent is answering or asking you something, and a chat another agent started can't be rewound.
+
+After a rewind, the chat ends at the turn before, with a row saying "New branch · write to go on from here". Nothing is asked of the agent until you send: the first message makes the branch, forking the agent's session at the end of the turn before, so the agent knows the conversation up to there exactly. Where the agent can't fork its session there, it's told the turns before as a summary, and the switcher says "from a summary".
+
+Where branches part, `‹ 2/3 ›` shows over the turn: which branch is shown, of how many. Switching to another branch goes on with that branch's own agent session, which remembers it exactly as it left it and knows nothing of the others. The bar asks, as for a rewind, whether to undo what this branch changed in files after the turn where they part; `y` also makes again what leaving the other branch undid. Your files are shared by every branch, so with `n`, the branch you switch to sees files from the one you left.
+
+A chat keeps at most 16 branches and about 4 MB of their turns; past that, the least recently shown keep only where they part and their first message, and their turns are told again by the agent when you switch to one. A branch whose agent didn't tell a turn again shows that turn as failed. The phone shows where branches part, but switching is the window's for now.
 
 ### Reviewing its changes
 
@@ -746,6 +771,7 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
+- A board's link to a chat's turn names the turn by its number, so after a rewind or a switch it goes to whatever turn has that number on the branch shown. Switching branches from the phone, and a summary of a branch from where it parts, are still to come.
 - Ctrl+? doesn't list a form's keys yet. What an input method is composing doesn't show in a form's box until it's committed.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
 - Codex's commands in the background (its `/ps`) aren't listed: its adapter lists them only to a client that asks as JetBrains' AIR does, which leaves every command's output out of its row. Shift+Tab steps through Codex's modes, not its Plan mode.

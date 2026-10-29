@@ -57,6 +57,9 @@ pub(super) struct Memory {
     /// The queued message being taken back into the box, until the daemon
     /// answers: its ID and text.
     pub(super) taking_back: Option<TakingBack>,
+    /// The message of a turn being edited, to put in the box once the
+    /// daemon has rewound to before it (see `chat::branches`).
+    pub(super) editing: Option<String>,
     /// What the daemon was last told is typed, or the draft the box took.
     pub(super) synced: String,
     /// When what's typed first changed since, and last changed, as turns
@@ -83,7 +86,7 @@ fn millis(duration: Duration) -> u64 {
 }
 
 /// `message`, taken back, before `typed`, on a line of its own.
-fn joined(message: &str, typed: &str) -> String {
+pub(super) fn joined(message: &str, typed: &str) -> String {
     if typed.is_empty() {
         message.to_owned()
     } else {
@@ -105,6 +108,7 @@ impl ChatView {
             return;
         };
         if !self.memory.touched
+            && !self.editing()
             && self.editor.raw_text().is_empty()
             && self.images.is_empty()
             && !draft.is_empty()
@@ -209,7 +213,7 @@ impl ChatView {
 
     /// Has what's typed told the daemon now, rather than as typing pauses,
     /// whether or not it's what was last told.
-    fn tell_draft_at_once(&mut self) {
+    pub(super) fn tell_draft_at_once(&mut self) {
         self.memory.tell_now = true;
         self.note_draft();
     }
@@ -233,7 +237,7 @@ impl ChatView {
 
     /// Makes the box `text`, a message taken back, with the caret at its
     /// end.
-    fn put_taken_back(&mut self, text: &str) {
+    pub(super) fn put_taken_back(&mut self, text: &str) {
         self.editor.set_text(text);
         self.memory.recall = None;
         self.queued.push(Input::CaretToEnd);

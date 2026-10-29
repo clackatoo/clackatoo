@@ -1115,6 +1115,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A subagent in a pane comes back a subagent after a restart: its band, its card, its profile and its limits",
     },
+    News {
+        id: "chat-branches",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Rewind a chat with dG or /rewind, edit a message with cc, and switch between its branches with [b and ]b",
+    },
 ];
 
 impl News {

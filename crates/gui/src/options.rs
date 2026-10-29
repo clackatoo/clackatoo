@@ -645,6 +645,12 @@ options! {
     /// chat, and clicking it goes there. A subagent's finishing tells the
     /// chat that started it, not you, but its questions are yours.
     notify("ntf", "Desktop notifications for chats you can’t see"): Notify = Notify::All;
+    /// What rewinding a chat's conversation, or switching it to another
+    /// branch, does to the files the turns it takes out changed: `ask`
+    /// asks each time; `undo` undoes them, as `u` undoes a turn; `keep`
+    /// leaves them as they are. `:rewind!` undoes them without asking,
+    /// leaving out any that can't be.
+    rewindfiles("rwf", "Undo files a chat rewind takes out"): RewindFiles = RewindFiles::Ask;
     /// Look for a new release of clackatoo, at most once a day, a while
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.
@@ -833,6 +839,19 @@ impl AgentTools {
             Self::Allow => clackatoo_protocol::AgentTools::Allow,
             Self::Off => clackatoo_protocol::AgentTools::Off,
         }
+    }
+}
+
+choice! {
+    /// What `rewindfiles` says to do with the files a rewind takes out of
+    /// a chat's conversation changed.
+    RewindFiles {
+        /// Ask, in the bottom bar.
+        Ask = "ask",
+        /// Undo them without asking.
+        Undo = "undo",
+        /// Leave them as they are.
+        Keep = "keep",
     }
 }
 

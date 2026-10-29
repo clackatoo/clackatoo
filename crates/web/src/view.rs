@@ -440,6 +440,27 @@ pub fn chat_header(state: &State, open: &OpenChat) -> Element {
     header
 }
 
+/// Where the conversation's branches part at turn `index`, as the
+/// daemon numbers turns, if they part there.
+fn branches_at(node: &ChatNode, index: usize) -> Option<&clackatoo_protocol::Divergence> {
+    let index = u32::try_from(index).ok()?;
+    node.branches.iter().find(|place| place.at == index)
+}
+
+/// What the phone says where branches part: "Branch 2 of 3", and that it
+/// was made from a summary.
+fn branches_said(place: &clackatoo_protocol::Divergence) -> String {
+    let mut said = format!("‹ Branch {} of {} ›", place.current, place.count);
+    let summary = (place
+        .branches
+        .get(usize::from(place.current).wrapping_sub(1)))
+    .is_some_and(|branch| branch.summary);
+    if summary {
+        said.push_str(" · from a summary");
+    }
+    said
+}
+
 /// Where turn `index`'s answer starts, among its items: after the last
 /// that isn't the agent's words.
 fn answer_start(turn: &Turn) -> usize {
@@ -466,6 +487,11 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
             .child(el("div").class("divider").text(switch.label()));
     }
     let mut section = section;
+    // Where the conversation's branches part, which is shown of how many:
+    // switching is the window's, for now.
+    if let Some(place) = branches_at(node, index) {
+        section = section.child(el("div").class("branches").text(branches_said(place)));
+    }
     if !turn.prompt.is_empty() || !turn.previews.is_empty() {
         let mut prompt = el("div").class("prompt");
         if let Some(from) = &turn.from {
@@ -562,6 +588,15 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
                 .class("muted")
                 .text(format!("Changed {} file{plural}{state}", files.count)),
         );
+    }
+    // After the last, a new branch not written to yet.
+    if index + 1 == node.first_turn as usize + node.turns.len()
+        && let Some(place) = branches_at(node, index + 1)
+    {
+        section = section.child(el("div").class("branches").text(format!(
+            "New branch, to write to · {}",
+            branches_said(place)
+        )));
     }
     section
 }
@@ -2062,6 +2097,44 @@ mod tests {
         assert!(text.contains("Needs approval"));
         assert!(text.contains("Elsewhere"));
         assert!(text.contains("Claude CodeReady5m"), "{text}");
+    }
+
+    #[test]
+    fn where_branches_part_says_which_is_shown_and_a_new_one_says_so() {
+        let mut node = ChatNode::default();
+        for prompt in ["one", "two"] {
+            node.turns.push(Turn {
+                woke: None,
+                previews: Vec::new(),
+                prompt: prompt.into(),
+                sent: 0,
+                items: Vec::new(),
+                end: None,
+                files: None,
+                from: None,
+                switch: None,
+            });
+        }
+        let place = |at, current, count| clackatoo_protocol::Divergence {
+            at,
+            current,
+            count,
+            dropped: 0,
+            branches: vec![clackatoo_protocol::BranchSummary::default(); usize::from(count)],
+        };
+        node.branches = vec![place(1, 2, 3), place(2, 2, 2)];
+        node.branches[0].branches[1].summary = true;
+        let open = open();
+        assert!(!turn(&node, &open, 0, 0).all_text().contains("Branch"));
+        let text = turn(&node, &open, 1, 0).all_text();
+        assert!(
+            text.contains("‹ Branch 2 of 3 › · from a summary"),
+            "{text}"
+        );
+        assert!(
+            text.contains("New branch, to write to · ‹ Branch 2 of 2 ›"),
+            "{text}"
+        );
     }
 
     #[test]

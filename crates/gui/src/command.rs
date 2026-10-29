@@ -234,6 +234,16 @@ pub(crate) enum Command {
         redo: bool,
         force: bool,
     },
+    /// `:rewind`: rewind the focused chat's conversation to before turn
+    /// `number`, as people count them, from 1, or its last; with `force`,
+    /// `:rewind!`, undoing what the turns cut changed in files without
+    /// asking.
+    Rewind { number: Option<usize>, force: bool },
+    /// `:branch N`: show branch N, from 1, where the focused chat's
+    /// branches part at the turn under its cursor, or the nearest above.
+    Branch(u16),
+    /// `:branches`: the finder over every branch of the focused chat.
+    Branches,
     /// `:stoptask`: ask the focused chat's agent to stop what it runs in
     /// the background on line `line` of the shelf above the box, counting
     /// from 0, or the newest running.
@@ -768,10 +778,39 @@ fn stop_task(word: &str, argument: Option<&str>) -> Option<Result<Command, Strin
     })
 }
 
+/// `:rewind`, `:branch` or `:branches`, if `word` is one, with what
+/// follows it.
+fn branch_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    let number = |word: &str| match argument.map(str::parse::<usize>) {
+        None => Ok(None),
+        Some(Ok(number)) if number > 0 => Ok(Some(number)),
+        Some(_) => Err(format!("{word} takes a turn's number, from 1: :{word} 3")),
+    };
+    match word {
+        "rewind" | "rewind!" => Some(number("rewind").map(|number| Command::Rewind {
+            number,
+            force: word.ends_with('!'),
+        })),
+        "branch" => Some(match argument.map(str::parse::<u16>) {
+            Some(Ok(number)) if number > 0 => Ok(Command::Branch(number)),
+            _ => Err("branch takes the branch's number, from 1: :branch 2".to_owned()),
+        }),
+        "branches" => Some(match argument {
+            Some(argument) => Err(format!(
+                "branches takes nothing after it, but has {argument:?}"
+            )),
+            None => Ok(Command::Branches),
+        }),
+        _ => None,
+    }
+}
+
 /// A command for the focused chat, if `word` is one: `:agentundo`,
-/// `:agentredo`, `:stoptask`, `:taskoutput` or `:plan`.
+/// `:agentredo`, `:rewind`, `:branch`, `:branches`, `:stoptask`,
+/// `:taskoutput` or `:plan`.
 fn chat_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     (agent_undo(word, argument))
+        .or_else(|| branch_command(word, argument))
         .or_else(|| stop_task(word, argument))
         .or_else(|| plan_command(word, argument))
         .or_else(|| ask_command(word, argument))
@@ -941,6 +980,9 @@ command_names! {
     "markdown" => "Toggle the rendered Markdown view",
     "agentundo" => "Undo file changes from an agent turn",
     "agentredo" => "Redo file changes from an agent turn",
+    "rewind" => "Rewind the chat to before a turn, keeping what follows as a branch",
+    "branch" => "Show another branch of the chat, where branches part",
+    "branches" => "Find and show a branch of the chat",
     "stoptask" => "Stop what the agent runs in the background",
     "taskoutput" => "Follow what a background task printed",
     "plan" => "Open or fold the agent's plan",
@@ -1141,6 +1183,9 @@ mod tests {
         ("markdown", ""),
         ("agentundo", ""),
         ("agentredo", ""),
+        ("rewind", ""),
+        ("branch", ""),
+        ("branches", ""),
         ("stoptask", ""),
         ("taskoutput", ""),
         ("plan", ""),
@@ -1660,6 +1705,14 @@ mod tests {
         assert_eq!(parse("agentundo! 1").unwrap(), undo(Some(0), false, true));
         assert_eq!(parse("agentredo!").unwrap(), undo(None, true, true));
         assert!(parse("agentundo 0").is_err());
+        let rewind = |number, force| Command::Rewind { number, force };
+        assert_eq!(parse("rewind").unwrap(), rewind(None, false));
+        assert_eq!(parse("rewind 3").unwrap(), rewind(Some(3), false));
+        assert_eq!(parse("rewind! 2").unwrap(), rewind(Some(2), true));
+        assert!(parse("rewind 0").is_err());
+        assert_eq!(parse("branch 2").unwrap(), Command::Branch(2));
+        assert!(parse("branch").is_err());
+        assert_eq!(parse("branches").unwrap(), Command::Branches);
         assert!(parse("agentredo last").is_err());
     }
 

@@ -475,6 +475,60 @@ impl Desk {
         }
     }
 
+    /// `:rewind`: the focused chat rewinds to before turn `number`, as
+    /// people count them, or its last; with `force`, undoing files
+    /// without asking.
+    pub(super) fn rewind_chat(&mut self, number: Option<usize>, force: bool) {
+        let asked = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.view_mut().rewind_numbered(number, force),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
+    /// `:branch N`: the focused chat shows branch `to` where its branches
+    /// part at the turn under its cursor, or the nearest above.
+    pub(super) fn switch_chat_branch(&mut self, to: u16) {
+        let asked = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.view_mut().branch_numbered(to),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
+    /// `:branches`: the finder over every branch of the focused chat,
+    /// where each parts from the others: Enter shows the one picked.
+    pub(super) fn list_branches(&mut self) {
+        let Some(chat) = self.focused_chat() else {
+            self.refuse("that's for a chat with an agent".into());
+            return;
+        };
+        let items = chat.view().branch_items();
+        if items.is_empty() {
+            self.refuse("this chat's conversation has no other branches".into());
+            return;
+        }
+        self.close_finder();
+        let case = crate::options::Case::of(&self.options);
+        self.finder = Some(Finder::local(finder::Kind::Branches, items, case));
+    }
+
+    /// Shows the branch picked in the finder, `picked` as
+    /// [`ChatView::branch_items`] names it, in the focused chat.
+    pub(super) fn show_picked_branch(&mut self, picked: &str) {
+        let asked = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.view_mut().switch_picked(picked),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
     /// Asks the focused chat's agent to stop what it runs in the
     /// background on line `line` of the chat's shelf, or the newest
     /// running.

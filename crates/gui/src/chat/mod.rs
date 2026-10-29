@@ -12,6 +12,7 @@
 //! the window [settles](ChatView::settle) it, which it does before sending
 //! anything to the daemon and before drawing.
 
+mod branches;
 mod card;
 mod favorites;
 mod filling;
@@ -216,6 +217,13 @@ enum Hit {
     Usage,
     /// A command in the `/` menu, by its line in view.
     Slash(usize),
+    /// An arrow of the switcher where the conversation's branches part,
+    /// which shows branch `to`, from 1, of those parting at turn `at`, by
+    /// its index among those held.
+    Branch {
+        at: usize,
+        to: u16,
+    },
     /// A file in the `@` menu, by its line in view.
     Mention(usize),
 }
@@ -488,6 +496,15 @@ pub(crate) struct ChatView {
     memory: prompts::Memory,
     /// Whether the daemon keeps what's typed in the box (protocol 117 on).
     pub(crate) drafts_supported: bool,
+    /// Whether the daemon rewinds a chat's conversation and switches its
+    /// branches (protocol 121 on).
+    pub(crate) branches_supported: bool,
+    /// What a rewind does to the files the turns it takes out changed,
+    /// as the `rewindfiles` option says.
+    rewind_files: crate::options::RewindFiles,
+    /// What a rewind or a switch to another branch asks first, while it
+    /// does (see [`branches`]).
+    branch_asked: Option<branches::Asked>,
 }
 
 /// How long, in milliseconds, after a number arms an answer in normal mode
@@ -514,6 +531,22 @@ enum Pick {
 
 /// The answer the number `text` names, from 1 to 9, by its index, if it's
 /// one.
+/// How many of the turns `old` held, as indexes among those `new` holds,
+/// `older` turns having come before them, are still what they were: up
+/// to the first that's another turn, or gone, as a rewind or a switch to
+/// another branch leaves them. `None` if `new` starts after `old` did, so
+/// none of the indexes held mean what they did.
+fn kept_turns(old: &ChatNode, new: &ChatNode, older: usize) -> Option<usize> {
+    if new.first_turn > old.first_turn {
+        return None;
+    }
+    let same = (old.turns.iter())
+        .zip(new.turns.iter().skip(older))
+        .take_while(|(old, new)| old.sent == new.sent && old.prompt == new.prompt)
+        .count();
+    Some(older + same)
+}
+
 fn numbered(text: Option<&str>) -> Option<usize> {
     let number = text?.parse::<usize>().ok()?;
     (1..=9).contains(&number).then(|| number - 1)
@@ -544,6 +577,7 @@ impl ChatView {
         self.finds = finds.clone();
     }
 
+    #[allow(clippy::too_many_lines, reason = "one field a line")]
     pub(crate) fn new(title: String, node: ChatNode) -> Self {
         let mut view = Self {
             node,
@@ -638,6 +672,9 @@ impl ChatView {
             wants_insert: false,
             memory: prompts::Memory::default(),
             drafts_supported: false,
+            branches_supported: false,
+            rewind_files: crate::options::RewindFiles::Ask,
+            branch_asked: None,
         };
         view.came_whole();
         // A chat first seen asking may be arrived at already.
@@ -758,8 +795,17 @@ impl ChatView {
         match update {
             ViewUpdate::Snapshot(view) => {
                 if let Some(chat) = view.chat() {
-                    if chat.first_turn < self.node.first_turn {
-                        self.prepend_history((self.node.first_turn - chat.first_turn) as usize);
+                    let older = self.node.first_turn.saturating_sub(chat.first_turn) as usize;
+                    if older > 0 {
+                        self.prepend_history(older);
+                    }
+                    // A rewind or a switch to another branch sends the
+                    // chat whole: what's kept by turn goes from the first
+                    // turn that isn't what it was.
+                    match kept_turns(&self.node, chat, older) {
+                        Some(kept) if kept < self.node.turns.len() + older => self.cut_from(kept),
+                        Some(_) => {}
+                        None => self.cut_from(0),
                     }
                     self.history_pending = None;
                     chat.clone_into(&mut self.node);
@@ -850,6 +896,13 @@ impl ChatView {
                                     .collect();
                                 for turn in turns {
                                     self.restyled(turn as usize);
+                                }
+                            }
+                            // The switchers, where branches part, are laid
+                            // out with their turns.
+                            if let clackatoo_protocol::ChatPatch::Branches(_) = patch {
+                                for turn in 0..self.node.turns.len() {
+                                    self.restyled(turn);
                                 }
                             }
                             self.node.apply(patch.clone());
@@ -1407,6 +1460,7 @@ impl ChatView {
         {
             self.queued = ready.split_off(waiting);
         }
+        let waiting = self.queued.len();
         for input in ready {
             // A drag that started nothing changes nothing.
             settled.redraw |= !matches!(input, Input::Drag(_))
@@ -1476,6 +1530,15 @@ impl ChatView {
                 Input::Compose(None) => self.drive(fonts, |driver| {
                     driver.clear_compose();
                 }),
+            }
+        }
+        // What a click or a message typed asked of the daemon meanwhile,
+        // as a switch to another branch, goes now, in order.
+        let asked: Vec<Input> = self.queued.drain(waiting..).collect();
+        for input in asked {
+            match input {
+                Input::Act(action) => settled.actions.push(action),
+                input => self.queued.push(input),
             }
         }
         settled.redraw |= self.preview_search(fonts);
@@ -2456,6 +2519,7 @@ impl ChatView {
                     self.copied_answer = Some(turn);
                 }
             }
+            Some(Hit::Branch { at, to }) => self.switch_branch(at, to),
             Some(Hit::Resend) => {
                 if self.resend_asked() == Some(true) {
                     settled.actions.push(ChatAction::Resend);

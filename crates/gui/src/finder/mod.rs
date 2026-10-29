@@ -87,6 +87,9 @@ pub(crate) enum Kind {
     /// The messages sent in the focused chat, the newest first, to put
     /// one in its box (see `chat::prompts`).
     Prompts,
+    /// The branches of the focused chat's conversation, where each parts
+    /// from the others, to show one (see `chat::branches`).
+    Branches,
 }
 
 impl Kind {
@@ -105,6 +108,7 @@ impl Kind {
             Self::ProjectSymbols => "Project symbols",
             Self::Background => "Background",
             Self::Prompts => "Messages sent",
+            Self::Branches => "Branches",
         }
     }
 
@@ -120,7 +124,7 @@ impl Kind {
     fn local(self) -> bool {
         matches!(
             self,
-            Self::Lessons | Self::News | Self::Background | Self::Prompts
+            Self::Lessons | Self::News | Self::Background | Self::Prompts | Self::Branches
         )
     }
 }
@@ -1030,7 +1034,7 @@ impl Finder {
             let lines = self.local_previews.get(index)?;
             // A background tab's screen, or a message, as it is: no line
             // numbers.
-            if matches!(self.kind, Kind::Background | Kind::Prompts) {
+            if matches!(self.kind, Kind::Background | Kind::Prompts | Kind::Branches) {
                 return Some(PreviewView::screen(lines, (rows, cols)));
             }
             return Some(PreviewView::new(0, lines, None, (rows, cols)));

@@ -1,0 +1,42 @@
+# Rewinding a chat (CLACKA-198): dG asks about the files, the new branch's
+# row, the switcher where branches part, [b back to the branch left, cc
+# putting a message back in the box, and narrow.
+size 1000x750
+file note.txt <<END
+before
+END
+keys <C-;>:Agent claude<CR>
+keys i
+type remember APPLE
+keys <CR>
+wait-for echo: remember APPLE
+type write $PROJECT/note.txt
+keys <S-CR>
+type after
+keys <CR>
+wait-for wrote
+keys <C-;>dG
+shot asked
+keys y
+sleep 500
+shot rewound
+keys i
+type remember BANANA
+keys <CR>
+wait-for echo: remember BANANA
+shot switcher
+keys <C-;>[b
+sleep 500
+shot switch-asked
+keys y
+wait-for wrote
+shot switched-back
+keys gg
+keys cc
+sleep 500
+shot edit
+keys n
+sleep 500
+shot edit-box
+size 300x750
+shot narrow

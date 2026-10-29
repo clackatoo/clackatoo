@@ -328,6 +328,27 @@ impl ChatView {
         }
     }
 
+    /// The turns from `turn` on are no longer what they were, as after a
+    /// rewind: a match, or a place to go back to, in them is let go of.
+    pub(super) fn search_cut(&mut self, turn: usize) {
+        let gone = |at: &Option<Position>| at.is_some_and(|at| at.text.turn >= turn);
+        if gone(self.search.found_mut()) {
+            *self.search.found_mut() = None;
+        }
+        if let Some(kept) = self.search.kept_found_mut()
+            && gone(kept)
+        {
+            *kept = None;
+        }
+        if let Some(start) = self.search.start_mut() {
+            if gone(&start.cursor) {
+                start.cursor = None;
+            }
+            start.opened_in = start.opened_in.filter(|&at| at < turn);
+            start.folds.retain(|&at, _| at < turn);
+        }
+    }
+
     /// Takes how searches treat case, as the options say.
     pub(crate) fn set_case(&mut self, case: Case) {
         self.case = case;
@@ -338,9 +359,10 @@ impl ChatView {
         self.search.set_options(options);
     }
 
-    /// Whether a search is being typed, which takes every key.
+    /// Whether a search is being typed, or a rewind asks something,
+    /// which takes every key.
     pub(crate) fn prompting(&self) -> bool {
-        self.search.typing()
+        self.search.typing() || self.branch_asking().is_some()
     }
 
     /// The search being typed, for the desk to put a register in, or a
@@ -352,11 +374,14 @@ impl ChatView {
     /// What the bar shows of the search being typed, if one is: `/` or
     /// `?`, and what's typed.
     pub(crate) fn prompt_label(&self) -> Option<String> {
-        self.search.label()
+        (self.branch_asking().map(str::to_owned)).or_else(|| self.search.label())
     }
 
     /// The keys shown by Ctrl+? while a search is typed.
     pub(super) fn prompt_shortcuts(&self) -> Option<crate::shortcuts::Context> {
+        if let Some(context) = self.branch_shortcuts() {
+            return Some(context);
+        }
         self.search.shortcuts("Chat search")
     }
 

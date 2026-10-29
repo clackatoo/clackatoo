@@ -2440,6 +2440,9 @@ impl App {
         let resend = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_FACTS);
         let cost = self.desk.options().chatcost;
         let drafts = self.desk.daemon_has(clackatoo_protocol::wire::PROMPT_BOX);
+        let branches = self
+            .desk
+            .daemon_has(clackatoo_protocol::wire::CHAT_BRANCHES);
         let usage = self
             .desk
             .daemon_has(clackatoo_protocol::wire::PROVIDER_USAGE);
@@ -2456,6 +2459,7 @@ impl App {
             view.set_resend_supported(resend);
             view.set_show_cost(cost);
             view.drafts_supported = drafts;
+            view.branches_supported = branches;
             view.usage_supported = usage;
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.
