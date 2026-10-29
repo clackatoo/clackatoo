@@ -163,6 +163,8 @@ An agent can give a subagent a pane of its own, and a card opens one as a pane. 
 
 `:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. One you sent back is yours: the agent that started it can't close it. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
 
+A subagent in a pane comes back after the daemon restarts, a subagent still, if its chat was in a pane too: band, card, `:q` and all, with its profile's limits and never a mode above its chat's.
+
 ## Reviewing what they changed
 
 `:Review turn` lists what the chat's last turn changed in files, hunk by hunk, and `:Review chat` everything it changed that you haven't kept, to the right of the focused pane, or with a split's mark, as `:-Review`, on that side: `a` keeps a hunk, `x` rejects it, and `]h` goes to the next. Both take in the chat's subagents too, open or closed: under the heading is a line for each, with what it was asked, and each hunk says whose it is, as `· explore (chat 7)`. A turn's review lists the subagents that turn started, and theirs.
