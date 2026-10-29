@@ -101,6 +101,20 @@ impl super::ChatView {
             .is_some_and(|(taking, _)| *taking == id)
     }
 
+    /// The daemon went out of reach while a queued message was being
+    /// taken back, so whether it's out of the queue isn't known: its text
+    /// goes in the box all the same, rather than be lost, and the bar
+    /// says to check the queue.
+    pub(super) fn take_back_lost(&mut self) {
+        if let Some(id) = self.taking_back.as_ref().map(|(id, _)| *id) {
+            self.taken_back(id, Response::Done);
+            self.say(
+                "Disconnected while taking a queued message back: check the queue, as it may still be there"
+                    .into(),
+            );
+        }
+    }
+
     /// Takes the daemon's answer to taking the message `id` out of the
     /// queue: once it's out, its text goes in the box, before anything
     /// typed since, as a draft refused comes back.

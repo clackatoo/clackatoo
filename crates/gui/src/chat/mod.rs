@@ -938,6 +938,7 @@ impl ChatView {
             self.handoff_failed(
                 "Disconnected before send was confirmed. Check the history before retrying.",
             );
+            self.take_back_lost();
             if let Some(viewer) = &mut self.image_viewer {
                 viewer.offline();
             }

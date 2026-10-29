@@ -359,6 +359,24 @@ mod tests {
     }
 
     #[test]
+    fn a_message_being_taken_back_as_the_daemon_goes_out_of_reach_isnt_lost() {
+        let mut fonts = fonts();
+        let mut view = sent();
+        view.queue_supported = true;
+        view.node.delivery.queued = vec![queued(4, "the lint too", 0)];
+        named(&mut view, &mut fonts, NamedKey::ArrowUp);
+        assert!(view.taking_back(4));
+        view.set_offline(true);
+        view.settle(&mut fonts);
+        assert_eq!(shown(&view), "the lint too");
+        assert!(
+            view.said
+                .as_deref()
+                .is_some_and(|said| said.contains("check the queue"))
+        );
+    }
+
+    #[test]
     fn a_queued_message_with_images_or_a_move_to_another_agent_isnt_taken_back() {
         let mut fonts = fonts();
         let mut view = sent();
