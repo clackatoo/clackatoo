@@ -3180,6 +3180,11 @@ fn a_turn_the_agent_took_by_itself_fails_as_its_agent_says_and_no_failure_goes_u
         "the account's usage limit is reached. Claude Code said: `You've hit your limit · \
          resets 3pm`"
     );
+    // One said by itself as the turn answering then fails with it is said
+    // once, by the turn.
+    let node = ask(&mut client, chat, "session-error-fail");
+    assert!(matches!(last_outcome(&node), Some(Outcome::Failed(_))));
+    assert_eq!(node.notice, None);
     // One said by itself while a message is answered is the session's:
     // a notice says so, and the turn goes on.
     let node = ask(&mut client, chat, "session-error");

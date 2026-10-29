@@ -171,7 +171,7 @@ impl HostedChat {
         if self.woken() {
             self.answered_as(Outcome::Failed(said.text), said.raw, None);
         } else {
-            self.set_notice(Some(one_line_notice(&capitalised(&said.text))));
+            self.set_notice(Some(failure_notice(&said.text)));
         }
     }
 
@@ -371,7 +371,9 @@ impl HostedChat {
     }
 
     /// Sends the last turn's message again, as a turn of its own, if it
-    /// failed and was the user's, with the role or brief it went with. A
+    /// failed and was the user's; with the role or brief it went with if
+    /// it failed before the agent did anything with it, so before it can
+    /// have taken that in: the turn holds nothing the agent did. A
     /// message with images is sent with them only as long as the chat has
     /// them: after an upgrade, its words go alone, and the chat says so.
     /// Nothing is sent while a message waits for the session to load.
@@ -390,6 +392,7 @@ impl HostedChat {
         if !failed || turn.from.is_some() || turn.switch.is_some() || turn.woke.is_some() {
             return;
         }
+        let unheard = turn.items.is_empty();
         let prompt = match &self.facts.last_prompt {
             Some((at, prompt)) if *at == index => prompt.clone(),
             _ => {
@@ -412,9 +415,10 @@ impl HostedChat {
                 Prompt::from(words)
             }
         };
-        // The role or brief it went with goes again.
+        // The role or brief it went with goes again, if the agent never
+        // took it in.
         if let Some((at, role)) = self.facts.briefed.take() {
-            if at == index && self.role.is_none() {
+            if at == index && unheard && self.role.is_none() {
                 self.role = Some(role);
             } else {
                 self.facts.briefed = Some((at, role));
@@ -447,6 +451,11 @@ fn without_image_labels(shown: &str) -> (String, bool) {
     let had = shown.lines().any(label);
     let words: Vec<&str> = shown.lines().filter(|line| !label(line)).collect();
     (words.join("\n").trim().to_owned(), had)
+}
+
+/// The notice that says `failure`, a failure in plain words, by itself.
+pub(super) fn failure_notice(failure: &str) -> String {
+    one_line_notice(&capitalised(failure))
 }
 
 /// How a turn that ended as `result` says ended.

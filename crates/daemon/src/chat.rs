@@ -2126,8 +2126,13 @@ impl HostedChat {
     /// The agent finished answering as `outcome` says, or failed to, in
     /// its own words `raw`, having spent `spent`.
     fn answered_as(&mut self, outcome: Outcome, raw: Option<String>, spent: Option<Spent>) {
-        if matches!(outcome, Outcome::Failed(_)) {
+        if let Outcome::Failed(why) = &outcome {
             self.user_queue.restart = None;
+            // The agent said the same failure by itself as it answered:
+            // the turn says it, so the notice needn't.
+            if self.node.notice.as_deref() == Some(facts::failure_notice(why).as_str()) {
+                self.set_notice(None);
+            }
         }
         if !matches!(outcome, Outcome::Done) {
             self.pause_queue(true);
@@ -5555,6 +5560,20 @@ mod tests {
         assert!(briefed(&send(&mut c, "inspect")));
         c.answered(Err("failed".into()));
         assert!(briefed(&c.act(ChatAction::Resend)));
+        // A turn the agent did something in had it: it goes without.
+        let thought = serde_json::from_str(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hm"}}"#,
+        )
+        .unwrap();
+        c.update(thought);
+        c.answered(Err("failed".into()));
+        let actions = c.act(ChatAction::Resend);
+        assert!(!briefed(&actions), "{actions:?}");
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Prompt(p) if p.text == "inspect"))
+        );
         c.answered(Ok(StopReason::EndTurn));
         // A message whose images the chat no longer has, as after an
         // upgrade: its words go alone, and the chat says so.

@@ -47,6 +47,7 @@
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
 //! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
 //! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
+//! | `session-error-fail` | Says, by itself, that the usage limit is reached, then ends its turn failed with the same, as AIR's `sessionFailure` |
 //! | `compact-late` | Compacts its context, as `compact` does, but says its last report with the next message |
 //! | `image-bad` | Shows an image in its words with no data, then `shown` |
 //!
@@ -1260,6 +1261,21 @@ impl Fake {
                 );
                 say(session, "carried on\n");
                 done(id, "end_turn");
+            }
+            "session-error-fail" => {
+                let failure = json!({ "id": "s:session-error:3", "revision": 1,
+                    "category": "limit", "severity": "error",
+                    "title": "You've hit your limit · resets 3pm", "actions": [] });
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "session_info_update", "_meta": { "jetbrains":
+                        { "air": { "version": 1, "sessionFailure": failure.clone() } } } }),
+                );
+                reply(
+                    id,
+                    &json!({ "stopReason": "end_turn", "_meta": { "jetbrains": { "air": {
+                        "version": 1, "sessionFailure": failure } } } }),
+                );
             }
             "compact-late" => {
                 update(
