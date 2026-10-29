@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.10.107 (2026-10-29)
+
+### Features
+
+- **gui:** Codex's Plan mode is in the permissions menu beside its mode (CLACKA-197) (3dd17659)
+- **daemon:** ask every agent for ACP notices, and keep Codex's Plan mode as it leaves it (CLACKA-197) (83e4c786)
+
+### Fixes
+
+- **daemon:** Codex's compaction is the turn's line, not a tool row (CLACKA-197) (724c5616)
+- **daemon:** an answer to a change asked for is followed too, and nothing a session tells again is (CLACKA-197) (8db1c33e)
+- **daemon:** an agent can't keep a mode it raises itself, and the phone shows Codex's Plan mode (CLACKA-197) (a843f609)
+- **daemon:** rank known agents' modes from a table, put a raise back at once, and leave Plan only as the user said (CLACKA-197) (c7d0355d)
+
 ## 2026.10.106 (2026-10-29)
 
 ### Features
