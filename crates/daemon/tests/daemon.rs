@@ -89,7 +89,12 @@ impl TestDaemon {
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
             shell_integration: None,
-            agents: AgentConfig::default(),
+            // Traced as the real daemon is, so the live tests that don't
+            // name a directory of their own can be traced too.
+            agents: AgentConfig {
+                trace: env_trace(),
+                ..AgentConfig::default()
+            },
             mcp: None,
             udp_ports: Some(0..=0),
             languages: None,
@@ -18158,10 +18163,28 @@ fn real_claude() -> Option<Vec<std::ffi::OsString>> {
     )
 }
 
-/// Where scenario `name` keeps its ACP traffic, emptied.
+/// `$CLACKATOO_ACP_TRACE`, made if it isn't there yet.
+fn env_trace() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("CLACKATOO_ACP_TRACE").filter(|dir| !dir.is_empty())?);
+    trace_dir(&dir);
+    Some(dir)
+}
+
+/// Makes `dir` if it isn't there, private (0700) as the daemon wants a
+/// trace directory to be before it writes there.
+fn trace_dir(dir: &Path) {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir);
+}
+
+/// Where scenario `name` keeps its ACP traffic, emptied and made again.
 fn live_trace(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("acp-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
+    trace_dir(&dir);
     dir
 }
 
@@ -18526,9 +18549,8 @@ fn a_real_claude_chat_rewinds_forgetting_the_turns_cut_and_switches_back() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_CODEX or install Codex, and run with --ignored"]
 fn a_real_codex_chat_rewinds_forgetting_the_turns_cut_and_switches_back() {
+    let _left = CodexLeft::new();
     live_rewind("codex");
-    // Codex's sandbox leaves an empty .git in each writable root.
-    let _ = std::fs::remove_dir(std::env::temp_dir().join(".git"));
 }
 
 /// Submits `text` as the window does, queued if the agent is busy.
@@ -19739,13 +19761,52 @@ fn a_real_agent_sees_an_image_in_a_message() {
     );
 }
 
-/// An empty folder Codex's sandbox leaves, taken away when dropped.
-struct GitLeft(PathBuf);
+/// The folders Codex's sandbox leaves in `$TMPDIR`: an empty `.git`,
+/// `.agents`, `.aws` and `.codex` (in each root it may write to), and
+/// bubblewrap's mount targets. Those that weren't there as it's made are
+/// taken away when dropped, and only while they hold nothing but empty
+/// folders, so nothing else in `$TMPDIR` is ever touched.
+struct CodexLeft(Vec<PathBuf>);
 
-impl Drop for GitLeft {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.0);
+impl CodexLeft {
+    fn new() -> Self {
+        let tmp = std::env::temp_dir();
+        let uid = std::fs::metadata("/proc/self").map_or(0, |meta| meta.uid());
+        let names = [".git", ".agents", ".aws", ".codex"]
+            .map(String::from)
+            .into_iter()
+            .chain([format!("codex-bwrap-synthetic-mount-targets-{uid}")]);
+        Self(
+            names
+                .map(|name| tmp.join(name))
+                .filter(|path| !path.exists())
+                .collect(),
+        )
     }
+}
+
+impl Drop for CodexLeft {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            remove_empty_tree(path);
+        }
+    }
+}
+
+/// Takes away `path` if it's a folder holding only empty folders.
+fn remove_empty_tree(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            remove_empty_tree(&entry.path());
+        }
+    }
+    let _ = std::fs::remove_dir(path);
 }
 
 /// Claude Code asked for AIR's `sessionFailure` (CLACKA-196): a turn that
@@ -19872,11 +19933,11 @@ fn a_real_codex_session_stops_and_takes_queued_messages() {
         config.agents.custom = vec![custom_agent("codex", command)];
         config.agents.trace = Some(trace.clone());
     });
-    // Codex's sandbox leaves an empty `.git` in each folder it may write
-    // to, `$TMPDIR` among them, where it would make every test's folder
-    // look like part of a repository: it's taken away as the test ends.
-    let git = std::env::temp_dir().join(".git");
-    let _git = (!git.exists()).then(|| GitLeft(git));
+    // Codex's sandbox leaves an empty `.git` (and more) in each folder it
+    // may write to, `$TMPDIR` among them, where `.git` would make every
+    // test's folder look like part of a repository: they're taken away as
+    // the test ends.
+    let _left = CodexLeft::new();
     let mut client = daemon.client();
     let client = &mut client;
     client
@@ -20046,8 +20107,7 @@ fn a_real_codex_plans_from_the_box_and_says_its_notices_as_such() {
         config.agents.custom = vec![custom_agent("codex", command)];
         config.agents.trace = Some(trace.clone());
     });
-    let git = std::env::temp_dir().join(".git");
-    let _git = (!git.exists()).then(|| GitLeft(git));
+    let _left = CodexLeft::new();
     let mut client = daemon.client();
     let client = &mut client;
     client
