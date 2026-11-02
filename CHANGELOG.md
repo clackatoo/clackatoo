@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.0 (2026-11-02)
+
+### Fixes
+
+- **chat:** keep running subagents visible after later messages (CLACKA-206) (81626cd7)
+
 ## 2026.10.112 (2026-10-29)
 
 ### Fixes
