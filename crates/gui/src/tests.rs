@@ -1112,6 +1112,36 @@ fn renders_wrapped_user_identifiers_without_an_oversized_bubble() {
 }
 
 #[test]
+fn renders_live_subagents_after_the_conversation_continues() {
+    use clackatoo_protocol::{Subagent, SubagentStatus, TerminalId};
+
+    let mut node = crate::chat::fixtures::talk(&[
+        (
+            "Check the old archive",
+            "The comparison is running in a subagent.",
+        ),
+        (
+            "Meanwhile, check the release notes",
+            "The release notes are up to date.",
+        ),
+    ]);
+    node.subagents = vec![Subagent {
+        chat: TerminalId(5),
+        agent: "Claude Code".into(),
+        profile: Some("general".into()),
+        model: None,
+        task: "Compare the old archive".into(),
+        status: SubagentStatus::Working,
+        started: 0,
+        ended: None,
+        turn: 0,
+        shown: false,
+        tasks: Vec::new(),
+    }];
+    render_chat("chat-live-subagents", node, "", 1.0);
+}
+
+#[test]
 fn renders_a_chat_with_its_box_and_question() {
     let Some(pixels) = render_chat("chat", chat_node(false), "Also run the tests", 1.0) else {
         return;

@@ -7,6 +7,8 @@
 //! the chat. One that asks the user something says so, as it must be
 //! opened to answer. What one runs in the background goes under its line.
 //! While any works, or runs anything, the card counts the seconds.
+//! After another turn starts, live subagents also have a shelf above the
+//! message box, so their status stays in view as the conversation goes on.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -15,8 +17,11 @@ use clackatoo_protocol::{Subagent, SubagentStatus, TerminalId};
 
 use super::fold::{duration, height};
 use super::select::TextKey;
+use super::shelf::{Shelf, ShelfRow, rows_within};
 use super::tasks::task_row;
-use super::{AGENTS, Canvas, Drawn, Laid, Look, Measures, draw_laid, intersection, lay_out};
+use super::{
+    AGENTS, BoxFrame, Canvas, Drawn, Laid, Look, Measures, draw_laid, intersection, lay_out,
+};
 use crate::chat::{ChatView, Hit, Tone};
 use crate::fonts::Fonts;
 
@@ -42,6 +47,65 @@ pub(in crate::chat) struct AgentsLaid {
 }
 
 impl ChatView {
+    /// Live children from before the latest turn, including turns not
+    /// loaded in this window. Turn numbers on subagents are absolute.
+    fn earlier_live_agents(&self) -> impl Iterator<Item = &Subagent> {
+        let last = u32::try_from(self.node.turns.len().saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .saturating_add(self.node.first_turn);
+        self.node.subagents.iter().filter(move |entry| {
+            entry.turn < last
+                && (entry.status.going()
+                    || entry.tasks.iter().any(clackatoo_protocol::AgentTask::going))
+        })
+    }
+
+    /// Keeps ongoing work visible after the conversation has moved on.
+    pub(super) fn draw_live_agents(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        above: f32,
+    ) -> f32 {
+        let entries: Vec<_> = self.earlier_live_agents().collect();
+        if entries.is_empty() {
+            return 0.0;
+        }
+        let now = self.now();
+        let mut heading = agents_label(&entries, self.live_agents_open, now);
+        let mut rows = Vec::new();
+        if self.live_agents_open {
+            // Leave room for the conversation, even in a short pane.
+            let room = (frame.top - frame.place.origin[1] - above).max(0.0);
+            let most = rows_within(m, room * 0.4).min(8);
+            rows = entries
+                .iter()
+                .take(most)
+                .map(|entry| ShelfRow {
+                    text: agent_row(entry, now),
+                    tone: row_tone(&entry.status),
+                    stop: None,
+                    open: Some(Hit::Subagent(entry.chat)),
+                })
+                .collect();
+            if entries.len() > rows.len() {
+                let _ = write!(heading, " · {} more", entries.len() - rows.len());
+            }
+        }
+        self.draw_shelf(
+            canvas,
+            m,
+            frame,
+            above,
+            Shelf {
+                heading,
+                heading_hit: Some(Hit::LiveAgents),
+                rows,
+            },
+        )
+    }
+
     /// The chats the agent started in turn `index`, oldest first: the last
     /// turn has any that say a turn past it.
     pub(in crate::chat) fn subagents_in(&self, index: usize) -> Vec<&Subagent> {
@@ -243,6 +307,7 @@ impl ChatView {
         (self.shown.iter())
             .filter(|shown| shown.key.piece == AGENTS && shown.at[1] < self.view_height)
             .flat_map(|shown| self.subagents_in(shown.key.turn))
+            .chain(self.earlier_live_agents())
             .flat_map(|entry| {
                 let own = entry.status.going().then_some(entry.started);
                 let tasks = (entry.tasks.iter())
@@ -467,6 +532,130 @@ mod tests {
             [ChatAction::Open {
                 chat: TerminalId(6)
             }]
+        );
+    }
+
+    fn live_heading(chat: &ChatView) -> Option<&str> {
+        chat.cache
+            .labels
+            .now
+            .keys()
+            .map(|(text, ..)| text.as_str())
+            .find(|text| text.contains("subagent"))
+    }
+
+    #[test]
+    fn live_subagents_stay_above_the_box_after_later_messages() {
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), starting());
+        chat.set_clock(112_400);
+        paint(&mut chat, &mut fonts);
+        assert!(hit(&chat, &Hit::LiveAgents).is_none());
+
+        // A later message arrives as a normal turn patch. The original
+        // card stays in history; the live summary appears by the box.
+        let next = crate::chat::fixtures::talk(&[("Continue", "All right")])
+            .turns
+            .remove(0);
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+            index: 1,
+            turn: Box::new(next),
+        })]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(live_heading(&chat), Some("2 subagents working · 12s  ›"));
+        let rect = hit(&chat, &Hit::LiveAgents).expect("persistent summary");
+        chat.press([rect[0] + 2.0, rect[1] + 2.0], 1, false);
+        chat.release();
+        chat.settle(&mut fonts);
+        paint(&mut chat, &mut fonts);
+        let rect = hit(&chat, &Hit::Subagent(TerminalId(6))).expect("child row");
+        chat.press([rect[0] + 2.0, rect[1] + 2.0], 1, false);
+        chat.release();
+        assert_eq!(
+            chat.settle(&mut fonts).actions,
+            [ChatAction::Open {
+                chat: TerminalId(6)
+            }]
+        );
+
+        let mut children = chat.node.subagents.clone();
+        children[0].status = SubagentStatus::Done;
+        children[1].status = SubagentStatus::Asking;
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Subagents(
+            children.clone(),
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(
+            live_heading(&chat),
+            Some("1 subagent working · 12s · 1 needs you  ⌄")
+        );
+        children[1].status = SubagentStatus::Closed;
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Subagents(
+            children,
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert!(hit(&chat, &Hit::LiveAgents).is_none());
+        assert!(live_heading(&chat).is_none());
+    }
+
+    #[test]
+    fn live_summary_survives_unloaded_history_and_stops_waking_when_work_ends() {
+        let mut fonts = fonts();
+        let mut node = crate::chat::fixtures::talk(&[("Later", "A reply")]);
+        node.first_turn = 20;
+        let mut child = entry(5, SubagentStatus::Done);
+        child.ended = Some(101_000);
+        child.tasks = vec![clackatoo_protocol::AgentTask {
+            id: "watch".into(),
+            kind: clackatoo_protocol::AgentTaskKind::Monitor,
+            title: "comparison finishing".into(),
+            command: None,
+            state: clackatoo_protocol::AgentTaskState::Running,
+            started: 101_000,
+            ended: None,
+            summary: None,
+            can_stop: false,
+            output: None,
+        }];
+        node.subagents = vec![child];
+        let mut chat = ChatView::new(String::new(), node);
+        chat.set_clock(112_400);
+        paint(&mut chat, &mut fonts);
+        assert_eq!(
+            live_heading(&chat),
+            Some("1 subagent finished in 1s · 1 in the background  ›")
+        );
+        assert!(chat.live().is_some());
+        let mut children = chat.node.subagents.clone();
+        children[0].tasks[0].state = clackatoo_protocol::AgentTaskState::Done;
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Subagents(
+            children,
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert!(hit(&chat, &Hit::LiveAgents).is_none());
+        assert!(chat.live().is_none());
+    }
+
+    #[test]
+    fn live_summary_limits_rows_in_short_panes() {
+        let mut fonts = fonts();
+        let mut node = crate::chat::fixtures::talk(&[("Later", "A reply")]);
+        node.first_turn = 20;
+        node.subagents = (1..=30)
+            .map(|id| entry(id, SubagentStatus::Working))
+            .collect();
+        let mut chat = ChatView::new(String::new(), node);
+        chat.live_agents_open = true;
+        chat.paint(&mut fonts, [0.0; 2], [600.0, 400.0], true);
+        let rect = hit(&chat, &Hit::LiveAgents).expect("summary in a short pane");
+        assert!(rect[1] > 0.0 && rect[1] + rect[3] < 400.0);
+        assert!(live_heading(&chat).unwrap().contains("more"));
+        assert!(
+            chat.hits
+                .iter()
+                .filter(|(hit, _)| matches!(hit, Hit::Subagent(_)))
+                .count()
+                <= 8
         );
     }
 

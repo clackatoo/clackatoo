@@ -161,6 +161,8 @@ Nothing is lost: what you rewound from stays in the chat as another branch. Wher
 
 An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working · 12s ›`. Click it, or press Enter or `za` on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going; `zR` opens every card in the chat. Click one, or press Enter on its line, to open it as a pane.
 
+After you send another message, subagents still working from earlier turns also show in a compact shelf above the message box. Click its heading to expand it, then a subagent to open its chat. The shelf stays while any of those subagents needs you or has background work running, and disappears when that work ends. The original cards stay with their turns.
+
 A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
 
 ## A subagent's own pane

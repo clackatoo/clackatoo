@@ -1127,6 +1127,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: ":fork copies a chat's conversation into a new chat, in its pane, and :|fork beside it; /fork does too",
     },
+    News {
+        id: "subagents-live",
+        date: "2026-11-02",
+        lesson: "agents",
+        what: "Running subagents stay visible above the message box after the conversation continues",
+    },
 ];
 
 impl News {

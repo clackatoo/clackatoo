@@ -618,6 +618,8 @@ Agents are told to use `start_chat` or `start_chats`, with a profile, for all su
 
 A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working… 12s ›". Click it, or press Enter on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Click a line, or press Enter on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
 
+When the conversation continues with another message, subagents from earlier turns that are still working also appear in a compact shelf above the message box. Click the heading to expand it and a row to open that chat. Subagents waiting for your answer and those with background tasks still running stay there too. The shelf disappears once all that work ends; the original cards remain in the conversation.
+
 #### A subagent's pane
 
 A subagent in a pane, one its agent asked to show or one you opened from its card, has a teal band across the top that says what it is: `↳ subagent of chat 12 · explore`, the chat that started it and the profile it was started as. Click the band, or press Ctrl+B `u`, to go to that chat, whichever tab or workspace it's in.

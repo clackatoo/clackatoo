@@ -1431,9 +1431,10 @@ impl ChatView {
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
         let queued = self.draw_queue(&mut canvas, m, &frame);
-        let tasks = self.draw_tasks(&mut canvas, m, &frame, queued);
-        let plan = self.draw_plan(&mut canvas, m, &frame, queued + tasks);
-        height + footer + queued + tasks + plan
+        let agents = self.draw_live_agents(&mut canvas, m, &frame, queued);
+        let tasks = self.draw_tasks(&mut canvas, m, &frame, queued + agents);
+        let plan = self.draw_plan(&mut canvas, m, &frame, queued + agents + tasks);
+        height + footer + queued + agents + tasks + plan
     }
 
     /// One draft thumbnail and its remove button, above the image pass.

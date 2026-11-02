@@ -163,6 +163,8 @@ enum Hit {
     QueuePage(i8),
     /// The heading of the agent's plan's shelf, which opens and folds it.
     Plan,
+    /// The summary of subagents still working from earlier turns.
+    LiveAgents,
     Stop,
     /// One of the answers to the agent's question, by its ID.
     Choice(String),
@@ -304,6 +306,7 @@ pub(crate) struct ChatView {
     /// Whether the agent's plan's shelf above the box is open, listing
     /// every step, rather than folded to a line.
     plan_open: bool,
+    live_agents_open: bool,
     /// The `/` menu of the agent's commands, over the box.
     slash: slash::Slash,
     /// The `@` menu of the project's files, over the box.
@@ -596,6 +599,7 @@ impl ChatView {
             show_cost: true,
             queue_page: 0,
             plan_open: false,
+            live_agents_open: false,
             slash: slash::Slash::default(),
             mentions: mentions::Mentions::default(),
             pasting: false,
@@ -2547,6 +2551,7 @@ impl ChatView {
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
             Some(Hit::TaskOutput(id)) => self.follows.push(id),
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
+            Some(Hit::LiveAgents) => self.live_agents_open = !self.live_agents_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
                 id,
                 steer: self.busy(),
