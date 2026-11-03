@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.1 (2026-11-03)
+
+### Features
+
+- **agents:** label spawned terminals and close completed terminals never selected (CLACKA-207) (42cd658c)
+
 ## 2026.11.0 (2026-11-02)
 
 ### Fixes
