@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.2 (2026-11-03)
+
+### Fixes
+
+- **gui:** align terminal and subagent headers (CLACKA-207) (4775f503)
+
 ## 2026.11.1 (2026-11-03)
 
 ### Features
