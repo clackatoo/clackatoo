@@ -1,0 +1,8 @@
+# An agent-created chat and its terminal share the same header height.
+size 1920x860
+keys <C-;>:set agenttools=allow<CR>
+keys <C-;>:Agent claude<CR>i
+type mcp start_chat {"prompt":"mcp run_in_terminal {\"command\":\"printf 'build complete\\n'\",\"name\":\"Build project\"}","show":true}
+keys <CR>
+sleep 1500
+shot aligned-headers

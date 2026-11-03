@@ -143,9 +143,9 @@ impl Desk {
         )
     }
 
-    /// Band height in pixels: one and a half rows for chats, two whole
-    /// rows for terminals, keeping their grids aligned. Content and pointer
-    /// coordinates both start below it.
+    /// The same one-and-a-half-row band over chats and terminals. Terminals
+    /// reserve two whole rows for it, leaving the spare half-row below the
+    /// grid. Content and pointer coordinates both start below the band.
     pub(crate) fn band_height(&self, terminal: TerminalId) -> f32 {
         let Some(area) = self.area.as_ref() else {
             return 0.0;
@@ -153,11 +153,7 @@ impl Desk {
         if !self.has_agent_band(terminal) {
             return 0.0;
         }
-        if self.chats.contains_key(&terminal) {
-            (area.cell[1] * 1.5).round()
-        } else {
-            area.cell[1] * 2.0
-        }
+        (area.cell[1] * 1.5).round()
     }
 
     /// A click on the band across the top of the pane of chat `terminal`:

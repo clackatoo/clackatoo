@@ -560,7 +560,7 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 
 The first pane an agent opens goes to its chat's right, and the next ones stack below that. An agent's tools reach only its chat's workspace.
 
-Agent-created terminals have a teal band like subagent panes. It names the chat that started the terminal and says whether an agent is actively waiting for it. Click the band, or press Ctrl+B `u`, to return to that chat.
+Agent-created terminals have the same compact teal band as subagent panes, aligned when they sit beside each other. It names the chat that started the terminal and says whether an agent is actively waiting for it. Click the band, or press Ctrl+B `u`, to return to that chat.
 
 A terminal that has **never been selected** closes automatically 60 seconds after its command finishes. Selecting it once keeps it open permanently, even after you move elsewhere; marking it to keep running does too. This applies to agent-created background terminals as well. A new command resets the timer. If the shell cannot report completion, the terminal stays open. Selection and remaining time survive a daemon upgrade; terminals carried over from older builds stay open because their selection history is unknown.
 

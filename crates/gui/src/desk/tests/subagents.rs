@@ -183,7 +183,7 @@ fn agent_terminals_show_waits_and_leave_room_for_the_grid() {
         retained: false,
     });
     desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view.clone()));
-    assert_eq!(desk.band_height(TerminalId(3)), 40.0);
+    assert_eq!(desk.band_height(TerminalId(3)), 30.0);
     assert!(band_says(&desk, 3).contains("terminal of chat 2 · agent waiting"));
     let requests = answer_all(&mut desk);
     assert!(requests.iter().any(|request| matches!(
