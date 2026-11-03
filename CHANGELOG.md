@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.3 (2026-11-03)
+
+### Features
+
+- **agents:** count down automatic terminal closure (CLACKA-207) (03a9be7d)
+
 ## 2026.11.2 (2026-11-03)
 
 ### Fixes
