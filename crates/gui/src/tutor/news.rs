@@ -1133,6 +1133,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Running subagents stay visible above the message box after the conversation continues",
     },
+    News {
+        id: "agent-terminal-lifecycle",
+        date: "2026-11-03",
+        lesson: "agents",
+        what: "Agent terminals show their parent and waits; unseen terminals close 60s after completion",
+    },
 ];
 
 impl News {

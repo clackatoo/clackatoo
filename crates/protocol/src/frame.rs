@@ -99,6 +99,122 @@ pub fn renumber_view(payload: &[u8], terminal: TerminalId) -> Option<Vec<u8>> {
         .flatten()
 }
 
+/// The spawning chat's number inside an agent terminal view. Its byte
+/// span lets relays translate it without decoding any terminal lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewAgentParent {
+    /// The spawning chat, in the sending daemon's numbering.
+    pub parent: TerminalId,
+    start: usize,
+    end: usize,
+}
+
+/// Reads only a terminal view's small prefix, finding its parent reference.
+/// A grid patch is last in the updates daemons produce. Other arrangements
+/// fall back to normal decoding; chat views and ordinary grids need none.
+///
+/// # Errors
+/// Returns an error for an unreadable prefix or an unfamiliar arrangement;
+/// relays must decode these normally instead of forwarding an unmapped ID.
+pub fn view_agent_parent(wire: u32, payload: &[u8]) -> Result<Option<ViewAgentParent>, FrameError> {
+    if wire < wire::AGENT_TERMINALS {
+        return Ok(None);
+    }
+    wire::speaking(wire, || agent_parent_prefix(payload))
+        .map_err(|why| FrameError::Decode(why, Head::of(payload)))
+}
+
+fn agent_parent_prefix(payload: &[u8]) -> Result<Option<ViewAgentParent>, postcard::Error> {
+    use postcard::{Error, take_from_bytes as take};
+    let ((message, event, _terminal, update), mut rest) =
+        take::<(u32, u32, TerminalId, u32)>(payload)?;
+    if (message, event) != (3, 0) {
+        return Err(Error::DeserializeBadEnum);
+    }
+    match update {
+        0 => {
+            let (_, after) = take::<(&str, Option<&str>)>(rest)?;
+            let (node, after) = take::<u32>(after)?;
+            if node != 0 {
+                return Ok(None);
+            }
+            rest = take::<crate::Size>(after)?.1;
+        }
+        1 => {
+            let (count, after) = take::<u32>(rest)?;
+            rest = after;
+            let mut grid = false;
+            for index in 0..count {
+                let (kind, after) = take::<u32>(rest)?;
+                rest = match kind {
+                    0 => take::<&str>(after)?.1,
+                    1 => take::<Option<&str>>(after)?.1,
+                    2 if index + 1 == count => {
+                        grid = true;
+                        take::<crate::NodeId>(after)?.1
+                    }
+                    3 => return Ok(None),
+                    _ => return Err(Error::DeserializeBadEnum),
+                };
+            }
+            if !grid {
+                return Ok(None);
+            }
+        }
+        _ => return Err(Error::DeserializeBadEnum),
+    }
+    let (state, after) = take::<crate::GridState>(rest)?;
+    let Some(agent) = state.agent else {
+        return Ok(None);
+    };
+    // AgentTerminal ends GridState: the parent's varint, then three bools.
+    let end = payload
+        .len()
+        .checked_sub(after.len() + 3)
+        .ok_or(Error::DeserializeUnexpectedEnd)?;
+    let mut encoded = [0; 5];
+    let width = postcard::to_slice(&agent.parent, &mut encoded)?.len();
+    let start = end
+        .checked_sub(width)
+        .ok_or(Error::DeserializeUnexpectedEnd)?;
+    Ok(Some(ViewAgentParent {
+        parent: agent.parent,
+        start,
+        end,
+    }))
+}
+
+/// Renumbers both a terminal and the spawning chat found by
+/// [`view_agent_parent`], leaving every byte of its output untouched.
+#[must_use]
+pub fn renumber_agent_view(
+    payload: &[u8],
+    terminal: TerminalId,
+    parent: ViewAgentParent,
+    local_parent: TerminalId,
+) -> Option<Vec<u8>> {
+    let (_, rest) = varint(payload)?;
+    let (_, rest) = varint(rest)?;
+    let terminal_start = payload.len() - rest.len();
+    let (_, after) = varint(rest)?;
+    let terminal_end = payload.len() - after.len();
+    if terminal_end > parent.start || parent.end > payload.len() {
+        return None;
+    }
+    let mut frame = vec![0; HEADER_LEN];
+    frame.extend_from_slice(&payload[..terminal_start]);
+    let mut frame = postcard::to_extend(&terminal, frame).ok()?;
+    frame.extend_from_slice(&payload[terminal_end..parent.start]);
+    let mut frame = postcard::to_extend(&local_parent, frame).ok()?;
+    frame.extend_from_slice(&payload[parent.end..]);
+    let len = frame.len() - HEADER_LEN;
+    if len > MAX_FRAME_LEN {
+        return None;
+    }
+    frame[..HEADER_LEN].copy_from_slice(&header(len));
+    Some(frame)
+}
+
 /// `payload`, a frame's holding an event whose first field is a number
 /// (`ServerMessage::Event`, of a variant such as `Buffer`, `Files`,
 /// `Board`, `Review` or `Browser`, whose first field names what it's
@@ -666,6 +782,110 @@ mod tests {
             None
         );
         assert_eq!(renumber_view(&[3], crate::TerminalId(1)), None);
+    }
+
+    #[test]
+    fn agent_parent_translation_leaves_terminal_output_untouched() {
+        use crate::{AgentTerminal, Event, Node, NodeId, Patch, View, ViewUpdate};
+        let mut terminal = clackatoo_term::Terminal::new(
+            crate::Size::new(80, 24).unwrap(),
+            &clackatoo_term::Config::default(),
+        );
+        terminal.advance("many terminal output lines\r\n".repeat(24).as_bytes());
+        for (from, to) in [(1, 300), (300, 1), (u32::MAX, 128)] {
+            let mut view = View::capture(&terminal);
+            let Node::Grid(grid) = &mut view.root else {
+                panic!()
+            };
+            grid.state.agent = Some(AgentTerminal {
+                parent: TerminalId(from),
+                waiting: true,
+                finished: false,
+                retained: false,
+            });
+            let patch = ViewUpdate::Patch(vec![
+                Patch::Title("test".into()),
+                Patch::Cwd(Some("/project".into())),
+                Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: grid.state,
+                    lines: grid
+                        .lines
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(line, text)| (u16::try_from(line).unwrap(), text))
+                        .collect(),
+                    links: grid.links.clone(),
+                    marks: grid.marks.clone(),
+                },
+            ]);
+            for update in [ViewUpdate::Snapshot(view), patch] {
+                let message = ServerMessage::Event(Event::View {
+                    terminal: TerminalId(from),
+                    update: update.clone(),
+                });
+                let encoded = encode(PROTOCOL_VERSION, &message).unwrap();
+                let payload = &encoded[HEADER_LEN..];
+                let reference = view_agent_parent(PROTOCOL_VERSION, payload)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(reference.parent, TerminalId(from));
+                // It reads only the small state prefix: even without the output.
+                assert_eq!(
+                    view_agent_parent(PROTOCOL_VERSION, &payload[..reference.end + 3]).unwrap(),
+                    Some(reference)
+                );
+                let mapped =
+                    renumber_agent_view(payload, TerminalId(to), reference, TerminalId(to))
+                        .unwrap();
+                let mut expected = update;
+                match &mut expected {
+                    ViewUpdate::Snapshot(view) => {
+                        if let Node::Grid(grid) = &mut view.root {
+                            grid.state.agent.as_mut().unwrap().parent = TerminalId(to);
+                        }
+                    }
+                    ViewUpdate::Patch(patches) => {
+                        for patch in patches {
+                            if let Patch::Grid { state, .. } = patch {
+                                state.agent.as_mut().unwrap().parent = TerminalId(to);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    mapped,
+                    encode(
+                        PROTOCOL_VERSION,
+                        &ServerMessage::Event(Event::View {
+                            terminal: TerminalId(to),
+                            update: expected
+                        })
+                    )
+                    .unwrap()
+                );
+                let older = wire::AGENT_TERMINALS - 1;
+                assert_eq!(
+                    view_agent_parent(older, &encode(older, &message).unwrap()[HEADER_LEN..])
+                        .unwrap(),
+                    None
+                );
+            }
+        }
+        // Ordinary grids and chat updates retain the normal forwarding path.
+        let regular = ServerMessage::Event(Event::View {
+            terminal: TerminalId(1),
+            update: ViewUpdate::Snapshot(View::capture(&terminal)),
+        });
+        assert_eq!(
+            view_agent_parent(
+                PROTOCOL_VERSION,
+                &encode(PROTOCOL_VERSION, &regular).unwrap()[HEADER_LEN..]
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

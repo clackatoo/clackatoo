@@ -170,5 +170,59 @@ fn chat_history(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, frames, chat_history);
+/// Parent mapping must stay a prefix read plus a copy, even for large grids.
+/// The existing raw relay is the baseline; decoding the entire view is the
+/// expensive alternative this feature avoids.
+fn agent_terminal_relay(c: &mut Criterion) {
+    use clackatoo_protocol::{AgentTerminal, Node};
+    let mut message = snapshot(&terminal());
+    let ordinary = encode(&message);
+    if let ServerMessage::Event(Event::View {
+        update: ViewUpdate::Snapshot(view),
+        ..
+    }) = &mut message
+        && let Node::Grid(grid) = &mut view.root
+    {
+        grid.state.agent = Some(AgentTerminal {
+            parent: TerminalId(2),
+            waiting: true,
+            finished: false,
+            retained: false,
+        });
+    }
+    let bytes = encode(&message);
+    let payload = &bytes[4..];
+    let mut group = c.benchmark_group("agent-terminal-relay");
+    group.bench_function("ordinary raw snapshot baseline", |b| {
+        b.iter(|| frame::renumber_view(black_box(&ordinary[4..]), TerminalId(300)));
+    });
+    group.bench_function("agent snapshot prefix and copy", |b| {
+        b.iter(|| {
+            let bytes = black_box(payload);
+            let parent = frame::view_agent_parent(PROTOCOL_VERSION, bytes)
+                .unwrap()
+                .unwrap();
+            frame::renumber_agent_view(bytes, TerminalId(300), parent, TerminalId(400))
+        });
+    });
+    group.bench_function("agent snapshot decode and encode", |b| {
+        b.iter(|| {
+            let mut message: ServerMessage =
+                FrameDecoder::decode_payload(PROTOCOL_VERSION, black_box(payload)).unwrap();
+            if let ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(view),
+            }) = &mut message
+                && let Node::Grid(grid) = &mut view.root
+            {
+                *terminal = TerminalId(300);
+                grid.state.agent.as_mut().unwrap().parent = TerminalId(400);
+            }
+            encode(&message)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, frames, chat_history, agent_terminal_relay);
 criterion_main!(benches);

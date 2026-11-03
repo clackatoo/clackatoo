@@ -22209,8 +22209,12 @@ fn a_background_tab_keeps_running_says_how_it_gets_on_and_comes_back() {
     assert_eq!(site.tabs.len(), 1);
     assert_eq!(site.active_tab, site.tabs[0].id);
     assert_eq!(site.background[0].tab.layout.panes().len(), 2);
-    // Its panes are no others': nothing asked of a pane finds them.
-    assert!(client.focus(server).is_err());
+    // A phone may select a background pane to retain its output, without
+    // bringing the tab onto the desktop. Other pane operations still refuse it.
+    client.focus(server).unwrap();
+    let selected = client.watch_workspaces().unwrap();
+    assert_eq!(selected.list[0].active_tab, site.active_tab);
+    assert_eq!(selected.list[0].background.len(), 1);
     assert!(client.close_pane(below).is_err());
     // Idle once its shells are at their prompts again.
     wait_for_background(&mut client, |background| {

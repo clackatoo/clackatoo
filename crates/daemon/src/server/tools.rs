@@ -157,6 +157,15 @@ enum Wait {
     },
 }
 
+impl Tools {
+    pub(super) fn terminal_state(
+        &self,
+        terminal: TerminalId,
+    ) -> Option<clackatoo_protocol::AgentTerminal> {
+        self.commanded.get(&terminal)?.published
+    }
+}
+
 /// A terminal an agent ran a command in, or typed into.
 #[derive(Debug, Default)]
 struct Commanded {
@@ -179,13 +188,28 @@ struct Commanded {
     /// when `expect` was set (see [`Terminal::block_renumberings`]): once
     /// that changes, an `expect` from before means nothing.
     renumbered: u64,
+    /// Selection is permanent: moving away never re-enables cleanup.
+    retained: bool,
+    /// Confirmed completion starts one grace period, reset by new work.
+    close_due: Option<Instant>,
+    /// Last metadata published to views, so wait-only changes wake clients.
+    published: Option<clackatoo_protocol::AgentTerminal>,
 }
 
 impl Commanded {
+    fn expired(&mut self, finished: bool, now: Instant) -> bool {
+        if self.owner.is_none() || self.retained || !finished {
+            self.close_due = None;
+            return false;
+        }
+        *self.close_due.get_or_insert(now + Duration::from_mins(1)) <= now
+    }
+
     /// Notes that a command was typed into the shell `grid` shows, as it
     /// was just before, and Enter pressed: the block it runs as is the one
     /// to wait for.
     fn typed(&mut self, grid: &Terminal) {
+        self.close_due = None;
         let latest = grid.latest_block();
         self.expect = match latest {
             Some((block, Progress::Prompt)) => Some(block),
@@ -1401,6 +1425,7 @@ impl Daemon {
                 owner: owner.or(before.owner),
                 name: name.or(before.name),
                 typing: Some(typing),
+                retained: before.retained,
                 ..Commanded::default()
             },
         );
@@ -1683,6 +1708,60 @@ impl Daemon {
         }
     }
 
+    /// An actual user selection or explicit keep permanently opts out.
+    pub(super) fn retain_agent_terminal(&mut self, terminal: TerminalId) {
+        if let Some(commanded) = self.tools.commanded.get_mut(&terminal) {
+            commanded.retained = true;
+            commanded.close_due = None;
+            self.views_pending = true;
+        }
+    }
+
+    pub(super) fn agent_terminal(
+        &self,
+        terminal: TerminalId,
+    ) -> Option<clackatoo_protocol::AgentTerminal> {
+        self.tools.terminal_state(terminal)
+    }
+
+    /// Work is only eligible after shell integration confirms completion.
+    /// Unmarked shells, new work, and explicit keep rules never expire.
+    pub(super) fn maintain_agent_terminals(&mut self, now: Instant) {
+        let mut close = Vec::new();
+        for (&terminal, commanded) in &mut self.tools.commanded {
+            let Some(parent) = commanded.owner else {
+                continue;
+            };
+            let Some(slot) = self.terminals.get(&terminal) else {
+                continue;
+            };
+            let finished = slot.terminal.status() != clackatoo_protocol::TerminalStatus::Running
+                || slot.terminal.grid().is_some_and(|grid| {
+                    Commanded::finished(Some(commanded), grid) == Some(true)
+                        && !matches!(grid.latest_block(), Some((_, Progress::Running)))
+                });
+            let waiting = self.tools.waiting.iter().any(
+                |wait| matches!(wait.what, Wait::Finish { terminal: id, .. } if id == terminal),
+            );
+            let state = clackatoo_protocol::AgentTerminal {
+                parent,
+                waiting,
+                finished,
+                retained: commanded.retained,
+            };
+            if commanded.published != Some(state) {
+                commanded.published = Some(state);
+                self.views_pending = true;
+            }
+            if commanded.expired(finished, now) {
+                close.push(terminal);
+            }
+        }
+        for terminal in close {
+            let _ = self.close_terminal(terminal);
+        }
+    }
+
     /// When the tools next need the loop's attention: a shell's first
     /// prompt given up on, or a wait timing out.
     pub(super) fn next_tool_due(&self) -> Option<Instant> {
@@ -1706,7 +1785,12 @@ impl Daemon {
                 Some(Source::Tools(connection)) => connection.gone_due(),
                 _ => None,
             });
-        typing.chain(waits).chain(finished).min()
+        let closing = self
+            .tools
+            .commanded
+            .values()
+            .filter_map(|commanded| commanded.close_due);
+        typing.chain(waits).chain(finished).chain(closing).min()
     }
 
     /// Types the commands whose shells' prompts haven't come, or haven't
@@ -2256,6 +2340,124 @@ mod keeping_whose {
     use crate::server::agent_files::tests::daemon_with_chat;
 
     #[test]
+    fn terminal_lifecycle_tracks_waits_selection_and_closes_only_unseen_completion() {
+        use super::{Commanded, Wait, Waiting};
+        use clackatoo_protocol::{Request, Response};
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.workspaces.new_workspace("test".into(), chat);
+        daemon.next_id = chat.0 + 1;
+        let now = Instant::now();
+        let make = |daemon: &mut super::Daemon| {
+            let terminal = daemon
+                .new_terminal(&NewTerminal {
+                    size: Size::new(40, 10).unwrap(),
+                    command: Some(vec!["cat".into()]),
+                    cwd: None,
+                    record_to: None,
+                })
+                .unwrap();
+            daemon
+                .place_beside(chat, clackatoo_protocol::PaneTerminal::Existing(terminal))
+                .unwrap();
+            daemon.tools.commanded.insert(
+                terminal,
+                Commanded {
+                    owner: Some(chat),
+                    ..Commanded::default()
+                },
+            );
+            terminal
+        };
+        let unseen = make(&mut daemon);
+        let selected = make(&mut daemon);
+        let unknown = make(&mut daemon);
+        // No shell marks: unknown completion never schedules a close.
+        daemon.maintain_agent_terminals(now);
+        assert!(
+            daemon
+                .tools
+                .commanded
+                .values()
+                .all(|command| command.close_due.is_none())
+        );
+        for terminal in [unseen, selected] {
+            daemon
+                .terminals
+                .get_mut(&terminal)
+                .unwrap()
+                .terminal
+                .pty()
+                .unwrap()
+                .emulator_mut()
+                .advance(b"\x1b]133;A\x07$ test\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        }
+        daemon.tools.waiting.push(Waiting {
+            token: mio::Token(usize::MAX),
+            id: serde_json::json!(1),
+            chat,
+            what: Wait::Finish {
+                terminal: unseen,
+                lines: 10,
+                due: now + Duration::from_mins(5),
+            },
+        });
+        daemon.maintain_agent_terminals(now);
+        assert!(daemon.agent_terminal(unseen).unwrap().waiting);
+        daemon.tools.waiting.clear();
+        daemon.maintain_agent_terminals(now);
+        assert!(!daemon.agent_terminal(unseen).unwrap().waiting);
+        // Exercise the user Focus request, then focus elsewhere: selection stays sticky.
+        let pane = daemon.workspaces.get().pane_showing(selected).unwrap();
+        assert!(matches!(
+            daemon.respond(Request::Focus { pane }, mio::Token(usize::MAX)),
+            Response::Done
+        ));
+        let parent = daemon.workspaces.get().pane_showing(chat).unwrap();
+        daemon.respond(Request::Focus { pane: parent }, mio::Token(usize::MAX));
+        let saved = daemon.hand_over_agent_terminals();
+        daemon.tools.commanded.clear();
+        daemon.resume_agent_terminals(Some(saved));
+        assert!(daemon.tools.commanded[&selected].retained);
+        let due = daemon.tools.commanded[&unseen].close_due.unwrap();
+        assert!(due.saturating_duration_since(now) < Duration::from_secs(61));
+        daemon.maintain_agent_terminals(due.checked_sub(Duration::from_secs(1)).unwrap());
+        assert!(daemon.terminals.contains_key(&unseen));
+        daemon.maintain_agent_terminals(due);
+        assert!(!daemon.terminals.contains_key(&unseen));
+        assert!(daemon.terminals.contains_key(&selected));
+        assert!(daemon.terminals.contains_key(&unknown));
+        assert!(daemon.agent_terminal(selected).unwrap().retained);
+        // No dangling terminal in the layout after automatic closure.
+        assert!(daemon.workspaces.get().pane_showing(unseen).is_none());
+    }
+
+    #[test]
+    fn selecting_a_background_terminal_retains_it_without_changing_the_active_tab() {
+        use clackatoo_protocol::{Request, Response};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.next_id = chat.0 + 1;
+        daemon.workspaces.new_workspace("test".into(), chat);
+        let (pane, terminal) = daemon.background_terminal(chat, "true", None).unwrap();
+        daemon.tools.commanded.insert(
+            terminal,
+            super::Commanded {
+                owner: Some(chat),
+                ..super::Commanded::default()
+            },
+        );
+        let before = daemon.workspaces.get().clone();
+        assert!(matches!(
+            daemon.respond(Request::Focus { pane }, mio::Token(usize::MAX)),
+            Response::Done
+        ));
+        assert!(daemon.tools.commanded[&terminal].retained);
+        assert_eq!(daemon.workspaces.get(), &before);
+    }
+
+    #[test]
     fn a_command_typed_again_keeps_the_terminal_its_agents_and_its_name() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, chat) = daemon_with_chat(dir.path());
@@ -2267,11 +2469,13 @@ mod keeping_whose {
         };
         let terminal = daemon.new_terminal(&request).unwrap();
         daemon.type_at_first_prompt(terminal, "make".into(), Some(chat), Some("build".into()));
+        daemon.retain_agent_terminal(terminal);
         // As a command kept running is run again, by nobody's agent.
         daemon.type_at_first_prompt(terminal, "make".into(), None, None);
         let commanded = &daemon.tools.commanded[&terminal];
         assert_eq!(commanded.owner, Some(chat));
         assert_eq!(commanded.name.as_deref(), Some("build"));
+        assert!(commanded.retained);
     }
 
     #[test]
@@ -2455,6 +2659,41 @@ mod tests {
     fn shell() -> Terminal {
         let size = clackatoo_term::Size::new(40, 5).unwrap();
         Terminal::new(size, &clackatoo_term::Config::default())
+    }
+
+    #[test]
+    fn only_never_selected_agent_terminals_expire_after_sixty_seconds() {
+        let now = Instant::now();
+        let mut command = Commanded {
+            owner: Some(TerminalId(1)),
+            ..Commanded::default()
+        };
+        assert!(!command.expired(false, now));
+        assert!(command.close_due.is_none());
+        assert!(!command.expired(true, now));
+        assert!(!command.expired(true, now + Duration::from_secs(59)));
+        assert!(command.expired(true, now + Duration::from_mins(1)));
+        command.retained = true;
+        assert!(!command.expired(true, now + Duration::from_mins(2)));
+        assert!(command.close_due.is_none());
+        let mut user_terminal = Commanded::default();
+        assert!(!user_terminal.expired(true, now));
+        assert!(user_terminal.close_due.is_none());
+    }
+
+    #[test]
+    fn new_work_cancels_the_previous_completion_deadline() {
+        let now = Instant::now();
+        let mut command = Commanded {
+            owner: Some(TerminalId(1)),
+            ..Commanded::default()
+        };
+        assert!(!command.expired(true, now));
+        assert!(!command.expired(false, now + Duration::from_secs(59)));
+        assert!(command.close_due.is_none());
+        assert!(!command.expired(true, now + Duration::from_secs(61)));
+        assert!(!command.expired(true, now + Duration::from_mins(2)));
+        assert!(command.expired(true, now + Duration::from_secs(121)));
     }
 
     #[test]

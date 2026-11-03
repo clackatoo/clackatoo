@@ -105,12 +105,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 41;
+pub(crate) const VERSION: u32 = 42;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -287,6 +287,9 @@ pub(crate) struct State {
     /// Where chats' agent sessions can be forked: see [`ChatForks`].
     /// Since version 41; before, none was known.
     pub(crate) forks: Vec<ChatForks>,
+    /// Command ownership and permanent selection protection, since 42.
+    /// None from older builds: selection history is unknown, so retain all.
+    pub(crate) agent_terminals: Option<Vec<AgentCommand>>,
 }
 
 /// The branches of the conversation of the chat `chat`, by its terminal's
@@ -1705,6 +1708,7 @@ impl State {
             38 => Ok(postcard::from_bytes::<v38::State>(body)?.into()),
             39 => Ok(postcard::from_bytes::<v39::State>(body)?.into()),
             40 => Ok(postcard::from_bytes::<v40::State>(body)?.into()),
+            41 => Ok(postcard::from_bytes::<v41::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1805,6 +1809,7 @@ mod v31 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -1903,6 +1908,7 @@ mod v30 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2000,6 +2006,7 @@ mod v29 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2096,6 +2103,7 @@ mod v28 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2190,6 +2198,7 @@ mod v27 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2287,6 +2296,7 @@ mod v26 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2381,6 +2391,7 @@ mod v25 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2473,6 +2484,7 @@ mod v24 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2563,6 +2575,7 @@ mod v23 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2666,6 +2679,7 @@ mod v22 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2752,6 +2766,7 @@ mod v21 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2836,6 +2851,7 @@ mod v20 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2916,6 +2932,7 @@ mod v19 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -2996,6 +3013,7 @@ mod v18 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3541,6 +3559,7 @@ mod v7 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3645,6 +3664,7 @@ mod v8 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3719,6 +3739,7 @@ mod v9 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3795,6 +3816,7 @@ mod v11 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3920,6 +3942,7 @@ mod v15 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -3999,6 +4022,7 @@ mod v14 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -4076,6 +4100,7 @@ mod v13 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -4195,6 +4220,7 @@ mod v12 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -4312,6 +4338,7 @@ mod v10 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -4327,6 +4354,20 @@ mod tests {
     )]
     fn state() -> State {
         State {
+            agent_terminals: Some(vec![AgentCommand {
+                command: LiveCommanded {
+                    terminal: 2,
+                    owner: Some(3),
+                    name: Some("tests".into()),
+                    typing: None,
+                    failed: None,
+                    expect: Some(4),
+                    expect_first: false,
+                    renumbered: 0,
+                },
+                retained: true,
+                close_left: None,
+            }]),
             listener: 0,
             lock: Some(1),
             next_terminal: 3,
@@ -5675,14 +5716,29 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v41.bin"]
+    #[ignore = "writes tests/fixtures/handover-v42.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v41.bin"
+            "/tests/fixtures/handover-v42.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
+    }
+
+    #[test]
+    fn terminal_retention_is_carried_and_old_selection_history_is_unknown() {
+        let mut file = tempfile::tempfile().unwrap();
+        state().write(&mut file).unwrap();
+        let read = State::read(&mut file).unwrap();
+        let commands = read.agent_terminals.unwrap();
+        assert!(commands[0].retained);
+        assert_eq!(commands[0].command.owner, Some(3));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v41.bin"))
+            .unwrap();
+        let old = State::read(&mut file).unwrap();
+        assert!(old.agent_terminals.is_none());
     }
 
     #[test]
@@ -6231,6 +6287,7 @@ mod v32 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -6394,6 +6451,7 @@ mod v33 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -6560,6 +6618,7 @@ mod v34 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -6729,6 +6788,7 @@ mod v35 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -6901,6 +6961,7 @@ mod v36 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -7076,6 +7137,7 @@ mod v37 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -7251,6 +7313,7 @@ mod v38 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -7426,6 +7489,7 @@ mod v39 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
             }
         }
     }
@@ -7603,6 +7667,217 @@ mod v40 {
                 uids: Vec::new(),
                 branches: Vec::new(),
                 forks: Vec::new(),
+                agent_terminals: None,
+            }
+        }
+    }
+}
+
+/// Agent-created terminal lifecycle, including ownership even when its agent stopped.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AgentCommand {
+    pub(crate) command: LiveCommanded,
+    pub(crate) retained: bool,
+    /// Remaining grace period in milliseconds. New work resets it.
+    pub(crate) close_left: Option<u64>,
+}
+
+/// The exact version 41 handover, before terminal retention.
+mod v41 {
+    use super::{
+        Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches, ChatContinuation,
+        ChatDraft, ChatForks, ChatPreviews, ChatQueue, ChatUids, Connection, Deserialize, EditLog,
+        Exe, Files, ImageOriginals, Kept, Known, Lender, Lent, LentBackground, Live, NestedItem,
+        Process, Restored, Reviews, Sharing, Shell, Talk, Terminal, ToolPreviews, Trusted,
+        Undelivered, Workspaces,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        lock: Option<u32>,
+        /// The ID the next terminal gets.
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        next_buffer: u32,
+        /// Files being edited.
+        buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        next_files: u32,
+        /// File explorers.
+        explorers: Vec<Files>,
+        /// What agents changed in files.
+        edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34; before, they
+        /// kept nothing, and none changed nothing.
+        undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs of the daemons they're lent
+        /// to, and the failure of each not seen there yet. Since version 35;
+        /// before, none was.
+        lent_background: Vec<LentBackground>,
+        /// Messages chats sent others that waited their turns and were
+        /// dropped as they came, so each sender is still told why. Since
+        /// version 36; before, none was.
+        undelivered: Vec<Undelivered>,
+        /// Where chats stand among the others: see [`Talk`]. Since version
+        /// 37; `None` before, from a build that couldn't hand it over.
+        talk: Option<Talk>,
+        /// The agents' processes that go on through the upgrade, and what
+        /// goes on with them: see [`Live`]. Since version 38; `None` before,
+        /// and from a build that stopped its agents, as it was told to, or as
+        /// the build it upgraded to couldn't take them.
+        live: Option<Live>,
+        /// The items of chats' turns that an agent's own subagents did: see
+        /// [`NestedItem`]. Since version 39; before, none was.
+        nested: Vec<NestedItem>,
+        /// The messages being typed in chats' boxes and not sent yet. Since
+        /// version 40; before, none was kept.
+        drafts: Vec<ChatDraft>,
+        /// The numbers that stay with chats' turns, of the chats whose turns
+        /// aren't each numbered by their index: see [`ChatUids`]. Since
+        /// version 41; before, every turn was.
+        uids: Vec<ChatUids>,
+        /// The branches of chats' conversations, of the chats that have been
+        /// cut back: see [`ChatBranches`]. Since version 41.
+        branches: Vec<ChatBranches>,
+        /// Where chats' agent sessions can be forked: see [`ChatForks`].
+        /// Since version 41; before, none was known.
+        forks: Vec<ChatForks>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: state.chat_continuations,
+                activities: state.activities,
+                undo_states: state.undo_states,
+                lent_background: state.lent_background,
+                undelivered: state.undelivered,
+                talk: state.talk,
+                live: state.live,
+                nested: state.nested,
+                drafts: state.drafts,
+                uids: state.uids,
+                branches: state.branches,
+                forks: state.forks,
+                agent_terminals: None,
             }
         }
     }

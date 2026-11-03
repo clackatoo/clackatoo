@@ -297,6 +297,7 @@ impl State {
             term.fit = Fit::Off;
             term.dirty.header = true;
             let terminal = term.id;
+            self.select_terminal(terminal);
             self.request(
                 Request::Attach { terminal },
                 Asked::Doing("opening the terminal"),
@@ -715,6 +716,25 @@ impl State {
         self.dirty.home = true;
     }
 
+    /// Records an actual selection with the terminal's owner, through a
+    /// relay too. Attaching alone can also mean merely watching a split.
+    fn select_terminal(&mut self, terminal: TerminalId) {
+        let pane = self.workspaces.pane_showing(terminal).or_else(|| {
+            self.workspaces
+                .background_showing(terminal)?
+                .1
+                .tab
+                .layout
+                .panes()
+                .into_iter()
+                .find(|pane| pane.content == Content::Terminal(terminal))
+                .map(|pane| pane.id)
+        });
+        if let Some(pane) = pane {
+            self.request(Request::Focus { pane }, Asked::Quiet);
+        }
+    }
+
     /// Shows terminal `id`.
     pub fn open_terminal(&mut self, id: TerminalId) {
         if self.term.as_ref().is_some_and(|term| term.id == id) {
@@ -725,6 +745,7 @@ impl State {
         self.term = Some(OpenTerminal::new(id));
         self.note = None;
         if self.online == Online::Open {
+            self.select_terminal(id);
             self.request(
                 Request::Attach { terminal: id },
                 Asked::Doing("opening the terminal"),

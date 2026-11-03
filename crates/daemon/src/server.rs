@@ -789,9 +789,14 @@ impl Subscription {
     /// The update that brings the client, which speaks `wire`, from what
     /// it was last sent to what `hosted` shows now, recorded as sent.
     /// `None` if nothing changed.
-    fn update_from(&mut self, hosted: &Hosted, wire: u32) -> Option<ViewUpdate> {
+    fn update_from(
+        &mut self,
+        hosted: &Hosted,
+        wire: u32,
+        agent: Option<clackatoo_protocol::AgentTerminal>,
+    ) -> Option<ViewUpdate> {
         match hosted {
-            Hosted::Pty(terminal) => self.update(terminal.emulator(), wire),
+            Hosted::Pty(terminal) => self.update_agent(terminal.emulator(), wire, agent),
             Hosted::Chat(chat) => chat.catch_up(&mut self.chat),
         }
     }
@@ -799,9 +804,20 @@ impl Subscription {
     /// The update that brings the client, which speaks `wire`, from what
     /// it was last sent to what `terminal` shows now, recorded as sent.
     /// `None` if nothing changed.
+    #[cfg(test)]
     fn update(&mut self, terminal: &Terminal, wire: u32) -> Option<ViewUpdate> {
+        self.update_agent(terminal, wire, None)
+    }
+
+    fn update_agent(
+        &mut self,
+        terminal: &Terminal,
+        wire: u32,
+        agent: Option<clackatoo_protocol::AgentTerminal>,
+    ) -> Option<ViewUpdate> {
         let size = terminal.size();
-        let state = GridState::of(terminal);
+        let mut state = GridState::of(terminal);
+        state.agent = agent;
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
             self.size = Some(size);
@@ -813,7 +829,11 @@ impl Subscription {
             // ended, and history how those it holds did.
             self.settled = BlockMarks::settled(terminal);
             self.damage.clear();
-            return Some(ViewUpdate::Snapshot(View::capture(terminal)));
+            let mut view = View::capture(terminal);
+            if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
+                grid.state.agent = agent;
+            }
+            return Some(ViewUpdate::Snapshot(view));
         }
 
         let mut patches = Vec::new();
@@ -1210,6 +1230,7 @@ impl Daemon {
             .into_iter()
             .map(|chat| (chat.chat, chat))
             .collect();
+        let agent_terminals = handover.state.agent_terminals.take();
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -1346,6 +1367,7 @@ impl Daemon {
             daemon.resume_agent_timers(live, &kept_chats);
             daemon.resume_tools(live, fds, &kept_chats);
         }
+        daemon.resume_agent_terminals(agent_terminals);
         daemon.next_buffer = state.next_buffer;
         // Older builds had none, and keep the one just chosen.
         if state.daemon != 0 {
@@ -1492,6 +1514,7 @@ impl Daemon {
     ) -> io::Result<Handover> {
         let kept_names = self.agent_names(keep);
         let kept_chats = self.chats_of(&kept_names);
+        let agent_terminals = Some(self.hand_over_agent_terminals());
         let mut live_chats = Vec::new();
         // Agents' changes to big files still being worked out go into the
         // edit log first, so the next build has them.
@@ -1630,6 +1653,7 @@ impl Daemon {
                 uids,
                 branches,
                 forks,
+                agent_terminals,
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),
@@ -2288,6 +2312,7 @@ impl Daemon {
     /// QUIC, everything on that terminal's stream. Holding back for slow
     /// clients means changes pile up into one update instead of a backlog.
     fn send_view_updates(&mut self) {
+        self.maintain_agent_terminals(Instant::now());
         if !std::mem::take(&mut self.views_pending) {
             return;
         }
@@ -2328,8 +2353,11 @@ impl Daemon {
                     None if quic.is_some() && !client.outgoing.is_empty() => continue,
                     None => &mut client.outgoing,
                 };
-                if let Some(update) = subscription.update_from(&slot.terminal, client.wire)
-                    && queue_update(subscription, client.wire, id, update, outgoing)
+                if let Some(update) = subscription.update_from(
+                    &slot.terminal,
+                    client.wire,
+                    self.tools.terminal_state(id),
+                ) && queue_update(subscription, client.wire, id, update, outgoing)
                 {
                     ready.push(Token(key));
                 }
@@ -3264,6 +3292,7 @@ impl Daemon {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
             Request::SendInput { terminal, bytes } => {
+                self.retain_agent_terminal(terminal);
                 self.note_typed(terminal);
                 self.send_input(token, terminal, &bytes)
                     .map(|()| Response::Done)
@@ -3271,7 +3300,13 @@ impl Daemon {
             Request::Capture { terminal } => self
                 .terminals
                 .get(&terminal)
-                .map(|slot| Response::View(slot.terminal.view()))
+                .map(|slot| {
+                    let mut view = slot.terminal.view();
+                    if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
+                        grid.state.agent = self.agent_terminal(terminal);
+                    }
+                    Response::View(view)
+                })
                 .ok_or(Error::NoSuchTerminal(terminal)),
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
@@ -3593,10 +3628,21 @@ impl Daemon {
                     Ok(Response::Done)
                 }
             },
-            Request::Focus { pane } => self.workspaces.focus(pane).map(|()| {
-                self.workspaces_changed();
-                Response::Done
-            }),
+            Request::Focus { pane } => {
+                // Phones can select a background terminal without bringing
+                // its tab into the desktop. Relayed selections arrive here too.
+                if let Some(terminal) = self.terminal_of_pane(pane) {
+                    self.retain_agent_terminal(terminal);
+                }
+                if self.workspaces.get().find_background_pane(pane).is_some() {
+                    Ok(Response::Done)
+                } else {
+                    self.workspaces.focus(pane).map(|()| {
+                        self.workspaces_changed();
+                        Response::Done
+                    })
+                }
+            }
             Request::RenameWorkspace { workspace, name } => {
                 self.workspaces.rename(workspace, &name).map(|()| {
                     self.workspaces_changed();
@@ -3634,6 +3680,9 @@ impl Daemon {
     /// Starts sending `id`'s view to the client at `token`, beginning with a
     /// snapshot.
     fn attach(&mut self, token: Token, id: TerminalId) -> Result<(), Error> {
+        if self.is_web_device(token) {
+            self.retain_agent_terminal(id);
+        }
         let slot = self
             .terminals
             .get_mut(&id)

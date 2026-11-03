@@ -134,8 +134,8 @@ pub use review::{
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
 pub use view::{
-    BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, LinkTarget,
-    Links, Node, NodeId, Patch, Run, View, ViewUpdate,
+    AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
+    LinkTarget, Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
@@ -145,7 +145,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 122;
+pub const PROTOCOL_VERSION: u32 = 123;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -851,7 +851,8 @@ pub enum Request {
     },
     /// Records that a client switched to this pane: its tab becomes its
     /// workspace's active tab, it becomes that tab's focused pane, and the
-    /// workspace becomes the active one.
+    /// workspace becomes the active one. Since protocol 123, selecting a
+    /// background pane retains its terminal without changing the active tab.
     Focus {
         /// The pane switched to.
         pane: PaneId,

@@ -32,6 +32,8 @@ pub(crate) enum Need {
     /// be `terminal`.
     PassOn {
         terminal: Option<TerminalId>,
+        /// Parent reference in the payload and its number here, if any.
+        parent: Option<(frame::ViewAgentParent, TerminalId)>,
         wires: Vec<u32>,
     },
 }
@@ -74,13 +76,22 @@ pub(crate) fn heavy(payload: &[u8], wire: u32, need: &Need) -> bool {
 pub(crate) fn unpack(payload: &[u8], wire: u32, need: &Need) -> Unpacked {
     match need {
         Need::Decode => Unpacked::Decoded(decode(payload, wire)),
-        Need::PassOn { terminal, wires } => {
+        Need::PassOn {
+            terminal,
+            parent,
+            wires,
+        } => {
             let mut decoded = None;
             let frames = (wires.iter())
                 .map(|&to| {
                     let frame = if to == wire {
                         match terminal {
-                            Some(terminal) => frame::renumber_view(payload, *terminal),
+                            Some(terminal) => match parent {
+                                Some((reference, local)) => frame::renumber_agent_view(
+                                    payload, *terminal, *reference, *local,
+                                ),
+                                None => frame::renumber_view(payload, *terminal),
+                            },
                             None => Some(frame::reframe(payload)),
                         }
                     } else {
@@ -89,12 +100,17 @@ pub(crate) fn unpack(payload: &[u8], wire: u32, need: &Need) -> Unpacked {
                                 .ok()
                                 .map(|message| match (message, terminal) {
                                     (
-                                        ServerMessage::Event(Event::View { update, .. }),
+                                        ServerMessage::Event(Event::View { mut update, .. }),
                                         Some(terminal),
-                                    ) => ServerMessage::Event(Event::View {
-                                        terminal: *terminal,
-                                        update,
-                                    }),
+                                    ) => {
+                                        if let Some((_, local)) = parent {
+                                            super::map_agent_terminals(&mut update, |_| *local);
+                                        }
+                                        ServerMessage::Event(Event::View {
+                                            terminal: *terminal,
+                                            update,
+                                        })
+                                    }
                                     (message, _) => message,
                                 })
                         });
@@ -223,6 +239,7 @@ mod tests {
         let came = payload(&view(3), PROTOCOL_VERSION);
         let need = Need::PassOn {
             terminal: Some(TerminalId(40)),
+            parent: None,
             wires: vec![PROTOCOL_VERSION, older],
         };
         let unpacked = unpack(&came, PROTOCOL_VERSION, &need);
@@ -237,11 +254,54 @@ mod tests {
     }
 
     #[test]
+    fn agent_terminal_parents_are_mapped_on_both_forwarding_paths() {
+        use clackatoo_protocol::{AgentTerminal, GridState, NodeId};
+        let message = |terminal, parent| {
+            ServerMessage::Event(Event::View {
+                terminal: TerminalId(terminal),
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: GridState {
+                        agent: Some(AgentTerminal {
+                            parent: TerminalId(parent),
+                            waiting: true,
+                            finished: false,
+                            retained: false,
+                        }),
+                        ..GridState::default()
+                    },
+                    lines: Vec::new(),
+                    links: Vec::new(),
+                    marks: clackatoo_protocol::BlockMarks::default(),
+                }]),
+            })
+        };
+        let came = payload(&message(1, 2), PROTOCOL_VERSION);
+        let reference = frame::view_agent_parent(PROTOCOL_VERSION, &came)
+            .unwrap()
+            .unwrap();
+        let older = wire::AGENT_TERMINALS - 1;
+        let need = Need::PassOn {
+            terminal: Some(TerminalId(300)),
+            parent: Some((reference, TerminalId(400))),
+            wires: vec![PROTOCOL_VERSION, older],
+        };
+        let unpacked = unpack(&came, PROTOCOL_VERSION, &need);
+        for wire in [PROTOCOL_VERSION, older] {
+            assert_eq!(
+                unpacked.for_wire(wire),
+                Some(frame::encode(wire, &message(300, 400)).unwrap().as_slice())
+            );
+        }
+    }
+
+    #[test]
     fn an_answer_goes_on_as_it_came() {
         let answer = ServerMessage::Response(Response::Text("hello".into()));
         let came = payload(&answer, PROTOCOL_VERSION);
         let need = Need::PassOn {
             terminal: None,
+            parent: None,
             wires: vec![PROTOCOL_VERSION],
         };
         let unpacked = unpack(&came, PROTOCOL_VERSION, &need);
@@ -255,6 +315,7 @@ mod tests {
         assert!(heavy(&big, PROTOCOL_VERSION, &Need::Decode));
         let other = Need::PassOn {
             terminal: None,
+            parent: None,
             wires: vec![PROTOCOL_VERSION - 1],
         };
         assert!(heavy(&big, PROTOCOL_VERSION, &other));
@@ -264,6 +325,7 @@ mod tests {
     fn what_cant_be_read_isnt_passed_on_at_another_version() {
         let need = Need::PassOn {
             terminal: Some(TerminalId(1)),
+            parent: None,
             wires: vec![PROTOCOL_VERSION - 1],
         };
         let unpacked = unpack(&[3, 0, 1, 0xff], PROTOCOL_VERSION, &need);

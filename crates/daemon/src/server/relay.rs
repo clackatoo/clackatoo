@@ -2282,6 +2282,7 @@ impl Daemon {
                             let wires = self.client_wire(token).into_iter().collect();
                             Need::PassOn {
                                 terminal: None,
+                                parent: None,
                                 wires,
                             }
                         }
@@ -2299,11 +2300,23 @@ impl Daemon {
                     .find(&host)
                     .and_then(|at| self.links.list[at].relayed.followed.get(&local))
                     .is_some_and(|f| f.viewers.iter().any(|v| v.recent));
-                let need = if paged {
+                let reference = frame::view_agent_parent(wire, &payload);
+                let need = if paged || reference.is_err() {
                     Need::Decode
                 } else {
+                    let parent = reference.ok().flatten().map(|reference| {
+                        let at = self.links.find(&host).expect("the view has a connection");
+                        let (linked, mut fresh) = self.numbering(at);
+                        let parent = linked
+                            .relayed
+                            .mirror
+                            .terminal_numbers
+                            .local_or_fresh(reference.parent.0, || fresh.terminal());
+                        (reference, TerminalId(parent))
+                    });
                     Need::PassOn {
                         terminal: Some(local),
+                        parent,
                         wires,
                     }
                 };
@@ -2496,6 +2509,30 @@ impl Daemon {
     /// following it that's to have it, as `unpacked` holds it for each
     /// version they speak.
     fn pass_on_view(&mut self, at: usize, local: TerminalId, snapshot: bool, unpacked: &Unpacked) {
+        let mapped;
+        let unpacked =
+            if let Unpacked::Decoded(Ok(ServerMessage::Event(Event::View { terminal, update }))) =
+                unpacked
+            {
+                let mut update = update.clone();
+                let (linked, mut fresh) = self.numbering(at);
+                map_agent_terminals(&mut update, |parent| {
+                    TerminalId(
+                        linked
+                            .relayed
+                            .mirror
+                            .terminal_numbers
+                            .local_or_fresh(parent.0, || fresh.terminal()),
+                    )
+                });
+                mapped = Unpacked::Decoded(Ok(ServerMessage::Event(Event::View {
+                    terminal: *terminal,
+                    update,
+                })));
+                &mapped
+            } else {
+                unpacked
+            };
         let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
             // Followed by no one, as they all went: it waits for nothing.
             if let Some(remote) = self.links.list[at]
@@ -3145,6 +3182,32 @@ fn shown_choices(
         .map(|summary| mirror.renumber_summary(summary, fresh))
         .collect();
     choices
+}
+
+/// Parent references in terminal views follow the same numbering as chats.
+fn map_agent_terminals(
+    update: &mut clackatoo_protocol::ViewUpdate,
+    mut map: impl FnMut(TerminalId) -> TerminalId,
+) {
+    let mut state = |state: &mut clackatoo_protocol::GridState| {
+        if let Some(agent) = &mut state.agent {
+            agent.parent = map(agent.parent);
+        }
+    };
+    match update {
+        clackatoo_protocol::ViewUpdate::Snapshot(view) => {
+            if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
+                state(&mut grid.state);
+            }
+        }
+        clackatoo_protocol::ViewUpdate::Patch(patches) => {
+            for patch in patches {
+                if let clackatoo_protocol::Patch::Grid { state: grid, .. } = patch {
+                    state(grid);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2712,6 +2712,12 @@ fn drawings<'a>(
         let Some(state) = state.filter(|state| state.screen().is_some()) else {
             continue;
         };
+        let mut tile = tile;
+        let band = desk.band_height(terminal);
+        if band > 0.0 {
+            tile.origin[1] += band;
+            tile.rows = tile.rows.saturating_sub(2).max(1);
+        }
         let height = usize::from(tile.rows) + usize::from(desk.row_scroll(id).is_some());
         let (rows, mut cursor) = state.scene(height);
         // Hollow, too, on another machine's terminal while that machine
@@ -2737,7 +2743,7 @@ fn drawings<'a>(
         if let Some((id, _)) = placement
             .panes
             .iter()
-            .find(|(_, tile)| *tile == drawing.tile)
+            .find(|(_, tile)| tile.rect == drawing.tile.rect)
         {
             drawing.scroll = desk.row_scroll(*id);
         }

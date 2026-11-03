@@ -1,0 +1,17 @@
+# Agent-owned terminal bands and permanent retention after selection.
+size 1280x860
+keys <C-;>:set agenttools=allow<CR>
+keys <C-;>:Agent claude<CR>i
+type mcp run_in_terminal {"command":"printf 'building project\\n'; sleep 12; printf 'build complete\\n'","name":"Build project"}
+keys <S-CR>
+type mcp wait_for_terminal {"pane":3,"timeout":30}
+keys <CR>
+sleep 600
+shot terminal-waiting
+sleep 12000
+shot terminal-completed
+# Select the output once, then return to its parent chat via the band.
+click 950 280
+shot terminal-retained
+keys <C-b>u
+shot terminal-parent

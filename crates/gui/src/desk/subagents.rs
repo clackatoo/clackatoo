@@ -19,11 +19,13 @@ use super::{Asked, Desk};
 use crate::keymap::{Chord, KeyMode};
 use crate::render::Ink;
 
-/// What the band across the top of a subagent's pane says of it.
+/// The shared band for subagents and terminals they create.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Band {
     /// The chat that started it.
     pub(crate) parent: TerminalId,
+    /// Live terminal state; None for a subagent chat.
+    pub(crate) terminal: Option<clackatoo_protocol::AgentTerminal>,
     /// The profile it was started as, such as `explore`, if the daemon
     /// says.
     pub(crate) profile: Option<String>,
@@ -44,13 +46,34 @@ impl Band {
         let parent = self.parent;
         let mut parts = vec![
             ("↳ ".to_owned(), Ink::Muted),
-            ("subagent".to_owned(), Ink::Subagent),
+            (
+                if self.terminal.is_some() {
+                    "terminal"
+                } else {
+                    "subagent"
+                }
+                .to_owned(),
+                Ink::Subagent,
+            ),
         ];
         if self.open {
             parts.push((" of ".to_owned(), Ink::Muted));
             parts.push((format!("chat {parent}"), Ink::Link));
         } else {
             parts.push((format!(" of chat {parent}, which has closed"), Ink::Muted));
+        }
+        if let Some(terminal) = self.terminal {
+            let status = if terminal.waiting {
+                "agent waiting"
+            } else if terminal.finished {
+                "completed"
+            } else {
+                "no agent waiting"
+            };
+            parts.push((format!(" · {status}"), Ink::Muted));
+            if terminal.finished && !terminal.retained {
+                parts.push((" · closes after 60s".to_owned(), Ink::Muted));
+            }
         }
         if let Some(profile) = &self.profile {
             parts.push((format!(" · {profile}"), Ink::Muted));
@@ -65,13 +88,38 @@ impl Band {
 }
 
 impl Desk {
-    /// What the band across the top of the pane of chat `terminal` says,
-    /// if an agent started it.
+    /// Whether a band is needed, without formatting its text or key bindings.
+    pub(crate) fn has_agent_band(&self, terminal: TerminalId) -> bool {
+        self.panes
+            .get(&terminal)
+            .and_then(|pane| pane.screen())
+            .is_some_and(|screen| screen.state.agent.is_some())
+            || self
+                .watched_chat(terminal)
+                .is_some_and(|chat| chat.parent.is_some())
+    }
+
+    /// What the band across an agent-created pane says.
     pub(crate) fn subagent_band(&self, terminal: TerminalId) -> Option<Band> {
+        if let Some(agent) = self
+            .panes
+            .get(&terminal)
+            .and_then(|pane| pane.screen())
+            .and_then(|screen| screen.state.agent)
+        {
+            return Some(Band {
+                parent: agent.parent,
+                terminal: Some(agent),
+                profile: None,
+                open: self.watched_chat(agent.parent).is_some(),
+                keys: self.parent_chat_keys(),
+            });
+        }
         let summary: &ChatSummary = self.watched_chat(terminal)?;
         let parent = summary.parent?;
         Some(Band {
             parent,
+            terminal: None,
             profile: summary.profile.clone(),
             open: self.watched_chat(parent).is_some(),
             keys: self.parent_chat_keys(),
@@ -95,19 +143,21 @@ impl Desk {
         )
     }
 
-    /// How tall the band across the top of the pane of chat `terminal`
-    /// is, in pixels, below where its cells would start: half as tall
-    /// again as a terminal's row, or nothing if no agent started it. The
-    /// chat is drawn that much further down, and the pointer's place in
-    /// it measured from there.
+    /// Band height in pixels: one and a half rows for chats, two whole
+    /// rows for terminals, keeping their grids aligned. Content and pointer
+    /// coordinates both start below it.
     pub(crate) fn band_height(&self, terminal: TerminalId) -> f32 {
         let Some(area) = self.area.as_ref() else {
             return 0.0;
         };
-        if !self.chats.contains_key(&terminal) || self.subagent_band(terminal).is_none() {
+        if !self.has_agent_band(terminal) {
             return 0.0;
         }
-        (area.cell[1] * 1.5).round()
+        if self.chats.contains_key(&terminal) {
+            (area.cell[1] * 1.5).round()
+        } else {
+            area.cell[1] * 2.0
+        }
     }
 
     /// A click on the band across the top of the pane of chat `terminal`:
@@ -132,7 +182,7 @@ impl Desk {
                 "chat {}, which started this one, has closed",
                 band.parent
             )),
-            None => self.say("this pane isn't a subagent's: no agent started it".to_owned()),
+            None => self.say("no agent started this pane".to_owned()),
         }
     }
 

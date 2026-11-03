@@ -66,10 +66,7 @@ fn a_subagents_pane_says_what_it_is_and_goes_to_the_chat_that_started_it() {
     // From a chat no agent started, it says why not.
     ctrl_b(&mut desk, "u");
     assert_eq!(desk.shown().unwrap().pane, PaneId(2));
-    assert_eq!(
-        note(&desk),
-        "this pane isn't a subagent's: no agent started it"
-    );
+    assert_eq!(note(&desk), "no agent started this pane");
 
     // So does a click on the band, but not one on the chat below it.
     desk.show_tab(TabId(2));
@@ -159,4 +156,57 @@ fn bd_is_for_chats() {
         note(&desk),
         ":bd closes a chat for good; :q closes this pane"
     );
+}
+
+#[test]
+#[allow(clippy::float_cmp)]
+fn agent_terminals_show_waits_and_leave_room_for_the_grid() {
+    let mut desk = desk(workspaces(vec![workspace(
+        1,
+        "work",
+        vec![tab(1, pane(2)), tab(2, pane(3))],
+    )]));
+    desk.chats_changed(vec![summary(2, 1, ChatState::Ready)]);
+    desk.show_tab(TabId(2));
+    let terminal = clackatoo_term::Terminal::new(
+        Size::new(40, 10).unwrap(),
+        &clackatoo_term::Config::default(),
+    );
+    let mut view = View::capture(&terminal);
+    let clackatoo_protocol::Node::Grid(grid) = &mut view.root else {
+        panic!()
+    };
+    grid.state.agent = Some(clackatoo_protocol::AgentTerminal {
+        parent: TerminalId(2),
+        waiting: true,
+        finished: false,
+        retained: false,
+    });
+    desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view.clone()));
+    assert_eq!(desk.band_height(TerminalId(3)), 40.0);
+    assert!(band_says(&desk, 3).contains("terminal of chat 2 · agent waiting"));
+    let requests = answer_all(&mut desk);
+    assert!(requests.iter().any(|request| matches!(
+        request,
+        Request::Resize {
+            terminal: TerminalId(3),
+            ..
+        }
+    )));
+    let clackatoo_protocol::Node::Grid(grid) = &mut view.root else {
+        panic!()
+    };
+    let agent = grid.state.agent.as_mut().unwrap();
+    agent.waiting = false;
+    agent.finished = true;
+    desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view.clone()));
+    assert!(band_says(&desk, 3).contains("completed · closes after 60s"));
+    let clackatoo_protocol::Node::Grid(grid) = &mut view.root else {
+        panic!()
+    };
+    grid.state.agent.as_mut().unwrap().retained = true;
+    desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view));
+    assert!(!band_says(&desk, 3).contains("closes after"));
+    ctrl_b(&mut desk, "u");
+    assert_eq!(desk.shown().unwrap().pane, PaneId(2));
 }

@@ -172,7 +172,15 @@ impl Daemon {
             });
         }
         live.next_call = self.tools.next_call;
-        live.commanded = (self.tools.commanded.iter())
+        live.commanded = self.hand_over_commands();
+    }
+
+    fn hand_over_commands(&self) -> Vec<LiveCommanded> {
+        let now = Instant::now();
+        let left = |due: Instant| {
+            u64::try_from(due.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
+        };
+        (self.tools.commanded.iter())
             .map(|(terminal, commanded)| LiveCommanded {
                 terminal: terminal.0,
                 owner: commanded.owner.map(|owner| owner.0),
@@ -184,7 +192,65 @@ impl Daemon {
                 expect_first: commanded.expect_first,
                 renumbered: commanded.renumbered,
             })
-            .collect();
+            .collect()
+    }
+
+    pub(in crate::server) fn hand_over_agent_terminals(
+        &self,
+    ) -> Vec<crate::handover::AgentCommand> {
+        let now = Instant::now();
+        self.hand_over_commands()
+            .into_iter()
+            .map(|command| {
+                let commanded = &self.tools.commanded[&TerminalId(command.terminal)];
+                crate::handover::AgentCommand {
+                    command,
+                    retained: commanded.retained,
+                    close_left: commanded.close_due.map(|due| {
+                        u64::try_from(due.saturating_duration_since(now).as_millis())
+                            .unwrap_or(u64::MAX)
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    pub(in crate::server) fn resume_agent_terminals(
+        &mut self,
+        commands: Option<Vec<crate::handover::AgentCommand>>,
+    ) {
+        let Some(commands) = commands else { return };
+        let now = Instant::now();
+        for saved in commands {
+            let kept = saved.command;
+            let terminal = TerminalId(kept.terminal);
+            if !self.terminals.contains_key(&terminal) {
+                continue;
+            }
+            self.tools.commanded.insert(
+                terminal,
+                Commanded {
+                    owner: kept.owner.map(TerminalId),
+                    name: kept.name,
+                    typing: kept.typing.map(|(command, left, marked)| Typing {
+                        command,
+                        due: now + Duration::from_millis(left),
+                        marked,
+                        again: None,
+                        refused: None,
+                    }),
+                    failed: kept.failed,
+                    expect: kept.expect,
+                    expect_first: kept.expect_first,
+                    renumbered: kept.renumbered,
+                    retained: saved.retained,
+                    close_due: saved
+                        .close_left
+                        .map(|left| now + Duration::from_millis(left)),
+                    published: None,
+                },
+            );
+        }
     }
 
     /// Takes back the connections the last build handed over in `live`,
@@ -215,6 +281,9 @@ impl Daemon {
                 expect: kept.expect,
                 expect_first: kept.expect_first,
                 renumbered: kept.renumbered,
+                retained: true,
+                close_due: None,
+                published: None,
             };
             if self.terminals.contains_key(&TerminalId(kept.terminal)) {
                 self.tools

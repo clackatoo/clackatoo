@@ -779,6 +779,7 @@ impl Daemon {
                 wires.dedup();
                 Need::PassOn {
                     terminal: None,
+                    parent: None,
                     wires,
                 }
             }

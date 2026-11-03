@@ -279,6 +279,25 @@ pub struct GridState {
     ///
     /// [`Block`]: clackatoo_term::Block
     pub block: Option<u32>,
+    /// The agent that created this terminal and its live wait state.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::AGENT_TERMINALS }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_TERMINALS }, _, _>"
+    )]
+    pub agent: Option<AgentTerminal>,
+}
+
+/// Provenance and lifecycle of a terminal created by an agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTerminal {
+    /// The chat that spawned it.
+    pub parent: crate::TerminalId,
+    /// At least one agent is actively waiting for this terminal to finish.
+    pub waiting: bool,
+    /// The command has positively finished.
+    pub finished: bool,
+    /// The user selected it at least once, or explicitly kept it.
+    pub retained: bool,
 }
 
 /// Lines of a terminal's history, answering a request for them.
@@ -497,6 +516,7 @@ impl GridState {
             history_end: terminal.primary().scrollback_end(),
             shell: terminal.shell_state(),
             block: terminal.latest_block().map(|(block, _)| block),
+            agent: None,
         }
     }
 }
@@ -819,9 +839,27 @@ mod tests {
             .collect();
         assert_eq!(samples.len(), 4);
         for sample in samples {
-            let Sample::Server(message) = sample else {
+            let Sample::Server(mut message) = sample else {
                 panic!("the daemon sends them");
             };
+            // The shared corpus also exercises newer terminal metadata.
+            // This test isolates the older marks/home gate.
+            if let crate::ServerMessage::Event(crate::Event::View { update, .. }) = &mut message {
+                match update {
+                    ViewUpdate::Snapshot(View {
+                        root: Node::Grid(grid),
+                        ..
+                    }) => grid.state.agent = None,
+                    ViewUpdate::Patch(patches) => {
+                        for patch in patches {
+                            if let Patch::Grid { state, .. } = patch {
+                                state.agent = None;
+                            }
+                        }
+                    }
+                    ViewUpdate::Snapshot(_) => {}
+                }
+            }
             assert_eq!(through(wire::BLOCK_MARKS, &message), message);
             // An older peer gets none, and reads none from an older daemon:
             // no prompts, no exits, no home, as before.

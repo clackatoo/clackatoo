@@ -1427,7 +1427,12 @@ impl Desk {
                     continue;
                 }
             };
-            let Ok(size) = Size::new(tile.cols, tile.rows) else {
+            let rows = if !self.chats.contains_key(&terminal) && self.has_agent_band(terminal) {
+                tile.rows.saturating_sub(2).max(1)
+            } else {
+                tile.rows
+            };
+            let Ok(size) = Size::new(tile.cols, rows) else {
                 continue;
             };
             if let Some(chat) = self.chats.get_mut(&terminal) {
@@ -1609,6 +1614,7 @@ impl Desk {
     /// Applies a view update for `terminal`. Returns whether it's shown,
     /// and so the window must be redrawn.
     pub(crate) fn view_changed(&mut self, terminal: TerminalId, update: &ViewUpdate) -> bool {
+        let band_before = self.has_agent_band(terminal);
         if matches!(update, ViewUpdate::Snapshot(_)) {
             self.reattaching.remove(&terminal);
         }
@@ -1629,6 +1635,9 @@ impl Desk {
             }
             false
         };
+        if self.has_agent_band(terminal) != band_before {
+            self.fit_panes();
+        }
         self.lesson_view_changed(terminal);
         self.settle_lesson();
         // Tabs not shown wait, undrawn, until they are.

@@ -3570,6 +3570,12 @@ fn grid_state() -> GridState {
         history_end: 98,
         shell: ShellState::Prompt,
         block: Some(12),
+        agent: Some(crate::AgentTerminal {
+            parent: TerminalId(7),
+            waiting: true,
+            finished: false,
+            retained: true,
+        }),
     }
 }
 

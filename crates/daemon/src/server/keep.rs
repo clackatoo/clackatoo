@@ -234,6 +234,7 @@ impl Daemon {
         } else {
             format!("pane {pane} runs `{command}` again as the daemon starts afresh")
         };
+        self.retain_agent_terminal(terminal);
         self.workspaces.keep(pane, command, always);
         if !always {
             self.drop_restart(pane);

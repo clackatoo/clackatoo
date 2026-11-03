@@ -320,6 +320,8 @@ gates! {
     /// Copying a chat's conversation into a new chat of its own
     /// (CLACKA-198): `ChatAction::Fork`.
     CHAT_FORK = 122,
+    /// Agent terminal ownership, active waits and retention (CLACKA-207).
+    AGENT_TERMINALS = 123,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

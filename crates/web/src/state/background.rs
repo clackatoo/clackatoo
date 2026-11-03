@@ -210,6 +210,29 @@ mod tests {
         state
     }
 
+    #[test]
+    fn opening_a_background_terminal_records_selection_without_showing_its_tab() {
+        let mut state = with_background();
+        state.open_terminal(TerminalId(5));
+        assert_eq!(
+            state.take_outbox(),
+            [
+                ClientMessage::Request(Request::Focus { pane: PaneId(5) }),
+                ClientMessage::Request(Request::Attach {
+                    terminal: TerminalId(5)
+                }),
+            ]
+        );
+        state.open_terminal(TerminalId(5));
+        assert!(state.take_outbox().is_empty());
+        state.connected();
+        assert!(
+            state
+                .take_outbox()
+                .contains(&ClientMessage::Request(Request::Focus { pane: PaneId(5) }))
+        );
+    }
+
     /// The background actions among `sent`.
     fn asked(sent: &[ClientMessage]) -> Vec<BackgroundAction> {
         (sent.iter())

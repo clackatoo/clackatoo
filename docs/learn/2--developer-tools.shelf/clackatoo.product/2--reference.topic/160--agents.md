@@ -560,6 +560,10 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 
 The first pane an agent opens goes to its chat's right, and the next ones stack below that. An agent's tools reach only its chat's workspace.
 
+Agent-created terminals have a teal band like subagent panes. It names the chat that started the terminal and says whether an agent is actively waiting for it. Click the band, or press Ctrl+B `u`, to return to that chat.
+
+A terminal that has **never been selected** closes automatically 60 seconds after its command finishes. Selecting it once keeps it open permanently, even after you move elsewhere; marking it to keep running does too. This applies to agent-created background terminals as well. A new command resets the timer. If the shell cannot report completion, the terminal stays open. Selection and remaining time survive a daemon upgrade; terminals carried over from older builds stay open because their selection history is unknown.
+
 No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a-terminal-running), and `run_in_terminal` and `run_in_background` refuse a command line that runs `clackatoo keep` or `clackatoo bg`. That's a guard against mistakes, not a boundary: whatever an agent types into a terminal, or a script it runs there, follows the rules below, and could do what you could at that shell.
 
 Before running a command or typing into a terminal, the agent asks: Allow, Always allow, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow lets the agent run commands in terminals it started without asking; typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project. The tools that only show or read inside the project, and those that start and message chats, never ask.

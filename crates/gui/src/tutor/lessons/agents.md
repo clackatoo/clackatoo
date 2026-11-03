@@ -167,6 +167,10 @@ A subagent is a chat like any other: you can steer it, review and undo what it c
 
 ## A subagent's own pane
 
+Agent-created terminals have a teal band like subagent panes. It names the chat that started the terminal and says whether an agent is actively waiting for it. Click the band, or press Ctrl+B `u`, to return to that chat.
+
+A terminal that has **never been selected** closes automatically 60 seconds after its command finishes. Selecting it once keeps it open permanently, even after you move elsewhere; marking it to keep running does too. This applies to agent-created background terminals as well. A new command resets the timer. If the shell cannot report completion, the terminal stays open. Selection and remaining time survive a daemon upgrade; terminals carried over from older builds stay open because their selection history is unknown.
+
 An agent can give a subagent a pane of its own, and a card opens one as a pane. A teal band across the top of a subagent's pane says what it is, as `↳ subagent of chat 12 · explore`: whose it is, and the profile it was started as. Click the band, or press Ctrl+B `u`, to go to the chat that started it, whichever tab that's in.
 
 `:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. One you sent back is yours: the agent that started it can't close it. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
