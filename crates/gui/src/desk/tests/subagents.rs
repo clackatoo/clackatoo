@@ -181,6 +181,7 @@ fn agent_terminals_show_waits_and_leave_room_for_the_grid() {
         waiting: true,
         finished: false,
         retained: false,
+        close_in: None,
     });
     desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view.clone()));
     assert_eq!(desk.band_height(TerminalId(3)), 30.0);
@@ -204,9 +205,15 @@ fn agent_terminals_show_waits_and_leave_room_for_the_grid() {
     let clackatoo_protocol::Node::Grid(grid) = &mut view.root else {
         panic!()
     };
+    grid.state.agent.as_mut().unwrap().close_in = Some(37);
+    desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view.clone()));
+    assert!(band_says(&desk, 3).contains("completed · closes in 37s"));
+    let clackatoo_protocol::Node::Grid(grid) = &mut view.root else {
+        panic!()
+    };
     grid.state.agent.as_mut().unwrap().retained = true;
     desk.view_changed(TerminalId(3), &ViewUpdate::Snapshot(view));
-    assert!(!band_says(&desk, 3).contains("closes after"));
+    assert!(!band_says(&desk, 3).contains("closes"));
     ctrl_b(&mut desk, "u");
     assert_eq!(desk.shown().unwrap().pane, PaneId(2));
 }

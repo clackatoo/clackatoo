@@ -6,3 +6,7 @@ type mcp start_chat {"prompt":"mcp run_in_terminal {\"command\":\"printf 'build 
 keys <CR>
 sleep 1500
 shot aligned-headers
+sleep 3000
+shot countdown-later
+click 1500 150
+shot countdown-retained

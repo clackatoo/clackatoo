@@ -815,6 +815,13 @@ impl Subscription {
         wire: u32,
         agent: Option<clackatoo_protocol::AgentTerminal>,
     ) -> Option<ViewUpdate> {
+        // Countdown-only changes must not send identical patches to old windows.
+        let agent = agent.map(|mut agent| {
+            if wire < clackatoo_protocol::wire::TERMINAL_COUNTDOWN {
+                agent.close_in = None;
+            }
+            agent
+        });
         let size = terminal.size();
         let mut state = GridState::of(terminal);
         state.agent = agent;
@@ -4668,6 +4675,44 @@ mod tests {
             count: unreadable.count,
             at: unreadable.at,
             any: unreadable.any,
+        }
+    }
+
+    #[test]
+    fn countdown_updates_quiet_terminals_but_not_older_windows() {
+        let terminal = Terminal::new(Size::new(10, 2).unwrap(), &Config::default());
+        for wire in [PROTOCOL_VERSION, wire::TERMINAL_COUNTDOWN - 1] {
+            let mut sent = Subscription::new();
+            let mut agent = clackatoo_protocol::AgentTerminal {
+                parent: TerminalId(2),
+                waiting: false,
+                finished: true,
+                retained: false,
+                close_in: Some(60),
+            };
+            assert!(matches!(
+                sent.update_agent(&terminal, wire, Some(agent)),
+                Some(ViewUpdate::Snapshot(_))
+            ));
+            agent.close_in = Some(59);
+            let update = sent.update_agent(&terminal, wire, Some(agent));
+            if wire >= wire::TERMINAL_COUNTDOWN {
+                let Some(ViewUpdate::Patch(patches)) = update else {
+                    panic!("a countdown patch")
+                };
+                assert!(
+                    matches!(&patches[..], [Patch::Grid { state, lines, .. }] if state.agent == Some(agent) && lines.is_empty())
+                );
+            } else {
+                assert!(
+                    update.is_none(),
+                    "old windows get no countdown-only updates"
+                );
+            }
+            assert!(sent.update_agent(&terminal, wire, Some(agent)).is_none());
+            agent.retained = true;
+            agent.close_in = None;
+            assert!(sent.update_agent(&terminal, wire, Some(agent)).is_some());
         }
     }
 

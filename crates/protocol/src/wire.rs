@@ -322,6 +322,8 @@ gates! {
     CHAT_FORK = 122,
     /// Agent terminal ownership, active waits and retention (CLACKA-207).
     AGENT_TERMINALS = 123,
+    /// Seconds until an unselected agent terminal closes (CLACKA-207).
+    TERMINAL_COUNTDOWN = 124,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

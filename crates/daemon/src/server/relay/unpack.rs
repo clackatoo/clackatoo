@@ -267,6 +267,7 @@ mod tests {
                             waiting: true,
                             finished: false,
                             retained: false,
+                            close_in: Some(37),
                         }),
                         ..GridState::default()
                     },
@@ -284,10 +285,10 @@ mod tests {
         let need = Need::PassOn {
             terminal: Some(TerminalId(300)),
             parent: Some((reference, TerminalId(400))),
-            wires: vec![PROTOCOL_VERSION, older],
+            wires: vec![PROTOCOL_VERSION, wire::AGENT_TERMINALS, older],
         };
         let unpacked = unpack(&came, PROTOCOL_VERSION, &need);
-        for wire in [PROTOCOL_VERSION, older] {
+        for wire in [PROTOCOL_VERSION, wire::AGENT_TERMINALS, older] {
             assert_eq!(
                 unpacked.for_wire(wire),
                 Some(frame::encode(wire, &message(300, 400)).unwrap().as_slice())

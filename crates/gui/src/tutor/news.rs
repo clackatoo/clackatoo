@@ -1139,6 +1139,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Agent terminals show their parent and waits; unseen terminals close 60s after completion",
     },
+    News {
+        id: "terminal-countdown",
+        date: "2026-11-03",
+        lesson: "agents",
+        what: "Unselected agent terminals show the seconds remaining before they close; select one to keep it",
+    },
 ];
 
 impl News {

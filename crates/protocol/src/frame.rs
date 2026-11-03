@@ -120,11 +120,14 @@ pub fn view_agent_parent(wire: u32, payload: &[u8]) -> Result<Option<ViewAgentPa
     if wire < wire::AGENT_TERMINALS {
         return Ok(None);
     }
-    wire::speaking(wire, || agent_parent_prefix(payload))
+    wire::speaking(wire, || agent_parent_prefix(wire, payload))
         .map_err(|why| FrameError::Decode(why, Head::of(payload)))
 }
 
-fn agent_parent_prefix(payload: &[u8]) -> Result<Option<ViewAgentParent>, postcard::Error> {
+fn agent_parent_prefix(
+    wire: u32,
+    payload: &[u8],
+) -> Result<Option<ViewAgentParent>, postcard::Error> {
     use postcard::{Error, take_from_bytes as take};
     let ((message, event, _terminal, update), mut rest) =
         take::<(u32, u32, TerminalId, u32)>(payload)?;
@@ -167,10 +170,16 @@ fn agent_parent_prefix(payload: &[u8]) -> Result<Option<ViewAgentParent>, postca
     let Some(agent) = state.agent else {
         return Ok(None);
     };
-    // AgentTerminal ends GridState: the parent's varint, then three bools.
+    // AgentTerminal ends GridState: the parent's varint, three bools and,
+    // since 124, an Option<u8> (one byte for the tag and one for Some).
+    let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
+        1 + usize::from(agent.close_in.is_some())
+    } else {
+        0
+    };
     let end = payload
         .len()
-        .checked_sub(after.len() + 3)
+        .checked_sub(after.len() + 3 + countdown)
         .ok_or(Error::DeserializeUnexpectedEnd)?;
     let mut encoded = [0; 5];
     let width = postcard::to_slice(&agent.parent, &mut encoded)?.len();
@@ -792,88 +801,108 @@ mod tests {
             &clackatoo_term::Config::default(),
         );
         terminal.advance("many terminal output lines\r\n".repeat(24).as_bytes());
-        for (from, to) in [(1, 300), (300, 1), (u32::MAX, 128)] {
-            let mut view = View::capture(&terminal);
-            let Node::Grid(grid) = &mut view.root else {
-                panic!()
-            };
-            grid.state.agent = Some(AgentTerminal {
-                parent: TerminalId(from),
-                waiting: true,
-                finished: false,
-                retained: false,
-            });
-            let patch = ViewUpdate::Patch(vec![
-                Patch::Title("test".into()),
-                Patch::Cwd(Some("/project".into())),
-                Patch::Grid {
-                    node: NodeId::ROOT,
-                    state: grid.state,
-                    lines: grid
-                        .lines
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .map(|(line, text)| (u16::try_from(line).unwrap(), text))
-                        .collect(),
-                    links: grid.links.clone(),
-                    marks: grid.marks.clone(),
-                },
-            ]);
-            for update in [ViewUpdate::Snapshot(view), patch] {
-                let message = ServerMessage::Event(Event::View {
-                    terminal: TerminalId(from),
-                    update: update.clone(),
+        for (wire, close_in) in [
+            (wire::AGENT_TERMINALS, None),
+            (wire::AGENT_TERMINALS, Some(37)),
+            (PROTOCOL_VERSION, None),
+            (PROTOCOL_VERSION, Some(37)),
+            (PROTOCOL_VERSION, Some(u8::MAX)),
+        ] {
+            for (from, to) in [(1, 300), (300, 1), (u32::MAX, 128)] {
+                let mut view = View::capture(&terminal);
+                let Node::Grid(grid) = &mut view.root else {
+                    panic!()
+                };
+                grid.state.agent = Some(AgentTerminal {
+                    parent: TerminalId(from),
+                    waiting: true,
+                    finished: false,
+                    retained: false,
+                    close_in,
                 });
-                let encoded = encode(PROTOCOL_VERSION, &message).unwrap();
-                let payload = &encoded[HEADER_LEN..];
-                let reference = view_agent_parent(PROTOCOL_VERSION, payload)
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(reference.parent, TerminalId(from));
-                // It reads only the small state prefix: even without the output.
-                assert_eq!(
-                    view_agent_parent(PROTOCOL_VERSION, &payload[..reference.end + 3]).unwrap(),
-                    Some(reference)
-                );
-                let mapped =
-                    renumber_agent_view(payload, TerminalId(to), reference, TerminalId(to))
-                        .unwrap();
-                let mut expected = update;
-                match &mut expected {
-                    ViewUpdate::Snapshot(view) => {
-                        if let Node::Grid(grid) = &mut view.root {
-                            grid.state.agent.as_mut().unwrap().parent = TerminalId(to);
+                let patch = ViewUpdate::Patch(vec![
+                    Patch::Title("test".into()),
+                    Patch::Cwd(Some("/project".into())),
+                    Patch::Grid {
+                        node: NodeId::ROOT,
+                        state: grid.state,
+                        lines: grid
+                            .lines
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .map(|(line, text)| (u16::try_from(line).unwrap(), text))
+                            .collect(),
+                        links: grid.links.clone(),
+                        marks: grid.marks.clone(),
+                    },
+                ]);
+                for update in [ViewUpdate::Snapshot(view), patch] {
+                    let message = ServerMessage::Event(Event::View {
+                        terminal: TerminalId(from),
+                        update: update.clone(),
+                    });
+                    let encoded = encode(wire, &message).unwrap();
+                    let payload = &encoded[HEADER_LEN..];
+                    let reference = view_agent_parent(wire, payload).unwrap().unwrap();
+                    assert_eq!(reference.parent, TerminalId(from));
+                    // It reads only the small state prefix: even without the output.
+                    let tail = 3 + if wire >= wire::TERMINAL_COUNTDOWN {
+                        1 + usize::from(close_in.is_some())
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),
+                        Some(reference)
+                    );
+                    let mapped =
+                        renumber_agent_view(payload, TerminalId(to), reference, TerminalId(to))
+                            .unwrap();
+                    let mut expected = update;
+                    match &mut expected {
+                        ViewUpdate::Snapshot(view) => {
+                            if let Node::Grid(grid) = &mut view.root {
+                                grid.state.agent.as_mut().unwrap().parent = TerminalId(to);
+                            }
                         }
-                    }
-                    ViewUpdate::Patch(patches) => {
-                        for patch in patches {
-                            if let Patch::Grid { state, .. } = patch {
-                                state.agent.as_mut().unwrap().parent = TerminalId(to);
+                        ViewUpdate::Patch(patches) => {
+                            for patch in patches {
+                                if let Patch::Grid { state, .. } = patch {
+                                    state.agent.as_mut().unwrap().parent = TerminalId(to);
+                                }
                             }
                         }
                     }
+                    assert_eq!(
+                        mapped,
+                        encode(
+                            wire,
+                            &ServerMessage::Event(Event::View {
+                                terminal: TerminalId(to),
+                                update: expected
+                            })
+                        )
+                        .unwrap()
+                    );
+                    let older = wire::AGENT_TERMINALS - 1;
+                    assert_eq!(
+                        view_agent_parent(older, &encode(older, &message).unwrap()[HEADER_LEN..])
+                            .unwrap(),
+                        None
+                    );
                 }
-                assert_eq!(
-                    mapped,
-                    encode(
-                        PROTOCOL_VERSION,
-                        &ServerMessage::Event(Event::View {
-                            terminal: TerminalId(to),
-                            update: expected
-                        })
-                    )
-                    .unwrap()
-                );
-                let older = wire::AGENT_TERMINALS - 1;
-                assert_eq!(
-                    view_agent_parent(older, &encode(older, &message).unwrap()[HEADER_LEN..])
-                        .unwrap(),
-                    None
-                );
             }
         }
-        // Ordinary grids and chat updates retain the normal forwarding path.
+    }
+
+    #[test]
+    fn ordinary_grid_views_need_no_parent_translation() {
+        use crate::{Event, View, ViewUpdate};
+        let terminal = clackatoo_term::Terminal::new(
+            crate::Size::new(80, 24).unwrap(),
+            &clackatoo_term::Config::default(),
+        );
         let regular = ServerMessage::Event(Event::View {
             terminal: TerminalId(1),
             update: ViewUpdate::Snapshot(View::capture(&terminal)),

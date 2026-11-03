@@ -3575,6 +3575,7 @@ fn grid_state() -> GridState {
             waiting: true,
             finished: false,
             retained: true,
+            close_in: Some(37),
         }),
     }
 }

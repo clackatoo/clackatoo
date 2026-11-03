@@ -188,6 +188,7 @@ fn agent_terminal_relay(c: &mut Criterion) {
             waiting: true,
             finished: false,
             retained: false,
+            close_in: Some(37),
         });
     }
     let bytes = encode(&message);

@@ -298,6 +298,13 @@ pub struct AgentTerminal {
     pub finished: bool,
     /// The user selected it at least once, or explicitly kept it.
     pub retained: bool,
+    /// Seconds until automatic closure, rounded up by the owning daemon.
+    /// None if not scheduled, or the daemon predates the countdown.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_COUNTDOWN }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_COUNTDOWN }, _, _>"
+    )]
+    pub close_in: Option<u8>,
 }
 
 /// Lines of a terminal's history, answering a request for them.

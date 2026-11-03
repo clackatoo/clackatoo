@@ -72,7 +72,11 @@ impl Band {
             };
             parts.push((format!(" · {status}"), Ink::Muted));
             if terminal.finished && !terminal.retained {
-                parts.push((" · closes after 60s".to_owned(), Ink::Muted));
+                let closing = terminal.close_in.map_or_else(
+                    || " · closes after 60s".to_owned(),
+                    |seconds| format!(" · closes in {seconds}s"),
+                );
+                parts.push((closing, Ink::Muted));
             }
         }
         if let Some(profile) = &self.profile {

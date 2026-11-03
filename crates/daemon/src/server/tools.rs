@@ -197,6 +197,24 @@ struct Commanded {
 }
 
 impl Commanded {
+    fn close_in(&self, now: Instant) -> Option<u8> {
+        let left = self.close_due?.saturating_duration_since(now);
+        let seconds = left.as_secs() + u64::from(left.subsec_nanos() != 0);
+        Some(u8::try_from(seconds).unwrap_or(u8::MAX))
+    }
+
+    /// Wake at the next displayed second, with no ticking after retention.
+    fn next_close_tick(&self, now: Instant) -> Option<Instant> {
+        // Keep a boundary that passed since the last publication due now,
+        // rather than skipping its update while calculating the poll timeout.
+        let seconds = self
+            .published
+            .and_then(|state| state.close_in)
+            .or_else(|| self.close_in(now))?;
+        self.close_due?
+            .checked_sub(Duration::from_secs(u64::from(seconds.saturating_sub(1))))
+    }
+
     fn expired(&mut self, finished: bool, now: Instant) -> bool {
         if self.owner.is_none() || self.retained || !finished {
             self.close_due = None;
@@ -1743,18 +1761,19 @@ impl Daemon {
             let waiting = self.tools.waiting.iter().any(
                 |wait| matches!(wait.what, Wait::Finish { terminal: id, .. } if id == terminal),
             );
+            if commanded.expired(finished, now) {
+                close.push(terminal);
+            }
             let state = clackatoo_protocol::AgentTerminal {
                 parent,
                 waiting,
                 finished,
                 retained: commanded.retained,
+                close_in: commanded.close_in(now),
             };
             if commanded.published != Some(state) {
                 commanded.published = Some(state);
                 self.views_pending = true;
-            }
-            if commanded.expired(finished, now) {
-                close.push(terminal);
             }
         }
         for terminal in close {
@@ -1785,11 +1804,12 @@ impl Daemon {
                 Some(Source::Tools(connection)) => connection.gone_due(),
                 _ => None,
             });
+        let now = Instant::now();
         let closing = self
             .tools
             .commanded
             .values()
-            .filter_map(|commanded| commanded.close_due);
+            .filter_map(|commanded| commanded.next_close_tick(now));
         typing.chain(waits).chain(finished).chain(closing).min()
     }
 
@@ -2405,8 +2425,9 @@ mod keeping_whose {
         });
         daemon.maintain_agent_terminals(now);
         assert!(daemon.agent_terminal(unseen).unwrap().waiting);
+        assert_countdown_ticks(&mut daemon, unseen, now);
         daemon.tools.waiting.clear();
-        daemon.maintain_agent_terminals(now);
+        daemon.maintain_agent_terminals(now + Duration::from_secs(1));
         assert!(!daemon.agent_terminal(unseen).unwrap().waiting);
         // Exercise the user Focus request, then focus elsewhere: selection stays sticky.
         let pane = daemon.workspaces.get().pane_showing(selected).unwrap();
@@ -2424,13 +2445,46 @@ mod keeping_whose {
         assert!(due.saturating_duration_since(now) < Duration::from_secs(61));
         daemon.maintain_agent_terminals(due.checked_sub(Duration::from_secs(1)).unwrap());
         assert!(daemon.terminals.contains_key(&unseen));
+        assert_eq!(daemon.agent_terminal(unseen).unwrap().close_in, Some(1));
         daemon.maintain_agent_terminals(due);
         assert!(!daemon.terminals.contains_key(&unseen));
         assert!(daemon.terminals.contains_key(&selected));
         assert!(daemon.terminals.contains_key(&unknown));
         assert!(daemon.agent_terminal(selected).unwrap().retained);
+        assert_eq!(daemon.agent_terminal(selected).unwrap().close_in, None);
+        assert_eq!(daemon.tools.commanded[&selected].next_close_tick(due), None);
         // No dangling terminal in the layout after automatic closure.
         assert!(daemon.workspaces.get().pane_showing(unseen).is_none());
+    }
+
+    fn assert_countdown_ticks(
+        daemon: &mut crate::server::Daemon,
+        terminal: clackatoo_protocol::TerminalId,
+        now: std::time::Instant,
+    ) {
+        use std::time::Duration;
+        assert_eq!(daemon.agent_terminal(terminal).unwrap().close_in, Some(60));
+        assert_eq!(
+            daemon.tools.commanded[&terminal].next_close_tick(now),
+            Some(now + Duration::from_secs(1))
+        );
+        daemon.views_pending = false;
+        daemon.maintain_agent_terminals(now + Duration::from_millis(999));
+        assert!(
+            !daemon.views_pending,
+            "no update before the second boundary"
+        );
+        daemon.maintain_agent_terminals(now + Duration::from_secs(1));
+        assert!(
+            daemon.views_pending,
+            "a quiet terminal still publishes its countdown"
+        );
+        assert_eq!(daemon.agent_terminal(terminal).unwrap().close_in, Some(59));
+        assert_eq!(
+            daemon.tools.commanded[&terminal].next_close_tick(now + Duration::from_secs(2)),
+            Some(now + Duration::from_secs(2)),
+            "a boundary that passed before polling is still due"
+        );
     }
 
     #[test]
