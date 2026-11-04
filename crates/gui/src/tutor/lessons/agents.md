@@ -12,6 +12,14 @@ Notes for the agents lesson.
 
 Long chats open on recent turns in the window and web app. Scroll near the top to load earlier messages without losing your place. In the web app, **Load earlier messages** also fetches a page. Each device keeps its own range, including through reconnects. The daemon retains the whole conversation. Load an older turn before asking to undo it by number.
 
+## Reading and copying a chat
+
+In normal mode, word motions and copies follow the same rules as the editor, including Unicode and the word characters of fenced code’s language. `ge` goes to the previous word’s end, `%` finds its matching bracket, and `(` and `)` move between sentences in a block. `g0` and `g$` move to the visual row’s edges; `g_` finds its last non-blank character.
+
+Use `H`, `M`, and `L` to move within the visible text, and `zt`, `zz`, and `zb` to place the cursor’s row at the top, middle, or bottom. Vertical movement follows wrapped rows; copying with `y$` or `yj` still follows the underlying text lines.
+
+Try `viw` to select a word, then `aw` to extend it. Brackets, quotes, sentences, paragraphs and tags work as visual text objects too. After copying with `y` or leaving with Esc, `gv` selects the same text again. In visual mode, `gv` swaps the current and previous selections. `vix`, `vim` and `vam` select visible code, a message, or a turn; direct `yax` and `yim` retain their source-Markdown copying behavior.
+
 ## Opening a chat
 
 `:Agent codex` or `:Agent antigravity` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.

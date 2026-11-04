@@ -266,6 +266,7 @@ impl Daemon {
         let mut snippets = Vec::new();
         let mut sent = Vec::with_capacity(code.len());
         let mut bytes = 0;
+        let mut words = Vec::with_capacity(code.len());
         if let Some(languages) = &mut self.languages {
             // The directory is read again once for the ask, not for each
             // block.
@@ -282,6 +283,19 @@ impl Daemon {
                 } else {
                     None
                 };
+                words.push(pack.as_deref().map_or_else(
+                    || {
+                        clackatoo_syntax::KNOWN
+                            .iter()
+                            .find(|known| known.name.eq_ignore_ascii_case(&block.language))
+                            .map_or("", |known| known.word)
+                            .to_owned()
+                    },
+                    |pack| {
+                        clackatoo_syntax::pack::word_of(Some(pack), std::path::Path::new(""))
+                            .to_owned()
+                    },
+                ));
                 sent.push(pack.map(|pack| {
                     snippets.push(Snippet {
                         pack,
@@ -293,6 +307,7 @@ impl Daemon {
         } else {
             sent.resize(code.len(), None);
         }
+        self.send_event(token, clackatoo_protocol::Event::CodeWords { id, words });
         let colouring = CodeColouring { token, id, sent };
         if snippets.is_empty() {
             return self.code_coloured(&colouring, &[]);

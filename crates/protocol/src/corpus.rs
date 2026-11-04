@@ -761,6 +761,13 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             }),
         ),
         (
+            crate::wire::CODE_WORDS,
+            Server(ServerMessage::Event(Event::CodeWords {
+                id: 9,
+                words: vec!["-?!".into()],
+            })),
+        ),
+        (
             COLOURS,
             Server(ServerMessage::Event(Event::Coloured {
                 id: 9,

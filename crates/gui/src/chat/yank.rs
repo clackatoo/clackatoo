@@ -29,14 +29,10 @@ use clackatoo_protocol::ChatNode;
 use super::paint::{How, Picked, Position, TextKey, control, hard_line, within};
 use super::{ChatView, Input};
 use crate::editor::Register;
-use crate::motion::{Motion, Reach};
+use crate::motion::{Cursor, Lines, Motion, Reach};
 use crate::objects::Object;
 use crate::pane::{CopyTo, Yanked};
 use crate::vim::{Selection, Target};
-
-/// How wide a tab is, for the objects found in a block's text: only
-/// columns, which never leave the block, depend on it.
-const TABSTOP: usize = 8;
 
 impl ChatView {
     /// `y` and `target`, `count` typed, into the register `name`, if one
@@ -76,6 +72,9 @@ impl ChatView {
         let Some(start) = self.cursor_or_default() else {
             return;
         };
+        if self.yank_in_block(motion, count, start, name) {
+            return;
+        }
         // Moved to see where the motion goes, and put back: the view
         // doesn't follow it, nor the chat's end, as `G` would have it.
         let (goal, follow, reveal) = (self.goal, self.follow, self.reveal);
@@ -94,9 +93,36 @@ impl ChatView {
         } else {
             (start, moved)
         };
+        let mut by_lines = motion.reach() == Reach::Lines;
         let range = match motion.reach() {
             Reach::Lines => self.range_of(visual(first, last, Selection::Lines)),
             Reach::Inclusive => self.range_of(visual(first, last, Selection::Characters)),
+            Reach::Exclusive if first.text == last.text => self
+                .motion_block(first.text, false, false)
+                .and_then(|block| {
+                    let found = crate::objects::Found::new(
+                        (block.point(first.byte), block.point(last.byte)),
+                        false,
+                        false,
+                    )
+                    .taken(&*block)?;
+                    by_lines = found.lines();
+                    let (start, end) = if by_lines {
+                        (
+                            block.range(found.start().line).start,
+                            block.range(found.last().line).end,
+                        )
+                    } else {
+                        (block.byte(found.start()), block.char_end(found.last()))
+                    };
+                    Some((
+                        Position {
+                            byte: start,
+                            ..first
+                        },
+                        Position { byte: end, ..last },
+                    ))
+                }),
             Reach::Exclusive => {
                 let last = self.exclusive_end(first, last);
                 (first < last).then_some((first, last))
@@ -105,12 +131,7 @@ impl ChatView {
         let Some((from, to)) = range else {
             return;
         };
-        self.queue_yank(
-            from,
-            to,
-            motion.reach() == Reach::Lines,
-            CopyTo::Register(name),
-        );
+        self.queue_yank(from, to, by_lines, CopyTo::Register(name));
         // To the start of it, as Vim's yank goes, where the motion went
         // back.
         if moved < start {
@@ -118,6 +139,101 @@ impl ChatView {
             self.goal = moved_goal;
             self.reveal = true;
         }
+    }
+
+    /// Motions contained in one block use the shared operator endpoint,
+    /// reach and exclusive-line rules. Only transitions between blocks
+    /// need the conversation's own addressing below.
+    fn yank_in_block(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        start: Position,
+        name: Option<char>,
+    ) -> bool {
+        if matches!(
+            motion,
+            Motion::First
+                | Motion::Last
+                | Motion::TextEnd
+                | Motion::Paragraph { .. }
+                | Motion::ViewTop
+                | Motion::ViewMiddle
+                | Motion::ViewBottom
+                | Motion::RowDown(_)
+                | Motion::RowUp(_)
+        ) {
+            return false;
+        }
+        let Some(text) = self.text(start.text) else {
+            return false;
+        };
+        let word = matches!(
+            motion,
+            Motion::WordStart
+                | Motion::BigWordStart
+                | Motion::WordBack
+                | Motion::BigWordBack
+                | Motion::WordEnd
+                | Motion::BigWordEnd
+                | Motion::WordEndBack
+                | Motion::BigWordEndBack
+        );
+        let visual = matches!(motion, Motion::RowStart | Motion::RowEnd);
+        let Some(block) = self.motion_block(start.text, visual, word) else {
+            return false;
+        };
+        let at = block.point(start.byte);
+        let times = count.unwrap_or(1);
+        let distance = match motion {
+            Motion::Down(_) | Motion::NextLine => Some(block.bounds().1 - at.line),
+            Motion::Up(_) | Motion::PreviousLine => Some(at.line),
+            Motion::LineEnd | Motion::LastNonBlank | Motion::LineFirstNonBlank => {
+                Some(block.bounds().1 - at.line + 1)
+            }
+            _ => None,
+        };
+        if distance.is_some_and(|distance| times as u64 > distance) {
+            return false;
+        }
+        let mut moved = Cursor::new(at);
+        moved.go_to_take(motion, count, &*block, self.start_of_line);
+        // Only boundary transitions use conversation addressing. The same
+        // endpoint supplies the shared operator's reach, without a second walk.
+        if word && (moved.at.line == 0 || moved.at.line == block.bounds().1) {
+            return false;
+        }
+        let Some(taken) = crate::motion::Taken::between(motion, count, at, moved, &*block) else {
+            self.failed |= !matches!(motion, Motion::Left | Motion::Right | Motion::LineEnd);
+            return true;
+        };
+        let found = crate::objects::Found::new(
+            (taken.start, taken.end),
+            taken.reach == Reach::Lines,
+            taken.reach != Reach::Exclusive,
+        );
+        let Some(found) = found.taken(&*block) else {
+            return true;
+        };
+        let (first, last) = if found.lines() {
+            (
+                block.range(found.start().line).start,
+                block.range(found.last().line).end,
+            )
+        } else {
+            (block.byte(found.start()), block.char_end(found.last()))
+        };
+        let copied = text.text[first..last].to_owned();
+        let byte = block.byte(found.start());
+        self.queued.push(Input::YankText(Yanked {
+            register: Register::new(copied, found.lines()),
+            to: CopyTo::Register(name),
+        }));
+        if taken.moved.at < at {
+            self.go(Position { byte, ..start });
+            self.goal = None;
+        }
+        true
     }
 
     /// Where `motion`, `count` typed, goes from `start` as what an operator
@@ -135,15 +251,10 @@ impl ChatView {
         start: Position,
     ) -> Option<Position> {
         let times = count.unwrap_or(1).max(1);
-        let line = (self.text(start.text)).map(|text| hard_line(text.text, start.byte));
-        let at = |byte| Position { byte, ..start };
         match motion {
-            Motion::LineStart => Some(line.map_or(start, |(first, _)| at(first))),
-            Motion::FirstNonBlank => {
-                let text = self.text(start.text)?;
-                let (first, last) = hard_line(text.text, start.byte);
-                let words = &text.text[first..last];
-                Some(at(first + words.len() - words.trim_start().len()))
+            Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom => {
+                self.view_motion(motion, count, true).then_some(())?;
+                self.cursor
             }
             Motion::LineEnd => {
                 let mut end = start;
@@ -162,22 +273,25 @@ impl ChatView {
                     ..end
                 })
             }
-            Motion::Find {
-                ch,
-                forward,
-                till,
-                again,
-            } => {
-                let text = self.text(start.text)?;
-                let (first, last) = hard_line(text.text, start.byte);
-                let find = (ch, forward, till, again);
-                super::read::find_in(text.text, first..last, start.byte, find, times).map(at)
+            Motion::LineFirstNonBlank | Motion::LastNonBlank => {
+                let end = if times > 1 {
+                    self.lines_on(start, times - 1, true)?
+                } else {
+                    start
+                };
+                let block = self.motion_block(end.text, false, false)?;
+                let mut cursor = Cursor::new(block.point(end.byte));
+                cursor.go_to_take(motion, None, &*block, false);
+                Some(Position {
+                    byte: block.byte(cursor.at),
+                    ..end
+                })
             }
             Motion::Down(_) | Motion::NextLine => self.lines_on(start, times, true),
             Motion::Up(_) | Motion::PreviousLine => self.lines_on(start, times, false),
             Motion::WordStart | Motion::BigWordStart => Some(self.words_on(motion, times, start)),
             _ => {
-                self.moved(motion, count);
+                self.moved(motion, count).then_some(())?;
                 self.cursor
             }
         }
@@ -243,16 +357,6 @@ impl ChatView {
             return Position {
                 text: before,
                 byte: len,
-            };
-        }
-        let breaks = self.text(end.text).is_some_and(|text| {
-            let byte = within(text.text, end.byte);
-            byte > 0 && text.text.as_bytes()[byte - 1] == b'\n'
-        });
-        if breaks && end > start {
-            return Position {
-                byte: end.byte - 1,
-                ..end
             };
         }
         end
@@ -424,15 +528,16 @@ impl ChatView {
         let Some(text) = self.text(cursor.text) else {
             return;
         };
-        let rope = clackatoo_text::Rope::from_str(text.text);
-        let lines = crate::editor::Text::new(&rope, TABSTOP);
-        let at = lines.point_of(within(text.text, cursor.byte));
-        let found = match object.find(&lines, at, inner, count) {
-            Ok(found) => found.taken(&lines),
+        let Some(lines) = self.motion_block(cursor.text, false, false) else {
+            return;
+        };
+        let at = lines.point(within(text.text, cursor.byte));
+        let found = match object.find(&*lines, at, inner, count) {
+            Ok(found) => found.taken(&*lines),
             // Where Vim's leaves the cursor failing, as a count of words
             // past the text's end does.
             Err(Some(moved)) => {
-                let byte = lines.byte_at(moved);
+                let byte = lines.byte(moved);
                 self.cursor = Some(Position { byte, ..cursor });
                 self.goal = None;
                 self.failed = true;
@@ -447,21 +552,19 @@ impl ChatView {
         };
         let (start, end) = if found.lines() {
             (
-                lines.line_start(found.start().line),
-                lines.line_end(found.last().line),
+                lines.range(found.start().line).start,
+                lines.range(found.last().line).end,
             )
         } else {
-            (lines.byte_at(found.start()), lines.char_end(found.last()))
+            (lines.byte(found.start()), lines.char_end(found.last()))
         };
-        let yanked = lines.slice(start, end);
+        let yanked = text.text[start..end].to_owned();
+        let byte = lines.byte(found.start());
         self.queued.push(Input::YankText(Yanked {
             register: Register::new(yanked, found.lines()),
             to: CopyTo::Register(name),
         }));
-        self.cursor = Some(Position {
-            byte: lines.byte_at(found.start()),
-            ..cursor
-        });
+        self.cursor = Some(Position { byte, ..cursor });
         self.goal = None;
         self.reveal = true;
     }
@@ -470,6 +573,9 @@ impl ChatView {
     /// whole, and it stops selecting, the cursor going to the start of
     /// it, as Vim's.
     fn yank_selected(&mut self, lines: bool, name: Option<char>) {
+        self.last_visual = self
+            .picked
+            .filter(|picked| matches!(picked.how, How::Visual(_)));
         let Some(picked) = self.picked.take() else {
             return;
         };

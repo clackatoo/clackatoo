@@ -371,7 +371,8 @@ impl Line {
 /// Which kind of word a character is part of: letters, digits and `_`, or
 /// anything else; or, for a WORD (`big`), all one kind but blanks.
 fn class(ch: char, big: bool) -> bool {
-    big || ch.is_alphanumeric() || ch == '_'
+    big || clackatoo_text::word::WordClass::CommandLine.class(ch)
+        == clackatoo_text::word::Class::Word
 }
 
 #[cfg(test)]

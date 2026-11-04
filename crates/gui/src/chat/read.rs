@@ -18,13 +18,15 @@
 //! | Keys | What they do |
 //! |---|---|
 //! | `h` `j` `k` `l`, arrows, `+` `-` | Move a character, or a line |
-//! | `w` `b` `e`, `W` `B` `E` | Move by words, or by anything between blanks |
+//! | `w` `b` `e` `ge`, `W` `B` `E` `gE` | Move by words, or by anything between blanks |
 //! | `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, and again |
-//! | `0` `^` `$` | To the start of the line, its first word, its end |
+//! | `0` `^` `$`, `g0` `g$`, `_` `g_` | To the start of the line, its first word, its end |
+//! | `%`, `(` `)` | Matching brackets and sentences in a block |
+//! | `H` `M` `L`, `zt` `zz` `zb` | Move within the view or place the cursor’s row in it |
 //! | `{` `}` | To the block before, or after |
 //! | `gg` `G` | To the start of the chat, or its end |
 //! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F and the pages | Scroll as far as in any pane, the cursor kept in view |
-//! | `v` `V` | Select characters, or lines; `o` goes to the other end |
+//! | `v` `V`, `gv` | Select characters or lines, restore the last selection; `o` swaps ends |
 //! | `y` and a motion or object, `yy` `Y` | Yank what it moves over, or the object, into the registers: `yix` a block of code, `yim` a message or card, `yam` a turn |
 //! | `"a`, before `y` | Yank into register `a`, or onto its end with `"A` |
 //! | `v` then `y`, `Y` | Yank what's selected, or its lines |
@@ -46,7 +48,7 @@ use super::card::Card;
 use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, control};
 use super::{ChatView, Input};
 use crate::input::KeyPress;
-use crate::motion::Motion;
+use crate::motion::{Cursor, Lines, Motion};
 use crate::objects::Object;
 use crate::vim::{
     Action, Command, Dialect, Operator, Parsed, Read, Reader, Scroll, Selection, Stroke, Target,
@@ -169,6 +171,7 @@ impl Dialect for ChatKeys {
                 ctrl: true,
             } => ChatKey::Undo { redo: true },
             Stroke::Char { ch, ctrl: false } => match ch {
+                'i' | 'a' if visual => return None,
                 'i' | 'a' | 'I' | 'A' => ChatKey::Compose,
                 // In visual mode, `o` goes to the selection's other end.
                 'o' if !visual => ChatKey::Compose,
@@ -271,7 +274,10 @@ impl Dialect for ChatKeys {
             // A register is for a yank alone.
             _ if command.register.is_some() => false,
             Action::Move(motion) => moves(motion),
-            Action::FindAgain { .. }
+            Action::Select { object, .. } => !matches!(object, Object::Block | Object::Code(_)),
+            Action::View(_)
+            | Action::Reselect
+            | Action::FindAgain { .. }
             | Action::Scroll(_)
             | Action::Visual { .. }
             | Action::OtherEnd
@@ -287,32 +293,7 @@ impl Dialect for ChatKeys {
 /// Whether a chat moves by `motion`, as its cursor moves through its
 /// lines laid out in proportional fonts (see [`ChatView::moved`]).
 fn moves(motion: Motion) -> bool {
-    matches!(
-        motion,
-        Motion::Down(_)
-            | Motion::Up(_)
-            | Motion::RowDown(_)
-            | Motion::RowUp(_)
-            | Motion::Left
-            | Motion::Right
-            | Motion::LeftOver
-            | Motion::RightOver
-            | Motion::WordStart
-            | Motion::WordEnd
-            | Motion::WordBack
-            | Motion::BigWordStart
-            | Motion::BigWordEnd
-            | Motion::BigWordBack
-            | Motion::LineStart
-            | Motion::FirstNonBlank
-            | Motion::LineEnd
-            | Motion::NextLine
-            | Motion::PreviousLine
-            | Motion::Paragraph { .. }
-            | Motion::First
-            | Motion::Last
-            | Motion::Find { .. }
-    )
+    !matches!(motion, Motion::FindAgain { .. })
 }
 
 /// Which way to move.
@@ -581,7 +562,7 @@ impl ChatView {
         self.queued.retain(|input| {
             !matches!(
                 input,
-                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }
+                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. } | Input::Reselect
             )
         });
     }
@@ -592,7 +573,7 @@ impl ChatView {
         (self.queued.iter()).any(|input| {
             matches!(
                 input,
-                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }
+                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. } | Input::Reselect
             )
         })
     }
@@ -614,6 +595,14 @@ impl ChatView {
             } => {
                 let text = self.text_between(fonts, start, end);
                 self.yanked(text, lines, to, settled);
+            }
+            Input::Reselect => {
+                if let Some(saved) = self.last_visual {
+                    for turn in [saved.anchor.text.turn, saved.head.text.turn] {
+                        self.lay_out_keeping_view(fonts, turn);
+                    }
+                }
+                self.reselect();
             }
             Input::YankText(crate::pane::Yanked { register, to }) => {
                 self.yanked(register.text, register.lines, to, settled);
@@ -650,6 +639,17 @@ impl ChatView {
                     Selection::Characters
                 };
                 self.visual_key(self.visual(), kind);
+            }
+            Action::View(at) => {
+                if let Some(number) = command.count {
+                    self.go_to_turn_numbered(number);
+                }
+                self.place_after_layout = Some(at);
+                self.place_view(at);
+            }
+            Action::Reselect => self.reselect(),
+            Action::Select { object, inner } => {
+                self.select_object(object, inner, command.count.unwrap_or(1));
             }
             Action::OtherEnd => {
                 if let Some(picked) = &mut self.picked {
@@ -702,6 +702,7 @@ impl ChatView {
                 if self.visual().is_none() {
                     self.stop_highlighting();
                 }
+                self.leave_visual();
                 self.picked = None;
             }
             ChatKey::Detail => {
@@ -756,6 +757,7 @@ impl ChatView {
     /// [`moved`](Self::moved)), or fails to, as `j` on the last line or
     /// `fx` with no x does, which Vim beeps at, stopping a macro.
     fn move_key(&mut self, motion: Motion, count: Option<usize>) {
+        self.place_after_layout = None;
         if !self.moved(motion, count) {
             self.failed = true;
         }
@@ -776,14 +778,51 @@ impl ChatView {
     /// text's lines, the chat not being one.
     pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let times = count.unwrap_or(1);
-        if let Motion::Find {
-            ch,
-            forward,
-            till,
-            again,
-        } = motion
-        {
-            return self.find((ch, forward, till, again), times);
+        if motion == Motion::TextEnd {
+            if let Some(number) = count {
+                self.go_to_turn_numbered(number);
+            } else {
+                self.go_to_end(Way::On);
+            }
+            self.line_edge('$');
+            return true;
+        }
+        if matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank) && times > 1 {
+            let from = self.cursor_or_default();
+            for _ in 1..times {
+                let before = self.cursor;
+                self.vertical(Way::On);
+                if self.cursor == before {
+                    break;
+                }
+            }
+            if self.cursor == from {
+                return false;
+            }
+            return self.shared_move(motion, None);
+        }
+        if matches!(
+            motion,
+            Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom
+        ) {
+            return self.view_motion(motion, count, false);
+        }
+        if matches!(
+            motion,
+            Motion::Find { .. }
+                | Motion::Match
+                | Motion::Column
+                | Motion::Left
+                | Motion::Right
+                | Motion::LeftOver
+                | Motion::RightOver
+                | Motion::Sentence { .. }
+                | Motion::LineFirstNonBlank
+                | Motion::LastNonBlank
+                | Motion::RowStart
+                | Motion::RowEnd
+        ) {
+            return self.shared_move(motion, count);
         }
         if let (Motion::First | Motion::Last, Some(number)) = (motion, count) {
             self.go_to_turn_numbered(number);
@@ -843,9 +882,11 @@ impl ChatView {
             Motion::WordStart => self.word(Way::On, false, false),
             Motion::WordEnd => self.word(Way::On, true, false),
             Motion::WordBack => self.word(Way::Back, false, false),
+            Motion::WordEndBack => self.word(Way::Back, true, false),
             Motion::BigWordStart => self.word(Way::On, false, true),
             Motion::BigWordEnd => self.word(Way::On, true, true),
             Motion::BigWordBack => self.word(Way::Back, false, true),
+            Motion::BigWordEndBack => self.word(Way::Back, true, true),
             Motion::LineStart => self.line_edge('0'),
             Motion::FirstNonBlank => self.line_edge('^'),
             Motion::LineEnd => self.line_edge('$'),
@@ -1117,7 +1158,7 @@ impl ChatView {
     /// it, or if visual mode selects it already, stops.
     fn visual_key(&mut self, visual: Option<Selection>, kind: Selection) {
         if visual == Some(kind) {
-            self.picked = None;
+            self.leave_visual();
             return;
         }
         let Some(cursor) = self.cursor_or_default() else {
@@ -1134,9 +1175,9 @@ impl ChatView {
     }
 
     /// Leaves visual mode, if it's in it, selecting nothing.
-    fn leave_visual(&mut self) {
+    pub(super) fn leave_visual(&mut self) {
         if self.visual().is_some() {
-            self.picked = None;
+            self.last_visual = self.picked.take();
         }
     }
 
@@ -1335,56 +1376,28 @@ impl ChatView {
         self.goal = Some(goal);
     }
 
-    /// `h` or `l`: a character back or on, within the line.
+    /// Row-local cursor operations use the shared cell engine, translating
+    /// its result back to the proportional layout's byte positions.
     fn across(&mut self, way: Way) {
-        let Some(cursor) = self.cursor_or_default() else {
-            return;
-        };
-        let Some(text) = self.text(cursor.text) else {
-            return;
-        };
-        let line = super::paint::line_of(text.layout, cursor.byte);
-        let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
-            return;
-        };
-        let byte = super::paint::within(text.text, cursor.byte);
-        let byte = match way {
-            // By what's drawn as one character, as an emoji of several.
-            Way::Back if byte > range.start => {
-                super::paint::before(text.text, byte).max(range.start)
-            }
-            Way::On if byte < last_char(text.text, range.clone()) => {
-                super::paint::after(text.text, byte)
-            }
-            _ => byte,
-        };
-        self.go(Position { byte, ..cursor });
-        self.goal = None;
+        self.shared_move(
+            if way == Way::On {
+                Motion::Right
+            } else {
+                Motion::Left
+            },
+            None,
+        );
     }
 
-    /// `0`, `^` or `$`: the start of the line, its first character that
-    /// isn't blank, or its last character.
     fn line_edge(&mut self, edge: char) {
-        let Some(cursor) = self.cursor_or_default() else {
-            return;
-        };
-        let Some(text) = self.text(cursor.text) else {
-            return;
-        };
-        let line = super::paint::line_of(text.layout, cursor.byte);
-        let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
-            return;
-        };
-        let byte = match edge {
-            '0' => range.start,
-            '^' => {
-                let line = &text.text[range.start..range.end.min(text.text.len())];
-                range.start + line.len() - line.trim_start().len()
-            }
-            _ => last_char(text.text, range),
-        };
-        self.go(Position { byte, ..cursor });
-        self.goal = None;
+        self.shared_move(
+            match edge {
+                '0' => Motion::LineStart,
+                '^' => Motion::FirstNonBlank,
+                _ => Motion::LineEnd,
+            },
+            None,
+        );
     }
 
     /// `w`, `e` or `b`: the start of the next word, the end of this one or
@@ -1392,57 +1405,77 @@ impl ChatView {
     /// the next block, or back to the one before, at either end; `W`, `E`
     /// and `B` if `big`, for anything between blanks.
     fn word(&mut self, way: Way, end: bool, big: bool) {
-        let kind = if big { big_class } else { class };
-        let Some(cursor) = self.cursor_or_default() else {
+        let motion = match (way, end, big) {
+            (Way::On, false, false) => Motion::WordStart,
+            (Way::On, false, true) => Motion::BigWordStart,
+            (Way::On, true, false) => Motion::WordEnd,
+            (Way::On, true, true) => Motion::BigWordEnd,
+            (Way::Back, false, false) => Motion::WordBack,
+            (Way::Back, false, true) => Motion::BigWordBack,
+            (Way::Back, true, false) => Motion::WordEndBack,
+            (Way::Back, true, true) => Motion::BigWordEndBack,
+        };
+        let Some(at) = self.cursor_or_default() else {
             return;
         };
-        let Some(text) = self.text(cursor.text) else {
+        let Some(block) = self.motion_block(at.text, false, true) else {
             return;
         };
-        let byte = super::paint::within(text.text, cursor.byte);
-        let found = match (way, end) {
-            (Way::On, false) => next_word_start(text.text, byte, kind),
-            (Way::On, true) => word_end(text.text, byte, kind),
-            (Way::Back, _) => word_start_before(text.text, byte, kind),
-        };
-        if let Some(byte) = found {
-            self.go(Position { byte, ..cursor });
-        } else if let Some(key) = self.next_text(cursor.text, way) {
-            let byte = match (way, self.text(key)) {
-                (Way::Back, Some(text)) => {
-                    word_start_before(text.text, text.text.len(), kind).unwrap_or(0)
-                }
-                (Way::On, Some(text)) if end => word_end(text.text, 0, kind).unwrap_or(0),
-                _ => 0,
-            };
+        let mut cursor = Cursor::new(block.point(at.byte));
+        cursor.go(motion, None, &*block, false);
+        let crossing = cursor.at.line == 0 || cursor.at.line == block.bounds().1;
+        let byte = block.byte(cursor.at);
+        if crossing && let Some(key) = self.next_text(at.text, way) {
+            let byte = self.motion_block(key, false, true).map_or(0, |block| {
+                let line = if way == Way::Back {
+                    block.bounds().1
+                } else {
+                    0
+                };
+                let mut cursor = Cursor::new(crate::motion::Point { line, col: 0 });
+                cursor.go(motion, None, &*block, false);
+                block.byte(cursor.at)
+            });
             self.go(Position { text: key, byte });
+        } else if !crossing {
+            self.go(Position { byte, ..at });
         }
         self.goal = None;
     }
 
-    /// `f`, `t`, `F` or `T` (`forward`, `till`) and `ch`, `count` times:
-    /// the `count`th `ch` on the cursor's line after it, or before it, or
-    /// the character just before that, or after it going back; found
-    /// `again`, by `;` or `,`, a `t` or `T` doesn't stop at one right by
-    /// the cursor, as Vim's doesn't. Nowhere if there aren't so many.
-    /// Returns whether it found one.
-    fn find(&mut self, find: (char, bool, bool, bool), count: usize) -> bool {
-        let Some(cursor) = self.cursor_or_default() else {
+    /// Execute against the block's hard lines, or its visual rows for
+    /// row-local navigation, using the same count and failure rules as editors.
+    fn shared_move(&mut self, motion: Motion, count: Option<usize>) -> bool {
+        let Some(at) = self.cursor_or_default() else {
             return false;
         };
-        let Some(text) = self.text(cursor.text) else {
+        let rows = matches!(
+            motion,
+            Motion::Find { .. }
+                | Motion::Column
+                | Motion::Left
+                | Motion::Right
+                | Motion::LeftOver
+                | Motion::RightOver
+                | Motion::LineStart
+                | Motion::FirstNonBlank
+                | Motion::LineEnd
+                | Motion::RowStart
+                | Motion::RowEnd
+                | Motion::LineFirstNonBlank
+                | Motion::LastNonBlank
+        );
+        let Some(block) = self.motion_block(at.text, rows, false) else {
             return false;
         };
-        let line = super::paint::line_of(text.layout, cursor.byte);
-        let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
-            return false;
-        };
-        let found = find_in(text.text, range, cursor.byte, find, count);
-        if let Some(byte) = found {
-            self.go(Position { byte, ..cursor });
-        }
+        let from = block.point(at.byte);
+        let mut cursor = Cursor::new(from);
+        cursor.go(motion, count, &*block, self.start_of_line);
+        let failed = motion.failed((from, cursor.at), count, &*block);
+        let byte = block.byte(cursor.at);
+        self.go(Position { byte, ..at });
         self.goal = None;
-        found.is_some()
+        !failed
     }
 
     /// `{` or `}`: the start of the block before, or after.
@@ -1618,42 +1651,6 @@ impl ChatView {
     }
 }
 
-/// Where `f`, `t`, `F` or `T` (`forward`, `till`) and `ch`, `count`
-/// times, go from `byte` in `text`, within the line `range` holds, as
-/// [`ChatView::find`] says; `None` if there aren't so many.
-pub(super) fn find_in(
-    text: &str,
-    range: std::ops::Range<usize>,
-    byte: usize,
-    (ch, forward, till, again): (char, bool, bool, bool),
-    count: usize,
-) -> Option<usize> {
-    let end = range.end.min(text.len());
-    let start = range.start.min(end);
-    let chars: Vec<(usize, char)> = text[start..end]
-        .trim_end_matches(['\n', '\r'])
-        .char_indices()
-        .map(|(at, ch)| (start + at, ch))
-        .collect();
-    let byte = super::paint::within(text, byte);
-    let here = chars.iter().position(|&(at, _)| at >= byte)?;
-    let skip = usize::from(till && again);
-    let found = if forward {
-        (chars.iter().enumerate())
-            .skip(here + 1 + skip)
-            .filter(|(_, (_, found))| *found == ch)
-            .nth(count.max(1) - 1)
-            .map(|(index, _)| if till { index - 1 } else { index })
-    } else {
-        (chars[..here.saturating_sub(skip)].iter().enumerate())
-            .rev()
-            .filter(|(_, (_, found))| *found == ch)
-            .nth(count.max(1) - 1)
-            .map(|(index, _)| if till { index + 1 } else { index })
-    };
-    found.map(|index| chars[index].0)
-}
-
 /// The start of the last character of the line of `text` in `range`,
 /// before its line break.
 fn last_char(text: &str, range: std::ops::Range<usize>) -> usize {
@@ -1664,78 +1661,10 @@ fn last_char(text: &str, range: std::ops::Range<usize>) -> usize {
         .map_or(range.start, |(at, _)| range.start + at)
 }
 
-/// What sort of character `ch` is, for words: blank, a word's, or other
-/// punctuation, as Vim's `w` sees them.
-fn class(ch: char) -> u8 {
-    if ch.is_whitespace() {
-        0
-    } else if ch.is_alphanumeric() || ch == '_' {
-        1
-    } else {
-        2
-    }
-}
-
-/// What sort of character `ch` is, for WORDs: blank, or not, as Vim's `W`
-/// sees them.
-fn big_class(ch: char) -> u8 {
-    u8::from(!ch.is_whitespace())
-}
-
-/// Where the next word after the one at `byte` in `text` starts, if one
-/// does, words as `class` sorts characters.
-fn next_word_start(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
-    let mut chars = text[byte..].char_indices().map(|(at, ch)| (byte + at, ch));
-    let (_, first) = chars.next()?;
-    let mut was = class(first);
-    for (at, ch) in chars {
-        let is = class(ch);
-        if is != 0 && is != was {
-            return Some(at);
-        }
-        was = is;
-    }
-    None
-}
-
-/// Where the word at `byte` in `text` ends, or if `byte` is at its end
-/// already, the next one: its last character.
-fn word_end(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
-    let chars: Vec<(usize, char)> = text[byte..]
-        .char_indices()
-        .map(|(at, ch)| (byte + at, ch))
-        .collect();
-    let mut index = 1;
-    while index < chars.len() && class(chars[index].1) == 0 {
-        index += 1;
-    }
-    let class_here = class(chars.get(index)?.1);
-    while index + 1 < chars.len() && class(chars[index + 1].1) == class_here {
-        index += 1;
-    }
-    Some(chars[index].0)
-}
-
-/// Where the word before `byte` in `text` starts, or the one `byte` is
-/// in, if it's not at its start.
-fn word_start_before(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
-    let chars: Vec<(usize, char)> = text[..byte].char_indices().collect();
-    let mut index = chars.len().checked_sub(1)?;
-    while class(chars[index].1) == 0 {
-        index = index.checked_sub(1)?;
-    }
-    let class_here = class(chars[index].1);
-    while index > 0 && class(chars[index - 1].1) == class_here {
-        index -= 1;
-    }
-    Some(chars[index].0)
-}
-
 #[cfg(test)]
 mod tests {
     use winit::keyboard::NamedKey;
 
-    use super::{big_class, class, next_word_start, word_end, word_start_before};
     use crate::chat::ChatView;
     use crate::chat::fixtures::{chars, fonts, lines, paint, read, read_named, talk, yanked};
     use crate::chat::paint::{FOLD, ITEMS, PROMPT, TextKey};
@@ -1762,6 +1691,41 @@ mod tests {
             turn,
             piece,
             part: 0,
+        }
+    }
+
+    #[test]
+    #[ignore = "manual input latency benchmark"]
+    fn chat_motion_timings() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for (name, answer) in [
+            ("prose", "alpha beta gamma delta epsilon".to_owned()),
+            (
+                "code",
+                format!(
+                    "```\n{}\n```",
+                    "alpha beta gamma delta epsilon\n".repeat(100)
+                ),
+            ),
+            ("unicode", "alpha 中文beta café 👩‍💻 gamma".to_owned()),
+        ] {
+            let (mut chat, _fonts) = reading(talk(&[("prompt", &answer)]));
+            read(&mut chat, "gg}");
+            let start = chat.cursor;
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let now = Instant::now();
+                for _ in 0..2000 {
+                    chat.cursor = start;
+                    read(&mut chat, "0webyw");
+                    chat.queued.clear();
+                    black_box(chat.cursor);
+                }
+                samples.push(now.elapsed().as_nanos() / 2000);
+            }
+            samples.sort_unstable();
+            eprintln!("chat-motion {name}: {} ns/sequence", samples[3]);
         }
     }
 
@@ -2199,23 +2163,5 @@ mod tests {
             chat.scroll - before > 4.0 * chat.line_height,
             "half the view again"
         );
-    }
-
-    #[test]
-    fn words_are_found_as_vim_finds_them() {
-        let text = "fn main() {  x }";
-        assert_eq!(next_word_start(text, 0, class), Some(3));
-        assert_eq!(next_word_start(text, 3, class), Some(7));
-        assert_eq!(next_word_start(text, 10, class), Some(13));
-        assert_eq!(word_end(text, 0, class), Some(1));
-        assert_eq!(word_end(text, 1, class), Some(6));
-        assert_eq!(word_start_before(text, 7, class), Some(3));
-        assert_eq!(word_start_before(text, 5, class), Some(3));
-        assert_eq!(word_start_before(text, 0, class), None);
-        assert_eq!(next_word_start("end", 0, class), None);
-        // WORDs: anything between blanks.
-        assert_eq!(next_word_start(text, 0, big_class), Some(3));
-        assert_eq!(next_word_start(text, 3, big_class), Some(10));
-        assert_eq!(word_end(text, 3, big_class), Some(8));
     }
 }

@@ -12,11 +12,10 @@ use std::rc::Rc;
 
 use clackatoo_term::{Cell, Row};
 
-mod classes;
 pub(crate) mod sentences;
 pub(crate) mod steps;
 
-pub(crate) use classes::word_classes;
+pub(crate) use clackatoo_text::word::{Class, Words, class_of, word_classes};
 
 /// A position in the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,59 +199,6 @@ pub(crate) struct View {
     pub(crate) top: RowAt,
     pub(crate) rows: u64,
     pub(crate) margin: u64,
-}
-
-/// The characters words are made of besides letters, digits and `_`, as a
-/// file's language says, as Vim's `iskeyword` adds them: `-` in CSS, so
-/// `w` goes over `margin-top` whole. ASCII punctuation only, kept as one
-/// bit each, so asking about a character costs no more than asking whether
-/// it's `_`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) struct Words(u128);
-
-impl Words {
-    /// None: words are letters, digits and `_`, as in plain text and in
-    /// terminals.
-    pub(crate) const NONE: Self = Self(0);
-
-    /// The ASCII punctuation in `chars`, as a language pack gives it. Any
-    /// other character is passed over: letters and digits are in words
-    /// already.
-    pub(crate) fn new(chars: &str) -> Self {
-        Self(
-            (chars.chars())
-                .filter(char::is_ascii_punctuation)
-                .fold(0, |bits, ch| bits | 1 << u32::from(ch)),
-        )
-    }
-
-    /// Whether there are none.
-    #[cfg(test)]
-    pub(crate) fn is_none(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Whether `ch` is one of them.
-    pub(crate) fn has(self, ch: char) -> bool {
-        let ch = u32::from(ch);
-        ch < 128 && self.0 >> ch & 1 == 1
-    }
-
-    /// Whether `ch` is part of a word: a letter, a digit, `_` or one of
-    /// them, or past ASCII, of a class of words, as Vim's `vim_iswordc()`
-    /// has it (see [`classes`]).
-    pub(crate) fn is_word(self, ch: char) -> bool {
-        if ch.is_ascii() {
-            ch.is_ascii_alphanumeric() || ch == '_' || self.has(ch)
-        } else {
-            classes::of(ch) >= 2
-        }
-    }
-
-    /// Them, in the order of their codes.
-    pub(crate) fn chars(self) -> impl Iterator<Item = char> {
-        (0..128_u8).map(char::from).filter(move |&ch| self.has(ch))
-    }
 }
 
 /// One of the screen rows a line is drawn on, when it wraps.
@@ -937,20 +883,6 @@ pub(crate) struct Cursor {
     /// as Vim's `w_set_curswant` has it: a tab's last cell, where Vim's
     /// cursor sits on one (see [`aim`](Self::aim)).
     want: Option<usize>,
-}
-
-/// What kind of character a cell holds, for word motions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Class {
-    Blank,
-    /// Letters, digits and `_`, and the characters the file's language
-    /// adds to them (see [`Words`]), and most others past Latin-1.
-    Word,
-    /// Any other printing character.
-    Punctuation,
-    /// A script's own kind of word past Latin-1, as Vim's `utf_class()`
-    /// sorts them: CJK ideographs, kana, hangul, emoji (see [`classes`]).
-    Script(u32),
 }
 
 impl Cursor {
@@ -1654,20 +1586,6 @@ impl Cursor {
     }
 }
 
-impl Class {
-    fn of(class: Self) -> Self {
-        class
-    }
-
-    /// For `W`, `B` and `E`: anything but blanks is one kind.
-    fn big(class: Self) -> Self {
-        match class {
-            Self::Blank => Self::Blank,
-            Self::Word | Self::Punctuation | Self::Script(_) => Self::Word,
-        }
-    }
-}
-
 /// A position moving cell by cell through the document, with each line's
 /// end as a blank between it and the next.
 pub(crate) struct Walk<'a, L: Lines> {
@@ -2065,28 +1983,6 @@ pub(crate) fn tone_base_at(row: &impl Cells, col: usize) -> Option<(usize, Spot)
     let before = row.extent(col).0.checked_sub(1);
     let cells = before.into_iter().flat_map(|before| row.back_from(before));
     tone_base((cells.filter(|(_, spot)| !spot.spacer)).map(|(at, spot)| ((at, spot), spot.ch)))
-}
-
-/// The class of `ch`, with `words` part of words: ASCII as Vim's
-/// `iskeyword` has it, with what the language adds; past it, as Vim's
-/// classes have it (see [`classes`]).
-pub(crate) fn class_of(ch: char, words: Words) -> Class {
-    if ch == ' ' || ch == '\t' {
-        return Class::Blank;
-    }
-    if ch.is_ascii() {
-        return if words.is_word(ch) {
-            Class::Word
-        } else {
-            Class::Punctuation
-        };
-    }
-    match classes::of(ch) {
-        0 => Class::Blank,
-        1 => Class::Punctuation,
-        2 => Class::Word,
-        class => Class::Script(class),
-    }
 }
 
 /// Where the line's text ends: one past its last non-blank cell.

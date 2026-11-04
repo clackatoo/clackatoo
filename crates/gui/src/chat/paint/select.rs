@@ -578,7 +578,17 @@ impl ChatView {
         let range = if lines {
             Range::hard_line_from_point(text.layout, x, y)
         } else {
-            Range::word_from_point(text.layout, x, y)
+            let range = clackatoo_text::word::WordClass::Prose.range(text.text, spot.byte);
+            return Some((
+                Position {
+                    byte: range.start,
+                    ..spot
+                },
+                Position {
+                    byte: range.end,
+                    ..spot
+                },
+            ));
         };
         let range = range.text_range();
         let spot = |byte| Position {

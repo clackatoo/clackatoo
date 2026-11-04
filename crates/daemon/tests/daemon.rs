@@ -6073,6 +6073,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Sessions { .. }
             | Event::Exited { .. }
             | Event::Coloured { .. }
+            | Event::CodeWords { .. }
             | Event::Connections(_)
             | Event::Login { .. }
             | Event::Forwarded(_)
@@ -7521,10 +7522,23 @@ fn a_chats_code_is_coloured_in_its_language_and_always_answered() {
     client
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
+    let mut words_seen = false;
     let spans = loop {
-        if let Event::Coloured { id, spans } = client.next_event().unwrap() {
-            assert_eq!(id, 7);
-            break spans;
+        match client.next_event().unwrap() {
+            Event::CodeWords { id, words } => {
+                assert_eq!(id, 7);
+                assert_eq!(words, ["", "", ""]);
+                words_seen = true;
+            }
+            Event::Coloured { id, spans } => {
+                assert_eq!(id, 7);
+                assert!(
+                    words_seen,
+                    "word rules arrive before colours consume the request"
+                );
+                break spans;
+            }
+            _ => {}
         }
     };
     assert_eq!(spans.len(), 3, "a list for each block, in order");
@@ -7552,6 +7566,69 @@ fn a_chats_code_is_coloured_in_its_language_and_always_answered() {
         }
     };
     assert_eq!(spans, [Vec::<Span>::new()]);
+}
+
+#[test]
+fn chat_word_metadata_uses_custom_packs_and_is_dropped_for_older_clients() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/dash");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("language.toml"),
+            "grammar = \"dash\"\nextensions = [\"dash\"]\nword = \"-?\"\n",
+        )
+        .unwrap();
+        config.languages = Some(dir.join("languages"));
+    });
+    let code = || {
+        vec![clackatoo_protocol::Code {
+            language: "dash".into(),
+            text: "odd-name?".into(),
+        }]
+    };
+    let mut client = daemon.client();
+    client.colour(15, code()).unwrap();
+    let mut words_seen = false;
+    loop {
+        match client.next_event().unwrap() {
+            Event::CodeWords { id, words } => {
+                assert_eq!(id, 15);
+                assert_eq!(words, ["-?"]);
+                words_seen = true;
+            }
+            Event::Coloured { id, .. } => {
+                assert_eq!(id, 15);
+                assert!(words_seen);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let old = wire::CODE_WORDS - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    raw.send(
+        &frame::encode(
+            old,
+            &ClientMessage::Colour {
+                id: 16,
+                code: code(),
+            },
+        )
+        .unwrap(),
+    );
+    loop {
+        match raw.next().unwrap() {
+            ServerMessage::Event(Event::CodeWords { .. }) => {
+                panic!("old client received new metadata")
+            }
+            ServerMessage::Event(Event::Coloured { id, .. }) => {
+                assert_eq!(id, 16);
+                break;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]

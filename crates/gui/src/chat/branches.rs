@@ -588,6 +588,8 @@ impl ChatView {
     /// switch to another branch: what's kept by turn index from there on
     /// is let go of, and the view follows the conversation's end.
     pub(super) fn cut_from(&mut self, turn: usize) {
+        self.motion_cache = super::navigation::MotionCache::default();
+        self.place_after_layout = None;
         self.cache.cut(turn);
         self.folds.retain(|&at, _| at < turn);
         self.open_agents.retain(|&at| at < turn);
@@ -596,6 +598,12 @@ impl ChatView {
         if self.cursor.is_some_and(|cursor| cursor.text.turn >= turn) {
             self.cursor = None;
             self.goal = None;
+        }
+        if self
+            .last_visual
+            .is_some_and(|picked| picked.anchor.text.turn >= turn || picked.head.text.turn >= turn)
+        {
+            self.last_visual = None;
         }
         if (self.picked.as_ref())
             .is_some_and(|picked| picked.anchor.text.turn >= turn || picked.head.text.turn >= turn)

@@ -114,7 +114,7 @@ pub(super) struct Cache {
     /// Each turn's top and bottom, from the conversation's top, as far as
     /// `bounded` turns: from there on, they're worked out again when next
     /// asked for, as a turn's height has changed.
-    bounds: Vec<[f32; 2]>,
+    pub(super) bounds: Vec<[f32; 2]>,
     bounded: usize,
     anchor: Option<(usize, f32)>,
     /// The turns laid out, to drop again once far from the view.
@@ -348,6 +348,10 @@ impl ChatView {
         self.set_view_height(view_height);
         self.scroll_past_edge();
         self.arrange(fonts, m, column);
+        if let Some(at) = self.place_after_layout {
+            self.cursor_onto_text();
+            self.place_view(at);
+        }
         let shown = in_view(&self.cache.bounds, self.scroll, self.scroll + view_height);
         self.label_folds(fonts, m, self.near());
         self.label_agents(fonts, m, self.near());

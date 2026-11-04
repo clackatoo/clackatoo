@@ -3768,6 +3768,9 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::CodeWords { id, words })) => {
+                self.desk.code_words(id, words);
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Coloured { id, spans })) => {
                 if self.desk.coloured(id, spans) {
                     self.request_redraw();

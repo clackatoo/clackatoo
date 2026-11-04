@@ -276,7 +276,8 @@ pub(crate) fn of(ch: char) -> u32 {
 /// `vim_iswordc()` takes them, by class: first those of class 2, then
 /// each script's own, each as ranges of first and last code points, in
 /// order, without the surrogates, which aren't characters.
-pub(crate) fn word_classes() -> Vec<Vec<(u32, u32)>> {
+#[must_use]
+pub fn word_classes() -> Vec<Vec<(u32, u32)>> {
     let mut words = Vec::new();
     let mut push = |first: u32, last: u32| {
         // Around the surrogates.

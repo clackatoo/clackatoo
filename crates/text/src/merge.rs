@@ -281,27 +281,14 @@ fn common_end(a: &str, b: &str) -> usize {
 /// `text` cut into words: runs of letters, digits and `_`, runs of spaces,
 /// and each other character alone, a line's end among them.
 fn split(text: &str) -> Vec<&str> {
-    #[derive(PartialEq)]
-    enum Class {
-        Word,
-        Space,
-        Other,
-    }
-    let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            Class::Word
-        } else if c.is_whitespace() && c != '\n' {
-            Class::Space
-        } else {
-            Class::Other
-        }
-    };
+    use crate::word::{Class, WordClass};
+    let class = |ch| WordClass::Merge.class(ch);
     let mut words = Vec::new();
     let mut start = 0;
     let mut last = None;
     for (at, c) in text.char_indices() {
         let this = class(c);
-        let joins = this != Class::Other && last.as_ref() == Some(&this);
+        let joins = this != Class::Punctuation && last.as_ref() == Some(&this);
         if !joins && at > start {
             words.push(&text[start..at]);
             start = at;

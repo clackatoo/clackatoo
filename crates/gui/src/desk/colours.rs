@@ -60,6 +60,14 @@ impl Desk {
     /// The daemon's colours for the code asked about in the ask numbered
     /// `id`: to the finder or the chat that asked, if it's still here.
     /// Returns whether to draw.
+    pub(crate) fn code_words(&mut self, id: u64, words: Vec<String>) {
+        if let Some(terminal) = self.colour_asks.get(&id)
+            && let Some(chat) = self.chats.get_mut(terminal)
+        {
+            chat.view_mut().code_words(id, words);
+        }
+    }
+
     pub(crate) fn coloured(&mut self, id: u64, spans: Vec<Vec<Span>>) -> bool {
         if let Some(finder) = &mut self.finder
             && finder.colour_ask() == Some(id)

@@ -56,8 +56,16 @@ pub(crate) fn key(text: &mut String, stroke: Stroke) -> Outcome {
         }
         Action::Clear => text.clear(),
         Action::Word => {
-            let kept = text.trim_end_matches(|ch: char| !ch.is_alphanumeric());
-            let kept = kept.trim_end_matches(char::is_alphanumeric).len();
+            let kept = text.trim_end_matches(|ch: char| {
+                clackatoo_text::word::WordClass::Prompt.class(ch)
+                    != clackatoo_text::word::Class::Word
+            });
+            let kept = kept
+                .trim_end_matches(|ch| {
+                    clackatoo_text::word::WordClass::Prompt.class(ch)
+                        == clackatoo_text::word::Class::Word
+                })
+                .len();
             text.truncate(kept);
         }
         Action::Type(ch) => text.push(ch),

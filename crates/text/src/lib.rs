@@ -60,3 +60,5 @@ pub use pieces::{Construct, Piece};
 pub use ropey::Rope;
 pub use snippet::{Expanded, Part, Snippet, Stop};
 pub use step::{StepPlace, StepSelection, StepState, StepVisual};
+
+pub mod word;

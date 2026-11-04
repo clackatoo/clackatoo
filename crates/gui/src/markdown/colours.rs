@@ -42,6 +42,7 @@ pub(crate) enum Colouring<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct Colours {
     known: HashMap<Code, Vec<Span>>,
+    words: HashMap<String, crate::motion::Words>,
     /// Blocks asked for but not yet answered, or about to be.
     waiting: HashSet<Code>,
     /// Blocks to ask for.
@@ -51,6 +52,25 @@ pub(crate) struct Colours {
 }
 
 impl Colours {
+    /// Language metadata arrives before colours, while the request still
+    /// identifies its blocks. Unknown and disconnected requests do nothing.
+    pub(crate) fn word_reply(&mut self, id: u64, words: Vec<String>) {
+        let Some(code) = self.asked.get(&id) else {
+            return;
+        };
+        if self.words.len() >= MOST_KEPT {
+            self.words.clear();
+        }
+        for (code, word) in code.iter().zip(words) {
+            self.words
+                .insert(code.language.clone(), crate::motion::Words::new(&word));
+        }
+    }
+
+    pub(crate) fn words(&self, language: &str) -> crate::motion::Words {
+        self.words.get(language).copied().unwrap_or_default()
+    }
+
     /// What's known of the colours of `text`, code in `language`: a block
     /// not asked about yet is wanted.
     pub(crate) fn of(&mut self, language: &str, text: &str) -> Colouring<'_> {

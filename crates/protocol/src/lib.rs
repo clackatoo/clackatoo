@@ -145,7 +145,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 124;
+pub const PROTOCOL_VERSION: u32 = 125;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -636,6 +636,15 @@ pub enum Event {
         access: NativeAccess,
         /// Human-readable explanation.
         reason: String,
+    },
+    /// Word characters for each block in a Colour request, sent before
+    /// its Coloured reply. Absent on peers before protocol 125: plain
+    /// Vim words remain the fallback.
+    CodeWords {
+        /// The Colour request number.
+        id: u64,
+        /// ASCII punctuation added by each block's language pack.
+        words: Vec<String>,
     },
 }
 

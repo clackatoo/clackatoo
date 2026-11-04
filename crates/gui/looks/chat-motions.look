@@ -1,0 +1,20 @@
+# Shared chat motions, visual objects and reselect through the real GUI.
+size 1050x720
+keys <C-;>:Agent claude<CR>
+keys i
+type alpha beta (gamma delta). Next sentence.
+keys <CR>
+wait-for echo: alpha beta
+keys <C-;>G0wwviw
+shot word-selected
+keys ygv
+keys <Esc>G0wwviw<Esc>gv
+shot word-restored
+keys <Esc>G0f(%
+shot matching-bracket
+keys 0)vis
+keys <Esc>G0vis
+shot sentence-selected
+size 350x720
+keys <Esc>Gg$vg0
+shot wrapped-row-selected

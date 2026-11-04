@@ -324,6 +324,8 @@ gates! {
     AGENT_TERMINALS = 123,
     /// Seconds until an unselected agent terminal closes (CLACKA-207).
     TERMINAL_COUNTDOWN = 124,
+    /// Language word characters in fenced chat code (CLACKA-175).
+    CODE_WORDS = 125,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -637,6 +639,7 @@ impl Since for Event {
             | Self::Sessions { .. } => EARLIER,
             Self::Exited { .. } => EXITED,
             Self::Coloured { .. } => COLOURS,
+            Self::CodeWords { .. } => CODE_WORDS,
             Self::Connections(_) | Self::Login { .. } => FEDERATION,
             Self::Forwarded(_) => RELAY,
             Self::Said(_) => LEND,
@@ -1482,6 +1485,7 @@ impl Downgrade for ServerMessage {
                 | Event::NativeRequest { .. }
                 | Event::Exited { .. }
                 | Event::Coloured { .. }
+                | Event::CodeWords { .. }
                 | Event::Connections(_)
                 | Event::Login { .. }
                 | Event::Forwarded(_)
@@ -2274,6 +2278,7 @@ mod tests {
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }
                     | Event::Coloured { .. }
+                    | Event::CodeWords { .. }
                     | Event::Connections(_)
                     | Event::Login { .. }
                     | Event::Forwarded(_)

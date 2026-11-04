@@ -253,14 +253,18 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | Key | Does |
 |---|---|
 | `h` `j` `k` `l`, arrows, `+` `-` | A character, or a line. |
-| `w` `b` `e`, `W` `B` `E` | By words, or by anything between blanks. |
+| `w` `b` `e` `ge`, `W` `B` `E` `gE` | By words, or by anything between blanks; `ge` and `gE` go to the previous word’s end. |
 | `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, back with `F` and `T`; `;` again, `,` the other way. |
-| `0` `^` `$` | The start of the line, its first word, its end. |
+| `0` `^` `$`, `g0` `g$` | The visual row’s start, first non-blank, or end. |
+| `_` `g_`, `N\|` | First or last non-blank on the row; column N, counting from 1. A count before `_` or `g_` takes that many rows, including this one. |
+| `%`, `(` `)` | Matching bracket or sentence, within the block. A count before `%` goes to that percentage of the block’s lines. |
+| `H` `M` `L` | Top, middle or bottom of the visible text, respecting `scrolloff`; a count before H or L moves inward from that edge. |
+| `zt` `zz` `zb` | Put the cursor’s row at the top, middle or bottom of the view. |
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
 | `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](#mentioning-files)). |
 | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
-| `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops. |
+| `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops; `gv` restores the last selection, or swaps it with the current one. |
 | `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, or whole lines, into the registers (see [Yanking](#yanking)). In visual mode, `y` yanks what's selected and `Y` its lines. |
 | `"a` before `y` | Yanks into register `a`, or onto its end with `"A`. |
 | `/` `?`, `n` `N` | Searches the chat's text forward or back, and again (see [Searching](#searching)). |
@@ -287,6 +291,10 @@ The mouse wheel scrolls in either mode. While you're at the end, the view follow
 | `ax` | The same with its fence and language, as Markdown writes it. |
 | `im` | The message, answer or card the cursor's in, as it came: an answer as its Markdown. |
 | `am` | Its whole turn: the message, and all the agent said and did for it. |
+
+In visual mode, `iw`, `aw`, brackets, quotes, sentences, paragraphs and tags use the same selection rules as the editor; repeated objects extend the selection where Vim does. `ix` selects the visible code block, `im` the visible message or card, and `am` the visible turn. Visual selections contain the displayed text; use `yax` or `yim` directly to copy Markdown fences or source Markdown.
+
+Word motions and objects distinguish CJK scripts, Latin text and punctuation as Vim does. Code blocks use the daemon’s language word characters, including custom packs, once their metadata arrives with highlighting; older daemons use plain Vim word characters. Mouse double-clicks in prose follow Unicode word boundaries; terminal double-clicks retain whole paths and URLs.
 
 All four are whole lines. `ic` and `ac` are a class, as in an editor, which a chat hasn't got, so they do nothing. The cursor goes to the start of what's yanked.
 

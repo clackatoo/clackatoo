@@ -122,6 +122,8 @@ impl ChatPane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.carryover = options.carryover;
+        self.view.start_of_line = options.startofline;
+        self.view.scroll_margin = options.scrolloff;
         self.view.set_rewind_files(options.rewindfiles);
         self.view.set_case(crate::options::Case::of(options));
         self.view.set_search_options(options);

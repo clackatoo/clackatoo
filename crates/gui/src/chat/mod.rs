@@ -21,6 +21,7 @@ pub(crate) mod fixtures;
 mod handoff;
 mod images;
 pub(crate) mod mentions;
+mod navigation;
 mod paint;
 mod pane;
 mod picker;
@@ -90,6 +91,8 @@ enum Input {
     },
     /// Yanks this, which the chat has whole already, as a message.
     YankText(Yanked),
+    /// Restore a saved selection whose turns need laying out first.
+    Reselect,
     /// Searches for the last search again from `from`, `count` times,
     /// backward if `backward` (see [`search`]).
     Search {
@@ -396,6 +399,11 @@ pub(crate) struct ChatView {
     shown: Vec<Shown>,
     /// Text selected in the conversation.
     picked: Option<Picked>,
+    last_visual: Option<Picked>,
+    motion_cache: navigation::MotionCache,
+    start_of_line: bool,
+    scroll_margin: u32,
+    place_after_layout: Option<crate::vim::ViewAt>,
     /// A drag that started on the conversation's text selects as it goes.
     picking: bool,
     /// Whether the pane is in normal or visual mode, reading the chat
@@ -636,6 +644,11 @@ impl ChatView {
             offline: false,
             shown: Vec::new(),
             picked: None,
+            last_visual: None,
+            motion_cache: navigation::MotionCache::default(),
+            start_of_line: false,
+            scroll_margin: 5,
+            place_after_layout: None,
             picking: false,
             reading: false,
             was_reading: false,
@@ -747,6 +760,10 @@ impl ChatView {
             picked.anchor.text.turn += count;
             picked.head.text.turn += count;
         }
+        if let Some(picked) = &mut self.last_visual {
+            picked.anchor.text.turn += count;
+            picked.head.text.turn += count;
+        }
         for key in [&mut self.hovered_code, &mut self.copied_code]
             .into_iter()
             .flatten()
@@ -840,6 +857,13 @@ impl ChatView {
                             if let Some(turn) = touches(patch)
                                 .and_then(|t| t.checked_sub(self.node.first_turn as usize))
                             {
+                                if self.last_visual.is_some_and(|picked| {
+                                    let first = picked.anchor.text.turn.min(picked.head.text.turn);
+                                    let last = picked.anchor.text.turn.max(picked.head.text.turn);
+                                    (first..=last).contains(&turn)
+                                }) {
+                                    self.last_visual = None;
+                                }
                                 self.restyled(turn);
                                 // A turn whole, as a new one comes: the one
                                 // before may have been last, and its button
@@ -1042,6 +1066,11 @@ impl ChatView {
             self.colours.plain(code);
             self.recolour();
         }
+    }
+
+    /// Word characters for the pending colour request.
+    pub(crate) fn code_words(&mut self, id: u64, words: Vec<String>) {
+        self.colours.word_reply(id, words);
     }
 
     /// The daemon's answer to the ask numbered `id`: each block's spans.
@@ -1522,7 +1551,10 @@ impl ChatView {
                         }
                     }
                 }
-                input @ (Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }) => {
+                input @ (Input::Yank { .. }
+                | Input::YankText(_)
+                | Input::Search { .. }
+                | Input::Reselect) => {
                     self.settle_reading(fonts, input, &mut settled);
                 }
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),
@@ -2588,6 +2620,7 @@ impl ChatView {
     /// selection there is; and the cursor goes there. Anywhere else, what
     /// was selected isn't.
     fn press_text(&mut self, at: [f32; 2], clicks: u8, shift: bool) {
+        self.leave_visual();
         let Some(spot) = self.spot_at(at, false) else {
             self.picked = None;
             return;

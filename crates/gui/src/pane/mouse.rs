@@ -282,26 +282,6 @@ fn ordered(a: Point, b: Point) -> (Point, Point) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// What kind of character a cell holds, for finding words.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Space,
-    /// Letters, digits and the characters of paths and URLs, so a double
-    /// click takes a whole path.
-    Word,
-    Other,
-}
-
-fn class(ch: char) -> Class {
-    if ch.is_whitespace() {
-        Class::Space
-    } else if ch.is_alphanumeric() || "_-./~:@%+=#?&$".contains(ch) {
-        Class::Word
-    } else {
-        Class::Other
-    }
-}
-
 /// The columns of the word at `col` in `row`: the run of cells around it
 /// of the same kind. A wide character's two cells count as one.
 fn word_at(row: &Row, col: usize) -> std::ops::Range<usize> {
@@ -317,7 +297,7 @@ fn word_at(row: &Row, col: usize) -> std::ops::Range<usize> {
         } else {
             col
         };
-        class(cells[col].ch())
+        clackatoo_text::word::WordClass::Path.class(cells[col].ch())
     };
     let wanted = class_at(col);
     let mut start = col;
