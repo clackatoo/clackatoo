@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.4 (2026-11-04)
+
+### Fixes
+
+- **gui:** share pane status and focus handling (e39b89c8)
+
 ## 2026.11.3 (2026-11-03)
 
 ### Features
