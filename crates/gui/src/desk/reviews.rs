@@ -30,6 +30,7 @@ use super::{Asked, Desk, Input, Purpose};
 use crate::command::{ReviewCommand, ReviewWhich};
 use crate::input::KeyPress;
 use crate::review::{Ask, Review};
+use crate::vim::list::ListPane;
 
 /// The reviews, by the pane each is, and those attached.
 #[derive(Debug, Default)]
@@ -159,10 +160,7 @@ impl Desk {
         let Some(review) = self.reviews.panes.get_mut(&pane) else {
             return false;
         };
-        let mut redraw = false;
-        for stroke in crate::vim::list::strokes(press, &*review) {
-            redraw |= review.stroke(stroke);
-        }
+        let mut redraw = crate::vim::list::press(review, press);
         let asks = review.take_asks();
         redraw |= !asks.is_empty();
         for ask in asks {

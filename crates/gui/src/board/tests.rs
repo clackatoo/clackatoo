@@ -1,6 +1,7 @@
 use clackatoo_protocol::TerminalId;
 
 use super::*;
+use crate::vim::list::Searching;
 
 fn summary(entries: u32, archived: bool) -> BoardSummary {
     BoardSummary {
@@ -469,4 +470,38 @@ fn every_match_drawn_is_lit_however_many_come_before_it() {
         .map(|highlight| highlight.line)
         .collect();
     assert!(lit.contains(&(last_of_long - pane.top + 1)), "{lit:?}");
+}
+
+#[test]
+fn shared_list_input_contract() {
+    let mut pane = ten();
+    pane.settle();
+    list::checks::input(pane, "entry 7");
+}
+
+#[test]
+#[ignore = "manual input-path timing comparison"]
+fn list_input_timing() {
+    let mut pane = ten();
+    list::input_timing("board", |stroke| pane.stroke(stroke));
+}
+
+#[test]
+fn leaving_keeps_a_board_draft_and_accepting_or_cancelling_finishes_it_once() {
+    let mut pane = ten();
+    keys(&mut pane, "iwork in progress");
+    pane.leave();
+    assert!(pane.prompting());
+    keys(&mut pane, "<C-w>done<CR>");
+    assert_eq!(
+        pane.take_outbox(),
+        [BoardAction::Post {
+            kind: PostKind::Note,
+            text: "work in done".into(),
+        }]
+    );
+    assert!(!pane.prompting());
+    keys(&mut pane, "i<BS>iignored<Esc>");
+    assert!(!pane.prompting());
+    assert!(pane.take_outbox().is_empty());
 }

@@ -30,6 +30,8 @@ focused explorer
 
 The explorer reads keys as an editor does, a line a file: `j` and `k` move, with a count, `5G` goes to the fifth line, `H`, `M` and `L` to the top, middle and bottom of the view, Ctrl+E and Ctrl+Y scroll a line, Ctrl+D, Ctrl+U and Ctrl+F half a view or a page, and `zt`, `zz` and `zb` put the cursor's line at the top, middle or bottom. `/` searches the names shown, `?` back up, and `n` and `N` go to the next or the one before; a review and a board read their keys the same way. Ctrl+? lists them all.
 
+A count before Ctrl+D or Ctrl+U sets the distance for later half-page moves in this pane: `3` then Ctrl+D moves three items, and Ctrl+D again moves another three. Moving to another pane clears a half-typed command or an unfinished search, restoring where the search started. A file name or board note being typed stays ready to finish when you return.
+
 Type `/todo` and press Enter.
 
 ```check

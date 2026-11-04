@@ -45,9 +45,8 @@ use crate::hlsearch::Memo;
 use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search;
-use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
+use crate::vim::list::{self, ListPane, ListRows};
+use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Read, Reader, Stroke};
 
 #[cfg(test)]
 mod tests;
@@ -311,8 +310,7 @@ impl Review {
     /// Ends what was half done as the focus leaves the review: a command
     /// half typed, and a search being typed.
     pub(crate) fn leave(&mut self) {
-        self.keys.clear();
-        search::give_up(&mut Searching(self));
+        ListPane::leave(self);
     }
 
     /// What the bar says but for keys half typed: a message, or where the
@@ -548,46 +546,15 @@ impl Review {
 
     // --- Keys ---------------------------------------------------------------
 
-    /// Does what `stroke` does. Returns whether it should be drawn again.
-    pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        let had_message = self.message.take().is_some();
-        if list::search_stroke(self, stroke) {
-            return true;
-        }
-        let was_pending = self.keys.pending();
-        match self.keys.read(stroke, false, &ReviewKeys) {
-            Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending || had_message,
-            Parsed::Command(command) => {
-                self.execute(command);
-                true
-            }
-        }
-    }
-
-    /// Does `command`, read whole.
-    fn execute(&mut self, command: Command<ReviewKey>) {
-        let mut paging = self.paging;
-        let moved = list::go(self, &mut paging, &command);
-        self.paging = paging;
-        if moved || list::search_command(self, &command) {
-            return;
-        }
-        let count = command.times();
-        // Nothing else is taken (see `ReviewKeys::takes`).
-        let Action::Own(own) = command.action else {
-            return;
-        };
+    /// Does one of this pane's own commands, after shared list handling.
+    fn own_key(&mut self, own: ReviewKey, count: Option<usize>) {
+        let times = count.unwrap_or(1);
         match own {
-            ReviewKey::Go(motion) => {
-                let mut paging = self.paging;
-                list::go_own(self, &mut paging, motion, command.count);
-                self.paging = paging;
-            }
+            ReviewKey::Go(motion) => self.move_by(motion, count),
             ReviewKey::Open => self.open_here(),
             ReviewKey::Comment => self.comment_here(),
             ReviewKey::Next { file, forward } => {
-                self.next_of(forward, count, |line| match line {
+                self.next_of(forward, times, |line| match line {
                     Line::File { .. } => file,
                     Line::Hunk { .. } => !file,
                     _ => false,
@@ -1187,7 +1154,7 @@ pub(crate) enum ReviewKey {
 
 /// How a review reads keys: a list's (see [`list`]), with its own for
 /// what's reviewed, and `/` `?` `n` `N` searching its lines.
-struct ReviewKeys;
+pub(crate) struct ReviewKeys;
 
 impl Dialect for ReviewKeys {
     type Own = ReviewKey;
@@ -1368,5 +1335,25 @@ impl Review {
             return context;
         }
         crate::vim::shortcuts::context("Review", &self.keys, Mode::Normal, &ReviewKeys)
+    }
+}
+
+impl ListPane for Review {
+    type Dialect = ReviewKeys;
+
+    fn dialect() -> ReviewKeys {
+        ReviewKeys
+    }
+
+    fn paging(&mut self) -> &mut Paging {
+        &mut self.paging
+    }
+
+    fn clear_message(&mut self) -> bool {
+        self.message.take().is_some()
+    }
+
+    fn own(&mut self, key: ReviewKey, count: Option<usize>) {
+        self.own_key(key, count);
     }
 }

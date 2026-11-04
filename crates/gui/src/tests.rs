@@ -1,5 +1,6 @@
 //! Rendering a known screen offscreen, to check what the renderer draws.
 
+use crate::vim::list::ListPane;
 use clackatoo_protocol::{Size, View};
 use clackatoo_term::{Config, Terminal};
 

@@ -7,6 +7,9 @@
 //! `n` `N`, searching the items shown ([`Searching`]). The rest of their
 //! keys are their own, through their [`Dialect`](super::Dialect)'s hooks.
 
+mod pane;
+pub(crate) use pane::{ListPane, press, prompt_key};
+
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -1166,5 +1169,37 @@ mod tests {
         assert_eq!(round(12, 2, 4, false, matches), Some((5, true)));
         assert_eq!(round(12, 9, 5, true, matches), Some((2, true)));
         assert_eq!(round(12, 0, 1, false, |_| false), None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod checks;
+
+/// Manual comparison of the pane key path, without drawing or I/O.
+#[cfg(test)]
+pub(crate) fn input_timing(name: &str, mut stroke: impl FnMut(Stroke) -> bool) {
+    use std::{hint::black_box, time::Instant};
+    let sequences = [
+        ("navigation", Stroke::read("gg3j2k3<C-d><C-u>2<C-n><Home>")),
+        ("search", Stroke::read("gg/entry<CR>nN<Esc>")),
+    ];
+    for (kind, keys) in sequences {
+        let repeats = if kind == "navigation" {
+            10_000_u128
+        } else {
+            100
+        };
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            for _ in 0..repeats {
+                for &key in &keys {
+                    black_box(stroke(black_box(key)));
+                }
+            }
+            samples.push(start.elapsed().as_nanos() / (repeats * keys.len() as u128));
+        }
+        samples.sort_unstable();
+        eprintln!("{name} {kind}: {} ns/stroke (median of 7)", samples[3]);
     }
 }

@@ -160,10 +160,7 @@ impl Desk {
         let Some(board) = self.boards.panes.get_mut(&pane) else {
             return false;
         };
-        let mut redraw = false;
-        for stroke in crate::vim::list::strokes(press, &*board) {
-            redraw |= board.stroke(stroke);
-        }
+        let mut redraw = crate::vim::list::press(board, press);
         for ask in board.take_asks() {
             redraw = true;
             match ask {

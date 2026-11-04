@@ -30,9 +30,8 @@ use crate::colors;
 use crate::motion::Motion;
 use crate::options::Options;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search;
-use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
+use crate::vim::list::{self, ListPane, ListRows};
+use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Read, Reader, Stroke};
 
 #[cfg(test)]
 mod tests;
@@ -194,8 +193,7 @@ impl BoardPane {
     /// half typed, and a search being typed. An entry being typed stays,
     /// to finish.
     pub(crate) fn leave(&mut self) {
-        self.keys.clear();
-        search::give_up(&mut Searching(self));
+        ListPane::leave(self);
     }
 
     /// What the window's title says: "Board:" and the board's name, as
@@ -292,45 +290,10 @@ impl BoardPane {
 
     // --- Keys ---------------------------------------------------------------
 
-    /// Does what `stroke` does. Returns whether it should be drawn again.
-    pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        let had_message = self.message.take().is_some();
-        if self.prompt.is_some() {
-            self.prompt_stroke(stroke);
-            return true;
-        }
-        if list::search_stroke(self, stroke) {
-            return true;
-        }
-        let was_pending = self.keys.pending();
-        match self.keys.read(stroke, false, &BoardKeys) {
-            Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending || had_message,
-            Parsed::Command(command) => {
-                self.execute(command);
-                true
-            }
-        }
-    }
-
-    /// Does `command`, read whole.
-    fn execute(&mut self, command: Command<BoardKey>) {
-        let mut paging = self.paging;
-        let moved = list::go(self, &mut paging, &command);
-        self.paging = paging;
-        if moved || list::search_command(self, &command) {
-            return;
-        }
-        // Nothing else is taken (see `BoardKeys::takes`).
-        let Action::Own(own) = command.action else {
-            return;
-        };
+    /// Does one of this pane's own commands, after shared list handling.
+    fn own_key(&mut self, own: BoardKey, count: Option<usize>) {
         match own {
-            BoardKey::Go(motion) => {
-                let mut paging = self.paging;
-                list::go_own(self, &mut paging, motion, command.count);
-                self.paging = paging;
-            }
+            BoardKey::Go(motion) => self.move_by(motion, count),
             BoardKey::Post(kind) => self.ask_post(kind),
             BoardKey::Edit => self.ask_edit(),
             BoardKey::Release => self.release(),
@@ -383,27 +346,18 @@ impl BoardPane {
 
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
-        let Some(prompt) = &mut self.prompt else {
-            return;
-        };
-        let text = match prompt {
-            Prompt::Post { text, .. } | Prompt::Edit { text, .. } => text,
-        };
-        match crate::cmdline::simple::key(text, stroke) {
-            crate::cmdline::simple::Outcome::Accept => {
-                match self.prompt.take().expect("a prompt") {
-                    Prompt::Post { kind, text } if !text.trim().is_empty() => {
-                        // What's posted is the newest, which the cursor follows.
-                        self.at_end = true;
-                        self.outbox.push(BoardAction::Post { kind, text });
-                    }
-                    Prompt::Edit { entry, text } if !text.trim().is_empty() => {
-                        self.outbox.push(BoardAction::Edit { entry, text });
-                    }
-                    _ => {}
-                }
+        let accepted = list::prompt_key(&mut self.prompt, stroke, |prompt| match prompt {
+            Prompt::Post { text, .. } | Prompt::Edit { text, .. } => Some(text),
+        });
+        match accepted {
+            Some(Prompt::Post { kind, text }) if !text.trim().is_empty() => {
+                // What's posted is the newest, which the cursor follows.
+                self.at_end = true;
+                self.outbox.push(BoardAction::Post { kind, text });
             }
-            crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
+            Some(Prompt::Edit { entry, text }) if !text.trim().is_empty() => {
+                self.outbox.push(BoardAction::Edit { entry, text });
+            }
             _ => {}
         }
     }
@@ -867,7 +821,7 @@ pub(crate) enum BoardKey {
 
 /// How a board reads keys: a list's (see [`list`]), with its own for
 /// posting and the like, and `/` `?` `n` `N` searching its entries.
-struct BoardKeys;
+pub(crate) struct BoardKeys;
 
 impl Dialect for BoardKeys {
     type Own = BoardKey;
@@ -1077,5 +1031,33 @@ impl BoardPane {
             return context;
         }
         crate::vim::shortcuts::context("Board", &self.keys, Mode::Normal, &BoardKeys)
+    }
+}
+
+impl ListPane for BoardPane {
+    type Dialect = BoardKeys;
+
+    fn dialect() -> BoardKeys {
+        BoardKeys
+    }
+
+    fn paging(&mut self) -> &mut Paging {
+        &mut self.paging
+    }
+
+    fn clear_message(&mut self) -> bool {
+        self.message.take().is_some()
+    }
+
+    fn own(&mut self, key: BoardKey, count: Option<usize>) {
+        self.own_key(key, count);
+    }
+
+    fn prompt_stroke(&mut self, stroke: Stroke) -> bool {
+        if self.prompt.is_none() {
+            return false;
+        }
+        BoardPane::prompt_stroke(self, stroke);
+        true
     }
 }

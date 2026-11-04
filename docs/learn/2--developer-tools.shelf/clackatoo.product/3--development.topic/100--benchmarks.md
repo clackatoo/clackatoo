@@ -170,3 +170,24 @@ harness and build profile on both revisions, with other builds finished.
 The default test profile is unoptimised: these numbers help find changes in
 dispatch cost, but do not measure release frame latency. There is no timing
 assertion because a shared machine's load varies.
+
+## List input
+
+Explorer, Board and Review use `vim::list::ListPane` for key parsing,
+movement and paging, search routing and leaving a pane. Their own actions
+and prompts enter through hooks; Explorer also keeps its tree flattened
+before and after each stroke. The trait is statically dispatched.
+
+The three ignored `list_input_timing` tests exercise navigation and search
+through each real pane, without drawing or daemon I/O:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clackatoo-gui --lib list_input_timing --locked -- --ignored --nocapture --test-threads=1
+```
+
+Each reports nanoseconds per stroke, taking the median of seven batches:
+10,000 navigation sequences or 100 search sequences, whose pattern compilation
+is much more expensive in an unoptimised build. The search query matches entries in the board and
+explorer; the review fixture exercises a missing query. Compare identical
+harnesses and build profiles, with compilation finished. These default
+unoptimised test timings compare dispatch cost, not release input latency.

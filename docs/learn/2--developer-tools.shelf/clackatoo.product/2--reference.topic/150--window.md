@@ -489,7 +489,7 @@ An [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boa
 
 A search is typed as every pane's is (see [Searching](#searching)): edited as the command line is, Up and Down going back through the searches typed before, in every pane. While you type it, the cursor goes to the item it would find from where you started, as [`incsearch`](~clackatoo/reference/config#options) shows it, and Esc puts the cursor and the view back. What it matches is lit, as [`hlsearch`](~clackatoo/reference/config#options) lights it: in an explorer, the names; in a board, the text of its entries; in a review, its lines, files' names and comments; the first match in the item the search went to brighter, until Esc in normal mode or `:noh`. A search that finds nothing says so, and stops a macro.
 
-A command half typed, as `3` or `g`, shows at the start of the bar, and leaving the pane forgets it. A key they don't take, as `d` or `"`, waits for the rest of its command, then does nothing. Ctrl+? lists the keys of the pane you're in, read from how it reads them.
+A command half typed, as `3` or `g`, shows at the start of the bar, and leaving the pane forgets it. Leaving also cancels an unfinished search and restores its starting cursor and view. File-name prompts, file-operation confirmations and board-note drafts stay open when focus leaves. A count before Ctrl+D or Ctrl+U sets the distance for subsequent half-page moves in that pane, until its height changes. A key they don't take, as `d` or `"`, waits for the rest of its command, then does nothing. Ctrl+? lists the keys of the pane you're in, read from how it reads them.
 
 ## The cursor
 

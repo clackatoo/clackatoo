@@ -62,9 +62,8 @@ use crate::colors;
 use crate::motion::Motion;
 use crate::options::Options;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search;
-use crate::vim::{Action, Command, Dialect, Keys, Paging, Parsed, Read, Reader, Stroke};
+use crate::vim::list::{self, ListPane, ListRows};
+use crate::vim::{Action, Command, Dialect, Keys, Paging, Read, Reader, Stroke};
 
 mod editing;
 pub(crate) mod listing;
@@ -472,8 +471,7 @@ impl Explorer {
     /// half typed, and a search being typed. A name or an answer being
     /// typed stays, to finish.
     pub(crate) fn leave(&mut self) {
-        self.keys.clear();
-        search::give_up(&mut Searching(self));
+        ListPane::leave(self);
     }
 
     /// The name at the cursor, as shown: `..` on the way up.
@@ -994,61 +992,10 @@ impl Explorer {
 
     // --- Keys ---------------------------------------------------------------
 
-    /// Does what `stroke` does. Returns whether it should be drawn again.
-    pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        self.flatten_if_stale();
-        let redraw = self.typed(stroke);
-        self.flatten_if_stale();
-        redraw
-    }
-
-    /// Does what `stroke` does, leaving the tree to be flattened.
-    fn typed(&mut self, stroke: Stroke) -> bool {
-        let had_message = self.message.take().is_some();
-        // Where a view kept put the cursor is forgotten once it's moved.
-        self.view.cursor = None;
-        self.view.up = false;
-        // What listings' edits come to, shown in place of the tree.
-        if self.editing.as_ref().is_some_and(editing::Editing::planned) {
-            self.plan_stroke(stroke);
-            return true;
-        }
-        if self.prompt.is_some() {
-            self.prompt_stroke(stroke);
-            return true;
-        }
-        if list::search_stroke(self, stroke) {
-            return true;
-        }
-        let was_pending = self.keys.pending();
-        match self.keys.read(stroke, false, &ExplorerKeys) {
-            Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending || had_message,
-            Parsed::Command(command) => {
-                self.execute(command);
-                true
-            }
-        }
-    }
-
-    /// Does `command`, read whole.
-    fn execute(&mut self, command: Command<ExplorerKey>) {
-        let mut paging = self.paging;
-        let moved = list::go(self, &mut paging, &command);
-        self.paging = paging;
-        if moved || list::search_command(self, &command) {
-            return;
-        }
-        // Nothing else is taken (see `ExplorerKeys::takes`).
-        let Action::Own(own) = command.action else {
-            return;
-        };
+    /// Does one of this pane's own commands, after shared list handling.
+    fn own_key(&mut self, own: ExplorerKey, count: Option<usize>) {
         match own {
-            ExplorerKey::Go(motion) => {
-                let mut paging = self.paging;
-                list::go_own(self, &mut paging, motion, command.count);
-                self.paging = paging;
-            }
+            ExplorerKey::Go(motion) => self.move_by(motion, count),
             ExplorerKey::Enter => self.enter(),
             ExplorerKey::Open(Opening::Here) => self.open_or_enter(),
             ExplorerKey::Open(how) => self.open(how),
@@ -1095,27 +1042,20 @@ impl Explorer {
 
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
-        let name = match &mut self.prompt {
-            Some(Prompt::Confirm(asked)) => {
-                if let Some(op) = asked.answer(stroke) {
-                    self.asks.push(Ask::Op(op));
-                } else {
-                    self.message = Some("nothing was done".to_owned());
-                }
-                self.prompt = None;
-                return;
+        if let Some(Prompt::Confirm(asked)) = &self.prompt {
+            if let Some(op) = asked.answer(stroke) {
+                self.asks.push(Ask::Op(op));
+            } else {
+                self.message = Some("nothing was done".to_owned());
             }
-            Some(Prompt::Add { name, .. } | Prompt::Rename { name, .. }) => name,
-            None => return,
-        };
-        match crate::cmdline::simple::key(name, stroke) {
-            crate::cmdline::simple::Outcome::Accept => {
-                if let Some(prompt) = self.prompt.take() {
-                    self.prompted(prompt);
-                }
-            }
-            crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
-            _ => {}
+            self.prompt = None;
+            return;
+        }
+        if let Some(prompt) = list::prompt_key(&mut self.prompt, stroke, |prompt| match prompt {
+            Prompt::Add { name, .. } | Prompt::Rename { name, .. } => Some(name),
+            Prompt::Confirm(_) => None,
+        }) {
+            self.prompted(prompt);
         }
     }
 
@@ -1849,7 +1789,7 @@ pub(crate) enum ExplorerKey {
 /// How an explorer reads keys: a list's (see [`list`]), with its own for
 /// files, as netrw's and nvim-tree's are, and `/` `?` `n` `N` searching
 /// the names shown.
-struct ExplorerKeys;
+pub(crate) struct ExplorerKeys;
 
 impl Dialect for ExplorerKeys {
     type Own = ExplorerKey;
@@ -2071,4 +2011,46 @@ impl Explorer {
 /// doesn't.
 fn confirm(question: String, op: FileOp) -> Prompt {
     Prompt::Confirm(crate::vim::confirm::Confirm::new(question).choice('y', "Confirm", op))
+}
+
+impl ListPane for Explorer {
+    type Dialect = ExplorerKeys;
+
+    fn dialect() -> ExplorerKeys {
+        ExplorerKeys
+    }
+
+    fn paging(&mut self) -> &mut Paging {
+        &mut self.paging
+    }
+
+    fn clear_message(&mut self) -> bool {
+        self.message.take().is_some()
+    }
+
+    fn own(&mut self, key: ExplorerKey, count: Option<usize>) {
+        self.own_key(key, count);
+    }
+
+    fn before_stroke(&mut self) {
+        self.flatten_if_stale();
+        // A kept view no longer controls the cursor after a key.
+        self.view.cursor = None;
+        self.view.up = false;
+    }
+
+    fn after_stroke(&mut self) {
+        self.flatten_if_stale();
+    }
+
+    fn prompt_stroke(&mut self, stroke: Stroke) -> bool {
+        if self.editing.as_ref().is_some_and(editing::Editing::planned) {
+            self.plan_stroke(stroke);
+        } else if self.prompt.is_some() {
+            Explorer::prompt_stroke(self, stroke);
+        } else {
+            return false;
+        }
+        true
+    }
 }

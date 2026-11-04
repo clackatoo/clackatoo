@@ -4,6 +4,7 @@ use clackatoo_protocol::{Made, ReviewComment};
 
 use super::*;
 use crate::vim::KeyState;
+use crate::vim::list::Searching;
 
 const CHAT: TerminalId = TerminalId(4);
 
@@ -514,4 +515,22 @@ fn what_is_lit_is_looked_for_once_and_only_as_far_as_is_drawn() {
         })
         .collect();
     assert_eq!(lit, ["added"]);
+}
+
+#[test]
+fn shared_list_input_contract() {
+    let mut pane = review();
+    pane.resize(Size::new(60, 10).unwrap());
+    pane.settle();
+    pane.settle();
+    list::checks::input(pane, "more");
+}
+
+#[test]
+#[ignore = "manual input-path timing comparison"]
+fn list_input_timing() {
+    let mut pane = review();
+    pane.resize(Size::new(60, 10).unwrap());
+    pane.settle();
+    list::input_timing("review", |stroke| pane.stroke(stroke));
 }

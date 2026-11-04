@@ -1151,6 +1151,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "registers",
         what: "Macro recording stays visible in every pane and below prompts; review searches use the shared typing bar",
     },
+    News {
+        id: "list-input",
+        date: "2026-11-04",
+        lesson: "explorer",
+        what: "Explorer, board and review share key handling for counts, paging, searches and unfinished prompts",
+    },
 ];
 
 impl News {

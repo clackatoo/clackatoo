@@ -1,0 +1,30 @@
+# Shared list input: counts, search prompts and pane-specific drafts.
+size 1200x800
+file entry01.txt
+file entry02.txt
+file entry03.txt
+file entry04.txt
+file entry05.txt
+file entry06.txt
+file entry07.txt
+file entry08.txt
+file entry09.txt
+file entry10.txt
+shell git init -q && git add . && git -c user.name=Look -c user.email=look@example.invalid commit -qm initial && printf 'entry changed\n' >> entry07.txt
+keys <C-;>:Explore<CR>
+wait-for entry07.txt
+keys gg3j2<C-n>/entry07
+shot explorer-search
+keys <Esc>:Editor entry07.txt<CR>
+wait-for entry changed
+keys <C-;>:Review base<CR>
+wait-for a keep
+keys gg3j/entry
+shot review-search
+keys <Esc>:Board input-check<CR>
+keys ifirst entry<CR>isecond entry<CR>ithird entry<CR>
+wait-for third entry
+keys gg2j/second
+shot board-search
+keys <Esc>ipending note
+shot board-draft

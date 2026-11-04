@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use super::*;
+use crate::vim::list::Searching;
 
 fn explorer(rows: u16) -> Explorer {
     let mut explorer = Explorer::new(FilesId(1), &Options::default());
@@ -1381,4 +1382,54 @@ fn what_a_search_keeps_follows_the_names_as_the_rows_change() {
     // A match whose file's gone is lit no more.
     listed(&mut explorer, "/p", vec![file("alpha.rs")]);
     assert_eq!(explorer.search.found(), None);
+}
+
+#[test]
+fn shared_list_input_contract() {
+    let mut pane = explorer(10);
+    rooted(
+        &mut pane,
+        (0..30).map(|n| file(&format!("entry{n:02}"))).collect(),
+    );
+    pane.settle();
+    list::checks::input(pane, "entry07");
+}
+
+#[test]
+#[ignore = "manual input-path timing comparison"]
+fn list_input_timing() {
+    let mut pane = explorer(10);
+    rooted(
+        &mut pane,
+        (0..30).map(|n| file(&format!("entry{n:02}"))).collect(),
+    );
+    list::input_timing("explorer", |stroke| pane.stroke(stroke));
+}
+
+#[test]
+fn leaving_keeps_a_name_or_confirmation_without_turning_it_into_navigation() {
+    let mut pane = explorer(10);
+    rooted(&mut pane, vec![file("old.txt")]);
+    keys(&mut pane, "anew old");
+    pane.leave();
+    keys(&mut pane, "<C-w>name<CR>");
+    assert_eq!(
+        pane.take_asks(),
+        [Ask::Op(FileOp::Create {
+            path: "/p/new name".into(),
+            dir: false,
+        })]
+    );
+    keys(&mut pane, "a<BS>aignored<Esc>");
+    assert!(pane.take_asks().is_empty());
+    assert!(!pane.prompting());
+    keys(&mut pane, "d");
+    pane.leave();
+    keys(&mut pane, "j");
+    assert!(!pane.prompting());
+    assert!(
+        pane.take_asks().is_empty(),
+        "a confirmation accepts only y/Y"
+    );
+    assert_eq!(at(&mut pane), "/p/old.txt");
 }

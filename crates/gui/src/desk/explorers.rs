@@ -388,10 +388,7 @@ impl Desk {
         let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
             return false;
         };
-        let mut redraw = false;
-        for stroke in crate::vim::list::strokes(press, &*explorer) {
-            redraw |= explorer.stroke(stroke);
-        }
+        let mut redraw = crate::vim::list::press(explorer, press);
         let asks = explorer.take_asks();
         redraw |= !asks.is_empty();
         for ask in asks {
