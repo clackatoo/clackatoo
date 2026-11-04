@@ -1,0 +1,18 @@
+# Recording remains visible across panes and below a prompt. A review's
+# search is a typing prompt, with the common NORMAL bar underneath.
+size 1200x800
+file notes.txt <<END
+one
+two
+END
+shell git init -q && git add notes.txt && git -c user.name=Look -c user.email=look@example.invalid commit -qm initial && printf 'three\n' >> notes.txt
+keys <C-;>:|Editor notes.txt<CR>
+keys qa<C-h>
+wait-for recording @a
+shot recording-terminal
+keys :
+shot recording-command
+keys <Esc>q
+keys :Review<CR>
+keys /three
+shot review-search

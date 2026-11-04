@@ -1145,6 +1145,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Unselected agent terminals show the seconds remaining before they close; select one to keep it",
     },
+    News {
+        id: "pane-status",
+        date: "2026-11-04",
+        lesson: "registers",
+        what: "Macro recording stays visible in every pane and below prompts; review searches use the shared typing bar",
+    },
 ];
 
 impl News {

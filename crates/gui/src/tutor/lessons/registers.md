@@ -67,7 +67,7 @@ elder
 
 ## Record a macro
 
-`q` and a register records the keys you press, until `q` again; the bar says `recording @a` meanwhile.
+`q` and a register records the keys you press, until `q` again; the bar says `recording @a` meanwhile. It stays visible when you move to another pane, and below a search or command line you type.
 
 ```practice fruit.txt
 apple

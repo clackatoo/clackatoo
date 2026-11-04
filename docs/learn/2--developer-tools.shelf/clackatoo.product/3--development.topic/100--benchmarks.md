@@ -154,3 +154,19 @@ cargo run --release -p clackatoo-bench --example replay -- dense 20
 ```
 
 That plays `dense` for 20 seconds and prints its throughput. Release builds use link-time optimisation, so build with `CARGO_PROFILE_RELEASE_DEBUG=true` to get the function names back in a profiler.
+
+## Pane status and focus
+
+The manual `pane_status_and_focus_timing` test measures the desk's status
+composition and focus changes for terminals, chats, editors, explorers,
+boards, reviews and browsers, without a GPU or daemon:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clackatoo-gui --lib pane_status_and_focus_timing --locked -- --ignored --nocapture
+```
+
+It reports the median of seven batches for each operation. Compare the same
+harness and build profile on both revisions, with other builds finished.
+The default test profile is unoptimised: these numbers help find changes in
+dispatch cost, but do not measure release frame latency. There is no timing
+assertion because a shared machine's load varies.

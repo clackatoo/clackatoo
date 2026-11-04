@@ -95,15 +95,14 @@ impl Desk {
         {
             return Some(Mode::Insert);
         }
-        if let Some((editor, _)) = self.focused_editor() {
-            return (!self.has_no_insert_mode(pane)).then_some(editor.mode);
-        }
-        // An explorer, or an editor's folder whose listing hasn't come.
-        if self.focused_explorer().is_some() {
-            return None;
-        }
-        let mode = self.focused_terminal_mode()?;
-        if self.held_normal == Some(pane) && mode != Mode::Insert {
+        let view = self.focused_view()?;
+        let mode = view.mode(self)?;
+        if matches!(
+            view,
+            super::view::PaneView::Chat(..) | super::view::PaneView::Terminal(..)
+        ) && self.held_normal == Some(pane)
+            && mode != Mode::Insert
+        {
             return None;
         }
         Some(mode)
@@ -255,23 +254,11 @@ impl Desk {
         {
             self.stop_waiting_to_insert(None);
         }
-        self.close_editor_panel(pane);
-        self.editor_leaves(pane);
-        if let Some(review) = self.reviews.panes.get_mut(&pane) {
-            review.leave();
+        if self.editor_drag == Some(pane) {
+            self.editor_drag = None;
         }
-        if let Some(board) = self.boards.panes.get_mut(&pane) {
-            board.leave();
-        }
-        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
-            explorer.leave();
-        }
-        let terminal =
-            (self.workspaces.find_pane(pane)).and_then(|(_, _, found)| found.content.terminal());
-        if let Some(chat) = terminal.and_then(|terminal| self.chats.get_mut(&terminal)) {
-            chat.leave();
-        } else if let Some(found) = terminal.and_then(|terminal| self.panes.get_mut(&terminal)) {
-            found.leave();
+        if let Some(focus) = self.pane_view(pane).map(super::view::PaneView::focus) {
+            focus.leave(self);
         }
     }
 
@@ -286,32 +273,14 @@ impl Desk {
         };
         self.arrived = Some(arrived);
         self.insert_on_load = None;
-        let (pane, content) = arrived;
+        let (pane, _) = arrived;
         let insert = self.mode == WindowMode::Insert && !self.has_no_insert_mode(pane);
         if insert && self.editor_unloaded(pane) {
             self.insert_on_load = Some((pane, Instant::now()));
-        } else {
-            self.editor_to_mode(pane, insert);
-        }
-        let Some(terminal) = content.terminal() else {
-            return;
-        };
-        if let Some(chat) = self.chats.get_mut(&terminal) {
-            chat.arrived();
-            if insert && chat.asking() {
-                chat.enter_normal_mode();
-                self.held_normal = Some(pane);
-            } else if insert {
-                chat.enter_insert_mode();
-            } else {
-                chat.enter_normal_mode();
-            }
-        } else if let Some(found) = self.panes.get_mut(&terminal) {
-            if insert {
-                found.enter_insert_mode();
-            } else {
-                found.enter_normal_mode();
-            }
+        } else if let Some(focus) = self.pane_view(pane).map(super::view::PaneView::focus)
+            && focus.arrive(self, insert)
+        {
+            self.held_normal = Some(pane);
         }
     }
 

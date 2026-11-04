@@ -32,16 +32,6 @@ impl Desk {
         self.boards.panes.get(&pane)
     }
 
-    /// What the bar says for the focused pane, if it's an explorer or a
-    /// board, and whether it's being typed in.
-    pub(super) fn panel_label(&self) -> Option<(String, bool)> {
-        (self.focused_explorer())
-            .map(|explorer| (explorer.label(), explorer.prompting()))
-            .or_else(|| (self.focused_board()).map(|board| (board.label(), board.prompting())))
-            .or_else(|| (self.focused_review()).map(|review| (review.label(), false)))
-            .or_else(|| (self.focused_browser()).map(|browser| (browser.label(), false)))
-    }
-
     /// The focused pane's board, if it shows one.
     pub(super) fn focused_board(&self) -> Option<&BoardPane> {
         self.boards.panes.get(&self.shown?.pane)

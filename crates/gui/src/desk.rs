@@ -187,6 +187,7 @@ mod notices;
 mod offers;
 mod restored;
 mod scrolling;
+mod view;
 pub(crate) use restored::Offer;
 mod reviews;
 mod script;
@@ -846,11 +847,7 @@ impl Desk {
     /// pane's mode and the tabs, and a message, if there is one, but not
     /// the pane's label, whose place a search typed in it takes.
     fn bar_under_typing(&self) -> Status {
-        let mode = match self.focused_editor() {
-            Some((editor, _)) => Some(editor_mode_name(editor)),
-            None if self.panel_label().is_some() => Some(ModeName::Normal),
-            None => self.focused_terminal_mode().map(mode_name),
-        };
+        let mode = self.focused_view().map(view::PaneView::shown_mode);
         let (note, kind) = self.note(None, None);
         Status::Tabs {
             mode,
@@ -871,76 +868,22 @@ impl Desk {
         if let Some(status) = self.pairing_status() {
             return status;
         }
-        if let Some((editor, copy)) = self.focused_editor() {
-            let label = editor.label(copy);
-            if editor.prompting() {
-                return Status::Typing {
-                    label: None,
-                    text: label,
-                    choices: Vec::new(),
-                    selected: editor.label_selected(),
-                    under: None,
-                };
-            }
-            let said = editor.said().map(str::to_owned);
-            let (note, kind) = self.note(said, Some(label));
-            return Status::Tabs {
-                mode: Some(editor_mode_name(editor)),
-                note: note.map(|note| self.recording_before(note)),
-                kind,
-                panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
+        let view = self.focused_view();
+        let bar = view.map_or_else(view::Bar::default, view::PaneView::bar);
+        if bar.prompting
+            && let Some(text) = bar.label
+        {
+            return Status::Typing {
+                label: None,
+                text,
+                choices: Vec::new(),
+                selected: bar.selected,
+                under: None,
             };
         }
-        if let Some((label, prompting)) = self.panel_label() {
-            if prompting {
-                return Status::Typing {
-                    label: None,
-                    text: label,
-                    choices: Vec::new(),
-                    selected: None,
-                    under: None,
-                };
-            }
-            let (note, kind) = self.note(None, Some(label));
-            return Status::Tabs {
-                mode: Some(ModeName::Normal),
-                note: note.map(|note| self.recording_before(note)),
-                kind,
-                panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
-            };
-        }
-        let (mode, label) = if let Some(chat) = self.focused_chat() {
-            if let Some(prompt) = chat.prompt_label() {
-                return Status::Typing {
-                    label: None,
-                    text: prompt,
-                    choices: Vec::new(),
-                    selected: None,
-                    under: None,
-                };
-            }
-            (Some(chat.shown_mode()), chat.label())
-        } else {
-            let pane = self
-                .focused_terminal()
-                .and_then(|terminal| self.panes.get(&terminal));
-            if let Some(pane) = pane
-                && pane.prompting()
-                && let Some(prompt) = pane.label()
-            {
-                return Status::Typing {
-                    label: None,
-                    text: prompt,
-                    choices: Vec::new(),
-                    selected: None,
-                    under: None,
-                };
-            }
-            (pane.map(Pane::shown_mode), pane.and_then(Pane::label))
-        };
-        let (note, kind) = self.note(None, label.or_else(|| self.notice()));
+        let (note, kind) = self.note(bar.said, bar.label.or_else(|| self.notice()));
         Status::Tabs {
-            mode: mode.map(mode_name),
+            mode: view.map(view::PaneView::shown_mode),
             note,
             kind,
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
@@ -952,21 +895,20 @@ impl Desk {
     /// its `label`. The keys that can come next, while some wait, are in a
     /// panel of their own (see [`Desk::which_keys`]).
     fn note(&self, said: Option<String>, label: Option<String>) -> (Option<String>, NoteKind) {
-        if let Some((message, kind)) = self.message_note() {
-            return (Some(message), kind);
-        }
-        match (said, label) {
-            (Some(said), _) => (Some(said), NoteKind::Message),
-            (None, label) => (label, NoteKind::Label),
-        }
-    }
-
-    /// `note`, after the register a macro is being recorded into, if one is.
-    fn recording_before(&self, note: String) -> String {
-        match self.recording() {
-            Some(register) => format!("recording @{register}  {note}"),
-            None => note,
-        }
+        let (note, kind) = if let Some((message, kind)) = self.message_note() {
+            (Some(message), kind)
+        } else {
+            match (said, label) {
+                (Some(said), _) => (Some(said), NoteKind::Message),
+                (None, label) => (label, NoteKind::Label),
+            }
+        };
+        let note = match (self.recording(), note) {
+            (Some(register), Some(note)) => Some(format!("recording @{register}  {note}")),
+            (Some(register), None) => Some(format!("recording @{register}")),
+            (None, note) => note,
+        };
+        (note, kind)
     }
 
     /// What the bar calls a tab: its number, and its name, or else its
@@ -3085,6 +3027,7 @@ mod tests {
     mod subagents;
     mod tasks;
     mod typing;
+    mod view;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};
