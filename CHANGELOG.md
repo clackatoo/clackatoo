@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.6 (2026-11-04)
+
+### Fixes
+
+- **gui:** route pointer input consistently across panes (448e2d25)
+
 ## 2026.11.5 (2026-11-04)
 
 Nothing to note: tests, chores and tidying.
