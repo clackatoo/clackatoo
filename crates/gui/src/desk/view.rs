@@ -1,5 +1,5 @@
 //! The pane the desk addresses, resolved once before reading its status or
-//! moving focus. Folder listings can have both an editor and an explorer:
+//! moving focus or routing input. Folder listings can have both an editor and an explorer:
 //! the editor is the view, but leaving it also ends the explorer's search.
 //!
 //! Read paths borrow the pane and its separately owned buffer directly.
@@ -241,5 +241,187 @@ impl Focus {
             | Focus::Other => {}
         }
         false
+    }
+}
+
+impl Focus {
+    /// Display-only panes can take focus without requesting clipboard data.
+    pub(super) fn takes_paste(self) -> bool {
+        !matches!(self, Self::Browser | Self::Other)
+    }
+
+    pub(super) fn paste(self, desk: &mut Desk, text: &str) {
+        match self {
+            Self::Editor(_) => {
+                desk.paste_into_editor(text);
+            }
+            Self::Explorer(id) => {
+                desk.explorers
+                    .panes
+                    .get_mut(&id)
+                    .expect("resolved explorer")
+                    .paste(text);
+            }
+            Self::Board(id) => {
+                desk.boards
+                    .panes
+                    .get_mut(&id)
+                    .expect("resolved board")
+                    .paste(text);
+            }
+            Self::Review(id) => {
+                desk.reviews
+                    .panes
+                    .get_mut(&id)
+                    .expect("resolved review")
+                    .paste(text);
+            }
+            Self::Chat(id) => {
+                let chat = desk.chats.get_mut(&id).expect("resolved chat");
+                match chat.search_line() {
+                    Some(line) => line.put(text),
+                    None => chat.paste(text),
+                }
+            }
+            Self::Terminal(id) => {
+                let pane = desk.panes.get_mut(&id).expect("resolved terminal");
+                if !pane.paste_into_search(text) {
+                    pane.paste(text);
+                }
+            }
+            Self::Browser | Self::Other => {}
+        }
+    }
+
+    pub(super) fn wheel(
+        self,
+        desk: &mut Desk,
+        point: [f32; 2],
+        lines: i64,
+        modifiers: crate::input::Modifiers,
+    ) -> bool {
+        match self {
+            Self::Editor(id) => desk.editor_wheel(id, lines),
+            // List panes count downwards; terminal wheel input counts upwards.
+            Self::Explorer(id) => desk
+                .explorers
+                .panes
+                .get_mut(&id)
+                .expect("resolved explorer")
+                .scroll(lines.saturating_neg()),
+            Self::Board(id) => desk
+                .boards
+                .panes
+                .get_mut(&id)
+                .expect("resolved board")
+                .scroll(lines.saturating_neg()),
+            Self::Review(id) => desk
+                .reviews
+                .panes
+                .get_mut(&id)
+                .expect("resolved review")
+                .scroll(lines.saturating_neg()),
+            Self::Chat(id) => {
+                let pixel = desk
+                    .cell_at(point, None)
+                    .filter(|(at, ..)| *at == id)
+                    .map_or([-1.0; 2], |(_, _, pixel)| pixel);
+                desk.chats
+                    .get_mut(&id)
+                    .expect("resolved chat")
+                    .wheel(lines, pixel, modifiers)
+            }
+            Self::Terminal(id) => {
+                let cell = desk
+                    .cell_at(point, None)
+                    .filter(|(at, ..)| *at == id)
+                    .map_or([0, 0], |(_, cell, _)| cell);
+                desk.panes
+                    .get_mut(&id)
+                    .expect("resolved terminal")
+                    .wheel(lines, cell, modifiers)
+            }
+            Self::Browser | Self::Other => false,
+        }
+    }
+
+    pub(super) fn click(
+        self,
+        desk: &mut Desk,
+        point: [f32; 2],
+        cell: [i64; 2],
+        clicks: u8,
+        modifiers: crate::input::Modifiers,
+    ) -> bool {
+        match self {
+            Self::Editor(id) => {
+                desk.rendered_click(point) || desk.editor_press(id, cell, clicks, modifiers.alt)
+            }
+            Self::Explorer(id) => {
+                desk.acting_from_list(|desk| desk.explorer_click(id, cell, clicks))
+            }
+            Self::Board(id) => desk.acting_from_list(|desk| desk.board_click(id, cell, clicks)),
+            Self::Review(id) => desk.acting_from_list(|desk| desk.review_click(id, cell, clicks)),
+            Self::Chat(_) | Self::Terminal(_) | Self::Browser | Self::Other => false,
+        }
+    }
+}
+
+impl<'a> PaneView<'a> {
+    pub(super) fn key_state(self) -> Option<&'a dyn crate::vim::KeyState> {
+        Some(match self {
+            Self::Editor(_, pane, _) => pane,
+            Self::Explorer(_, pane) => pane,
+            Self::Board(_, pane) => pane,
+            Self::Review(_, pane) => pane,
+            Self::Chat(_, pane) => pane,
+            Self::Terminal(_, pane) => pane,
+            Self::Browser(_) | Self::Other(_) => return None,
+        })
+    }
+
+    pub(super) fn shortcut_context(self) -> crate::shortcuts::Context {
+        match self {
+            Self::Editor(_, pane, _) => pane.shortcut_context(),
+            Self::Explorer(_, pane) => pane.shortcut_context(),
+            Self::Board(_, pane) => pane.shortcut_context(),
+            Self::Review(_, pane) => pane.shortcut_context(),
+            Self::Chat(_, pane) => pane.shortcut_context(),
+            Self::Terminal(_, pane) => pane.shortcut_context(),
+            Self::Browser(pane) => pane.shortcut_context(),
+            Self::Other(_) => crate::shortcuts::Context::new("Window", &[]),
+        }
+    }
+
+    pub(super) fn text_target(self) -> Option<super::TextTarget> {
+        use super::TextTarget;
+        let (prompting, typing) = match self {
+            Self::Editor(_, pane, _) => (pane.prompting(), pane.mode == Mode::Insert),
+            Self::Explorer(_, pane) => (pane.prompting(), false),
+            Self::Board(_, pane) => (pane.prompting(), false),
+            Self::Review(_, pane) => (pane.prompting(), false),
+            Self::Chat(_, pane) => (pane.prompting(), pane.takes_text()),
+            Self::Terminal(_, pane) => (pane.prompting(), pane.mode == Mode::Insert),
+            Self::Browser(_) | Self::Other(_) => return None,
+        };
+        if prompting {
+            Some(TextTarget::Bar)
+        } else {
+            typing.then_some(TextTarget::Pane)
+        }
+    }
+}
+
+impl Focus {
+    pub(super) fn key_state_mut(self, desk: &mut Desk) -> Option<&mut dyn crate::vim::KeyState> {
+        Some(match self {
+            Self::Editor(id) => desk.editors.panes.get_mut(&id)?,
+            Self::Explorer(id) => desk.explorers.panes.get_mut(&id)?,
+            Self::Board(id) => desk.boards.panes.get_mut(&id)?,
+            Self::Review(id) => desk.reviews.panes.get_mut(&id)?,
+            Self::Chat(id) => desk.chats.get_mut(&id)?,
+            Self::Terminal(id) => desk.panes.get_mut(&id)?,
+            Self::Browser | Self::Other => return None,
+        })
     }
 }

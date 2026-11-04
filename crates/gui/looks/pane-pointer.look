@@ -1,0 +1,78 @@
+# Pointer routing through the real window and isolated daemon.
+size 1200x600
+file entry001.txt
+file entry002.txt
+file entry003.txt
+file entry004.txt
+file entry005.txt
+file entry006.txt
+file entry007.txt
+file entry008.txt
+file entry009.txt
+file entry010.txt
+file entry011.txt
+file entry012.txt
+file entry013.txt
+file entry014.txt
+file entry015.txt
+file entry016.txt
+file entry017.txt
+file entry018.txt
+file entry019.txt
+file entry020.txt
+file entry021.txt
+file entry022.txt
+file entry023.txt
+file entry024.txt
+file entry025.txt
+file entry026.txt
+file entry027.txt
+file entry028.txt
+file entry029.txt
+file entry030.txt
+file entry031.txt
+file entry032.txt
+file entry033.txt
+file entry034.txt
+file entry035.txt
+file entry036.txt
+file entry037.txt
+file entry038.txt
+file entry039.txt
+file entry040.txt
+file entry041.txt
+file entry042.txt
+file entry043.txt
+file entry044.txt
+file entry045.txt
+file entry046.txt
+file entry047.txt
+file entry048.txt
+file entry049.txt
+file entry050.txt
+file entry051.txt
+file entry052.txt
+file entry053.txt
+file entry054.txt
+file entry055.txt
+file entry056.txt
+file entry057.txt
+file entry058.txt
+file entry059.txt
+file entry060.txt
+keys <C-;>:Explore<CR>
+wait-for entry001.txt
+keys gg
+scroll 800 590 -4
+shot explorer-bar-wheel
+keys :Board pointer-check<CR>
+keys ifirst entry<CR>isecond entry<CR>ithird entry<CR>
+wait-for third entry
+keys gg
+shot board-before-click
+quiet 30
+click 900 105
+click 900 105
+wait-for edit #1:
+shot board-double-click
+keys <Esc>

@@ -131,3 +131,52 @@ fn explorer_headers_stay_fixed_while_body_clicks_follow_fractional_rows() {
         "no overscroll above the first entry"
     );
 }
+
+#[test]
+fn wheel_over_a_bar_scrolls_the_focused_editor_with_trackpad_precision() {
+    let mut desk = editing("/t.txt", &text());
+    normal_mode(&mut desk);
+    assert_eq!(
+        desk.smooth_wheel([100.0, -10.0], -0.5, true, Modifiers::default()),
+        Some(true)
+    );
+    let offset = desk.row_scroll(PaneId(1)).expect("half a row");
+    assert!((offset.fraction - 0.5).abs() < 0.0001);
+    desk.stop_scrolling();
+    assert!(desk.wheel([100.0, -10.0], -3, Modifiers::default()));
+    desk.settle_editors();
+    assert!(
+        desk.editor(PaneId(1)).unwrap().scene().0[0]
+            .text()
+            .contains("line 3")
+    );
+}
+
+#[test]
+fn list_wheel_direction_is_the_same_over_the_body_and_bars_and_when_smooth() {
+    let mut desk = desk(one_tab(files_pane(2, 1)));
+    explore_with(
+        &mut desk,
+        (0..100)
+            .map(|n| entry(&format!("file-{n:03}"), false))
+            .collect(),
+    );
+    desk.settle_explorers();
+    let first = desk.explorer(PaneId(2)).unwrap().scene().0[1].text();
+    assert!(desk.wheel(cell_point(3, 2), -3, Modifiers::default()));
+    desk.settle_explorers();
+    let scrolled = desk.explorer(PaneId(2)).unwrap().scene().0[1].text();
+    assert_ne!(first, scrolled);
+    assert!(desk.wheel([100.0, -10.0], 3, Modifiers::default()));
+    desk.settle_explorers();
+    assert_eq!(first, desk.explorer(PaneId(2)).unwrap().scene().0[1].text());
+    assert_eq!(
+        desk.smooth_wheel([100.0, -10.0], -3.0, true, Modifiers::default()),
+        Some(true)
+    );
+    desk.settle_explorers();
+    assert_eq!(
+        scrolled,
+        desk.explorer(PaneId(2)).unwrap().scene().0[1].text()
+    );
+}

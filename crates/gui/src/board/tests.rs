@@ -226,11 +226,11 @@ fn the_cursor_moves_by_entries_and_stays_where_it_was_put() {
     // A click on an entry's heading puts the cursor there; between
     // entries, nowhere.
     let heading = shown.iter().position(|line| line.starts_with('#')).unwrap();
-    assert!(pane.click(heading));
+    assert!(pane.click(heading, false));
     pane.settle();
     assert_eq!(pane.scene().1.unwrap().line, heading);
     let gap = shown.iter().position(String::is_empty).unwrap();
-    assert!(!pane.click(gap));
+    assert!(!pane.click(gap, false));
 }
 
 #[test]
@@ -504,4 +504,39 @@ fn leaving_keeps_a_board_draft_and_accepting_or_cancelling_finishes_it_once() {
     keys(&mut pane, "i<BS>iignored<Esc>");
     assert!(!pane.prompting());
     assert!(pane.take_outbox().is_empty());
+}
+
+#[test]
+fn double_click_edits_the_entry_without_overwriting_an_existing_draft() {
+    let mut pane = pane(vec![
+        entry(1, PostKind::Note, "first"),
+        entry(2, PostKind::Note, "second"),
+    ]);
+    typed(&mut pane, "gg");
+    pane.settle();
+    assert!(pane.click(1, true));
+    assert!(pane.label().contains("first"));
+    assert!(!pane.click(4, true));
+    assert!(pane.label().contains("first"));
+    pane.stroke(Stroke::Escape);
+    assert!(!pane.click(0, true), "heading does not edit");
+    assert!(!pane.prompting());
+}
+
+#[test]
+fn wheel_moves_by_rows_within_an_entry_taller_than_the_view_and_stops_at_bounds() {
+    let mut pane = pane(vec![entry(
+        1,
+        PostKind::Note,
+        &"a wrapped entry ".repeat(150),
+    )]);
+    assert_eq!(pane.top, 0);
+    assert!(pane.scroll(1));
+    assert_eq!(pane.top, 1, "one physical row, not one entry");
+    assert_eq!(pane.cursor, 0);
+    assert!(pane.scroll(i64::MAX));
+    assert!(!pane.scroll(1));
+    assert!(pane.scroll(i64::MIN));
+    assert_eq!(pane.top, 0);
+    assert!(!pane.scroll(-1));
 }

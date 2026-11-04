@@ -37,11 +37,6 @@ impl Desk {
         self.boards.panes.get(&self.shown?.pane)
     }
 
-    /// The same, to change.
-    pub(super) fn focused_board_mut(&mut self) -> Option<&mut BoardPane> {
-        self.boards.panes.get_mut(&self.shown?.pane)
-    }
-
     /// Makes a board pane for every pane showing a board in the workspace
     /// shown, and attaches to their boards; forgets those of panes gone.
     pub(super) fn attach_shown_boards(&mut self) {
@@ -171,17 +166,13 @@ impl Desk {
     }
 
     /// A click at `cell` of the board pane `pane`: the cursor goes to the
-    /// entry there. Returns whether the window must be redrawn.
-    pub(super) fn board_click(&mut self, pane: PaneId, cell: [i64; 2]) -> bool {
+    /// entry there; a double click edits it. Returns whether the window
+    /// must be redrawn.
+    pub(super) fn board_click(&mut self, pane: PaneId, cell: [i64; 2], clicks: u8) -> bool {
         let Ok(row) = usize::try_from(cell[0]) else {
             return false;
         };
-        (self.boards.panes.get_mut(&pane)).is_some_and(|board| board.click(row))
-    }
-
-    /// Scrolls the board pane `pane` by `lines`, as the wheel does.
-    pub(super) fn board_wheel(&mut self, pane: PaneId, lines: i64) -> bool {
-        (self.boards.panes.get_mut(&pane)).is_some_and(|board| board.scroll(lines))
+        (self.boards.panes.get_mut(&pane)).is_some_and(|board| board.click(row, clicks == 2))
     }
 
     /// `:Board NAME`: opens the board called `name`, as the workspace shown

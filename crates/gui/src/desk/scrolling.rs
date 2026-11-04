@@ -32,7 +32,7 @@ impl Desk {
         if !lines.is_finite() || lines == 0.0 {
             return Some(false);
         }
-        let pane = self.placement()?.pane_at(point)?;
+        let pane = self.wheel_target(point)?;
         let (kind, room, unit) = self.scroll_target(pane, lines > 0.0, modifiers)?;
         let mut disarmed = false;
         if let Kind::Chat(terminal) = kind
@@ -80,46 +80,40 @@ impl Desk {
         up: bool,
         modifiers: Modifiers,
     ) -> Option<(Kind, bool, f64)> {
-        if let Some(editor) = self.editor(pane) {
-            if let Some((at, end, line)) = editor.rendered_wheel_metrics() {
-                return Some((
-                    Kind::Markdown,
+        use super::view::PaneView;
+        match self.pane_view(pane)? {
+            PaneView::Editor(_, editor, copy) => {
+                if let Some((at, end, line)) = editor.rendered_wheel_metrics() {
+                    Some((
+                        Kind::Markdown,
+                        if up { at > 0.0 } else { at < end },
+                        f64::from(line),
+                    ))
+                } else {
+                    Some((Kind::Rows, editor.native_scroll_room(up, copy), 1.0))
+                }
+            }
+            PaneView::Explorer(_, view) => Some((Kind::Rows, view.native_scroll_room(up), 1.0)),
+            PaneView::Board(_, view) => Some((Kind::Rows, view.native_scroll_room(up), 1.0)),
+            PaneView::Review(_, view) => Some((Kind::Rows, view.native_scroll_room(up), 1.0)),
+            PaneView::Chat(terminal, chat) => {
+                if modifiers.shift {
+                    return None;
+                }
+                let (at, end, line) = chat.view().wheel_metrics()?;
+                Some((
+                    Kind::Chat(terminal),
                     if up { at > 0.0 } else { at < end },
-                    f64::from(line),
-                ));
+                    f64::from(line) * 3.0,
+                ))
             }
-            let copy = self.editors.buffers.get(&editor.buffer())?;
-            return Some((Kind::Rows, editor.native_scroll_room(up, copy), 1.0));
+            PaneView::Terminal(_, view) => Some((
+                Kind::Rows,
+                view.native_scroll_room(up, modifiers.shift)?,
+                1.0,
+            )),
+            PaneView::Browser(_) | PaneView::Other(_) => None,
         }
-        if let Some(explorer) = self.explorer(pane) {
-            return Some((Kind::Rows, explorer.native_scroll_room(up), 1.0));
-        }
-        if let Some(board) = self.board(pane) {
-            return Some((Kind::Rows, board.native_scroll_room(up), 1.0));
-        }
-        if let Some(review) = self.review(pane) {
-            return Some((Kind::Rows, review.native_scroll_room(up), 1.0));
-        }
-        let (_, _, layout) = self.workspaces.find_pane(pane)?;
-        let terminal = layout.content.terminal()?;
-        if let Some(chat) = self.chats.get(&terminal) {
-            if modifiers.shift {
-                return None;
-            }
-            let (at, end, line) = chat.view().wheel_metrics()?;
-            return Some((
-                Kind::Chat(terminal),
-                if up { at > 0.0 } else { at < end },
-                f64::from(line) * 3.0,
-            ));
-        }
-        Some((
-            Kind::Rows,
-            self.panes
-                .get(&terminal)?
-                .native_scroll_room(up, modifiers.shift)?,
-            1.0,
-        ))
     }
 
     pub(crate) fn scroll_wakes(&self) -> Option<Instant> {

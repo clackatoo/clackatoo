@@ -46,23 +46,10 @@ impl Desk {
             self.mapped_shortcuts(&mut context);
             return context;
         }
-        let mut context = if let Some((editor, _)) = self.focused_editor() {
-            editor.shortcut_context()
-        } else if let Some(explorer) = self.focused_explorer() {
-            explorer.shortcut_context()
-        } else if let Some(board) = self.focused_board() {
-            board.shortcut_context()
-        } else if let Some(review) = self.focused_review() {
-            review.shortcut_context()
-        } else if let Some(browser) = self.focused_browser() {
-            browser.shortcut_context()
-        } else if let Some(chat) = chat {
-            chat.shortcut_context()
-        } else if let Some(pane) = self.focused_terminal().and_then(|id| self.pane(id)) {
-            pane.shortcut_context()
-        } else {
-            Context::new("Window", &[])
-        };
+        let mut context = self.focused_view().map_or_else(
+            || Context::new("Window", &[]),
+            super::view::PaneView::shortcut_context,
+        );
         self.lesson_shortcuts(&mut context);
         self.listing_shortcuts(&mut context);
         if self.key_mode() == crate::keymap::KeyMode::Normal && !self.pane_pending() {

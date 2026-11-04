@@ -199,3 +199,125 @@ fn pane_status_and_focus_timing() {
         println!("{name} focus median: {} ns", samples[3]);
     }
 }
+
+#[test]
+fn middle_click_pastes_into_each_list_search_and_focuses_display_only_panes() {
+    for content in [
+        Content::Files(FilesId(1)),
+        Content::Board(BoardId(1)),
+        Content::Review(ReviewId(1)),
+    ] {
+        let mut desk = showing(content);
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "/needle");
+        let outcome = desk.mouse(
+            [500.0, 100.0],
+            MouseAction::Press(MouseButton::Middle),
+            1,
+            Modifiers::default(),
+        );
+        assert!(outcome.paste_primary, "{content:?}");
+        desk.paste(" paste\ntext");
+        let Status::Typing { text, .. } = desk.status() else {
+            panic!("missing search")
+        };
+        assert!(text.contains("needle paste text"), "{content:?}: {text}");
+    }
+    let mut desk = showing(Content::Browser(TerminalId(9)));
+    let outcome = desk.mouse(
+        [500.0, 100.0],
+        MouseAction::Press(MouseButton::Middle),
+        1,
+        Modifiers::default(),
+    );
+    assert_eq!(shown_pane(&desk), PaneId(2));
+    assert!(!outcome.paste_primary);
+    assert!(!desk.wheel([500.0, 100.0], -3, Modifiers::default()));
+    assert_eq!(desk.text_goes_to(), None);
+    assert!(desk.focused_key_state().is_none());
+}
+
+#[test]
+fn middle_click_focuses_an_editor_and_preserves_terminal_mouse_reporting() {
+    let mut desk = showing(Content::Buffer(BufferId(8)));
+    load(&mut desk, 8, "/p/other.txt", "other\n");
+    let outcome = desk.mouse(
+        [500.0, 100.0],
+        MouseAction::Press(MouseButton::Middle),
+        1,
+        Modifiers::default(),
+    );
+    assert!(outcome.paste_primary);
+    assert_eq!(shown_pane(&desk), PaneId(2));
+    desk.paste("pasted ");
+    assert!(editor_text(&desk).contains("pasted "));
+    ctrl(&mut desk, "h");
+    assert_eq!(editor_text(&desk), "one\ntwo\n");
+
+    let mut desk = showing(Content::Terminal(TerminalId(2)));
+    let mut term = Terminal::new(Size::new(40, 23).unwrap(), &Config::default());
+    term.advance(b"\x1b[?1000h\x1b[?1006h");
+    desk.view_changed(TerminalId(2), &ViewUpdate::Snapshot(View::capture(&term)));
+    ctrl(&mut desk, "l");
+    type_keys(&mut desk, "i");
+    desk.take_outbox();
+    let outcome = desk.mouse(
+        [500.0, 100.0],
+        MouseAction::Press(MouseButton::Middle),
+        1,
+        Modifiers::default(),
+    );
+    assert!(!outcome.paste_primary);
+    assert!(
+        answer_all(&mut desk)
+            .iter()
+            .any(|r| matches!(r, Request::SendInput { .. }))
+    );
+    let outcome = desk.mouse(
+        [500.0, 100.0],
+        MouseAction::Press(MouseButton::Middle),
+        1,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert!(outcome.paste_primary);
+}
+
+/// Compare routing cost on the same machine and build profile; no timing gate.
+#[test]
+#[ignore = "manual input dispatch timing"]
+fn pane_input_dispatch_timing() {
+    use std::{hint::black_box, time::Instant};
+    for (name, content, chat) in [
+        ("terminal", Content::Terminal(TerminalId(2)), false),
+        ("chat", Content::Terminal(TerminalId(2)), true),
+        ("editor", Content::Buffer(BufferId(8)), false),
+        ("explorer", Content::Files(FilesId(1)), false),
+        ("board", Content::Board(BoardId(1)), false),
+        ("review", Content::Review(ReviewId(1)), false),
+        ("browser", Content::Browser(TerminalId(9)), false),
+    ] {
+        let mut desk = showing(content);
+        match content {
+            Content::Terminal(_) if chat => chat_snapshot(&mut desk),
+            Content::Terminal(_) => snapshot(&mut desk, 2),
+            Content::Buffer(_) => load(&mut desk, 8, "/p/other.txt", "other\n"),
+            _ => {}
+        }
+        desk.show_pane(PaneId(2));
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            for _ in 0..10_000 {
+                black_box(black_box(&desk).text_goes_to());
+                black_box(black_box(&desk).pane_pending());
+                black_box(black_box(&mut desk).wheel([500.0, 100.0], 1, Modifiers::default()));
+            }
+            samples.push(start.elapsed().as_nanos() / 10_000);
+        }
+        samples.sort_unstable();
+        println!("{name} input routing median: {} ns", samples[3]);
+    }
+}

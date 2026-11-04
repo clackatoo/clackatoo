@@ -140,11 +140,6 @@ impl Desk {
         self.explorers.panes.get(&self.shown?.pane)
     }
 
-    /// The same, to change.
-    pub(super) fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
-        self.explorers.panes.get_mut(&self.shown?.pane)
-    }
-
     /// Makes an explorer for every pane showing one in the workspace
     /// shown, and attaches to them; forgets those of panes gone, keeping
     /// how each was shown, by its root.
@@ -413,11 +408,6 @@ impl Desk {
             self.explorer_asked(pane, ask);
         }
         redraw
-    }
-
-    /// Scrolls the explorer `pane` by `lines`, as the wheel does.
-    pub(super) fn explorer_wheel(&mut self, pane: PaneId, lines: i64) -> bool {
-        (self.explorers.panes.get_mut(&pane)).is_some_and(|explorer| explorer.scroll(lines))
     }
 
     /// Does what the explorer `pane` asked.

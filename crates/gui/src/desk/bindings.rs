@@ -58,7 +58,7 @@
 
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Side, TerminalId, WorkspaceId};
+use clackatoo_protocol::{Side, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place, ReviewWhich};
@@ -395,17 +395,6 @@ const DIRECTIONS: [(char, Direction); 4] = [
     ('l', Direction::Right),
 ];
 
-/// The kinds of pane whose keys the desk asks about (see [`KeyState`]).
-#[derive(Clone, Copy)]
-enum WithKeys {
-    Editor,
-    Explorer,
-    Board,
-    Review,
-    Chat(TerminalId),
-    Terminal(TerminalId),
-}
-
 impl Desk {
     /// Whether the panes are numbered on screen: while keys wait for a
     /// pane's number, as after Ctrl+B p, or for keys that lead to one, as
@@ -555,46 +544,14 @@ impl Desk {
         self.suggest_completion();
     }
 
-    /// Which kind of pane with keys the focused one is.
-    fn focused_with_keys(&self) -> Option<WithKeys> {
-        Some(if self.focused_editor().is_some() {
-            WithKeys::Editor
-        } else if self.focused_explorer().is_some() {
-            WithKeys::Explorer
-        } else if self.focused_board().is_some() {
-            WithKeys::Board
-        } else if self.focused_review().is_some() {
-            WithKeys::Review
-        } else if let Some(chat) = self.focused_chat() {
-            WithKeys::Chat(chat.terminal())
-        } else {
-            WithKeys::Terminal(self.focused_terminal()?)
-        })
-    }
-
-    /// The focused pane's keys, if it reads any: an editor's, a
-    /// terminal's or a chat's, an explorer's, a board's or a review's.
+    /// The focused pane's keys, if it reads commands.
     pub(super) fn focused_key_state(&self) -> Option<&dyn KeyState> {
-        Some(match self.focused_with_keys()? {
-            WithKeys::Editor => self.focused_editor()?.0,
-            WithKeys::Explorer => self.focused_explorer()?,
-            WithKeys::Board => self.focused_board()?,
-            WithKeys::Review => self.focused_review()?,
-            WithKeys::Chat(terminal) => self.chats.get(&terminal)?,
-            WithKeys::Terminal(terminal) => self.panes.get(&terminal)?,
-        })
+        self.focused_view()?.key_state()
     }
 
     /// The same, to change.
     fn focused_key_state_mut(&mut self) -> Option<&mut dyn KeyState> {
-        Some(match self.focused_with_keys()? {
-            WithKeys::Editor => self.focused_editor_mut()?,
-            WithKeys::Explorer => self.focused_explorer_mut()?,
-            WithKeys::Board => self.focused_board_mut()?,
-            WithKeys::Review => self.focused_review_mut()?,
-            WithKeys::Chat(terminal) => self.chats.get_mut(&terminal)?,
-            WithKeys::Terminal(terminal) => self.panes.get_mut(&terminal)?,
-        })
+        self.focused_view()?.focus().key_state_mut(self)
     }
 
     /// Whether the focused pane has a command half typed, which the next

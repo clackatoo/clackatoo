@@ -122,13 +122,8 @@ pub(crate) fn go<O>(list: &mut impl ListRows, paging: &mut Paging, command: &Com
 /// wheel does, the cursor kept in view. Returns whether the view moved.
 pub(crate) fn wheel(list: &mut impl ListRows, lines: i64) -> bool {
     let top = list.top();
-    let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
     let final_item = list.len().saturating_sub(1);
-    list.set_top(if lines < 0 {
-        top.saturating_sub(by)
-    } else {
-        top.saturating_add(by).min(final_item)
-    });
+    list.set_top(wheel_top(top, final_item, lines));
     if list.top() == top {
         return false;
     }
@@ -138,6 +133,17 @@ pub(crate) fn wheel(list: &mut impl ListRows, lines: i64) -> bool {
     // the list's end.
     list.set_cursor(list.cursor().max(shown.start).min(bottom).min(final_item));
     true
+}
+
+/// Moves a viewport by physical rows or logical items, bounded at each end.
+/// Boards use physical rows because a single entry can wrap across a page.
+pub(crate) fn wheel_top(top: usize, last: usize, lines: i64) -> usize {
+    let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
+    if lines < 0 {
+        top.saturating_sub(by)
+    } else {
+        top.saturating_add(by).min(last)
+    }
 }
 
 /// Scrolls `list` as little as puts the cursor's item in view.

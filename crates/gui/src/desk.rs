@@ -573,37 +573,7 @@ impl Desk {
         if self.input.is_some() || self.finding() {
             return Some(TextTarget::Bar);
         }
-        if let Some((editor, _)) = self.focused_editor() {
-            return if editor.prompting() {
-                Some(TextTarget::Bar)
-            } else {
-                (editor.mode == Mode::Insert).then_some(TextTarget::Pane)
-            };
-        }
-        if let Some(explorer) = self.focused_explorer() {
-            return explorer.prompting().then_some(TextTarget::Bar);
-        }
-        if let Some(board) = self.focused_board() {
-            return board.prompting().then_some(TextTarget::Bar);
-        }
-        if let Some(review) = self.focused_review() {
-            return review.prompting().then_some(TextTarget::Bar);
-        }
-        if self.focused_browser().is_some() {
-            return None;
-        }
-        if let Some(chat) = self.focused_chat() {
-            if chat.prompting() {
-                return Some(TextTarget::Bar);
-            }
-            return chat.takes_text().then_some(TextTarget::Pane);
-        }
-        let pane = self.pane(self.focused_terminal()?)?;
-        if pane.prompting() {
-            Some(TextTarget::Bar)
-        } else {
-            (pane.mode == Mode::Insert).then_some(TextTarget::Pane)
-        }
+        self.focused_view()?.text_target()
     }
 
     /// Whether one of the window's own prompts has the keys: the command
@@ -2144,19 +2114,23 @@ impl Desk {
     /// unless it stops a macro being recorded. Returns whether the window
     /// must be redrawn, or `None` if the focused pane is none of them.
     fn list_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
-        if self.focused_browser().is_some() {
+        let view = self.focused_view()?.focus();
+        if matches!(view, view::Focus::Browser) {
             return Some(self.browser_key(press));
         }
-        let list = self.focused_explorer().is_some()
-            || self.focused_board().is_some()
-            || self.focused_review().is_some();
-        if !list {
+        if !matches!(
+            view,
+            view::Focus::Explorer(_) | view::Focus::Board(_) | view::Focus::Review(_)
+        ) {
             return None;
         }
         let redraw = self.stop_recording_in_pane(press)
-            || self.explorer_key(press)
-            || self.board_key(press)
-            || self.review_key(press);
+            || match view {
+                view::Focus::Explorer(_) => self.explorer_key(press),
+                view::Focus::Board(_) => self.board_key(press),
+                view::Focus::Review(_) => self.review_key(press),
+                _ => false,
+            };
         // A search that found nothing stops a macro or a binding, as
         // Vim's beep does.
         let failed = self
@@ -2196,67 +2170,29 @@ impl Desk {
             self.suggest_completion();
         } else if self.finding() {
             self.paste_into_finder(text);
-        } else if !self.paste_into_editor(text) && !self.paste_into_list(text) {
-            if let Some(chat) = self.focused_chat_mut() {
-                // Into the search being typed, if one is, as its bar's
-                // line is the command line's.
-                match chat.search_line() {
-                    Some(line) => line.put(text),
-                    None => chat.paste(text),
-                }
-            } else if let Some(pane) = self.focused_pane() {
-                // Into the search being typed, if one is, not the program.
-                if !pane.paste_into_search(text) {
-                    pane.paste(text);
-                }
-            }
+        } else if let Some(view) = self.focused_view().map(view::PaneView::focus) {
+            view.paste(self, text);
         }
     }
 
-    /// Pastes `text` into what's typed in the focused explorer's, board's
-    /// or review's bar. Returns whether it went there: not with nothing
-    /// typed, nor in a pane of none of them.
-    fn paste_into_list(&mut self, text: &str) -> bool {
-        if let Some(explorer) = self.focused_explorer_mut() {
-            return explorer.paste(text);
-        }
-        if let Some(board) = self.focused_board_mut() {
-            return board.paste(text);
-        }
-        if let Some(review) = self.focused_review_mut() {
-            return review.paste(text);
-        }
-        false
+    /// The pane under the pointer, or the focused pane over a bar or gap.
+    /// Both discrete and smooth wheel input use this same target.
+    fn wheel_target(&self, point: [f32; 2]) -> Option<PaneId> {
+        self.placement()?
+            .pane_at(point)
+            .or(self.shown.map(|shown| shown.pane))
     }
 
-    /// Scrolls the pane at `point` `lines` up, or down if negative, as the
-    /// mouse wheel does. Returns whether the window must be redrawn.
+    /// Scrolls the pane at `point` `lines` up, or down if negative.
     pub(crate) fn wheel(&mut self, point: [f32; 2], lines: i64, modifiers: Modifiers) -> bool {
-        if let Some((pane, _)) = self.editor_at(point) {
-            return self.editor_wheel(pane, lines);
-        }
-        if let Some((pane, _)) = self.explorer_at(point) {
-            return self.explorer_wheel(pane, lines);
-        }
-        if let Some((pane, _)) = self.board_at(point) {
-            return self.board_wheel(pane, lines);
-        }
-        if let Some((pane, _)) = self.review_at(point) {
-            return self.review_wheel(pane, lines);
-        }
-        // Away from the panes, as over the bars, the focused pane scrolls.
-        let Some((terminal, cell, pixel)) = self
-            .cell_at(point, None)
-            .or_else(|| Some((self.focused_terminal()?, [0, 0], [-1.0; 2])))
+        let Some(view) = self
+            .wheel_target(point)
+            .and_then(|pane| self.pane_view(pane))
+            .map(view::PaneView::focus)
         else {
             return false;
         };
-        if let Some(chat) = self.chats.get_mut(&terminal) {
-            return chat.wheel(lines, pixel, modifiers);
-        }
-        self.panes
-            .get_mut(&terminal)
-            .is_some_and(|pane| pane.wheel(lines, cell, modifiers))
+        view.wheel(self, point, lines, modifiers)
     }
 
     // --- The mouse --------------------------------------------------------
@@ -2286,49 +2222,24 @@ impl Desk {
             return outcome;
         }
         if self.dragging.is_none()
-            && let Some((pane, cell)) = self.editor_at(point)
+            && let Some(pane) = self.placement().and_then(|p| p.pane_at(point))
+            && let Some(view) = self.pane_view(pane).map(view::PaneView::focus)
+            && !matches!(view, view::Focus::Chat(_) | view::Focus::Terminal(_))
         {
             outcome.redraw |= self.mouse_left();
-            if let MouseAction::Press(MouseButton::Left) = action {
-                let focused = self.focus_at(point);
-                // Rendered Markdown takes a click on a link, and selects
-                // nothing.
-                let clicked = self.rendered_click(point)
-                    || self.editor_press(pane, cell, clicks, modifiers.alt);
-                outcome.redraw = focused | clicked;
-            }
-            return outcome;
-        }
-        if self.dragging.is_none()
-            && let Some((pane, cell)) = self.explorer_at(point)
-        {
-            outcome.redraw |= self.mouse_left();
-            if let MouseAction::Press(MouseButton::Left) = action {
-                let focused = self.focus_at(point);
-                let clicked = self.acting_from_list(|desk| desk.explorer_click(pane, cell, clicks));
-                outcome.redraw = focused | clicked;
-            }
-            return outcome;
-        }
-        if self.dragging.is_none()
-            && let Some((pane, cell)) = self.board_at(point)
-        {
-            outcome.redraw |= self.mouse_left();
-            if let MouseAction::Press(MouseButton::Left) = action {
-                let focused = self.focus_at(point);
-                let clicked = self.acting_from_list(|desk| desk.board_click(pane, cell));
-                outcome.redraw = focused | clicked;
-            }
-            return outcome;
-        }
-        if self.dragging.is_none()
-            && let Some((pane, cell)) = self.review_at(point)
-        {
-            outcome.redraw |= self.mouse_left();
-            if let MouseAction::Press(MouseButton::Left) = action {
-                let focused = self.focus_at(point);
-                let clicked = self.acting_from_list(|desk| desk.review_click(pane, cell, clicks));
-                outcome.redraw = focused | clicked;
+            if let MouseAction::Press(button) = action {
+                outcome.redraw |= self.focus_at(point);
+                match button {
+                    MouseButton::Left => {
+                        if let Some(cell) = self.cell_of(point, pane) {
+                            outcome.redraw |= view.click(self, point, cell, clicks, modifiers);
+                        }
+                    }
+                    MouseButton::Middle => {
+                        outcome.paste_primary = view.takes_paste();
+                    }
+                    _ => {}
+                }
             }
             return outcome;
         }
@@ -2666,29 +2577,6 @@ impl Desk {
         ))
     }
 
-    /// The editor at `point`, and the cell of its view under it.
-    fn editor_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
-        self.cell_in(point, |desk, pane| desk.editor(pane).is_some())
-    }
-
-    /// The explorer at `point`, if there's one there, and the cell of it
-    /// there, as [`editor_at`](Self::editor_at) finds an editor's.
-    fn explorer_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
-        self.cell_in(point, |desk, pane| desk.explorer(pane).is_some())
-    }
-
-    /// The review at `point`, if there's one there, and the cell of it
-    /// there.
-    fn review_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
-        self.cell_in(point, |desk, pane| desk.review(pane).is_some())
-    }
-
-    /// The board pane at `point`, if there's one there, and the cell of it
-    /// there.
-    fn board_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
-        self.cell_in(point, |desk, pane| desk.board(pane).is_some())
-    }
-
     /// The cell of `pane`'s tile at `point`, as its line and column, which
     /// is off the tile if `point` is, as a drag out of it goes: if the pane
     /// is shown.
@@ -2706,20 +2594,6 @@ impl Desk {
             ),
             cell(point[0] - tile.origin[0], area.cell[0]),
         ])
-    }
-
-    /// The pane at `point`, if `wanted` takes it, and the cell of it there,
-    /// as its line and column.
-    fn cell_in(
-        &self,
-        point: [f32; 2],
-        wanted: impl Fn(&Self, PaneId) -> bool,
-    ) -> Option<(PaneId, [i64; 2])> {
-        let id = self.placement()?.pane_at(point)?;
-        if !wanted(self, id) {
-            return None;
-        }
-        Some((id, self.cell_of(point, id)?))
     }
 
     /// Focuses the pane beside the focused one towards `direction`, if

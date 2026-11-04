@@ -1157,6 +1157,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Explorer, board and review share key handling for counts, paging, searches and unfinished prompts",
     },
+    News {
+        id: "pane-pointer",
+        date: "2026-11-04",
+        lesson: "explorer",
+        what: "Wheel over bars and middle-click paste work across panes; double-click a board entry to edit",
+    },
 ];
 
 impl News {

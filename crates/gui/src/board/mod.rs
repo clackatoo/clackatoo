@@ -370,8 +370,12 @@ impl BoardPane {
     }
 
     /// A click on row `row` of the pane: the cursor goes to the entry
-    /// drawn there. Returns whether it should be drawn again.
-    pub(crate) fn click(&mut self, row: usize) -> bool {
+    /// drawn there, and a double click edits it. An open prompt keeps its
+    /// draft and cursor. Returns whether it should be drawn again.
+    pub(crate) fn click(&mut self, row: usize, double: bool) -> bool {
+        if self.prompting() {
+            return false;
+        }
         let Some(line) = row.checked_sub(1).map(|row| self.top + row) else {
             return false;
         };
@@ -379,18 +383,16 @@ impl BoardPane {
             return false;
         };
         self.go_to(entry);
+        if double {
+            self.ask_edit();
+        }
         true
     }
 
     /// Scrolls `lines` down, or up if it's negative, as the wheel does.
     pub(crate) fn scroll(&mut self, lines: i64) -> bool {
-        let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
         let last = self.lines.len().saturating_sub(self.list_height());
-        let top = if lines < 0 {
-            self.top.saturating_sub(by)
-        } else {
-            self.top.saturating_add(by).min(last)
-        };
+        let top = list::wheel_top(self.top, last, lines);
         if top == self.top {
             return false;
         }

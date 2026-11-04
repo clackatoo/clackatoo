@@ -50,11 +50,6 @@ impl Desk {
         self.reviews.panes.get(&self.shown?.pane)
     }
 
-    /// The same, to change.
-    pub(super) fn focused_review_mut(&mut self) -> Option<&mut Review> {
-        self.reviews.panes.get_mut(&self.shown?.pane)
-    }
-
     /// Makes a review for every pane showing one in the workspace shown,
     /// and attaches to them; forgets those of panes gone.
     pub(super) fn attach_shown_reviews(&mut self) {
@@ -183,11 +178,6 @@ impl Desk {
             self.review_asked(pane, ask);
         }
         redraw
-    }
-
-    /// Scrolls the review `pane` by `lines`, as the wheel does.
-    pub(super) fn review_wheel(&mut self, pane: PaneId, lines: i64) -> bool {
-        (self.reviews.panes.get_mut(&pane)).is_some_and(|review| review.scroll(lines))
     }
 
     /// Does what the review `pane` asked.

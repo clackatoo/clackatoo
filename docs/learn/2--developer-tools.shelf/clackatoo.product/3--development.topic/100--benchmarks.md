@@ -171,6 +171,17 @@ The default test profile is unoptimised: these numbers help find changes in
 dispatch cost, but do not measure release frame latency. There is no timing
 assertion because a shared machine's load varies.
 
+The ignored `pane_input_dispatch_timing` test measures text-target lookup,
+pending-key lookup and one wheel event together for the same pane kinds:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clackatoo-gui --lib pane_input_dispatch_timing --locked -- --ignored --nocapture
+```
+
+Each sample is a batch of 10,000 routing sequences; the report takes the
+median of seven batches. The same build-profile and idle-machine rules apply.
+This measures routing, not rendering or a populated pane's scrolling throughput.
+
 ## List input
 
 Explorer, Board and Review use `vim::list::ListPane` for key parsing,
