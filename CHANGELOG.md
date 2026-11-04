@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.7 (2026-11-04)
+
+### Features
+
+- **chat:** share Vim motions and restore visual selections (910f98b2)
+
 ## 2026.11.6 (2026-11-04)
 
 ### Fixes
