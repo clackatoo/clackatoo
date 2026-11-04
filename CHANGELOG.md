@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026.11.5 (2026-11-04)
+
+Nothing to note: tests, chores and tidying.
+
 ## 2026.11.4 (2026-11-04)
 
 ### Fixes
