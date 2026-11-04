@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.9 (2026-11-04)
+
+### Fixes
+
+- **remote:** preserve federated panes and edit receipts across upgrades (8a510d0b)
+
 ## 2026.11.8 (2026-11-04)
 
 ### Features
