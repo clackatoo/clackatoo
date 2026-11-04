@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.8 (2026-11-04)
+
+### Features
+
+- **vim:** share macros, marks and jump history across panes (e45e9f43)
+
 ## 2026.11.7 (2026-11-04)
 
 ### Features
