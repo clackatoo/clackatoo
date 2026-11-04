@@ -689,6 +689,25 @@ impl ChatView {
         (best, any)
     }
 
+    /// Reopen the same folded content that a search would reveal.
+    pub(super) fn reveal_piece(&mut self, turn: usize, piece: usize) {
+        let activities = self.activities_of(turn);
+        let Some(piece) = self
+            .pieces_of(turn, &activities)
+            .into_iter()
+            .find(|p| p.piece == piece)
+        else {
+            return;
+        };
+        if piece.fold {
+            self.set_fold(turn, true);
+        }
+        if !piece.cards.is_empty() {
+            self.open_cards.extend(piece.cards);
+            self.restyled(turn);
+        }
+    }
+
     /// The pieces of turn `turn` a search looks through, in the order
     /// they show: its message, its items and the cards of `activities`,
     /// and what must open for each to show.
@@ -920,6 +939,9 @@ impl Searcher for Searching<'_> {
     /// For a search done, the view follows the selection.
     fn go(&mut self, found: Position) {
         let chat = &mut *self.chat;
+        if !chat.search.typing() && chat.cursor != Some(found) {
+            chat.left_place = chat.place();
+        }
         chat.go(found);
         chat.goal = None;
         if !chat.search.typing() {

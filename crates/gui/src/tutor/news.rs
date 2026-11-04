@@ -1169,6 +1169,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Chat shares Vim word rules, adds motions and visual objects, and restores selections with gv",
     },
+    News {
+        id: "pane-places",
+        date: "2026-11-04",
+        lesson: "registers",
+        what: "Macros, marks and jump history work in terminals, chats and lists; Q closes list panes",
+    },
 ];
 
 impl News {

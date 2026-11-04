@@ -93,7 +93,7 @@ fn the_keys_line_is_cut_short_with_an_ellipsis_in_a_narrow_pane() {
     assert_eq!(rows(&mut review)[1], "a ke…");
     // It's whole where it fits.
     review.resize(Size::new(120, 30).unwrap());
-    assert!(rows(&mut review)[1].ends_with("q close"));
+    assert!(rows(&mut review)[1].ends_with("Q close"));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn keys_keep_reject_comment_send_and_go_to_the_line() {
         }]
     );
     assert_eq!(keys(&mut review, "S"), [Ask::Act(ReviewAction::Send(CHAT))]);
-    assert_eq!(keys(&mut review, "q"), [Ask::Close]);
+    assert_eq!(keys(&mut review, "Q"), [Ask::Close]);
     // On a comment, x takes it back.
     keys(&mut review, "G");
     assert_eq!(
@@ -533,4 +533,19 @@ fn list_input_timing() {
     pane.resize(Size::new(60, 10).unwrap());
     pane.settle();
     list::input_timing("review", |stroke| pane.stroke(stroke));
+}
+
+#[test]
+fn saved_review_places_follow_files_and_reject_removed_hunks() {
+    let mut review = review();
+    keys(&mut review, "]h");
+    let at = review.saved_place(None).unwrap();
+    let mut changed = list();
+    changed.files.reverse();
+    review.update(changed.clone());
+    assert!(review.show_place(&at));
+    assert_eq!(review.saved_place(None), Some(at.clone()));
+    changed.files.retain(|file| file.path != "/src/a.rs");
+    review.update(changed);
+    assert!(!review.show_place(&at));
 }

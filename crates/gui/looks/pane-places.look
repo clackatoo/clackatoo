@@ -1,0 +1,18 @@
+# Macros and marks in lists, with jump history in the same pane.
+size 1200x800
+file alpha.txt
+file beta.txt
+file gamma.txt
+keys <C-;>:Explore<CR>
+wait-for gamma.txt
+keys ggjmaqaGq
+shot explorer-recorded
+keys `a@a<C-o>
+shot explorer-jump-back
+keys :Board places<CR>
+keys ifirst entry<CR>isecond entry<CR>ithird entry<CR>
+wait-for third entry
+keys ggmaqaGq
+shot board-recorded
+keys `a@a<C-o>
+shot board-jump-back

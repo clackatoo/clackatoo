@@ -12,13 +12,14 @@ mod command;
 pub(crate) mod confirm;
 mod grammar;
 pub(crate) mod list;
+pub(crate) mod place;
 pub(crate) mod search;
 pub(crate) mod shortcuts;
 mod stroke;
 
 pub(crate) use command::{
-    Action, Command, Entry, Finds, Operator, Paging, Recase, Scroll, Target, ViewAt, is_register,
-    page_rows,
+    Action, Command, Entry, Finds, Operator, Paging, Recase, Scroll, Target, ViewAt, WindowAction,
+    is_register, page_rows,
 };
 pub(crate) use grammar::{Dialect, Keys, Parsed, Read, Reader, only_count_and_register, parse};
 pub(crate) use stroke::{
@@ -37,6 +38,10 @@ pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 /// is, to know which mode its bindings are looked up in and whether the
 /// next key is the pane's.
 pub(crate) trait KeyState {
+    fn take_window(&mut self) -> Vec<WindowAction> {
+        Vec::new()
+    }
+
     /// The mode it reads keys in: normal for a pane with no other.
     fn mode(&self) -> Mode;
 
@@ -66,6 +71,10 @@ pub(crate) trait ListKeys {
 }
 
 impl<T: ListKeys> KeyState for T {
+    fn take_window(&mut self) -> Vec<WindowAction> {
+        self.keys_mut().take_window()
+    }
+
     fn mode(&self) -> Mode {
         Mode::Normal
     }

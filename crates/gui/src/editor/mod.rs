@@ -432,6 +432,8 @@ pub(crate) struct Editor {
     /// How much of the start of a line is hidden, if any is, as a folder's
     /// listing hides each line's mark.
     hide: Option<fn(&str) -> usize>,
+    /// Folder listings keep named marks by entry in the window.
+    pub(crate) window_marks: bool,
     /// Which lines `r` and `J` leave as they are, if any are, as a folder's
     /// listing's `..`, which names nothing as it is.
     keep: Option<fn(&str) -> bool>,
@@ -757,6 +759,7 @@ impl Editor {
             seen: None,
             kept: Kept::default(),
             hide: None,
+            window_marks: false,
             keep: None,
             height: 1,
             width: 1,
@@ -1655,6 +1658,13 @@ impl Editor {
         shared: &mut Shared,
         again: bool,
     ) -> Done {
+        if self.window_marks
+            && self.mode == Mode::Normal
+            && matches!(command.action, Action::SetMark(_) | Action::Mark { .. })
+        {
+            self.keys.window(&command);
+            return Done::REDRAW;
+        }
         if self.waits_for_grammar(command, copy, &shared.marks) {
             return Done::default();
         }
@@ -1755,6 +1765,14 @@ impl Editor {
             Action::OtherEnd => self.other_end(),
             Action::OtherCorner => self.other_corner(copy),
             Action::Select { object, inner } => self.select(object, inner, times, copy),
+            Action::Record(name) => shared.registers.record(name),
+            Action::Replay(name) => match shared.registers.macro_keys(name) {
+                Ok(keys) => self.macro_asked = Some((keys, times)),
+                Err(why) => {
+                    self.status = Some(why);
+                    self.fail();
+                }
+            },
             Action::SetMark(mark) => self.set_mark(mark, copy, &mut shared.marks),
             Action::Mark { mark, exact } => self.go_to_mark(mark, exact, copy, &shared.marks),
             Action::Own(own) => self.own(own, times, copy, shared),
@@ -1800,14 +1818,6 @@ impl Editor {
             EditorAction::Rename => self.rename_here(copy),
             EditorAction::CodeActions => self.ask_actions(copy),
             EditorAction::FormatSelection => self.format_selection(copy),
-            EditorAction::Record(name) => shared.registers.record(name),
-            EditorAction::Replay(name) => match shared.registers.macro_keys(name) {
-                Ok(keys) => self.macro_asked = Some((keys, times)),
-                Err(why) => {
-                    self.status = Some(why);
-                    self.fail();
-                }
-            },
             EditorAction::RepeatSubstitute { all } => self.repeat_substitute(all, copy, shared),
             EditorAction::Escape => self.escape(),
         }
@@ -5431,6 +5441,14 @@ impl Editor {
     /// character that isn't blank. A mark in another file is for the desk
     /// to open, which a macro being typed can't wait for, so it stops.
     fn go_to_mark(&mut self, mark: char, exact: bool, copy: &BufferCopy, marks: &Marks) {
+        if marks.external(mark) && self.mode == Mode::Normal {
+            self.keys.window(&Command {
+                action: Action::Mark { mark, exact },
+                count: None,
+                register: None,
+            });
+            return;
+        }
         if let Some(place) = marks.get(previous(mark), copy.file())
             && !place.is_in(copy.file())
             && self.mode == Mode::Normal
@@ -6984,6 +7002,9 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
 }
 
 impl vim::KeyState for Editor {
+    fn take_window(&mut self) -> Vec<vim::WindowAction> {
+        self.keys.take_window()
+    }
     fn mode(&self) -> Mode {
         self.mode
     }

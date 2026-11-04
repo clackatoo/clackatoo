@@ -25,6 +25,7 @@ mod navigation;
 mod paint;
 mod pane;
 mod picker;
+mod places;
 mod prompts;
 mod queue;
 mod read;
@@ -93,6 +94,10 @@ enum Input {
     YankText(Yanked),
     /// Restore a saved selection whose turns need laying out first.
     Reselect,
+    Place {
+        at: crate::vim::place::ChatPlace,
+        exact: bool,
+    },
     /// Searches for the last search again from `from`, `count` times,
     /// backward if `backward` (see [`search`]).
     Search {
@@ -400,6 +405,8 @@ pub(crate) struct ChatView {
     /// Text selected in the conversation.
     picked: Option<Picked>,
     last_visual: Option<Picked>,
+    place_generation: u64,
+    left_place: Option<crate::vim::place::ChatPlace>,
     motion_cache: navigation::MotionCache,
     start_of_line: bool,
     scroll_margin: u32,
@@ -645,6 +652,8 @@ impl ChatView {
             shown: Vec::new(),
             picked: None,
             last_visual: None,
+            place_generation: 0,
+            left_place: None,
             motion_cache: navigation::MotionCache::default(),
             start_of_line: false,
             scroll_margin: 5,
@@ -1554,7 +1563,8 @@ impl ChatView {
                 input @ (Input::Yank { .. }
                 | Input::YankText(_)
                 | Input::Search { .. }
-                | Input::Reselect) => {
+                | Input::Reselect
+                | Input::Place { .. }) => {
                     self.settle_reading(fonts, input, &mut settled);
                 }
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),

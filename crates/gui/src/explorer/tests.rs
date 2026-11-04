@@ -420,7 +420,7 @@ fn files_are_opened_and_operated_on_as_asked() {
         })]
     );
     // x and y keep what's at the cursor; p puts it where the cursor is.
-    keys(&mut explorer, "xkp<Esc>q");
+    keys(&mut explorer, "xkp<Esc>Q");
     assert_eq!(
         explorer.take_asks(),
         [
@@ -699,7 +699,7 @@ fn g_question_lists_the_keys_at_the_foot_and_again_hides_them() {
             "zR expand all",
             "zM collapse all · Ctrl+V split",
             "Ctrl+S below · Ctrl+T tab",
-            "q close · g? hide keys",
+            "Q close · g? hide keys",
         ],
         "a key and what it does kept together, as many to a row as fit"
     );
@@ -1432,4 +1432,19 @@ fn leaving_keeps_a_name_or_confirmation_without_turning_it_into_navigation() {
         "a confirmation accepts only y/Y"
     );
     assert_eq!(at(&mut pane), "/p/old.txt");
+}
+
+#[test]
+fn saved_paths_reveal_hidden_items_and_refuse_known_deleted_items() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, vec![file(".hidden"), file("visible")]);
+    keys(&mut explorer, ".ggj");
+    assert_eq!(at(&mut explorer), "/p/.hidden");
+    let saved = explorer.saved_place(None).unwrap();
+    keys(&mut explorer, ".");
+    assert!(explorer.show_place(&saved));
+    assert_eq!(at(&mut explorer), "/p/.hidden");
+    listed(&mut explorer, "/p", vec![file("visible")]);
+    assert!(!explorer.show_place(&saved));
+    assert_eq!(at(&mut explorer), "/p/visible");
 }

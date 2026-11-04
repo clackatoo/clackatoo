@@ -550,7 +550,7 @@ impl Desk {
     }
 
     /// The same, to change.
-    fn focused_key_state_mut(&mut self) -> Option<&mut dyn KeyState> {
+    pub(super) fn focused_key_state_mut(&mut self) -> Option<&mut dyn KeyState> {
         self.focused_view()?.focus().key_state_mut(self)
     }
 

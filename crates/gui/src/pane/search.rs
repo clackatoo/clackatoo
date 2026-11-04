@@ -142,6 +142,9 @@ impl Searcher for Pane {
     }
 
     fn go(&mut self, found: Match) {
+        if !self.search.typing() && self.cursor.is_some_and(|c| c.at != start_of(found)) {
+            self.left_place = self.place();
+        }
         self.cursor = Some(Cursor::new(start_of(found)));
         self.follow_cursor();
     }

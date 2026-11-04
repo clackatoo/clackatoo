@@ -164,6 +164,10 @@ impl Dialect for TerminalKeys {
             | Action::SearchAgain { .. }
             | Action::Scroll(_)
             | Action::View(_)
+            | Action::Record(_)
+            | Action::Replay(_)
+            | Action::SetMark(_)
+            | Action::Mark { .. }
             | Action::Own(_) => true,
             Action::Operate(..)
             | Action::DeleteChars { .. }
@@ -176,8 +180,6 @@ impl Dialect for TerminalKeys {
             | Action::Redo
             | Action::Repeat
             | Action::SearchWord { .. }
-            | Action::SetMark(_)
-            | Action::Mark { .. }
             | Action::Tilde => false,
         }
     }
@@ -232,6 +234,18 @@ impl Pane {
 
     /// Does `command`, which [`TerminalKeys`] took.
     fn execute(&mut self, command: Command<TerminalAction>) -> bool {
+        let from = self.place();
+        let redraw = self.execute_command(command);
+        if command.jumps() && from != self.place() && !self.failed {
+            self.left_place = from;
+        }
+        redraw
+    }
+
+    fn execute_command(&mut self, command: Command<TerminalAction>) -> bool {
+        if self.keys.window(&command) {
+            return true;
+        }
         let count = command.count;
         let to = CopyTo::Register(command.register);
         match command.action {
@@ -309,6 +323,8 @@ impl Pane {
             | Action::Redo
             | Action::Repeat
             | Action::SearchWord { .. }
+            | Action::Record(_)
+            | Action::Replay(_)
             | Action::SetMark(_)
             | Action::Mark { .. }
             | Action::Tilde => {
@@ -928,4 +944,47 @@ pub(super) fn terminal_control(
             "Send interrupt to terminal program"
         }),
     ))
+}
+
+impl Pane {
+    pub(crate) fn place(&self) -> Option<crate::vim::place::LinePlace> {
+        let at = self.cursor?.at;
+        Some(crate::vim::place::LinePlace {
+            line: at.line,
+            col: at.col,
+            generation: self.place_generation,
+            alternate: self.screen.as_ref()?.state.alternate,
+        })
+    }
+    pub(crate) fn valid_place(&self, at: &crate::vim::place::LinePlace) -> bool {
+        let (first, last) = Document(self).bounds();
+        at.generation == self.place_generation
+            && self
+                .screen
+                .as_ref()
+                .is_some_and(|s| s.state.alternate == at.alternate)
+            && (first..=last).contains(&at.line)
+    }
+    pub(crate) fn show_place(&mut self, at: &crate::vim::place::LinePlace, exact: bool) -> bool {
+        if !self.valid_place(at) {
+            return false;
+        }
+        self.cursor = Some(Cursor::new(Point {
+            line: at.line,
+            col: at.col,
+        }));
+        self.move_cursor(
+            if exact {
+                Motion::Column
+            } else {
+                Motion::FirstNonBlank
+            },
+            exact.then_some(at.col.saturating_add(1)),
+        );
+        self.follow_cursor();
+        true
+    }
+    pub(crate) fn take_left_place(&mut self) -> Option<crate::vim::place::LinePlace> {
+        self.left_place.take()
+    }
 }

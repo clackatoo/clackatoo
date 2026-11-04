@@ -49,7 +49,7 @@ Which folders are open, where the cursor is and what's scrolled to belong to the
 | `/` `?` `n` `N` | Searches the names shown, with the editor's patterns, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
 | `.`, `g.` | Shows hidden files, or hides them |
 | `R` | Lists everything shown again |
-| `q` | Closes the explorer, or stops recording a macro |
+| `Q` | Closes the explorer |
 
 A click puts the cursor on a line, a double click opens it, or goes up from `..`, and the wheel scrolls.
 

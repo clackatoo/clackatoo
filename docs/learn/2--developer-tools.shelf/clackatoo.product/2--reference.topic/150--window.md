@@ -259,7 +259,7 @@ In normal mode, Ctrl+H, Ctrl+J, Ctrl+K and Ctrl+L move to the pane to the left, 
 
 Wherever you go, you arrive in the window's mode. That holds when you move, click, switch tabs or workspaces, jump, or open a pane, and when the pane you were in closes because you closed it, or its program ends just after you typed into it, as after `exit` or Ctrl+D. Arriving in insert mode, a terminal goes back to its live screen and a chat to its message box. An editor types at its cursor once its file's text has come; until then, what you type waits for it, and any other key, such as Esc or Ctrl+B, is had at once in normal mode. A chat that's asking something is arrived at in normal mode, so a key can't answer it by chance. If anything else moves the focus, such as another window or an agent closing the pane or opening a file in it, you arrive in normal mode and the window goes to normal mode, so nothing you type lands where you didn't choose. Leaving a pane ends a selection, a half-typed command, a search or the command line. The pane keeps its place in history, or its cursor.
 
-The window remembers where you've been, as Vim's jump list does: the panes you moved between, and in an [editor](~clackatoo/reference/editor#jumps), the places in files you jumped from.
+The window remembers where you've been, as Vim's jump list does: the panes you moved between, and the places you jumped from in files, folders, terminals, chats and lists. Long moves such as `gg` and `G`, and accepted searches including `n` and `N`, are jumps. Search previews do not add places.
 
 | Keys | In | Does |
 |---|---|---|
@@ -267,6 +267,30 @@ The window remembers where you've been, as Vim's jump list does: the panes you m
 | Ctrl+Shift+O Ctrl+Shift+I | either mode | Back and forward through everywhere: panes, tabs and workspaces. |
 
 Going back first remembers where you are, so going forward comes back to it. Going back and then jumping somewhere new forgets the way forward. Panes that have closed are skipped. Each window has its own list.
+
+### Macros and marks across panes
+
+In normal mode, `q` and a register start recording, `q` stops, and `@a`,
+`3@a` and `@@` replay, in editors, terminals, chats, explorers, boards and
+reviews. The keys can move between panes and continue there. Explorer,
+board and review panes close with `Q` so `q` is available for recording.
+See [macros](~clackatoo/reference/editor#macros) for registers, waiting and
+stopping on a failed command.
+
+`ma` sets a mark in the current file or pane; `mA` sets a window-wide mark.
+Backtick and the letter return to its position, and apostrophe and the letter
+to its line. Capital marks can take you between pane kinds. `''` returns to
+the place before the last jump in this file or pane, and again comes back.
+
+Saved terminal positions follow line numbers while history grows. A new
+snapshot or history renumbering invalidates them. Chat positions use
+absolute turns, so loading older messages preserves them; replacing a branch
+invalidates them. Folded chat content opens when returning to its mark.
+Marks on live activity cards are not kept until their content is part of a
+turn. Boards and reviews restore entries by identity, and an explorer
+remembers its path. Known missing items and closed panes are skipped in
+jump history; a missing named mark reports that its position is unavailable.
+Marks and jump history are local to this window and are not kept on restart.
 
 ### Ctrl+B
 

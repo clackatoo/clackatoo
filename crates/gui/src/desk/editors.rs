@@ -34,6 +34,7 @@ use crate::input::{KeptPress, KeyPress};
 use crate::options::{Clipboard, Options};
 use crate::pane::{Copy, CopyTo, Yanked};
 use crate::vim::Stroke;
+use crate::vim::place::Place as SavedPlace;
 
 /// The editors, by the pane each is, and the buffers they show.
 #[derive(Debug, Default)]
@@ -640,8 +641,7 @@ impl Desk {
             let file = FilePlace::at_line(landing, place.line, place.col, text);
             return Some(Jump {
                 pane,
-                file: Some(file),
-                folder: None,
+                place: SavedPlace::File(file),
             });
         }
         let file = (editors.panes.get(&pane))
@@ -653,27 +653,38 @@ impl Desk {
                 FilePlace::at(copy.file(), copy.text(), byte)
             });
         let folder = self.folder_place(pane);
-        Some(Jump { pane, file, folder })
+        let place = if let Some(at) = folder {
+            SavedPlace::Folder {
+                pane,
+                machine: self.pane_machine(pane),
+                at,
+            }
+        } else if let Some(file) = file {
+            SavedPlace::File(file)
+        } else {
+            self.other_place(pane).unwrap_or(SavedPlace::Pane(pane))
+        };
+        Some(Jump { pane, place })
     }
 
     /// Puts the cursor of the editor `pane` on `place`, once its file's
     /// text is there, opening the file in the pane, as `:e` does, if it
     /// shows another, or is about to.
-    pub(super) fn show_file_place(&mut self, pane: PaneId, place: &FilePlace) {
+    pub(super) fn show_file_place(&mut self, pane: PaneId, place: &FilePlace) -> bool {
         if !self.editors.panes.contains_key(&pane) {
-            return;
+            return false;
         }
         // Not a file on another machine than the pane's, where the same
         // path is another file, if there's one.
         if place.machine != self.pane_machine(pane) {
             self.say("that place is in a file on another machine".into());
-            return;
+            return false;
         }
         // Not into a folder's listing that won't leave, having changes.
         if self.file_in(pane) != Some(place.path.as_str())
             && !self.open_here(pane, place.path.clone())
         {
-            return;
+            return false;
         }
         let location = FileLocation {
             path: place.path.clone(),
@@ -683,6 +694,7 @@ impl Desk {
             text: String::new(),
         };
         self.land_at(pane, location);
+        true
     }
 
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
@@ -1509,12 +1521,6 @@ impl Desk {
     /// The register a macro is being recorded into, if one is.
     pub(super) fn recording(&self) -> Option<char> {
         self.editors.shared.registers.recording()
-    }
-
-    /// Notes `place`, just jumped from, as its file's `'` mark, which `''`
-    /// goes back to.
-    pub(super) fn jumped_from(&mut self, place: &FilePlace) {
-        self.editors.shared.marks.set('\'', place.clone());
     }
 
     /// Pastes `text` into the focused editor. Returns whether there is one.

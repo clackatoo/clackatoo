@@ -284,6 +284,10 @@ impl Dialect for ChatKeys {
             | Action::Insert(_)
             | Action::Search { .. }
             | Action::SearchAgain { .. }
+            | Action::Record(_)
+            | Action::Replay(_)
+            | Action::SetMark(_)
+            | Action::Mark { .. }
             | Action::Own(_) => true,
             _ => false,
         }
@@ -562,7 +566,11 @@ impl ChatView {
         self.queued.retain(|input| {
             !matches!(
                 input,
-                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. } | Input::Reselect
+                Input::Yank { .. }
+                    | Input::YankText(_)
+                    | Input::Search { .. }
+                    | Input::Reselect
+                    | Input::Place { .. }
             )
         });
     }
@@ -573,7 +581,11 @@ impl ChatView {
         (self.queued.iter()).any(|input| {
             matches!(
                 input,
-                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. } | Input::Reselect
+                Input::Yank { .. }
+                    | Input::YankText(_)
+                    | Input::Search { .. }
+                    | Input::Reselect
+                    | Input::Place { .. }
             )
         })
     }
@@ -596,6 +608,7 @@ impl ChatView {
                 let text = self.text_between(fonts, start, end);
                 self.yanked(text, lines, to, settled);
             }
+            Input::Place { at, exact } => self.settle_place(fonts, at, exact),
             Input::Reselect => {
                 if let Some(saved) = self.last_visual {
                     for turn in [saved.anchor.text.turn, saved.head.text.turn] {
@@ -619,6 +632,17 @@ impl ChatView {
     /// Does `command`, read whole. Returns whether the chat must be
     /// redrawn, and whether it goes to insert mode, to type a message.
     fn execute(&mut self, command: Command<ChatKey>) -> (bool, bool) {
+        let from = self.place();
+        let done = self.execute_command(command);
+        if command.jumps() && from != self.place() && !self.failed {
+            self.left_place = from;
+        }
+        done
+    }
+    fn execute_command(&mut self, command: Command<ChatKey>) -> (bool, bool) {
+        if self.keys.window(&command) {
+            return (true, false);
+        }
         match command.action {
             Action::Move(motion) => {
                 let motion = self.finds.remember(motion);

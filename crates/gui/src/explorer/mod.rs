@@ -37,7 +37,7 @@
 //! | `d` | Deletes what's at the cursor, to the trash |
 //! | `x` `y`, then `p` | Cuts or copies what's at the cursor, then moves or copies it where the cursor is |
 //! | `e` | Edits the folder at the cursor as text (see [`editing`]) |
-//! | `q` | Closes the explorer |
+//! | `Q` | Closes the explorer |
 //! | `g?` | Lists these keys at the explorer's foot, or stops |
 //!
 //! The heading is the root, cut short from its start to fit, or for a
@@ -210,6 +210,7 @@ pub(crate) struct Explorer {
     /// line's number never counts `..`, so it names the same line whether
     /// `..` shows or not.
     cursor: usize,
+    left_row: Option<usize>,
     up: bool,
     /// The first row in view: `..`'s, if it shows, counts as the first.
     top: usize,
@@ -291,6 +292,7 @@ impl Explorer {
             lines: Vec::new(),
             stale: true,
             cursor: 0,
+            left_row: None,
             up: false,
             top: 0,
             scroll_extra: 0,
@@ -1645,7 +1647,7 @@ const KEYS: &[(&str, &str)] = &[
     ("Ctrl+V", "split"),
     ("Ctrl+S", "below"),
     ("Ctrl+T", "tab"),
-    ("q", "close"),
+    ("Q", "close"),
     ("g?", "hide keys"),
 ];
 
@@ -1768,7 +1770,7 @@ pub(crate) enum ExplorerKey {
     Help,
     /// `R`: list everything shown again.
     Refresh,
-    /// `q`: close the explorer.
+    /// `Q`: close the explorer.
     Close,
     /// `a`: make a file, or a directory.
     Add,
@@ -1849,7 +1851,7 @@ impl Dialect for ExplorerKeys {
                 '-' => ExplorerKey::Up,
                 '.' => ExplorerKey::Hidden,
                 'R' => ExplorerKey::Refresh,
-                'q' => ExplorerKey::Close,
+                'Q' => ExplorerKey::Close,
                 'a' => ExplorerKey::Add,
                 'r' => ExplorerKey::Rename,
                 'd' => ExplorerKey::Delete,
@@ -1896,7 +1898,8 @@ impl Dialect for ExplorerKeys {
 
     fn takes(&self, command: &Command<ExplorerKey>) -> bool {
         command.register.is_none()
-            && (list::moves(command)
+            && (command.window().is_some()
+                || list::moves(command)
                 || matches!(
                     command.action,
                     Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
@@ -1906,6 +1909,10 @@ impl Dialect for ExplorerKeys {
 
 /// An explorer's search goes through the names shown.
 impl list::Searched for Explorer {
+    fn remember_jump(&mut self, row: usize) {
+        self.left_row = Some(row);
+    }
+
     type Start = list::Rows;
 
     fn search(&self) -> &list::ListSearch {
@@ -2051,6 +2058,70 @@ impl ListPane for Explorer {
         } else {
             return false;
         }
+        true
+    }
+}
+
+impl Explorer {
+    pub(crate) fn take_left_row(&mut self) -> Option<usize> {
+        self.left_row.take()
+    }
+}
+
+impl Explorer {
+    pub(crate) fn saved_place(&self, row: Option<usize>) -> Option<crate::vim::place::ItemPlace> {
+        let root = self.root()?.to_owned();
+        let row = row.unwrap_or_else(|| self.row());
+        let path = if self.shows_up() && row == 0 {
+            None
+        } else {
+            Some(self.lines.get(row - usize::from(self.shows_up()))?.path())
+        };
+        Some(crate::vim::place::ItemPlace::Explorer { root, path })
+    }
+    pub(crate) fn valid_place(&self, at: &crate::vim::place::ItemPlace) -> bool {
+        let crate::vim::place::ItemPlace::Explorer { root, path } = at else {
+            return false;
+        };
+        if self.fenced_out(root) {
+            return false;
+        }
+        let Some(path) = path else { return true };
+        let Some((parent, name)) = path.rsplit_once('/') else {
+            return false;
+        };
+        let parent = if parent.is_empty() { "/" } else { parent };
+        self.listings
+            .get(parent)
+            .is_none_or(|listing| listing.entries.iter().any(|entry| entry.name == name))
+    }
+    pub(crate) fn show_place(&mut self, at: &crate::vim::place::ItemPlace) -> bool {
+        let crate::vim::place::ItemPlace::Explorer { root, path } = at else {
+            return false;
+        };
+        if !self.valid_place(at) {
+            return false;
+        }
+        if self.root() != Some(root.as_str()) {
+            self.root_at(root.clone());
+        }
+        let mut view = self.view.clone();
+        view.cursor.clone_from(path);
+        view.up = path.is_none();
+        if let Some(path) = path {
+            view.hidden |= path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .split('/')
+                .any(|name| name.starts_with('.'));
+            for parent in std::path::Path::new(path).ancestors().skip(1) {
+                if parent == std::path::Path::new(root) {
+                    break;
+                }
+                view.expanded.insert(parent.to_string_lossy().into_owned());
+            }
+        }
+        self.restore(view);
         true
     }
 }

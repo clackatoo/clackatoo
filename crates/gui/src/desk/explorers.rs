@@ -544,6 +544,7 @@ impl Desk {
                 let mut editor = Editor::new(buffer, &self.options);
                 editor.share_finds(&self.finds);
                 editor.hide_starts(listing::mark_len);
+                editor.window_marks = true;
                 editor.keep_lines(listing::is_up);
                 editor.style_lines(listing::style);
                 editor.note_when_empty(listing::EMPTY);
@@ -898,7 +899,7 @@ impl Desk {
     fn went_from(&self, pane: PaneId, from: &crate::desk::jumps::Jump) -> bool {
         let waiting = (self.explorers.panes.get(&pane)).is_some_and(Explorer::waiting_for_listing);
         let now = self.place_of(pane, None);
-        waiting || self.is_opening(pane) || now.is_some_and(|now| now.folder != from.folder)
+        waiting || self.is_opening(pane) || now.is_some_and(|now| now.place != from.place)
     }
 
     /// The line the cursor's on in the listing the editor `pane` shows,

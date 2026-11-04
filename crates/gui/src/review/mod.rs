@@ -22,7 +22,7 @@
 //! | `gc` | Comments on the line, for the agent |
 //! | `S` | Sends the comments, as one message |
 //! | `R` | Works the list out afresh |
-//! | `q` | Closes the review |
+//! | `Q` | Closes the review |
 //!
 //! `a` is "accept"; `x` is Vim's delete, for a change rather than a
 //! character, where `d` would wait for a motion, by habit. Keeping or
@@ -151,6 +151,7 @@ pub(crate) struct Review {
     lines: Vec<Line>,
     /// The line the cursor's on, and the first in view.
     cursor: usize,
+    left_row: Option<usize>,
     top: usize,
     /// Extra rows drawn only while the view is between whole rows.
     pub(crate) scroll_extra: usize,
@@ -202,8 +203,11 @@ type LitAt = (usize, std::ops::Range<usize>, bool);
 
 /// Something on a review's line, to find it again in a new list (see
 /// [`Review::place_of`]).
-#[derive(Debug, PartialEq, Eq)]
-enum Place {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+    Heading,
+    Keys,
+    Subagent(TerminalId),
     /// A file's line, or a hunk's: the file's path, the hunk's first
     /// line in it, and how far past the file's or the hunk's first line.
     In {
@@ -230,6 +234,7 @@ impl Review {
             heard: false,
             lines: Vec::new(),
             cursor: 0,
+            left_row: None,
             top: 0,
             scroll_extra: 0,
             width: 0,
@@ -398,6 +403,14 @@ impl Review {
     /// else.
     fn place_of(&self, row: usize) -> Option<Place> {
         let line = self.lines.get(row)?;
+        match line {
+            Line::Heading => return Some(Place::Heading),
+            Line::Keys => return Some(Place::Keys),
+            Line::Subagent { chat } => {
+                return Some(Place::Subagent(self.list.chats.get(*chat)?.chat));
+            }
+            _ => {}
+        }
         if let Line::Comment { comment } = line {
             let comment = self.list.comments.get(*comment)?;
             return Some(Place::Comment {
@@ -427,8 +440,14 @@ impl Review {
     fn find_place(&self, place: &Place) -> Option<usize> {
         let Place::In { path, hunk, past } = place else {
             return (self.lines.iter().enumerate()).position(|(row, line)| {
-                matches!(line, Line::Comment { .. } | Line::Note(_))
-                    && self.place_of(row).as_ref() == Some(place)
+                matches!(
+                    line,
+                    Line::Heading
+                        | Line::Keys
+                        | Line::Subagent { .. }
+                        | Line::Comment { .. }
+                        | Line::Note(_)
+                ) && self.place_of(row).as_ref() == Some(place)
             });
         };
         let file = self.list.files.iter().position(|file| &file.path == path)?;
@@ -869,7 +888,7 @@ impl Review {
             }
             Line::Keys => {
                 let keys = "a keep  x reject  A X whole file  gc comment  S send  \
-                            Enter go to  ]h [h hunks  q close";
+                            Enter go to  ]h [h hunks  Q close";
                 builder.push(&keys_that_fit(keys, self.width), &faint, true);
             }
             Line::Note(note) => builder.push(note, &faint, true),
@@ -1148,7 +1167,7 @@ pub(crate) enum ReviewKey {
     Send,
     /// `R`: work the list out afresh.
     Refresh,
-    /// `q`: close the review.
+    /// `Q`: close the review.
     Close,
 }
 
@@ -1209,7 +1228,7 @@ impl Dialect for ReviewKeys {
                 'X' => ReviewKey::RejectFile,
                 'S' => ReviewKey::Send,
                 'R' => ReviewKey::Refresh,
-                'q' => ReviewKey::Close,
+                'Q' => ReviewKey::Close,
                 _ => return None,
             },
             _ => return None,
@@ -1246,7 +1265,8 @@ impl Dialect for ReviewKeys {
 
     fn takes(&self, command: &Command<ReviewKey>) -> bool {
         command.register.is_none()
-            && (list::moves(command)
+            && (command.window().is_some()
+                || list::moves(command)
                 || matches!(
                     command.action,
                     Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
@@ -1257,6 +1277,10 @@ impl Dialect for ReviewKeys {
 /// A review's search goes through its changed lines, its files' names and
 /// its comments.
 impl list::Searched for Review {
+    fn remember_jump(&mut self, row: usize) {
+        self.left_row = Some(row);
+    }
+
     type Start = list::Rows;
 
     fn search(&self) -> &list::ListSearch {
@@ -1355,5 +1379,36 @@ impl ListPane for Review {
 
     fn own(&mut self, key: ReviewKey, count: Option<usize>) {
         self.own_key(key, count);
+    }
+}
+
+impl Review {
+    pub(crate) fn take_left_row(&mut self) -> Option<usize> {
+        self.left_row.take()
+    }
+}
+
+impl Review {
+    pub(crate) fn saved_place(&self, row: Option<usize>) -> Option<crate::vim::place::ItemPlace> {
+        Some(crate::vim::place::ItemPlace::Review {
+            review: self.id,
+            at: self.place_of(row.unwrap_or(self.cursor))?,
+        })
+    }
+    pub(crate) fn valid_place(&self, at: &crate::vim::place::ItemPlace) -> Option<usize> {
+        if let crate::vim::place::ItemPlace::Review { review, at } = at
+            && *review == self.id
+        {
+            return self.find_place(at);
+        }
+        None
+    }
+    pub(crate) fn show_place(&mut self, at: &crate::vim::place::ItemPlace) -> bool {
+        let Some(row) = self.valid_place(at) else {
+            return false;
+        };
+        self.set_cursor(row);
+        self.set_top(row);
+        true
     }
 }

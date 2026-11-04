@@ -10,7 +10,7 @@
 //! one exception is a key a completion menu took, which is kept as what
 //! it put in: a macro never asks the language server, so the menu won't
 //! be there when it's typed again. The `q` that stops recording isn't
-//! kept. `q` stops it in an editor's normal mode, and in a terminal's.
+//! kept. `q` stops it in normal mode in every text and list pane.
 //!
 //! **Typing** a macro pushes its keys on a stack of frames, which the desk
 //! hands to [`key_with`](Desk::key_with) one at a time, so each key is
@@ -331,6 +331,7 @@ impl Desk {
     /// until none are left, or something must be waited for. Returns
     /// whether the window must be redrawn.
     pub(super) fn type_macros(&mut self) -> bool {
+        self.collect_place_jumps();
         if self.macros.handing.is_some() {
             return false;
         }
@@ -514,9 +515,7 @@ impl Desk {
         if self.recording().is_none() || Chord::of(press) != Some(crate::vim::RECORD_STOP.chord()) {
             return false;
         }
-        let chat = self.focused_chat().is_some();
-        let normal = !chat
-            && self.focused_editor().is_none()
+        let normal = self.focused_editor().is_none()
             && self.focused_key_state().is_some_and(|keys| {
                 keys.mode() == crate::vim::Mode::Normal && !keys.prompting() && !keys.pending()
             });
@@ -566,5 +565,24 @@ fn types_text(key: Chord) -> bool {
         Base::Char(_) => !key.alt,
         Base::Named(Named::Space | Named::Backspace) => !key.ctrl && !key.alt,
         Base::Named(_) => false,
+    }
+}
+
+impl Desk {
+    pub(super) fn window_action(&mut self, action: crate::vim::WindowAction) {
+        use crate::vim::WindowAction;
+        match action {
+            WindowAction::Record(name) => self.shared_mut().registers.record(name),
+            WindowAction::Replay(name, times) => match self.shared_mut().registers.macro_keys(name)
+            {
+                Ok(keys) => self.type_macro(&keys, times),
+                Err(why) => {
+                    self.say(why);
+                    self.stop_macro(None);
+                }
+            },
+            WindowAction::SetMark(mark) => self.set_place_mark(mark),
+            WindowAction::Mark { mark, exact } => self.go_to_place_mark(mark, exact),
+        }
     }
 }

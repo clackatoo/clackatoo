@@ -168,3 +168,25 @@ apple
 ## More about marks
 
 `` `. `` goes to the last change. `:Marks` lists the marks the file can go to in the finder. `'<` and `'>` are the last selection's start and end. Marks move with the text as anyone edits it, an agent included, and lines `:m` moves take theirs with them, the last selection's too: so `gv` after `:'<,'>m '>+1` selects the lines where they went, and the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time.
+
+
+## The same keys in other panes
+
+In normal mode, `qa` starts recording and `q` stops in terminals, chats,
+explorers, boards and reviews too. `@a`, `3@a` and `@@` replay there.
+A terminal in insert mode still sends these keys to its program; a chat's
+message box still types them. In explorer, board and review panes, `Q`
+closes the pane, leaving `q` for recording.
+
+`ma` marks a place in the current pane; `mA` sets a window-wide mark.
+Go elsewhere and type `` `A `` to return, even from an editor. Files keep
+their own lowercase marks; other panes keep theirs. `G`, `gg` and accepted
+searches remember where they left, so Ctrl+O comes back and Ctrl+I goes
+forward. `''` swaps with the place before the last jump in this file or pane.
+
+A mark remembers a terminal line, a chat turn and its text, or a list entry.
+Loading older chat messages and reordering a board preserve it. Closed
+panes, replaced chat branches and terminal history renumbered by a new
+snapshot invalidate their positions; jumping to a missing mark says so.
+Jump history skips positions it can no longer restore. These places belong
+to this window and last until it closes.

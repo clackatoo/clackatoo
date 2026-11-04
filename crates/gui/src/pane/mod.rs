@@ -103,12 +103,15 @@ pub(crate) struct Pane {
     requested_size: Option<Size>,
     screen: Option<Screen>,
     history: History,
+    /// Saved positions are invalidated by screen replacement or switching.
+    place_generation: u64,
     /// How many lines up from the live screen the view is: 0 shows the
     /// screen as the program draws it.
     scroll: u64,
     pub(crate) mode: Mode,
     /// The normal-mode cursor, while in normal or visual mode.
     cursor: Option<Cursor>,
+    left_place: Option<crate::vim::place::LinePlace>,
     /// Where a visual selection started.
     anchor: Option<Point>,
     /// The last visual selection, for `gv`: where it started, where the
@@ -179,9 +182,11 @@ impl Pane {
             requested_size: None,
             screen: None,
             history: History::default(),
+            place_generation: 0,
             scroll: 0,
             mode: Mode::Insert,
             cursor: None,
+            left_place: None,
             anchor: None,
             last_visual: None,
             search: vim::search::Search::default(),
@@ -384,6 +389,7 @@ impl Pane {
     /// Applies a view update. Returns whether the pane must be redrawn.
     pub(crate) fn view_changed(&mut self, update: &ViewUpdate) -> bool {
         let old_end = self.screen.as_ref().map(|screen| screen.state.history_end);
+        let old_alternate = self.screen.as_ref().map(|screen| screen.state.alternate);
         let snapshot = matches!(update, ViewUpdate::Snapshot(_));
         match (&mut self.screen, update) {
             (Some(screen), _) => screen.apply(update),
@@ -392,6 +398,16 @@ impl Pane {
         }
         self.changes += 1;
         let end = self.history_end();
+        if old_end.is_some_and(|old| snapshot || end < old)
+            || old_alternate.is_some_and(|old| {
+                self.screen
+                    .as_ref()
+                    .is_some_and(|screen| screen.state.alternate != old)
+            })
+        {
+            self.place_generation = self.place_generation.wrapping_add(1);
+            self.left_place = None;
+        }
         if let Some(screen) = &self.screen {
             if snapshot || old_end.is_some_and(|old_end| end < old_end) {
                 self.predictor.screen_replaced();
@@ -1157,6 +1173,10 @@ fn past_text(row: &Row) -> usize {
 }
 
 impl vim::KeyState for Pane {
+    fn take_window(&mut self) -> Vec<vim::WindowAction> {
+        self.keys.take_window()
+    }
+
     fn mode(&self) -> Mode {
         self.mode
     }

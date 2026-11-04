@@ -254,6 +254,9 @@ impl<O> Command<O> {
 /// command of the pane's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action<O> {
+    /// Record or replay a window-wide macro.
+    Record(char),
+    Replay(char),
     Move(Motion),
     Operate(Operator, Target),
     /// `x`, or `X` if `before`.
@@ -430,5 +433,51 @@ mod tests {
         assert_eq!(page_rows(10, None), 10);
         assert_eq!(page_rows(10, Some([Some(1), Some(1), None, None])), 10);
         assert_eq!(page_rows(10, Some([Some(1), Some(1), Some(1), None])), 9);
+    }
+}
+
+/// A command owned by the window, emitted by a pane after parsing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowAction {
+    Record(char),
+    Replay(char, usize),
+    SetMark(char),
+    Mark { mark: char, exact: bool },
+}
+impl<O> Command<O> {
+    pub(crate) fn window(&self) -> Option<WindowAction> {
+        Some(match self.action {
+            Action::Record(c) => WindowAction::Record(c),
+            Action::Replay(c) => WindowAction::Replay(c, self.times()),
+            Action::SetMark(c) => WindowAction::SetMark(c),
+            Action::Mark { mark, exact } => WindowAction::Mark { mark, exact },
+            _ => return None,
+        })
+    }
+}
+
+impl<O> Action<O> {
+    pub(crate) fn jumps(&self) -> bool {
+        matches!(
+            self,
+            Self::Move(
+                Motion::First
+                    | Motion::Last
+                    | Motion::TextEnd
+                    | Motion::ViewTop
+                    | Motion::ViewMiddle
+                    | Motion::ViewBottom
+                    | Motion::Match
+                    | Motion::Paragraph { .. }
+                    | Motion::Sentence { .. }
+            ) | Self::SearchAgain { .. }
+                | Self::SearchWord { .. }
+                | Self::Mark { .. }
+        )
+    }
+}
+impl<O> Command<O> {
+    pub(crate) fn jumps(&self) -> bool {
+        self.action.jumps() || matches!(self.action, Action::View(_)) && self.count.is_some()
     }
 }

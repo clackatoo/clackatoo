@@ -296,6 +296,8 @@ impl<S: Debug> SearchBar for ListSearch<S> {
 
 /// A list that's searched, item by item (see [`Searching`]).
 pub(crate) trait Searched: ListRows + super::ListKeys {
+    fn remember_jump(&mut self, _row: usize) {}
+
     /// What it keeps as a search starts, to put back: [`Rows`], unless it
     /// keeps more.
     type Start: Debug;
@@ -391,6 +393,9 @@ impl<L: Searched + ?Sized> Searcher for Searching<'_, L> {
     }
 
     fn go(&mut self, found: usize) {
+        if !self.0.search().typing() && self.0.cursor() != found {
+            self.0.remember_jump(self.0.cursor());
+        }
         self.0.set_cursor(found);
         follow(self.0);
     }

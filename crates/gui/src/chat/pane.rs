@@ -713,6 +713,10 @@ impl ChatPane {
 }
 
 impl vim::KeyState for ChatPane {
+    fn take_window(&mut self) -> Vec<vim::WindowAction> {
+        self.view.keys.take_window()
+    }
+
     fn mode(&self) -> Mode {
         self.mode
     }

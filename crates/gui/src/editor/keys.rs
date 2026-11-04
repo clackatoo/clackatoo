@@ -5,8 +5,9 @@
 
 use clackatoo_protocol::{Construct, Query};
 
+#[cfg(test)]
 use crate::motion::Motion;
-use crate::vim::{self, Dialect, Operator, Read, Reader, Stroke, Target, is_register};
+use crate::vim::{self, Dialect, Operator, Read, Reader, Stroke, Target};
 
 /// A command the editor takes.
 pub(crate) type Command = vim::Command<EditorAction>;
@@ -49,11 +50,6 @@ pub(crate) enum EditorAction {
     /// `gq` in visual mode: format what's selected, as the language server
     /// does.
     FormatSelection,
-    /// `q` and a register: record the keys typed into it, until `q`.
-    Record(char),
-    /// `@` and a register: type the keys it holds, as if typed again.
-    /// `@@` types the last register typed so again.
-    Replay(char),
     /// `&`: the last `:s` again on the cursor's line, without its flags;
     /// or `g&`, on every line, with them, and the last search's pattern.
     RepeatSubstitute { all: bool },
@@ -104,8 +100,6 @@ impl Dialect for EditorKeys {
             EditorAction::Rename => "Rename symbol",
             EditorAction::CodeActions => "Show code actions",
             EditorAction::FormatSelection => "Format selection",
-            EditorAction::Record(_) => "Record macro in register",
-            EditorAction::Replay(_) => "Replay register",
             EditorAction::RepeatSubstitute { all: false } => "Repeat substitution on line",
             EditorAction::RepeatSubstitute { all: true } => "Repeat substitution throughout file",
             EditorAction::Escape => "Cancel command or selection",
@@ -137,16 +131,6 @@ impl Dialect for EditorKeys {
             Stroke::Char { ch, ctrl: false } => match ch {
                 'K' => Read::Yes(EditorAction::Hover),
                 '&' => Read::Yes(EditorAction::RepeatSubstitute { all: false }),
-                'q' => keys.then(
-                    "register",
-                    |name| name.is_ascii_alphanumeric(),
-                    EditorAction::Record,
-                ),
-                '@' => keys.then(
-                    "register",
-                    |name| (is_register(name) && name != '_') || name == '@',
-                    EditorAction::Replay,
-                ),
                 _ => return None,
             },
             _ => return None,
@@ -250,28 +234,16 @@ impl Action {
     /// and going to a mark. A search typed after `/` is too, once Enter
     /// finds it, as is going where a language server says, once it
     /// answers.
-    pub(crate) fn jumps(self) -> bool {
-        matches!(
-            self,
-            Self::Move(
-                Motion::First
-                    | Motion::Last
-                    | Motion::TextEnd
-                    | Motion::ViewTop
-                    | Motion::ViewMiddle
-                    | Motion::ViewBottom
-                    | Motion::Match
-                    | Motion::Paragraph { .. }
-                    | Motion::Sentence { .. }
-            ) | Self::SearchAgain { .. }
-                | Self::SearchWord { .. }
-                | Self::Own(
+    pub(crate) fn editor_jumps(self) -> bool {
+        self.jumps()
+            || matches!(
+                self,
+                Self::Own(
                     EditorAction::Diagnostic { .. }
                         | EditorAction::Hunk { .. }
                         | EditorAction::Piece { .. }
                 )
-                | Self::Mark { .. }
-        )
+            )
     }
 }
 
@@ -279,7 +251,8 @@ impl Action {
 /// action is (see [`Action::jumps`]), or `zt`, `zz` or `zb` with a count,
 /// going to that line, as Vim's are.
 pub(crate) fn jumps(command: &Command) -> bool {
-    command.action.jumps() || matches!(command.action, Action::View(_)) && command.count.is_some()
+    command.action.editor_jumps()
+        || matches!(command.action, Action::View(_)) && command.count.is_some()
 }
 
 #[cfg(test)]
@@ -350,10 +323,10 @@ mod tests {
     #[test]
     fn macros() {
         assert_eq!(read("q"), Parsed::Incomplete);
-        assert_eq!(read("qa"), own(None, EditorAction::Record('a')));
+        assert_eq!(read("qa"), command(None, Action::Record('a')));
         assert_eq!(read("q-"), Parsed::Nothing);
-        assert_eq!(read("3@a"), own(Some(3), EditorAction::Replay('a')));
-        assert_eq!(read("@@"), own(None, EditorAction::Replay('@')));
+        assert_eq!(read("3@a"), command(Some(3), Action::Replay('a')));
+        assert_eq!(read("@@"), command(None, Action::Replay('@')));
         assert_eq!(read("@_"), Parsed::Nothing);
     }
 
@@ -375,7 +348,7 @@ mod tests {
         );
         assert_eq!(read("]"), Parsed::Incomplete);
         assert_eq!(read("]x"), Parsed::Nothing);
-        assert!(Action::Own(piece(Construct::Function, true)).jumps());
+        assert!(Action::Own(piece(Construct::Function, true)).editor_jumps());
     }
 
     #[test]

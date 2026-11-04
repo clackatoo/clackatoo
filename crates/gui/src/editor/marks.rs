@@ -31,6 +31,7 @@ use clackatoo_protocol::MachineId;
 use clackatoo_text::{Bias, Edit, Moved, Rope, StepPlace, StepSelection, StepVisual, compose};
 
 use crate::vim::Selection;
+use crate::vim::place::Place;
 
 /// A file, as places are kept in it: its path, on the machine it's on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -622,7 +623,7 @@ fn texts_of(edits: &[Passing<'_>], text: &Rope) -> Vec<(Rope, Rope)> {
 pub(crate) struct Marks {
     /// Each mark, and where it is. A file's own marks are kept for each
     /// file, by its path; there are few enough that a list does.
-    list: Vec<(char, FilePlace)>,
+    list: Vec<(char, Place)>,
     /// Each file's last selection, where `<` and `>` are, and the one
     /// before it.
     selections: Vec<Selections>,
@@ -633,13 +634,28 @@ impl Marks {
     /// for a file's own mark, or anywhere. A buffer with no file yet keeps
     /// only its own: one for anywhere would have nothing to open.
     pub(crate) fn set(&mut self, mark: char, place: FilePlace) {
-        let local = local(mark);
-        if !local && place.path.is_empty() {
+        if !local(mark) && place.path.is_empty() {
             return;
         }
+        self.set_place(mark, Place::File(place));
+    }
+    pub(crate) fn set_place(&mut self, mark: char, place: Place) {
         self.list
-            .retain(|(set, at)| *set != mark || (local && !at.is_in(place.file())));
+            .retain(|(set, at)| *set != mark || (local(mark) && !at.same_scope(&place)));
         self.list.push((mark, place));
+    }
+    pub(crate) fn get_place(&self, mark: char, here: &Place) -> Option<&Place> {
+        self.list
+            .iter()
+            .find(|(set, at)| *set == mark && (!local(mark) || at.same_scope(here)))
+            .map(|(_, at)| at)
+    }
+    pub(crate) fn external(&self, mark: char) -> bool {
+        !local(mark)
+            && self
+                .list
+                .iter()
+                .any(|(set, at)| *set == mark && at.file().is_none())
     }
 
     /// Where `mark` is, for `file`: its own `a` to `z`, or `A` to `Z` in
@@ -652,16 +668,18 @@ impl Marks {
         }
         let local = local(mark);
         (self.list.iter())
-            .find(|(set, at)| *set == mark && (!local || at.is_in(file)))
-            .map(|(_, at)| at)
+            .find(|(set, at)| {
+                *set == mark && (!local || at.file().is_some_and(|at| at.is_in(file)))
+            })
+            .and_then(|(_, at)| at.file())
     }
 
     /// The marks `file` can go to, its own and then the others, each in
     /// order.
     pub(crate) fn of(&self, file: File<'_>) -> Vec<(char, &FilePlace)> {
         let mut marks: Vec<(char, &FilePlace)> = (self.list.iter())
+            .filter_map(|(mark, at)| at.file().map(|at| (*mark, at)))
             .filter(|(mark, at)| !local(*mark) || at.is_in(file))
-            .map(|(mark, at)| (*mark, at))
             .collect();
         if let Some(selected) = self.selected(file) {
             marks.extend([('<', &selected.marked[0]), ('>', &selected.marked[1])]);
@@ -684,7 +702,12 @@ impl Marks {
             return;
         }
         let edits = passing(edits, text);
-        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
+        for place in self
+            .list
+            .iter_mut()
+            .filter_map(|(_, at)| at.file_mut())
+            .filter(|at| at.is_in(file))
+        {
             place.edited(&edits, text);
         }
         self.selections_edited(file, &edits, text, came);
@@ -887,7 +910,12 @@ impl Marks {
     /// to their lines and columns in it, and its selections stay at theirs,
     /// as Vim's do.
     pub(crate) fn replaced(&mut self, file: File<'_>, text: &Rope) {
-        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
+        for place in self
+            .list
+            .iter_mut()
+            .filter_map(|(_, at)| at.file_mut())
+            .filter(|at| at.is_in(file))
+        {
             place.find_byte(text);
         }
         if let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) {

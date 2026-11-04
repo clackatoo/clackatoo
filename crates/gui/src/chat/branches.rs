@@ -588,6 +588,8 @@ impl ChatView {
     /// switch to another branch: what's kept by turn index from there on
     /// is let go of, and the view follows the conversation's end.
     pub(super) fn cut_from(&mut self, turn: usize) {
+        self.place_generation = self.place_generation.wrapping_add(1);
+        self.left_place = None;
         self.motion_cache = super::navigation::MotionCache::default();
         self.place_after_layout = None;
         self.cache.cut(turn);

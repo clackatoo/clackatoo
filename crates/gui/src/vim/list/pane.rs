@@ -49,14 +49,24 @@ pub(crate) trait ListPane: Searched + Sized {
 
     /// Runs shared movement and search commands before pane-specific ones.
     fn execute(&mut self, command: Command<<Self::Dialect as Dialect>::Own>) {
+        if self.keys_mut().window(&command) {
+            return;
+        }
         let mut paging = *self.paging();
+        let from = self.cursor();
         let moved = go(self, &mut paging, &command);
+        if moved && command.jumps() && from != self.cursor() {
+            self.remember_jump(from);
+        }
         *self.paging() = paging;
         if moved || search_command(self, &command) {
             return;
         }
         if let Action::Own(key) = command.action {
             self.own(key, command.count);
+            if from != self.cursor() {
+                self.remember_jump(from);
+            }
         }
     }
 

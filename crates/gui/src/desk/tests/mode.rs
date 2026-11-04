@@ -906,9 +906,9 @@ fn opening_or_closing_from_an_explorer_by_command_or_key_leaves_normal_mode() {
         (answer_all(&mut desk).iter()).any(|request| matches!(request, Request::NewTab { .. }))
     );
     assert_eq!(desk.mode(), WindowMode::Normal);
-    // `q`, closing it: the pane gone to is in normal mode.
+    // `Q`, closing it: the pane gone to is in normal mode.
     let mut desk = new_desk();
-    key(&mut desk, "q");
+    key(&mut desk, "Q");
     let asked = answer_all(&mut desk);
     assert!(
         asked.contains(&Request::ClosePane { pane: PaneId(1) }),

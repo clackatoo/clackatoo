@@ -16,7 +16,7 @@
 //! | `e` | Edits the entry at the cursor |
 //! | `x` | Releases the claim at the cursor, whoever holds it |
 //! | `A` | Archives the board, or unarchives it |
-//! | `q` | Closes the pane: the board stays |
+//! | `Q` | Closes the pane: the board stays |
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,6 +81,7 @@ pub(crate) struct BoardPane {
     /// The entry the cursor's on, by its index, and whether it follows
     /// the newest, as it does until it's moved off it.
     cursor: usize,
+    left_row: Option<usize>,
     at_end: bool,
     /// The first line in view.
     top: usize,
@@ -127,6 +128,7 @@ impl BoardPane {
             gone: None,
             title: "Board".to_owned(),
             cursor: 0,
+            left_row: None,
             at_end: true,
             top: 0,
             scroll_extra: 0,
@@ -817,7 +819,7 @@ pub(crate) enum BoardKey {
     Release,
     /// `A`: archive the board, or unarchive it.
     Archive,
-    /// `q`: close the pane.
+    /// `Q`: close the pane.
     Close,
 }
 
@@ -853,7 +855,7 @@ impl Dialect for BoardKeys {
                 'e' => BoardKey::Edit,
                 'x' => BoardKey::Release,
                 'A' => BoardKey::Archive,
-                'q' => BoardKey::Close,
+                'Q' => BoardKey::Close,
                 _ => return None,
             },
             _ => return None,
@@ -863,7 +865,8 @@ impl Dialect for BoardKeys {
 
     fn takes(&self, command: &Command<BoardKey>) -> bool {
         command.register.is_none()
-            && (list::moves(command)
+            && (command.window().is_some()
+                || list::moves(command)
                 || matches!(
                     command.action,
                     Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
@@ -897,6 +900,10 @@ pub(crate) struct Start {
 
 /// A board's search goes through what its entries say.
 impl list::Searched for BoardPane {
+    fn remember_jump(&mut self, row: usize) {
+        self.left_row = Some(row);
+    }
+
     type Start = Start;
 
     fn search(&self) -> &list::ListSearch<Start> {
@@ -1060,6 +1067,37 @@ impl ListPane for BoardPane {
             return false;
         }
         BoardPane::prompt_stroke(self, stroke);
+        true
+    }
+}
+
+impl BoardPane {
+    pub(crate) fn take_left_row(&mut self) -> Option<usize> {
+        self.left_row.take()
+    }
+}
+
+impl BoardPane {
+    pub(crate) fn place(&self, row: Option<usize>) -> Option<crate::vim::place::ItemPlace> {
+        Some(crate::vim::place::ItemPlace::Board {
+            board: self.board(),
+            entry: self.entries.get(row.unwrap_or(self.cursor))?.id,
+        })
+    }
+    pub(crate) fn valid_place(&self, at: &crate::vim::place::ItemPlace) -> Option<usize> {
+        if let crate::vim::place::ItemPlace::Board { board, entry } = at
+            && *board == self.board()
+        {
+            return self.entries.iter().position(|e| e.id == *entry);
+        }
+        None
+    }
+    pub(crate) fn show_place(&mut self, at: &crate::vim::place::ItemPlace) -> bool {
+        let Some(row) = self.valid_place(at) else {
+            return false;
+        };
+        self.set_cursor(row);
+        self.set_top(row);
         true
     }
 }

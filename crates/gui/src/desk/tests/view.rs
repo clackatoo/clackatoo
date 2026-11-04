@@ -321,3 +321,67 @@ fn pane_input_dispatch_timing() {
         println!("{name} input routing median: {} ns", samples[3]);
     }
 }
+
+#[test]
+fn every_list_can_start_stop_and_replay_a_macro_across_panes() {
+    for content in [
+        Content::Files(FilesId(1)),
+        Content::Board(BoardId(1)),
+        Content::Review(ReviewId(1)),
+    ] {
+        let mut desk = showing(content);
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "qa");
+        assert_eq!(desk.recording(), Some('a'), "{content:?}");
+        ctrl(&mut desk, "h");
+        type_keys(&mut desk, "j");
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "q");
+        assert_eq!(desk.recording(), None);
+        ctrl(&mut desk, "h");
+        type_keys(&mut desk, "gg");
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "@a");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        let place = desk.place_of(PaneId(1), None).unwrap();
+        assert_eq!(place.place.file().unwrap().line, 1);
+        assert!(
+            !answer_all(&mut desk)
+                .iter()
+                .any(|r| matches!(r, Request::ClosePane { .. }))
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual full key dispatch timing"]
+fn pane_keys_timing() {
+    use std::{hint::black_box, time::Instant};
+    for (name, content, chat) in [
+        ("terminal", Content::Terminal(TerminalId(2)), false),
+        ("chat", Content::Terminal(TerminalId(2)), true),
+        ("editor", Content::Buffer(BufferId(8)), false),
+        ("explorer", Content::Files(FilesId(1)), false),
+        ("board", Content::Board(BoardId(1)), false),
+        ("review", Content::Review(ReviewId(1)), false),
+    ] {
+        let mut desk = showing(content);
+        match content {
+            Content::Terminal(_) if chat => chat_snapshot(&mut desk),
+            Content::Terminal(_) => snapshot(&mut desk, 2),
+            Content::Buffer(_) => load(&mut desk, 8, "/p/other.txt", "other\nsecond\n"),
+            _ => {}
+        }
+        desk.show_pane(PaneId(2));
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            for _ in 0..1000 {
+                type_keys(black_box(&mut desk), "jk");
+            }
+            samples.push(start.elapsed().as_nanos() / 2000);
+        }
+        samples.sort_unstable();
+        println!("{name} key median: {} ns", samples[3]);
+    }
+}

@@ -12,7 +12,8 @@
 //! Going back and then jumping somewhere new forgets the way forward. A
 //! jump from the line the newest place is on replaces it, so going back
 //! never stops twice on one line. Places in panes that no longer exist are
-//! skipped.
+//! skipped. Terminal lines, chat text and list entries use the same
+//! history and validate their content identity before returning.
 //!
 //! A place in a file moves with the text while the window has the file:
 //! edits made above it, by anyone, take it down with them. Once no pane of
@@ -28,6 +29,8 @@ use clackatoo_text::{Edit, Rope};
 use super::Desk;
 use crate::editor::File;
 pub(super) use crate::editor::FilePlace;
+pub(super) use crate::vim::place::FolderPlace;
+use crate::vim::place::Place;
 
 /// How many places are remembered.
 const MAX: usize = 100;
@@ -36,51 +39,12 @@ const MAX: usize = 100;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Jump {
     pub(super) pane: PaneId,
-    /// Where the cursor was, if the pane was editing a file.
-    pub(super) file: Option<FilePlace>,
-    /// Where the cursor was, if the pane was showing a folder's listing.
-    pub(super) folder: Option<FolderPlace>,
-}
-
-/// Where the cursor was in a folder's listing: the folder, and the path of
-/// the entry on the cursor's line, if it was on one, or `..` if it was on
-/// the way up. The entry is kept,
-/// not the line, as a folder listed again may have more lines, or fewer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct FolderPlace {
-    pub(super) dir: String,
-    pub(super) entry: Option<String>,
-}
-
-impl FolderPlace {
-    /// The file or directory at `from` has moved to `to`: the folder, or
-    /// the entry, goes with it if it's in it.
-    fn moved(&mut self, from: &str, to: &str) {
-        let moved = |path: &mut String| {
-            let rest =
-                (path.strip_prefix(from)).filter(|rest| rest.is_empty() || rest.starts_with('/'));
-            if let Some(rest) = rest {
-                *path = format!("{to}{rest}");
-            }
-        };
-        moved(&mut self.dir);
-        if let Some(entry) = &mut self.entry {
-            moved(entry);
-        }
-    }
+    pub(super) place: Place,
 }
 
 impl Jump {
-    /// Whether `self` and `other` are on the same line of the same pane,
-    /// or the same entry of the same folder, or are the same pane, with
-    /// neither.
     pub(super) fn same(&self, other: &Self) -> bool {
-        let files = match (&self.file, &other.file) {
-            (None, None) => true,
-            (Some(mine), Some(theirs)) => mine.file() == theirs.file() && mine.line == theirs.line,
-            _ => false,
-        };
-        self.pane == other.pane && files && self.folder == other.folder
+        self.pane == other.pane && self.place.same_line(&other.place)
     }
 }
 
@@ -185,18 +149,13 @@ impl Jumps {
     /// it. A folder's places, kept by their panes, go wherever they are.
     pub(super) fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
         for jump in &mut self.list {
-            if let Some(place) = &mut jump.file {
-                place.moved(machine, from, to);
-            }
-            if let Some(place) = &mut jump.folder {
-                place.moved(from, to);
-            }
+            jump.place.moved(machine, from, to);
         }
     }
 
     fn places_in<'a>(&'a mut self, file: File<'a>) -> impl Iterator<Item = &'a mut FilePlace> {
         (self.list.iter_mut())
-            .filter_map(|jump| jump.file.as_mut())
+            .filter_map(|jump| jump.place.file_mut())
             .filter(move |place| place.is_in(file))
     }
 }
@@ -209,21 +168,17 @@ impl Desk {
         let Some(here) = self.place_of(shown.pane, None) else {
             return;
         };
+        let mut jumps = std::mem::take(&mut self.jumps);
         let workspaces = &self.workspaces;
         let wanted = |place: &Jump| {
-            (workspaces.find_pane(place.pane))
-                .is_some_and(|(_, tab, _)| !within_tab || tab.id == shown.tab)
+            self.valid_place(place)
+                && (workspaces.find_pane(place.pane))
+                    .is_some_and(|(_, tab, _)| !within_tab || tab.id == shown.tab)
         };
-        let Some(place) = self.jumps.step(back, count, here, wanted) else {
-            return;
-        };
-        self.move_focus(place.pane, false);
-        if let Some(file) = &place.file {
-            self.show_file_place(place.pane, file);
-        }
-        if let Some(folder) = &place.folder {
-            self.show_folder_place(place.pane, folder);
-        }
+        let place = jumps.step(back, count, here, wanted);
+        self.jumps = jumps;
+        let Some(place) = place else { return };
+        self.show_place(&place, true);
     }
 
     /// Records a jump from where `pane` is: in an editor, from where its
@@ -238,9 +193,7 @@ impl Desk {
     /// Records a jump from `place`, taken before the move it was left by,
     /// once that's seen to go ahead.
     pub(super) fn record_place(&mut self, place: Jump) {
-        if let Some(file) = &place.file {
-            self.jumped_from(file);
-        }
+        self.shared_mut().marks.set_place('\'', place.place.clone());
         self.jumps.left(place);
     }
 }
@@ -252,8 +205,7 @@ mod tests {
     fn at(pane: u32) -> Jump {
         Jump {
             pane: PaneId(pane),
-            file: None,
-            folder: None,
+            place: Place::Pane(PaneId(pane)),
         }
     }
 
@@ -343,10 +295,14 @@ mod tests {
     #[test]
     fn places_in_folders_are_their_entries_and_move_with_them() {
         let in_folder = |dir: &str, entry: Option<&str>| Jump {
-            folder: Some(FolderPlace {
-                dir: dir.to_owned(),
-                entry: entry.map(str::to_owned),
-            }),
+            place: Place::Folder {
+                pane: PaneId(1),
+                machine: None,
+                at: FolderPlace {
+                    dir: dir.to_owned(),
+                    entry: entry.map(str::to_owned),
+                },
+            },
             ..at(1)
         };
         let mut jumps = Jumps::default();
@@ -369,10 +325,10 @@ mod tests {
         let mut jumps = Jumps::default();
         let mut jump = at(1);
         // On "three"'s "r".
-        jump.file = Some(FilePlace::at(File::here("/f"), &text, 10));
+        jump.place = Place::File(FilePlace::at(File::here("/f"), &text, 10));
         jumps.left(jump.clone());
         let place = |jumps: &Jumps| {
-            let file = jumps.list[0].file.as_ref().unwrap();
+            let file = jumps.list[0].place.file().unwrap();
             (file.line, file.col)
         };
         assert_eq!(place(&jumps), (2, 2));

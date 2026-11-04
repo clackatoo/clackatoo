@@ -192,7 +192,7 @@ listed "later.txt"
 
 The wheel scrolls the pane under the pointer. Over a window bar, it scrolls the focused pane instead, including explorers and editors. A middle click pastes the primary selection into an editor, or into a search or name already being typed in a list pane. In a board, double-click an entry to edit its text; Escape keeps it unchanged.
 
-`x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.
+`x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `Q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.
 
 Beside each file is what git says of it: `M` changed, `A` added, `?` untracked, `D` deleted, `!` in conflict. The daemon watches the folders open in the tree, so a file a terminal or an agent makes shows at once.
 

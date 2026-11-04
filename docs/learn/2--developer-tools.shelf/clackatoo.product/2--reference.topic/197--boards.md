@@ -38,7 +38,7 @@ Each entry says what it is, who wrote it and how long ago, then what it says, an
 | `e` | Edit the entry at the cursor. What it said is kept, the last 20 edits of it. |
 | `x` | Release the claim at the cursor, whoever holds it. |
 | `A` | Archive the board, or unarchive it. |
-| `q` | Close the pane. The board stays. |
+| `Q` | Close the pane. The board stays. |
 
 ## Claims
 

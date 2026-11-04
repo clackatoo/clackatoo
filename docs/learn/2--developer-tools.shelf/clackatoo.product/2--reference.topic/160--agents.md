@@ -544,7 +544,7 @@ Lines an agent changed that you haven't looked at yet get a bar of their own bes
 | `gc` | Comments on the line, for the agent |
 | `S` | Sends the comments, as one message |
 | `R` | Works the list out again |
-| `q` | Closes the review |
+| `Q` | Closes the review |
 
 Rejecting takes the change out as undoing a turn does, keeping what you've changed since, including anything you typed inside the agent's change. It's refused if you've changed the same lines, and says which. `:reviewkeep` and `:reviewreject` do the change at the cursor, or `file`, `turn` (`turn 3`) or `all`; `:reviewreject!` rejects what it can. Comments wait until `:reviewsend` or `S` sends them, as "Review comments:" and a line for each, with its file and line, and whether it's in the agent's change; they move with the text as you and the agent edit. Undoing a turn clears its colour; redoing it brings it back. What you've reviewed, the comments waiting and open reviews last through an upgrade.
 

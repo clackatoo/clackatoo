@@ -179,6 +179,8 @@ impl<O: Copy> Action<O> {
             Self::OtherCorner => "Other corner of selection",
             Self::Reselect => "Restore last selection",
             Self::Select { object, inner } => return object.description(inner),
+            Self::Record(_) => "Record macro in register",
+            Self::Replay(_) => "Replay register",
             Self::SetMark(_) => "Set mark",
             Self::Mark { exact: false, .. } => "Jump to marked line",
             Self::Mark { exact: true, .. } => "Jump to exact mark",

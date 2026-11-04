@@ -594,3 +594,14 @@ fn a_line_yanked_before_its_folder_is_listed_afresh_still_pastes_as_a_copy() {
         ]
     );
 }
+
+#[test]
+fn named_marks_restore_folder_entries_across_directories() {
+    let mut desk = listing_src();
+    type_keys(&mut desk, "jmA");
+    let before = desk.folder_place(PaneId(1)).unwrap();
+    type_keys(&mut desk, "-");
+    listed(&mut desk, 1, "/p", p());
+    type_keys(&mut desk, "`A");
+    assert_eq!(desk.folder_place(PaneId(1)), Some(before));
+}

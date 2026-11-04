@@ -163,7 +163,7 @@ fn posting_editing_releasing_and_archiving_go_to_the_daemon() {
     typed(&mut pane, "x");
     assert_eq!(pane.label(), "there's no claim held here");
     assert!(pane.take_outbox().is_empty());
-    typed(&mut pane, "q");
+    typed(&mut pane, "Q");
     assert_eq!(pane.take_asks(), [Ask::Close]);
 }
 
@@ -539,4 +539,25 @@ fn wheel_moves_by_rows_within_an_entry_taller_than_the_view_and_stops_at_bounds(
     assert!(pane.scroll(i64::MIN));
     assert_eq!(pane.top, 0);
     assert!(!pane.scroll(-1));
+}
+
+#[test]
+fn saved_entries_survive_reordering_and_refuse_removed_entries() {
+    let first = entry(1, PostKind::Note, "first");
+    let second = entry(2, PostKind::Note, "second");
+    let mut pane = pane(vec![first.clone(), second.clone()]);
+    let at = pane.place(None).unwrap();
+    pane.update(BoardUpdate::Snapshot {
+        summary: summary(2, false),
+        entries: vec![second, first.clone()],
+    });
+    pane.settle();
+    assert!(pane.show_place(&at));
+    assert_eq!(pane.place(None), Some(at.clone()));
+    pane.update(BoardUpdate::Snapshot {
+        summary: summary(1, false),
+        entries: vec![first],
+    });
+    pane.settle();
+    assert!(!pane.show_place(&at));
 }

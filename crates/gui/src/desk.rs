@@ -185,6 +185,7 @@ mod messages;
 mod mode;
 mod notices;
 mod offers;
+mod places;
 mod restored;
 mod scrolling;
 mod view;
@@ -1841,6 +1842,7 @@ impl Desk {
     /// Takes the messages waiting for the daemon: the window's, then each
     /// pane's.
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
+        self.collect_place_jumps();
         let mut messages = std::mem::take(&mut self.outbox);
         let blocks = self.daemon_has(wire::BLOCKS);
         let mut copied_across = false;
@@ -1912,11 +1914,25 @@ impl Desk {
     /// config's keypress handlers if not `handlers`, as for a key they've
     /// had already, and without noting it in a macro. Keys a binding types
     /// meet neither them nor the config's bindings, only the window's.
+    fn key_with(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
+        self.collect_place_jumps();
+        let redraw = self.dispatch_key(press, handlers);
+        self.collect_place_jumps();
+        let actions = self
+            .focused_key_state_mut()
+            .map(crate::vim::KeyState::take_window)
+            .unwrap_or_default();
+        for action in actions {
+            self.window_action(action);
+        }
+        redraw
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "where a key goes, in order, each step short"
     )]
-    fn key_with(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
+    fn dispatch_key(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
         // The keyboard reports Shift, Ctrl and the like as keys of their
         // own, on the way to a chord such as Ctrl+Shift+C. They mustn't
         // count as the next key: that would drop a selection or a message,
@@ -2894,6 +2910,7 @@ mod tests {
     mod mode;
     mod mouse;
     mod notices;
+    mod places;
     mod restored;
     mod scrolling;
     mod shared;
@@ -11646,8 +11663,8 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(3));
         command(&mut desk, "Ex");
         assert_eq!(shown_pane(&desk), PaneId(2));
-        // Keys in it are its own: q closes it.
-        type_keys(&mut desk, "q");
+        // Q closes it; q starts recording a macro.
+        type_keys(&mut desk, "Q");
         assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
     }
 
@@ -11838,7 +11855,7 @@ mod tests {
             }]
         );
         // q closes the pane; the board is the daemon's to keep.
-        type_keys(&mut desk, "q");
+        type_keys(&mut desk, "Q");
         assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(4) }));
     }
 

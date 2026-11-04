@@ -165,9 +165,20 @@ pub(crate) fn inspect<D: Dialect>(
 
 /// The keys of a command typed so far in normal or visual mode.
 #[derive(Debug, Default)]
-pub(crate) struct Keys(Vec<Stroke>);
+pub(crate) struct Keys(Vec<Stroke>, Vec<super::WindowAction>);
 
 impl Keys {
+    pub(crate) fn window<O>(&mut self, command: &Command<O>) -> bool {
+        let Some(action) = command.window() else {
+            return false;
+        };
+        self.1.push(action);
+        true
+    }
+    pub(crate) fn take_window(&mut self) -> Vec<super::WindowAction> {
+        std::mem::take(&mut self.1)
+    }
+
     /// Takes `stroke`, and reads what the keys make, as `dialect` reads
     /// them: once they make a command, or nothing, they're forgotten.
     pub(crate) fn read<D: Dialect>(
@@ -431,6 +442,18 @@ impl Reader<'_> {
             }
             'o' if visual => Action::OtherEnd,
             'O' if visual => Action::OtherCorner,
+            'q' => {
+                let read = self.then("register", |c| c.is_ascii_alphanumeric(), Action::Record);
+                return self.made(first, read);
+            }
+            '@' => {
+                let read = self.then(
+                    "register",
+                    |c| (is_register(c) && c != '_') || c == '@',
+                    Action::Replay,
+                );
+                return self.made(first, read);
+            }
             'm' => {
                 let mark = self.then("mark", is_settable_mark, Action::SetMark);
                 return self.made(first, mark);
