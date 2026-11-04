@@ -66,6 +66,7 @@ pub(super) mod mirror;
 pub(super) mod sessions;
 pub(super) mod shown;
 pub(super) mod unpack;
+pub(super) mod upgrade;
 
 use mirror::{Fresh, InUse, Mirror};
 use unpack::{Need, Unpacked, Unpacking};
@@ -128,6 +129,10 @@ const LISTENING: u32 = 22;
 pub(super) struct Relayed {
     /// The daemon there's workspaces and chats, as shown here.
     pub(super) mirror: Mirror,
+    /// Reconnecting to the same run: intermediate snapshots before
+    /// `RelayAs` is answered omit lent panes and passed-on machines.
+    awaiting_lends: bool,
+    starting_view: Option<Workspaces>,
     /// Its terminals followed by this daemon's clients, by this daemon's
     /// numbers.
     followed: BTreeMap<TerminalId, Followed>,
@@ -349,6 +354,8 @@ enum Expect {
     /// Nothing: it answers what this daemon sent for itself, or what a
     /// client was answered at once.
     Nothing,
+    /// Terminal input acknowledged locally, still awaiting the remote reply.
+    Keys,
     /// Taken in: the answer to watching its chats.
     Chats,
     /// The answer to saying which machine this is: the daemon there has
@@ -1499,7 +1506,7 @@ impl Daemon {
             terminal: remote,
             bytes,
         };
-        if let Err(err) = self.send_upstream(at, &ClientMessage::Request(input), Expect::Nothing) {
+        if let Err(err) = self.send_upstream(at, &ClientMessage::Request(input), Expect::Keys) {
             return Response::Error(err);
         }
         let followed = self.links.list[at]
@@ -2037,6 +2044,13 @@ impl Daemon {
             };
             let _ = self.send_upstream(at, &ClientMessage::Request(relay), expect);
         }
+        let same_run = workspaces
+            .machine
+            .as_ref()
+            .is_some_and(|machine| self.links.list[at].relayed.mirror.run() == Some(machine.run));
+        if same_run && self.link_wire(at) >= wire::LEND {
+            self.links.list[at].relayed.awaiting_lends = true;
+        }
         self.relay_workspaces(at, workspaces);
         // What was parked is back in its layout, and what's reached through
         // it shown again.
@@ -2095,6 +2109,8 @@ impl Daemon {
     }
 
     pub(super) fn relay_lost(&mut self, at: usize, upstream: Upstream) {
+        self.links.list[at].relayed.awaiting_lends = false;
+        self.links.list[at].relayed.starting_view = None;
         let host = self.links.list[at].remote.host.clone();
         self.relay_answers_lost(&host, upstream);
         self.lending_lost(at);
@@ -2177,6 +2193,10 @@ impl Daemon {
 
     /// Takes in `workspaces`, from the daemon of the connection at `at`.
     fn relay_workspaces(&mut self, at: usize, workspaces: &Workspaces) {
+        if self.links.list[at].relayed.awaiting_lends {
+            self.links.list[at].relayed.starting_view = Some(workspaces.clone());
+            return;
+        }
         let host = self.links.list[at].remote.host.clone();
         self.reached_says(&host, workspaces.machine.clone());
         let Some(at) = self.links.find(&host) else {
@@ -2270,7 +2290,7 @@ impl Daemon {
                     Expect::Nothing
                 });
                 let need = match expect {
-                    Expect::Nothing => continue,
+                    Expect::Nothing | Expect::Keys => continue,
                     Expect::Chats | Expect::Attached(_) | Expect::Lends => Need::Decode,
                     Expect::Client { token, then, .. } => {
                         // Only one that names nothing goes on as it came;
@@ -2645,7 +2665,7 @@ impl Daemon {
             ))),
         };
         match expect {
-            Expect::Nothing => {}
+            Expect::Nothing | Expect::Keys => {}
             Expect::Chats => {
                 if let Response::Chats(chats) = response {
                     self.take_relayed_chats(at, &chats);
@@ -2653,7 +2673,15 @@ impl Daemon {
             }
             Expect::Attached(local) => self.buffer_attached(at, local),
             Expect::Lends => match response {
-                Response::Done => self.lends_known(at),
+                Response::Done => {
+                    self.links.list[at].relayed.awaiting_lends = false;
+                    if let Some(view) = self.links.list[at].relayed.starting_view.take() {
+                        self.relay_workspaces(at, &view);
+                    }
+                    if let Some(at) = self.links.find(&host) {
+                        self.lends_known(at);
+                    }
+                }
                 // As when the daemon there still has the connection this
                 // daemon made before restarting: made again in a moment,
                 // when it may have let it go. Until then, nothing borrowed
@@ -2926,7 +2954,11 @@ impl Daemon {
             let asked = (reached.upstream.expecting.iter())
                 .filter_map(|expect| match expect {
                     Expect::Client { asked, .. } => Some(*asked),
-                    Expect::Nothing | Expect::Chats | Expect::Attached(_) | Expect::Lends => None,
+                    Expect::Nothing
+                    | Expect::Keys
+                    | Expect::Chats
+                    | Expect::Attached(_)
+                    | Expect::Lends => None,
                 })
                 .chain(held)
                 .chain(self.attaches_waiting_since(at))

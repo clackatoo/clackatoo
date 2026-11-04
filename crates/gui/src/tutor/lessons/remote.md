@@ -72,6 +72,8 @@ Everything else in them works as your own does, on HOST: editors, with undo, `:w
 
 A workspace from another machine has a ring in place of its dot: in its colour while it's connected, red while the connection is down and being made again, and amber when ssh needs a password no window has given yet, which `:connect HOST` asks for again. The mouse over it says which machine it's on, and how its connection is. If the connection drops, its workspaces stay in the bar as they last were, each pane saying so over its last screen, and keys for its terminals are turned down until it's back. Your daemon keeps the connection, makes it again whenever it drops, and after it restarts; `:disconnect HOST`, or `:disconnect` in one of its workspaces, ends it.
 
+A local daemon upgrade keeps these remote panes in place while connections return, including machines reached through another machine. Editor changes awaiting acknowledgement are reconciled before being sent again. Terminal input is never replayed; a planned upgrade waits for accepted keys to be acknowledged and is refused if that wait times out. This protection starts with upgrades from a release that already keeps this state; installing it from an older release cannot recover state the old daemon did not hand over.
+
 A workspace's name says which machine it's on only while another has the same name, as `notes@desk`. `:set showhost=always` says it for every one, and `never` for none. Try it:
 
 ```check

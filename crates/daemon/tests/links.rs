@@ -7869,3 +7869,167 @@ fn a_message_sent_mid_turn_after_a_restarting_upgrade_is_sent() {
     assert_eq!(node.turns[2].prompt, "hello");
     assert!(last_words(&node).contains("echo: hello"), "{node:#?}");
 }
+
+/// A real exec while connected to two machines, one through the other:
+/// cached layouts stay visible offline, edits keep their receipts, and
+/// new local objects cannot reuse the remote panes' numbers.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario across two execs and three daemons"
+)]
+fn a_local_upgrade_keeps_federated_panes_and_edit_receipts() {
+    let world = World::new();
+    let laptop = world.start("laptop");
+    let third = world.start("third");
+    let file = world.path().join("upgrade.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let mut far = laptop.client();
+    far.new_workspace(
+        Some("remote-editor".into()),
+        PaneTerminal::File(OpenFile {
+            path: file.display().to_string(),
+            cwd: None,
+        }),
+    )
+    .unwrap();
+    let mut beyond = third.client();
+    beyond
+        .new_workspace(
+            Some("beyond".into()),
+            PaneTerminal::New(NewTerminal {
+                size: Size::new(80, 24).unwrap(),
+                command: Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "stty raw -echo; printf READY; exec cat".into(),
+                ]),
+                cwd: None,
+                record_to: None,
+            }),
+        )
+        .unwrap();
+    connect(&mut far, "third");
+    wait_for_workspaces(&mut far, |s| theirs(s, "beyond").is_some());
+    let (child, socket) = process_daemon_with(&world, "desk", |c| {
+        c.env("CLACKATOO_SSH", world.path().join("ssh"));
+    });
+    let mut window = Client::connect(&socket).unwrap();
+    window.set_read_timeout(Some(PATIENCE)).unwrap();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |s| {
+        theirs(s, "remote-editor").is_some() && theirs(s, "beyond").is_some()
+    });
+    let editor = theirs(&shown, "remote-editor").unwrap().clone();
+    let beyond = theirs(&shown, "beyond").unwrap().clone();
+    let pane = editor.tabs[0].layout.panes()[0];
+    let buffer = pane.content.buffer().unwrap();
+    let terminal = first_terminal(&beyond);
+    let remote_terminal = first_terminal(&third.client().watch_workspaces().unwrap().list[0]);
+    let mut terminal_observer = third.client();
+    let screen = attach_to(&mut terminal_observer, remote_terminal);
+    if !screen_text(&screen).contains("READY") {
+        wait_for_view(&mut terminal_observer, remote_terminal, "READY");
+    }
+    let before = attach_to_buffer(&mut window, buffer, 71);
+    window.take_events();
+    window
+        .edit(
+            buffer,
+            42,
+            insert(before.text.len(), 0, "x", before.version),
+        )
+        .unwrap();
+    // Don't consume the acknowledgement: the reattached window needs it
+    // translated back to its own sequence, whether the relay saw it or not.
+    let far_shown = far.watch_workspaces().unwrap();
+    let far_buffer = far_shown
+        .list
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .flat_map(|t| t.layout.panes())
+        .find_map(|p| p.content.buffer())
+        .unwrap();
+    let mut observer = laptop.client();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if attach_to_buffer(&mut observer, far_buffer, 99).text == "xnotes\n" {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+    window.send_input(terminal, b"before-upgrade").unwrap();
+    world.down("laptop", true);
+    upgrade_process(&child, &socket);
+    // Existing windows must never hear that remote panes were deleted
+    // while the old daemon closes its connections for the exec.
+    while let Ok(event) = window.next_event() {
+        if let Event::Workspaces(shown) = event {
+            assert!(shown.get(editor.id).is_some() && shown.get(beyond.id).is_some());
+        }
+    }
+    let mut after = Client::connect(&socket).unwrap();
+    after.set_read_timeout(Some(PATIENCE)).unwrap();
+    let cached = after.watch_workspaces().unwrap();
+    assert_eq!(cached.get(editor.id), Some(&editor));
+    assert_eq!(
+        cached.get(beyond.id),
+        Some(&beyond),
+        "cached={cached:?}\n{}",
+        std::fs::read_to_string(world.path().join("desk.log")).unwrap()
+    );
+    after.attach_buffer_as(buffer, 71).unwrap();
+    world.down("laptop", false);
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(s) = next_change(&mut after, buffer) {
+            break s;
+        }
+    };
+    assert_eq!(snapshot.text, "xnotes\n");
+    assert_eq!(snapshot.applied, Some(42));
+    assert_eq!(snapshot.landed, Some(before.version + 1));
+    after
+        .edit(
+            buffer,
+            43,
+            insert(snapshot.text.len(), 0, "y", snapshot.version),
+        )
+        .unwrap();
+    assert!(matches!(
+        next_change(&mut after, buffer),
+        BufferUpdate::Acked { seq: 43, .. }
+    ));
+    assert_eq!(
+        attach_to_buffer(&mut observer, far_buffer, 99).text,
+        "yxnotes\n"
+    );
+    let fresh = after
+        .new_workspace(
+            Some("local-after".into()),
+            PaneTerminal::New(NewTerminal {
+                size: Size::new(80, 24).unwrap(),
+                command: Some(vec!["cat".into()]),
+                cwd: None,
+                record_to: None,
+            }),
+        )
+        .unwrap();
+    assert_ne!(fresh, pane.id);
+    let reconnected = wait_for_workspaces(&mut after, |s| theirs(s, "beyond").is_some());
+    assert_eq!(reconnected.get(editor.id), Some(&editor));
+    assert_eq!(reconnected.get(beyond.id), Some(&beyond));
+    wait_for_state(&mut after, "third", |state| {
+        matches!(state, ConnectionState::Connected { .. })
+    });
+    after.send_input(terminal, b"after-upgrade").unwrap();
+    wait_for_view(&mut terminal_observer, remote_terminal, "after-upgrade");
+    let text = screen_text(&attach_to(&mut third.client(), remote_terminal));
+    assert_eq!(text.matches("before-upgrade").count(), 1);
+    assert_eq!(text.matches("after-upgrade").count(), 1);
+    upgrade_process_to(&child, &socket, "daemon-again");
+    let mut again = Client::connect(&socket).unwrap();
+    again.set_read_timeout(Some(PATIENCE)).unwrap();
+    let snapshot = attach_to_buffer(&mut again, buffer, 71);
+    assert_eq!(snapshot.text, "yxnotes\n");
+    assert_eq!(snapshot.applied, Some(43));
+}

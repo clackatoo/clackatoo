@@ -44,6 +44,12 @@ Your daemon keeps the connection. It makes it again whenever it drops, and again
 
 `:portforward 8080` in one of HOST's workspaces forwards this machine's port 8080 to HOST's, through your daemon's connection to it, which keeps listening while the connection drops and is made again. `:portforward` there lists the forwards and `:portforward! 8080` stops one, as for a window on another machine. A window that's itself on another machine than its daemon can't forward to HOST yet.
 
+## Local upgrades
+
+A local daemon upgrade keeps remote pane identities and cached layouts while connections return, including machines reached through another. Editor acknowledgements survive so already-applied edits are not repeated. A planned upgrade waits for accepted terminal input to be acknowledged, refusing the upgrade if that wait times out. Terminal input is never replayed after reconnect.
+
+This protection applies when upgrading from a release that already keeps this state. An older daemon cannot supply it on the first installation. Open TCP streams and pending file-operation requests are not preserved.
+
 ## Machines passed on
 
 Your daemon passes on the machines it's connected to. If your laptop is connected to desk, and desk to a server, the laptop's bar has the server's workspaces too, as `notes@server`: named after the machine they live on, never the way there. Everything in them works as for a machine you connected to yourself, through a connection of your laptop's own to the server, which desk carries on.

@@ -1444,7 +1444,11 @@ impl Daemon {
             };
             daemon.links.pins.learn(MachineId(known.machine), pin);
         }
-        daemon.connect_kept(links::Kept::taken_over(state));
+        if let Some(federation) = &state.federation {
+            daemon.resume_federation(federation)?;
+        } else {
+            daemon.connect_kept(links::Kept::taken_over(state));
+        }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1519,6 +1523,9 @@ impl Daemon {
         servers_until: Instant,
         keep: &[AgentId],
     ) -> io::Result<Handover> {
+        // Capture before ending links or dropping their client receipts.
+        let federation = Some(self.hand_over_federation()?);
+        self.close_remotes("the daemon is upgrading to a new build");
         let kept_names = self.agent_names(keep);
         let kept_chats = self.chats_of(&kept_names);
         let agent_terminals = Some(self.hand_over_agent_terminals());
@@ -1661,6 +1668,7 @@ impl Daemon {
                 branches,
                 forks,
                 agent_terminals,
+                federation,
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),
@@ -1984,6 +1992,17 @@ impl Daemon {
         // the turn the upgrade goes ahead.
         let mut drained = None;
         let keep = loop {
+            match self.relay_keys_hold_upgrade(upgrading.until, Instant::now()) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.upgrade_to = Some(upgrading);
+                    return Ok(None);
+                }
+                Err(reason) => {
+                    self.refuse_upgrade(upgrading.token, reason);
+                    return Ok(None);
+                }
+            }
             match self.file_ops_hold_upgrade(upgrading.until, Instant::now()) {
                 Ok(false) => {}
                 // Asked again when one finishes, or at the time.
@@ -2033,7 +2052,6 @@ impl Daemon {
         self.stop_agents(&keep);
         // The client that asked hears how it went: its connection closes
         // as the new build starts, or says why it didn't.
-        self.close_remotes("the daemon is upgrading to a new build");
         let requester = match self.sources.try_remove(token.0) {
             Some(Source::Client(Client {
                 link: Link::Unix(mut stream),

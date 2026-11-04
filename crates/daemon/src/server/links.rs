@@ -170,7 +170,8 @@ pub(super) struct Links {
     /// The window this daemon is to the daemons it's connected to, as it
     /// attaches to their buffers for its clients (see
     /// [`Request::AttachBuffer`](clackatoo_protocol::Request)): chosen at
-    /// random as it starts, so its changes' numbers, counted from 1, are
+    /// random as it starts afresh and kept through upgrades, so its changes'
+    /// numbers, counted from 1, are
     /// never taken for a run's before.
     pub(super) window: u64,
     /// The number the next board shown from another machine gets.
@@ -964,7 +965,11 @@ impl Daemon {
         if let Some(thread) = linked.thread.take() {
             self.links.ending.push(thread);
         }
-        self.relay_ended(&linked.relayed);
+        // Stopping or execing closes the clients' connections. Announcing
+        // removed workspaces first would discard their pending editor work.
+        if !now {
+            self.relay_ended(&linked.relayed);
+        }
         // Its askpass, and the socket with it.
         drop(linked);
     }

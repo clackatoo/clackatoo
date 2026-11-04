@@ -40,6 +40,7 @@
 //! ([`Mirror::held`]), which this daemon shows what it shows in place of,
 //! if it reaches that machine.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
@@ -111,15 +112,15 @@ pub(crate) trait Fresh {
 }
 
 /// One kind of number, the other daemon's each way to this one's.
-#[derive(Debug)]
-pub(crate) struct Numbers<T = u32> {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Numbers<T: Ord = u32> {
     /// From the other daemon's to this one's.
     local: BTreeMap<T, T>,
     /// From this daemon's to the other's.
     remote: BTreeMap<T, T>,
 }
 
-impl<T> Default for Numbers<T> {
+impl<T: Ord> Default for Numbers<T> {
     fn default() -> Self {
         Self {
             local: BTreeMap::new(),
@@ -231,7 +232,7 @@ pub(crate) struct Mirror {
 
 /// A pane another daemon lent this one: where it is there, and what it
 /// shows, renumbered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LentPane {
     /// The workspace there holding it, by the number there.
     pub(crate) workspace: WorkspaceId,
@@ -250,7 +251,7 @@ pub(crate) struct LentPane {
 
 /// A pane of another daemon's workspaces that's on yet another machine,
 /// or on this one, and lent it there: see [`Mirror::held`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Held {
     /// The machine it's on.
     pub(crate) home: MachineId,
@@ -948,6 +949,125 @@ pub(crate) fn shown_name(name: &str) -> String {
         .take(LONGEST_NAME)
         .collect();
     shown.trim().to_owned()
+}
+
+/// Frozen v1 mirror view, encoded at protocol 125. Do not add fields.
+/// `Numbers`, `LentPane` and `Held` have frozen encodings here too.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct Snapshot {
+    /// The run of the daemon there the numbers are for (see
+    /// [`Machine::run`]), once it has said.
+    run: Option<u64>,
+    /// Its workspaces, as this daemon's clients are shown them.
+    pub(crate) workspaces: Vec<Workspace>,
+    /// What the panes of its workspaces it made again as it started still
+    /// have to show for it, by this daemon's numbers: the offers to run a
+    /// command again, and where editors were (see
+    /// [`Workspaces::restored`]).
+    pub(crate) restored: Vec<Restored>,
+    /// The terminals of its workspaces it keeps running, by this daemon's
+    /// numbers (see [`Workspaces::kept`]).
+    pub(crate) kept: Vec<KeptRunning>,
+    /// Its chats, summed up, as this daemon's clients are told them.
+    pub(crate) chats: Vec<ChatSummary>,
+    /// The panes it lent this daemon, by the number this daemon gave each
+    /// (see [`Lent::key`](clackatoo_protocol::Lent::key)).
+    pub(crate) lent: BTreeMap<u64, LentPane>,
+    /// Some panes it lent this daemon were left out, past what's taken in:
+    /// those not among [`lent`](Self::lent) may still be there.
+    pub(crate) lent_cut: bool,
+    /// The panes it lent other machines, by who and the number each has
+    /// there.
+    pub(crate) held_for: BTreeMap<(MachineId, u64), LentPane>,
+    /// The panes of its workspaces on yet another machine, or on this
+    /// one, lent it, by this daemon's numbers.
+    pub(crate) held: BTreeMap<PaneId, Held>,
+    /// The machines those are on and the numbers they have there, to look
+    /// one up by.
+    pub(crate) held_keys: BTreeSet<(MachineId, u64)>,
+    /// What it says the machines it isn't connected to are called.
+    pub(crate) others: Vec<OtherMachine>,
+    /// Some of its workspaces or panes were left out, past what's shown:
+    /// a pane of another machine's not among [`held`](Self::held) may
+    /// still be in its layouts.
+    pub(crate) cut: bool,
+    pub(crate) workspace_numbers: Numbers,
+    pub(crate) tab_numbers: Numbers,
+    pub(crate) pane_numbers: Numbers,
+    pub(crate) terminal_numbers: Numbers,
+    pub(crate) buffer_numbers: Numbers,
+    pub(crate) files_numbers: Numbers,
+    /// Boards are numbered for as long as the daemon there runs, never
+    /// forgotten before: few, and named by the finder's lists too.
+    pub(crate) board_numbers: Numbers,
+    pub(crate) review_numbers: Numbers,
+    /// Agent hunks, whose numbers the relay keeps as it says (see
+    /// [`Mirror::keep_hunks`]).
+    pub(crate) hunk_numbers: Numbers<u64>,
+    /// The other daemon's numbers of the terminals its workspaces show,
+    /// as last said.
+    terminals_shown: BTreeSet<u32>,
+    /// Its chats as it last said them, as many as are taken in, to be
+    /// renumbered again as its workspaces are.
+    told_chats: Vec<ChatSummary>,
+}
+impl From<&Mirror> for Snapshot {
+    fn from(m: &Mirror) -> Self {
+        Self {
+            run: m.run,
+            workspaces: m.workspaces.clone(),
+            restored: m.restored.clone(),
+            kept: m.kept.clone(),
+            chats: m.chats.clone(),
+            lent: m.lent.clone(),
+            lent_cut: m.lent_cut,
+            held_for: m.held_for.clone(),
+            held: m.held.clone(),
+            held_keys: m.held_keys.clone(),
+            others: m.others.clone(),
+            cut: m.cut,
+            workspace_numbers: m.workspace_numbers.clone(),
+            tab_numbers: m.tab_numbers.clone(),
+            pane_numbers: m.pane_numbers.clone(),
+            terminal_numbers: m.terminal_numbers.clone(),
+            buffer_numbers: m.buffer_numbers.clone(),
+            files_numbers: m.files_numbers.clone(),
+            board_numbers: m.board_numbers.clone(),
+            review_numbers: m.review_numbers.clone(),
+            hunk_numbers: m.hunk_numbers.clone(),
+            terminals_shown: m.terminals_shown.clone(),
+            told_chats: m.told_chats.clone(),
+        }
+    }
+}
+impl From<Snapshot> for Mirror {
+    fn from(m: Snapshot) -> Self {
+        Self {
+            run: m.run,
+            workspaces: m.workspaces,
+            restored: m.restored,
+            kept: m.kept,
+            chats: m.chats,
+            lent: m.lent,
+            lent_cut: m.lent_cut,
+            held_for: m.held_for,
+            held: m.held,
+            held_keys: m.held_keys,
+            others: m.others,
+            cut: m.cut,
+            workspace_numbers: m.workspace_numbers,
+            tab_numbers: m.tab_numbers,
+            pane_numbers: m.pane_numbers,
+            terminal_numbers: m.terminal_numbers,
+            buffer_numbers: m.buffer_numbers,
+            files_numbers: m.files_numbers,
+            board_numbers: m.board_numbers,
+            review_numbers: m.review_numbers,
+            hunk_numbers: m.hunk_numbers,
+            terminals_shown: m.terminals_shown,
+            told_chats: m.told_chats,
+        }
+    }
 }
 
 #[cfg(test)]

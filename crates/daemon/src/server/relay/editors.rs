@@ -101,6 +101,8 @@ pub(in crate::server) struct FollowedBuffer {
     version: Option<u64>,
     /// The change on its way there, not yet answered.
     sent: Option<Sent>,
+    /// A departed client's edit, awaiting delivery reconciliation.
+    unresolved: Option<(u64, u64, u64)>,
     /// What waits to be sent there, oldest first: clients' changes, which
     /// wait for the one on its way to be answered, and attaches, which do
     /// too, so that a snapshot sent as a change couldn't be made is never
@@ -390,7 +392,21 @@ impl Daemon {
         let gone = followed.viewers.is_empty();
         let upstream = followed.upstream;
         if gone {
-            relayed.buffers.remove(&local);
+            // A disconnected window still owns its unacknowledged edit.
+            // Keep receipts without socket tokens, just as local buffers do.
+            if let Some(sent) = followed.sent.take() {
+                followed.unresolved = sent
+                    .made
+                    .window
+                    .map(|window| (sent.seq, window, sent.made.seq));
+            }
+            followed.upstream = false;
+            followed.attaching.clear();
+            followed.queue.clear();
+            followed.hunks.clear();
+            if followed.applied.is_empty() && followed.unresolved.is_none() {
+                relayed.buffers.remove(&local);
+            }
         }
         for ticket in answered {
             self.hand_answer_with(token, ticket, Response::Done);
@@ -1591,6 +1607,17 @@ impl FollowedBuffer {
     /// or never arrived, when its window, attaching again, sends it again
     /// itself.
     fn resolve_lost(&mut self, local: BufferId, applied: Option<u64>, landed: Option<u64>) {
+        if let Some((seq, window, original)) = self.unresolved.take()
+            && applied == Some(seq)
+        {
+            self.applied.insert(
+                window,
+                Applied {
+                    seq: original,
+                    landed,
+                },
+            );
+        }
         let Some(sent) = self.sent.take_if(|sent| sent.lost) else {
             return;
         };
@@ -1628,6 +1655,36 @@ pub(super) fn transcode(frame: &[u8], from: u32, to: u32) -> Option<Vec<u8>> {
     frame::encode(to, &message)
         .ok()
         .filter(|frame| !frame.is_empty())
+}
+
+impl FollowedBuffer {
+    pub(super) fn hand_over(&self, local: BufferId) -> crate::handover::relay::Buffer {
+        crate::handover::relay::Buffer {
+            local: local.0,
+            applied: self
+                .applied
+                .iter()
+                .map(|(&window, a)| (window, a.seq, a.landed))
+                .collect(),
+            pending: self
+                .sent
+                .as_ref()
+                .and_then(|s| Some((s.seq, s.made.window?, s.made.seq)))
+                .or(self.unresolved),
+        }
+    }
+
+    pub(super) fn resume(kept: &crate::handover::relay::Buffer) -> Self {
+        Self {
+            applied: kept
+                .applied
+                .iter()
+                .map(|&(window, seq, landed)| (window, Applied { seq, landed }))
+                .collect(),
+            unresolved: kept.pending,
+            ..Self::default()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2872,5 +2929,112 @@ mod tests {
             ),
             "{asked:?}"
         );
+    }
+    #[test]
+    fn upgraded_relay_reconciles_uncertain_edits_before_its_window_resends() {
+        for arrived in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+            let (a, mut to_a) = client(&mut daemon);
+            attach(&mut daemon, (link, &mut there), a, local, 71);
+            updates(&mut to_a);
+            daemon.route_edit(a, local, 42, insert(0, "x", 10));
+            let sent = seq_of(&asked_of_buffers(&mut there)[0]);
+            let kept = daemon.hand_over_federation().unwrap();
+            let bytes = postcard::to_allocvec(&kept).unwrap();
+            let kept: crate::handover::relay::Federation = postcard::from_bytes(&bytes).unwrap();
+            let peer = &kept.peers[0];
+            // Client sockets and queues don't survive exec. Its edit does,
+            // in the window, while the relay keeps only delivery evidence.
+            daemon.links.list[0].relayed.buffers = peer
+                .buffers
+                .iter()
+                .map(|b| (BufferId(b.local), FollowedBuffer::resume(b)))
+                .collect();
+            let (b, mut to_b) = client(&mut daemon);
+            daemon.route_request(
+                b,
+                Request::AttachBuffer {
+                    buffer: local,
+                    window: 71,
+                    resume: None,
+                },
+            );
+            assert_eq!(asked_of_buffers(&mut there).len(), 1);
+            let mut reply = snapshot(
+                if arrived { 11 } else { 10 },
+                if arrived { "xnotes\n" } else { "notes\n" },
+                arrived.then_some(sent),
+            );
+            if let ServerMessage::Event(Event::Buffer {
+                update: BufferUpdate::Snapshot(ref mut s),
+                ..
+            }) = reply
+            {
+                s.landed = arrived.then_some(11);
+            }
+            say(&mut there, &reply);
+            say(&mut there, &ServerMessage::Response(Response::Done));
+            daemon.read_reached(link, Reading::Look);
+            let shown = updates(&mut to_b);
+            let BufferUpdate::Snapshot(snapshot) = &shown[0].1 else {
+                panic!("{shown:?}")
+            };
+            assert_eq!(snapshot.applied, arrived.then_some(42));
+            assert_eq!(snapshot.landed, arrived.then_some(11));
+            assert!(
+                asked_of_buffers(&mut there).is_empty(),
+                "never replay an uncertain edit here"
+            );
+            assert_eq!(daemon.links.window, kept.window);
+            assert_eq!(daemon.links.changes, kept.changes);
+        }
+    }
+
+    #[test]
+    fn closing_the_last_viewer_keeps_delivery_receipts_without_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+        let (a, mut to_a) = client(&mut daemon);
+        attach(&mut daemon, (link, &mut there), a, local, 71);
+        updates(&mut to_a);
+        daemon.route_edit(a, local, 42, insert(0, "x", 10));
+        let sent = seq_of(&asked_of_buffers(&mut there)[0]);
+        daemon.unfollow_buffer(a, 0, local);
+        let followed = &daemon.links.list[0].relayed.buffers[&local];
+        assert_eq!(followed.unresolved, Some((sent, 71, 42)));
+        assert!(
+            followed.sent.is_none() && followed.viewers.is_empty() && followed.queue.is_empty()
+        );
+        let mut restored = FollowedBuffer::resume(&followed.hand_over(local));
+        restored.resolve_lost(local, Some(sent), Some(11));
+        assert_eq!(restored.applied[&71].seq, 42);
+        assert_eq!(restored.applied[&71].landed, Some(11));
+    }
+
+    #[test]
+    fn upgraded_relay_keeps_receipts_for_each_window() {
+        let mut followed = FollowedBuffer::default();
+        followed.applied.insert(
+            7,
+            Applied {
+                seq: 42,
+                landed: Some(11),
+            },
+        );
+        followed.applied.insert(
+            8,
+            Applied {
+                seq: 5,
+                landed: None,
+            },
+        );
+        let kept = followed.hand_over(BufferId(9));
+        let resumed = FollowedBuffer::resume(&kept);
+        assert_eq!(resumed.applied[&7].seq, 42);
+        assert_eq!(resumed.applied[&7].landed, Some(11));
+        assert_eq!(resumed.applied[&8].seq, 5);
+        assert_eq!(resumed.applied[&8].landed, None);
+        assert!(resumed.viewers.is_empty() && resumed.queue.is_empty());
     }
 }

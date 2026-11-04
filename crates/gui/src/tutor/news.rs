@@ -1175,6 +1175,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "registers",
         what: "Macros, marks and jump history work in terminals, chats and lists; Q closes list panes",
     },
+    News {
+        id: "remote-upgrades",
+        date: "2026-11-04",
+        lesson: "remote",
+        what: "Remote panes and pending editor acknowledgements survive local daemon upgrades",
+    },
 ];
 
 impl News {
