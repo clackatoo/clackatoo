@@ -1725,6 +1725,7 @@ impl Editor {
             Action::Join if visual => self.join_selection(copy),
             Action::Join => self.join(times.max(2) - 1, copy),
             Action::Replace(ch) if visual => self.replace_selection(ch, copy),
+            Action::Replace('\r') => self.replace_with_break(times, copy),
             Action::Replace(ch) => self.replace_chars(ch, times, copy),
             Action::Insert(entry) => self.insert(entry, times, copy),
             // No more steps than Vim's `undolevels` keeps, so a huge
@@ -3137,6 +3138,54 @@ impl Editor {
         self.make(edit, copy);
         let last = line_start + start + with.len() - ch.len_utf8();
         self.cursor = Cursor::new(self.text(copy).point_of(last));
+    }
+
+    /// `r` and Enter: breaks the line in place of `times` characters at
+    /// the cursor, as Vim's, which types Enter there: the blanks after
+    /// them go, and the new line takes this one's indent, unless nothing
+    /// follows. If the line hasn't that many, fails, changing nothing.
+    fn replace_with_break(&mut self, times: usize, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let at = self.cursor.at;
+        let Some(laid) = text.laid(at.line) else {
+            return;
+        };
+        let line = laid.text();
+        let start = laid.byte_at(at.col);
+        let end = (0..times).try_fold(start, |end, _| {
+            (end < line.len()).then(|| laid.char_end(end))
+        });
+        let Some(end) = end else {
+            drop(text);
+            return self.fail();
+        };
+        let end = line.len() - line[end..].trim_start_matches([' ', '\t']).len();
+        let follows = end < line.len();
+        let indent = if follows {
+            indent_of(&line[..start])
+        } else {
+            ""
+        };
+        let line_start = text.line_start(at.line);
+        let with = format!("\n{indent}");
+        let edit = Edit::replace(
+            text.rope().len_bytes(),
+            line_start + start,
+            &line[start..end],
+            &with,
+        );
+        drop(text);
+        self.make(edit, copy);
+        // Where insert mode's Esc leaves it, a step back from the indent.
+        let text = self.text(copy);
+        let mut cursor = Cursor::new(text.point_of(line_start + start + with.len()));
+        cursor.apply(Motion::Left, &text);
+        drop(text);
+        self.cursor = Cursor::new(cursor.at);
+        self.normal_cursor(copy);
+        if follows {
+            self.ask_indent(at.line + 1, copy);
+        }
     }
 
     // --- Insert mode --------------------------------------------------------

@@ -475,6 +475,12 @@ impl Reader<'_> {
             'p' => Action::Put { before: false },
             'P' => Action::Put { before: true },
             'J' => Action::Join,
+            // `r` and Enter breaks the line, as Vim's; not in visual mode,
+            // where Vim's puts a CR in place of every character.
+            'r' if !visual && self.peek() == Some(Stroke::Enter) => {
+                self.at += 1;
+                return self.made(first, Read::Yes(Action::Replace('\r')));
+            }
             'r' => {
                 let replace = self.then("character", |_| true, Action::Replace);
                 return self.made(first, replace);
@@ -894,6 +900,12 @@ mod tests {
         );
         assert_eq!(read("r"), Parsed::Incomplete);
         assert_eq!(read("rx"), command(None, Action::Replace('x')));
+        let enter = parse(
+            &[Stroke::char('r'), Stroke::Enter],
+            false,
+            &Plain { tildeop: false },
+        );
+        assert_eq!(enter, command(None, Action::Replace('\r')));
         assert_eq!(read("zz"), command(None, Action::View(ViewAt::Middle)));
         assert_eq!(read("zx"), Parsed::Nothing);
         assert_eq!(
