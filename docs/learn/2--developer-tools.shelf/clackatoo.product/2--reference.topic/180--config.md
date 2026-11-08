@@ -40,6 +40,7 @@ end)
   client/startup.toml       the window's settings, needed before it starts
   daemon/agents.toml        agents chats can talk to, besides those clackatoo knows
   daemon/machine.toml       the name this machine's daemon goes by on other machines
+  daemon/web.toml           whether phones and browsers can reach it, and how
   lua/                      modules shared with the daemon's config, once it has one
 ```
 
@@ -86,10 +87,10 @@ Keys can be bound to other keys too, given as a string, as Vim's `noremap` maps 
 
 | Written | Is |
 |---|---|
-| `<C-b>`, `<A-h>` | Ctrl+B, Alt+H |
+| `<C-b>`, `<A-h>` | Ctrl+B, Alt+H. `<M-h>` is `<A-h>`. |
 | `<C-O>`, `<C-S-o>` | Ctrl+Shift+O. Shift is part of a letter: `<C-o>` is Ctrl+O. |
 | `<S-Tab>` | Shift with a named key |
-| `<Esc>`, `<CR>`, `<Tab>`, `<BS>`, `<Del>`, `<Insert>`, `<Space>` | Named keys. `<Enter>` and `<Return>` are `<CR>`. |
+| `<Esc>`, `<CR>`, `<Tab>`, `<BS>`, `<Del>`, `<Insert>`, `<Space>` | Named keys. `<Enter>` and `<Return>` are `<CR>`, and `<Escape>` is `<Esc>`. |
 | `<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<F1>`–`<F12>` | More named keys |
 | `<lt>` | `<` |
 
@@ -169,19 +170,20 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `agent` | `ag` | The agent `:Agent` and Ctrl+B `a` open a chat with: `claude`, `codex`, `gemini` or one in the daemon's [`agents.toml`](~clackatoo/reference/agents#which-agent). Empty leaves it to the daemon. | `claude` |
 | `agenttools` | `agt` | What a new chat's agent may do with [clackatoo's tools](~clackatoo/reference/agents#what-the-agent-can-show-you): `ask` before running commands or typing, `allow` commands in its own terminals, or `off`. | `ask` |
 | `claudetask` | `ct` | A new Claude Code chat keeps Claude Code's own Task tool, which runs helpers inside one turn, folded under the Task's [card](~clackatoo/reference/agents#claude-code-s-own-subagents). Off, Claude hands work on only as [subagents](~clackatoo/reference/agents#subagents), which you can watch. Other agents have no such tool. | off |
+| `chatbrowser` | `cb` | A new chat starts with its [Browser](~clackatoo/reference/agents#the-browser) setting on, so its agent can drive a headless browser with a profile of its own. Off, a chat has none until you turn it on in its settings. `cb` is `clipboard`'s short name too, and `:set cb` finds that one, so write this one out. | off |
 | `chatcost` | `chc` | Under each chat turn, what it spent, its tokens and, where the agent says, its cost; and what the session cost, in the chat's usage detail (see [what else a turn says](~clackatoo/reference/agents#what-else-a-turn-says)). | on |
-| `carryover` | `co` | About the most of a chat's conversation, in tokens, that an agent the chat moves to hears, never more than a quarter of its context. | 20000 |
+| `carryover` | `co` | About the most of a chat's conversation, in tokens, that an agent the chat moves to hears, from 1000 to 200000, but never more than 50000 or a quarter of its context. | 20000 |
 | `notify` | `ntf` | Which chats you can't see get a [desktop notification](~clackatoo/reference/agents#desktop-notifications): `all` (those that finish, fail or ask something), `questions`, or `off`. | `all` |
 | `rewindfiles` | `rwf` | What [rewinding a chat](~clackatoo/reference/agents#rewinding-and-branches), or switching its branch, does to the files the turns it takes out changed: `ask` each time, `undo` them, or `keep` them. `:rewind!` undoes them without asking. | `ask` |
 | `updatecheck` | `uc` | Look for a new release at most once a day, a while after the window opens, and say so in the bar. It sends one request to api.github.com, saying the version. | on |
 | `predictecho` | `pe` | Shows what's typed in a terminal at once, underlined, before its echo comes back: `auto` for a daemon on another machine whose round trip is over 30 ms or has just stalled, `always`, or `never`. | `auto` |
 | `blockmarks` | `bm` | Which finished commands a terminal marks at the end of their prompt's line, where the shell says how they ended: those that failed, with a red `✗` and their exit status (`failed`), every one, with a faint `✓` for those that worked (`all`), or none (`none`). | `failed` |
 | `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
-| `whichkeydelay` | `wkd` | How long, in milliseconds, keys that start others, as Space does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with Ctrl or Alt, as Ctrl+B, show it at once; 0 shows it at once for every key. | 400 |
+| `whichkeydelay` | `wkd` | How long, up to 5000 milliseconds, keys that start others, as Space does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with Ctrl or Alt, as Ctrl+B, show it at once; 0 shows it at once for every key. | 400 |
 | `explorerwidth` | `ew` | How wide a [file explorer](~clackatoo/reference/explorer) opens, in columns: 0 is 30, or a quarter of the tab if that's narrower; otherwise from 10 to 200. | 0 |
 | `explorerhidden` | `eh` | File explorers show hidden files when they open. | off |
 | `completion` | `cmp` | Asks the language server what could finish a word as you type it. Off, Ctrl+Space, Ctrl+N and Ctrl+P still ask. | on |
-| `completedelay` | `cmpd` | How long typing pauses, in milliseconds, before completion asks. | 40 |
+| `completedelay` | `cmpd` | How long typing pauses, up to 2000 milliseconds, before completion asks, so a burst of keys asks once. 0 asks at every key. | 40 |
 | `completeaccept` | `cmpa` | What Enter does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to Ctrl+Y. | `picked` |
 | `completetab` | `cmpt` | Tab accepts the picked item too. | off |
 | `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
@@ -190,9 +192,10 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/editor#language-servers) says; where it's given a value a little brighter. | on |
 | `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/editor#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
 | `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
+| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor#agents-changes) that you haven't reviewed, in the chat's colour. It shows only while a file has such lines, or `:blame` is on. | on |
 | `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/window#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/editor#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
-| `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. It applies to forwards opened after it's changed. | on |
+| `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as `client.opt.number = 1`, is a mistake.
 
@@ -218,13 +221,13 @@ Windows, workspaces, tabs and panes are handles: values that stand for one of th
 
 | | Fields | Methods |
 |---|---|---|
-| `client` | `windows`, `focused` (the focused pane), `opt` | `on`, `keys.map`, `keys.unmap`, `keys.group` |
+| `client` | `windows`, `focused` (the focused pane), `opt` | `on`, `keys.map`, `keys.unmap`, `keys.group`, `cmd`, `forward`, `connect`, `disconnect` |
 | A window | `workspace`, `tab`, `pane` | `on` |
 | A workspace | `name`, `tabs` | `on` |
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
-| A pane | `kind` (`"terminal"`, `"chat"` or `"editor"`), `title`, `tab` | `on`, `split`, `close`, `focus` |
+| A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"` or `"browser"`), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
-`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }`. An [editor](~clackatoo/reference/editor) can't be made from the config yet, so splitting one needs a kind. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
+`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make yet, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
 
 ```lua
 client.keys.map("n", "<C-b>t", function(ev)
@@ -241,13 +244,13 @@ Nothing is shown while `init.lua` first runs, so `client.focused` is nil then: h
 
 A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane that has closed, is shown in the bottom bar, with the file and line, until the next key, and printed on stderr in full. A mistake in `init.lua` itself stops it there, as an error in any Lua program does: what it bound before that line stays bound.
 
-A handler or binding that runs for more than a quarter of a second at a time, as a loop that never ends would, is stopped there, and its key is decided as if it had done nothing more.
+`init.lua` may run for 2 seconds before it's stopped where it is. A handler or binding that runs for more than a quarter of a second at a time, as a loop that never ends would, is stopped there, and its key is decided as if it had done nothing more.
 
 `print` writes to stderr.
 
 ## Not yet
 
-- The daemon's only config files are `agents.toml` and `machine.toml`.
+- The daemon's only config files are `agents.toml`, `machine.toml` and `web.toml`.
 - `init.lua` isn't run again when it changes: use `:reload`.
 - Bindings made in Lua don't show in Ctrl+B's list in the bottom bar.
 - Keypresses are the only event.
