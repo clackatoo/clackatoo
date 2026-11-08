@@ -1700,10 +1700,16 @@ fn newest(mut got: Vec<Listed>) -> Vec<Listed> {
     got
 }
 
+/// The most answers a question keeps: those past it are left out.
+const MOST_OPTIONS: usize = 64;
+
 /// The agent asking, in the request `id`, whether it may use a tool, as
-/// `params` say, if they can be read: those of its answers of a kind this
-/// build doesn't know are noted (see [`known_kinds`]).
+/// `params` say, if they can be read: its first [`MOST_OPTIONS`] answers,
+/// those of a kind this build doesn't know noted (see [`known_kinds`]).
 fn permission(mut params: Value, id: &Value) -> Option<Incoming> {
+    if let Some(options) = params.get_mut("options").and_then(Value::as_array_mut) {
+        options.truncate(MOST_OPTIONS);
+    }
     let unknown = known_kinds(&mut params);
     serde_json::from_value::<RequestPermissionRequest>(params)
         .ok()
@@ -1728,7 +1734,7 @@ const KNOWN_KINDS: [&str; 4] = ["allow_once", "allow_always", "reject_once", "re
 fn known_kinds(params: &mut Value) -> Vec<String> {
     let mut unknown = Vec::new();
     let options = (params.get_mut("options").and_then(Value::as_array_mut)).into_iter();
-    for option in options.flatten().take(64) {
+    for option in options.flatten().take(MOST_OPTIONS) {
         let known = (option.get("kind").and_then(Value::as_str))
             .is_some_and(|kind| KNOWN_KINDS.contains(&kind));
         let id = option.get("optionId").and_then(Value::as_str);
@@ -2429,6 +2435,31 @@ mod handover_tests {
             [TerminalId(4), TerminalId(5)]
         );
         agent.stop().kill_group();
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn a_question_keeps_only_as_many_answers_as_one_offers() {
+        let options: Vec<Value> = (0..100)
+            .map(|at| {
+                let kind = if at == 70 {
+                    "allow_forever"
+                } else {
+                    "allow_once"
+                };
+                serde_json::json!({ "optionId": format!("o{at}"), "name": "Yes", "kind": kind })
+            })
+            .collect();
+        let params = serde_json::json!({ "sessionId": "s", "toolCall": { "toolCallId": "t" },
+                                         "options": options });
+        let Some(Incoming::Permission { options, .. }) = permission(params, &Value::from(1)) else {
+            panic!("not read");
+        };
+        assert_eq!(options.len(), MOST_OPTIONS);
     }
 }
 

@@ -219,6 +219,10 @@ fn subagents_value(count: u8) -> String {
 /// refused rather than queued.
 pub(crate) const MAX_QUESTIONS: usize = 16;
 
+/// The most characters of an answer's name, as the agent names it, that
+/// its question shows.
+const MOST_CHOICE_NAME: usize = 256;
+
 /// The answers to a question about one of clackatoo's tools: its ID, what
 /// it's called, and what it means.
 const TOOL_CHOICES: [(&str, &str, ChoiceKind); 3] = [
@@ -2478,14 +2482,23 @@ impl HostedChat {
             .map(|option| option.option_id.0.to_string())
     }
 
-    /// The agent asks whether it may use a tool.
+    /// The agent asks whether it may use a tool. Returns whether it was
+    /// asked: too many questions waiting turn it down, which the chat
+    /// says, and nothing more is kept of it.
     pub(crate) fn ask(
         &mut self,
         request: Value,
         tool: &ToolCallUpdate,
         options: &[PermissionOption],
         unknown: &[String],
-    ) {
+    ) -> bool {
+        if self.asking.len() >= MAX_QUESTIONS {
+            self.set_notice(Some(
+                "Turned down one of the agent's questions: too many are waiting for answers."
+                    .to_owned(),
+            ));
+            return false;
+        }
         // The tool's own title, if it's been seen: Codex's questions call
         // every command "Run command", but its tool call has the command.
         let id = tool.tool_call_id.0.to_string();
@@ -2496,7 +2509,7 @@ impl HostedChat {
             .iter()
             .map(|option| Choice {
                 id: option.option_id.0.to_string(),
-                name: clean(&option.name),
+                name: cut(&clean(&option.name), MOST_CHOICE_NAME),
                 kind: match option.kind {
                     // A kind newer than this build knows: what it means
                     // isn't known, so it's never taken for yes or no.
@@ -2521,6 +2534,7 @@ impl HostedChat {
         self.next_question += 1;
         self.asking.push_back((Asker::Agent(request), question));
         self.show_question();
+        true
     }
 
     /// One of clackatoo's tools asks whether the agent may do `what`, as
@@ -4286,6 +4300,15 @@ fn tail(text: &str, max: usize) -> String {
     format!("{fence}…\n{rest}")
 }
 
+/// `text`, cut to its first `most` characters with `…` after, if it's
+/// longer.
+fn cut(text: &str, most: usize) -> String {
+    match text.char_indices().nth(most) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
 /// The first whole lines of `text` that fit in `max` bytes, if it's
 /// longer.
 fn head(text: &str, max: usize) -> String {
@@ -5657,6 +5680,29 @@ mod tests {
         chat.ask(Value::from(2), &unseen, &options, &[]);
         answer(&mut chat, None);
         assert_eq!(chat.node.question.unwrap().title, "rm<U+200F> -rf");
+    }
+
+    #[test]
+    fn an_agent_asking_too_much_at_once_is_turned_down() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        let tool: ToolCallUpdate =
+            serde_json::from_str(r#"{"toolCallId":"t","title":"Write a"}"#).unwrap();
+        let long = "n".repeat(1000);
+        let options: Vec<PermissionOption> = serde_json::from_str(&format!(
+            r#"[{{"optionId":"a","name":"{long}","kind":"allow_once"}}]"#
+        ))
+        .unwrap();
+        for request in 0..MAX_QUESTIONS {
+            assert!(chat.ask(Value::from(request), &tool, &options, &[]));
+        }
+        assert!(!chat.ask(Value::from(99), &tool, &options, &[]));
+        assert_eq!(chat.asking.len(), MAX_QUESTIONS);
+        // Its answers' names are cut to a size to show.
+        let name = &chat.node.question.as_ref().unwrap().choices[0].name;
+        assert_eq!(name.chars().count(), MOST_CHOICE_NAME + 1);
+        assert!(name.ends_with('…'), "{name}");
     }
 
     #[test]

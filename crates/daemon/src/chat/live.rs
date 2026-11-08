@@ -112,9 +112,10 @@ impl HostedChat {
                 (tool, diffs)
             })
             .collect();
+        // All of them, as the agent waits for each: no build asks more
+        // than it can show, but one before CLACKA-215 might have.
         self.asking = (live.asking.into_iter())
             .filter_map(resume_question)
-            .take(super::MAX_QUESTIONS)
             .collect();
         self.next_question = (live.next_question).max(
             (self.asking.iter())

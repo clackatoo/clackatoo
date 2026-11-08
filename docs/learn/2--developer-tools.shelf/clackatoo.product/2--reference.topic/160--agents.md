@@ -450,6 +450,8 @@ Nothing in a question can hide what it says. A character that reorders the text 
 
 An answer of a kind clackatoo doesn't know, which a newer agent may offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent colour, and Esc never picks it. A window from before this is shown the other answers only, or, if every answer is of a kind not known, a Decline that says no.
 
+Questions wait their turn, 16 at most: one more is turned down at once, and the chat says so. A question shows at most 64 answers, and an answer's name at most 256 characters.
+
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
 ### Questions, forms and plans
