@@ -694,17 +694,16 @@ impl Daemon {
     /// kept them with the workspaces did, unless they're known already;
     /// one that can't be read is passed over.
     fn restore_keys(&self, kept: &[saved::Known]) {
-        for known in kept {
-            let machine = known.machine.parse();
-            let key = crate::machine::unhex(&known.key);
-            if let (Ok(machine), Some(key)) = (machine, key) {
-                let pin = super::links::Pin {
-                    key,
-                    met: known.met,
-                };
-                self.links.pins.learn(machine, pin);
-            }
-        }
+        let known = kept.iter().filter_map(|known| {
+            let machine = known.machine.parse().ok()?;
+            let key = crate::machine::unhex(&known.key)?;
+            let pin = super::links::Pin {
+                key,
+                met: known.met,
+            };
+            Some((machine, pin))
+        });
+        self.links.pins.learn(known);
     }
 
     /// Takes the machines the workspaces made again were lent to, as kept,

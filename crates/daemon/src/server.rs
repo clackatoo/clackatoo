@@ -1437,13 +1437,13 @@ impl Daemon {
         }
         // The keys it knew other machines by, and the connections it had,
         // made again.
-        for known in &state.keys {
+        daemon.links.pins.learn(state.keys.iter().map(|known| {
             let pin = links::Pin {
                 key: known.key,
                 met: known.met,
             };
-            daemon.links.pins.learn(MachineId(known.machine), pin);
-        }
+            (MachineId(known.machine), pin)
+        }));
         if let Some(federation) = &state.federation {
             daemon.resume_federation(federation)?;
         } else {
