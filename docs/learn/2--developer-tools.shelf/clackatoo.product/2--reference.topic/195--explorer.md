@@ -21,7 +21,7 @@ A file explorer is a pane showing a folder, its root, as a tree. The daemon list
 
 Its root is the project the focused pane is in: the git repository of an editor's file or of the folder a terminal is in, or else that folder. Opened from an editor, the tree opens down to the editor's file, with the cursor on it. `:e` alone roots it at the folder you're in, not the project.
 
-It opens 30 columns wide, or a quarter of the tab if that's narrower (`explorerwidth`), and keeps that share of the tab as the window resizes.
+It opens 30 columns wide, or a quarter of the tab if that's narrower, but never under 10 (`explorerwidth`), and keeps that share of the tab as the window resizes.
 
 ## The tree
 
@@ -99,7 +99,7 @@ Each line starts with a hidden mark naming its entry, so what it named is known 
 
 | Option | Default | Does |
 |---|---|---|
-| `explorerwidth` (`ew`) | `0` | How wide an explorer opens, in columns: 0 is 30, or a quarter of the tab if that's narrower; otherwise 10 to 200. |
+| `explorerwidth` (`ew`) | `0` | How wide an explorer opens, in columns: 0 is 30, or a quarter of the tab if that's narrower, but never under 10; otherwise 10 to 200. |
 | `explorerhidden` (`eh`) | off | Explorers show hidden files when they open. |
 
 ## Not yet
