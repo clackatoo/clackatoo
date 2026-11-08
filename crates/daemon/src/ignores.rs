@@ -108,8 +108,12 @@ pub(crate) struct Rules {
     /// the nearest of it and the directories above it that has ignore
     /// files or a repository: the many with neither share the one above
     /// them.
-    dirs: RwLock<HashMap<(PathBuf, bool), Option<Arc<Dir>>>>,
+    dirs: RwLock<Dirs>,
 }
+
+/// Each directory a walk has asked about, and whether it's above the
+/// walk's root, with what [`Dir::read`] made of it.
+type Dirs = HashMap<(PathBuf, bool), Option<Arc<Dir>>>;
 
 /// A directory's ignore files, and those of the directories above it.
 struct Dir {
@@ -249,10 +253,10 @@ impl Rules {
             unread.push(key);
         }
         for key in unread.into_iter().rev() {
-            let read = Dir::read(&key.0, key.1, self.require_git, found);
+            let dir = Dir::read(&key.0, key.1, self.require_git, found);
             // As another thread of the walk may have read it meanwhile.
             let mut dirs = self.dirs.write().unwrap_or_else(PoisonError::into_inner);
-            found = dirs.entry(key).or_insert(read).as_ref().map(Arc::clone);
+            found = dirs.entry(key).or_insert(dir).as_ref().map(Arc::clone);
         }
         found
     }
@@ -472,7 +476,7 @@ mod tests {
         let names = |found: Vec<PathBuf>| -> Vec<String> {
             (found.iter())
                 .filter_map(|path| Some(path.file_name()?.to_str()?.to_owned()))
-                .filter(|name| name.ends_with(".txt"))
+                .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "txt"))
                 .collect()
         };
         // The finder's way, as the crate had it for a worktree.
