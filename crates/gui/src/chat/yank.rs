@@ -15,10 +15,11 @@
 //!
 //! Objects within a block are Vim's, found in its text by the objects
 //! every pane has (see [`crate::objects`]): `iw`, `aW`, `is`, `ip`, `i"`,
-//! `a(`, `it`. A chat names two of its own: `ix` is the block of code the
-//! cursor's in and `ax` the same with its fence, as Markdown writes it,
-//! and `im` is the message, answer or card it's in, as it came, as its
-//! Copy button copies it, and `am` its whole turn. All four are lines.
+//! `a(`, `it`. A chat has four of its own, by two letters: `ix` is the
+//! block of code the cursor's in and `ax` the same with its fence, as
+//! Markdown writes it, and `im` is the message, answer or card it's in,
+//! as it came, as its Copy button copies it, and `am` its whole turn. All
+//! four are lines.
 //!
 //! The cursor goes to the start of what's yanked, as Vim's does. Text not
 //! laid out yet is laid out for it once the fonts are at hand, as visual

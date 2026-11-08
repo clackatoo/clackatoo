@@ -116,9 +116,9 @@ pub(crate) enum ChatKey {
 /// Vim's operator, with any of those motions or the objects it finds,
 /// `ix` and `im` among them, and a register before it; `/`, `?`, `n` and
 /// `N`; and its own: Enter, `K`, `u` and Ctrl+R for turns, and `z` for
-/// folding and tables. It takes no mark, edit or other operator, and no
-/// register before anything but a yank: a chat's text isn't the user's
-/// to change.
+/// folding and tables. It takes marks and macros, as every pane does, but
+/// no edit or other operator, no yank to a mark, and no register before
+/// anything but a yank: a chat's text isn't the user's to change.
 pub(crate) struct ChatKeys;
 
 impl Dialect for ChatKeys {
