@@ -38,7 +38,7 @@ end)
   client/init.lua           the window's config
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
-  daemon/agents.toml        agents chats can talk to, besides those clackatoo knows
+  daemon/agents.toml        agents chats can talk to, besides those clackatoo knows, and their limits
   daemon/machine.toml       the name this machine's daemon goes by on other machines
   daemon/web.toml           whether phones and browsers can reach it, and how
   lua/                      modules shared with the daemon's config, once it has one
@@ -225,7 +225,7 @@ Windows, workspaces, tabs and panes are handles: values that stand for one of th
 | A window | `workspace`, `tab`, `pane` | `on` |
 | A workspace | `name`, `tabs` | `on` |
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
-| A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"` or `"browser"`), `title`, `tab` | `on`, `split`, `close`, `focus` |
+| A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
 `pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make yet, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
 
