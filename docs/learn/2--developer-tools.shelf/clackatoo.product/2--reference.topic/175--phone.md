@@ -11,7 +11,7 @@ The daemon can serve a web app: your chats by workspace, with those that need yo
 
 ## Turning it on
 
-It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The daemon reads it when it starts or upgrades (`clackatoo upgrade`).
+It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The daemon reads it when it starts or upgrades (`clackatoo upgrade`), and logs any key in it that isn't a setting.
 
     mode = "tailscale"   # or "public", or "off"
     login = "you@github" # tailscale: who's let in
@@ -19,6 +19,7 @@ It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The daemon 
     expire_days = 90     # unpair devices unused this long
     password_days = 0    # ask for the password again after this many days
     ask = true           # devices may ask a window to let them in
+    lock_after = 50      # wrong passwords in a row before password pairing locks (1 to 10000)
 
 ### Through Tailscale
 
@@ -43,7 +44,7 @@ This needs a password and `origin`, and `ask` is off unless you turn it on. Gett
 
 A device pairs once:
 
-- **with the password**, which `clackatoo web password` sets. Only its Argon2id hash is kept, in web.toml. Tries are limited to five at once, then one a minute, from each address (IPv6 by /64), and to about twenty a minute from everywhere together. After 50 wrong passwords in a row, password pairing locks, and stays locked after a restart, until `:devices unlock` or `clackatoo devices unlock`; every window's bar says so. Anyone can lock it this way, but devices already paired keep working.
+- **with the password**, which `clackatoo web password` sets. Only its Argon2id hash is kept, in web.toml. Tries are limited to five at once, then one a minute, from each address (IPv6 by /64), and to about twenty a minute from everywhere together. After `lock_after` wrong passwords in a row (50 unless set), password pairing locks, and stays locked after a restart, until `:devices unlock` or `clackatoo devices unlock`; every window's bar says so. Anyone can lock it this way, but devices already paired keep working.
 - **by asking a window.** The phone shows a code, and every window's bar says a device asks. Type `:devices allow CODE` to let it in, or `:devices deny`. The window never shows the code, so only someone holding the phone can let it in.
 
 The device then keeps a token in a cookie its scripts can't read; the daemon keeps only its hash. `:devices` (or `clackatoo devices`) lists paired devices, and `:devices revoke N` unpairs one, cutting it off at once. A device unused for `expire_days` is unpaired, and one past `password_days` is asked for the password again; either cuts off a device that's connected.

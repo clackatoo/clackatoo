@@ -29,7 +29,12 @@
 //! # Whether a device may ask to be allowed from a window: by default
 //! # with tailscale, not with public.
 //! ask = true
+//! # Wrong passwords in a row before pairing with the password locks,
+//! # from 1 to 10000.
+//! lock_after = 50
 //! ```
+//!
+//! A key it doesn't know is logged, and passed over.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -47,6 +52,26 @@ pub const DEFAULT_EXPIRY: Duration = Duration::from_hours(90 * 24);
 /// How many wrong passwords in a row lock pairing with the password,
 /// unless told otherwise.
 pub const LOCK_AFTER: u32 = 50;
+
+/// The most `lock_after` may be: more is as good as never locking.
+const MOST_LOCK_AFTER: u64 = 10_000;
+
+/// The keys `web.toml` may have.
+const KEYS: &[&str] = &[
+    "mode",
+    "socket",
+    "login",
+    "password",
+    "address",
+    "port",
+    "certificate",
+    "key",
+    "origin",
+    "expire_days",
+    "password_days",
+    "ask",
+    "lock_after",
+];
 
 /// The unix socket's name in the web app's data directory, unless told
 /// otherwise.
@@ -170,6 +195,9 @@ pub fn read(path: &Path, data: PathBuf) -> Option<WebConfig> {
 /// If `text` isn't TOML, or a setting doesn't make sense.
 pub fn parse(text: &str, data: PathBuf) -> Result<Option<WebConfig>, String> {
     let document: toml_edit::DocumentMut = text.parse().map_err(|err| format!("{err}"))?;
+    for key in unknown(&document) {
+        log::warn!("web.toml: there's no setting {key:?}; it's passed over");
+    }
     let text = |key: &str| -> Result<Option<String>, String> {
         document.get(key).map_or(Ok(None), |item| {
             (item.as_str().map(|text| Some(text.to_owned())))
@@ -255,7 +283,22 @@ pub fn parse(text: &str, data: PathBuf) -> Result<Option<WebConfig>, String> {
     if let Some(ask) = document.get("ask") {
         config.ask = ask.as_bool().ok_or("ask is true or false")?;
     }
+    if let Some(wrong) = number("lock_after")? {
+        if !(1..=MOST_LOCK_AFTER).contains(&wrong) {
+            return Err(format!("lock_after is from 1 to {MOST_LOCK_AFTER}"));
+        }
+        config.lock_after = u32::try_from(wrong).unwrap_or(LOCK_AFTER);
+    }
     Ok(Some(config))
+}
+
+/// The keys in `document` that aren't settings, as a slip in one's name.
+fn unknown(document: &toml_edit::DocumentMut) -> Vec<String> {
+    (document.iter())
+        .map(|(key, _)| key)
+        .filter(|key| !KEYS.contains(key))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -323,5 +366,27 @@ mod tests {
         assert!(config.ask);
         assert!(parse(&base.replace("https://Example.com:8443/", "http://x")).is_err());
         assert!(parse(&format!("{base}socket = \"/s\"")).is_err());
+    }
+
+    #[test]
+    fn lock_after_is_read_within_its_range() {
+        let base = "mode = \"tailscale\"\n";
+        assert_eq!(parse(base).unwrap().unwrap().lock_after, LOCK_AFTER);
+        let config = parse(&format!("{base}lock_after = 5")).unwrap().unwrap();
+        assert_eq!(config.lock_after, 5);
+        for wrong in ["0", "10001", "\"5\""] {
+            assert!(
+                parse(&format!("{base}lock_after = {wrong}")).is_err(),
+                "{wrong}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_isnt_a_setting_is_found_out() {
+        let document: toml_edit::DocumentMut = "mode = \"tailscale\"\nlock_afer = 3\nask = true"
+            .parse()
+            .unwrap();
+        assert_eq!(unknown(&document), ["lock_afer"]);
     }
 }

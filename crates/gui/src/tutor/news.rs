@@ -1253,6 +1253,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Ctrl+Shift+Alt+V pastes the clipboard's image into a terminal, on any machine, as a path Claude Code takes",
     },
+    News {
+        id: "web-lock-after",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "web.toml's lock_after sets how many wrong passwords lock pairing; a key it doesn't know is logged",
+    },
 ];
 
 impl News {
