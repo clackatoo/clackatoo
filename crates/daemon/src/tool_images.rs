@@ -8,7 +8,7 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, EmbeddedResourceResource, SessionUpdate, ToolCallContent,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use clackatoo_protocol::{ChatPreview, TerminalId, ToolContent};
+use clackatoo_protocol::{ChatImage, ChatPreview, TerminalId, ToolContent};
 
 const BYTES: usize = 8 * 1024 * 1024;
 const COUNT: usize = 4;
@@ -260,14 +260,15 @@ fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
     }
     let reader = || image::ImageReader::with_format(Cursor::new(&bytes), format);
     let (width, height) = reader().into_dimensions().ok()?;
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_000_000 {
+    if !fits(width, height) {
         return None;
     }
     let mut reader = reader();
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(128 * 1024 * 1024);
-    limits.max_image_width = Some(16_000_000);
-    limits.max_image_height = Some(16_000_000);
+    let most = u32::try_from(ChatImage::MAX_PIXELS).ok();
+    limits.max_image_width = most;
+    limits.max_image_height = most;
     reader.limits(limits);
     let image = reader
         .decode()
@@ -285,9 +286,22 @@ fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
     ))
 }
 
+/// Whether an image `width` by `height` is one a chat takes: no more
+/// pixels than one pasted may have.
+fn fits(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && u64::from(width) * u64::from(height) <= ChatImage::MAX_PIXELS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_has_as_many_pixels_as_one_pasted_may() {
+        assert!(fits(4096, 4096));
+        assert!(!fits(4097, 4096));
+        assert!(!fits(0, 1));
+    }
 
     fn png() -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());
