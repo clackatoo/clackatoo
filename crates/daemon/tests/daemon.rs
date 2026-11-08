@@ -13290,10 +13290,11 @@ fn a_tool_call_longer_than_one_read_comes_whole() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
     let chat = start_tooled_chat(&mut client, AgentTools::Ask);
-    // A path of 20 KB, more than a read takes: the rest of the call is
-    // read at the end of the turn. The answer names the path.
-    let path = format!("{}.rs", "y".repeat(20_000));
-    let prompt = format!("mcp get_diagnostics {{\"path\":\"{path}\"}}\nmcp list_panes");
+    // A call of 20 KB, more than a read takes: the rest of it is read at
+    // the end of the turn. The answer names the path, which comes last.
+    let (pad, path) = ("y".repeat(20_000), "last.rs");
+    let prompt =
+        format!("mcp get_diagnostics {{\"pad\":\"{pad}\",\"path\":\"{path}\"}}\nmcp list_panes");
     let words = last_words(&ask(&mut client, chat, &prompt));
     assert!(words.contains(&format!("wrong in {path}.")), "{words}");
     assert!(words.contains("list_panes: "), "{words}");

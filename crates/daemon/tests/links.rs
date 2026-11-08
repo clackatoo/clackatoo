@@ -8207,7 +8207,7 @@ fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
     let said = last_words(&node);
     assert!(
         said.contains(&format!(
-            "wait_for_chat: {}built r4\n[finished]",
+            "wait_for_chat: {}| built r4\n[finished]",
             answer(4, 4)
         )),
         "{said}"
@@ -8295,7 +8295,7 @@ fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
     );
     assert!(said.contains(&from_helper), "{said}");
     let from_builder = format!(
-        "wait_for_chat: {}built r5\n[finished]",
+        "wait_for_chat: {}| built r5\n[finished]",
         answer(builder_turns, 5)
     );
     assert!(said.contains(&from_builder), "{said}");
