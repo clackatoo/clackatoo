@@ -257,12 +257,13 @@ impl Scrollback {
     pub(crate) fn end_newest_line(&mut self) {
         if let Some(raw) = self.raw.back_mut() {
             raw.set_wrapped(false);
-        } else if let Some(record) = self
-            .pages
-            .back_mut()
-            .and_then(|page| page.records[page.first..].last_mut())
-        {
-            record.continues = false;
+        } else if self.newest_continues() {
+            // A record of a row that continues keeps the blanks it ends
+            // in, which one that doesn't loses: it's made again from its
+            // row, as it would have been had the row ended here.
+            let mut row = self.pop_newest();
+            row.set_wrapped(false);
+            self.compact_row(&row);
         }
     }
 

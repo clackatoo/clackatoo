@@ -1769,6 +1769,30 @@ mod snapshots {
             original.grid().scrollback_end()
         );
     }
+
+    #[test]
+    fn a_line_ended_after_it_was_compacted_loses_its_trailing_blanks() {
+        // A space wraps into history, then a character put in on the row
+        // it went on to ends the line there. Compacted as it went, the
+        // line kept its space, which it loses raw: so restoring it, as
+        // compacted history always is, changed it. (Found by fuzzing.)
+        for compaction in [Compaction::Off, Compaction::Lazy, Compaction::Eager] {
+            let config = Config {
+                scrollback_lines: 10,
+                scrollback_compaction: compaction,
+                ..Config::default()
+            };
+            let mut t = Terminal::new(Size::new(1, 1).unwrap(), &config);
+            t.advance(b" x\x1b[@");
+            t.compact_scrollback();
+            t.assert_invariants();
+            let snapshot = t.snapshot();
+            assert_eq!(snapshot.history[0].text, "", "{compaction:?}");
+            assert!(!snapshot.history[0].continues);
+            let restored = Terminal::restore(&snapshot, &config).unwrap();
+            assert_eq!(restored.snapshot(), snapshot, "{compaction:?}");
+        }
+    }
 }
 
 #[test]
