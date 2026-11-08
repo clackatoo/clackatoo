@@ -693,7 +693,9 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 
 ### Subagent limits
 
-The permissions menu beside the model, in a window or on the phone, has a **Subagents** setting after Tools and Browser: how many subagents may work at once under the chat. It offers Off, 2, 4, 6, 8, 12 and 16, none more than `working` below, and starts at 6. Off refuses `start_chat` and `start_chats`, and the agent is told you turned it off. The count is of every subagent working under your chat, however deep, and the fewest that any chat on the way up allows holds: a subagent starts with its chat's value, and you can lower it in the subagent's pane, but never raise it above its chat's. A message that would set an idle subagent working again counts as starting one. Only you change it: an agent never can.
+The permissions menu beside the model, in a window or on the phone, has a **Subagents** setting after Tools and Browser: how many subagents may work at once under the chat. It offers Off, 2, 4, 6, 8, 12 and 16, none more than `working` below, and starts at 6. Off means none of the chat's subagents work: `start_chat` and `start_chats` are refused, and so is a message that would set one of its idle subagents working again, and the agent is told you turned it off. The count is of every subagent working under your chat, however deep, and the fewest that any chat on the way up allows holds: a subagent starts with its chat's value, and you can lower it in the subagent's pane, but never raise it above its chat's. Lowering a chat lowers the subagents under it that had more, and a chat closing never lets those under it have more than they had. A message that would set an idle subagent working again counts as starting one. Only you change it: an agent never can.
+
+Each of your own chats has its own budget, which you set. An agent may message another of your chats whose setting is no higher than its own chat's, and what that chat then starts counts against that chat's budget, not the sender's: that's by design, and `working` below bounds all of them together.
 
 The rest are set in `agents.toml`, in a table of their own:
 
@@ -702,13 +704,15 @@ The rest are set in `agents.toml`, in a table of their own:
 working = 16       # subagents working at once in all, under all your chats (1–64)
 default = 6        # the Subagents setting a new chat starts at (0, off, to working)
 open = 32          # open under one of your chats (1–256)
-started = 128      # started under one of your chats since you last wrote there (1–10000)
+started = 128      # started under one of your chats since you last wrote in it (1–10000)
 depth = 3          # how deep subagents go: yours is 0, its subagents 1 (1–8)
 hops = 6           # the longest chain of messages, each in the turn the one before started (1–64)
 notice_turns = 100 # turns notices start under one of your chats since you last wrote (1–10000)
 ```
 
-A value outside its range is ignored, and the default used, and the daemon's log says so: it's never brought into range. The daemon reads the table as it starts and again as each chat starts, never while an agent works. At a depth of 3, your chat's PM can start a builder, which can start a helper of its own.
+A value outside its range is ignored, and the default used, and the daemon's log says so once, until the table changes: it's never brought into range. The daemon reads the table as it starts and again as each chat starts, an agent's `start_chat` included, but never on an agent's other tool calls. Lowering `working` lowers any chat's Subagents setting that's above it. At a depth of 3, your chat's PM can start a builder, which can start a helper of its own.
+
+`started` counts the subagents started under one of your chats since you last wrote in that chat: writing there starts the count again, and so does rewinding it or switching it to another branch, which count as writing again.
 
 Which chat started which, messages waiting their turn, which answers each chat has had from each other, the counts above, and each chat's Subagents setting, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` goes on waiting through an upgrade, and its call is answered as it would have been. If the upgrade stops its agent instead, it hears when they settle, as a notice, whoever they were answering: each of them, or, waiting for the first, once. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
 

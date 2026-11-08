@@ -664,6 +664,7 @@ impl Daemon {
         self.restate_backgrounds();
         self.restate_lent_backgrounds();
         self.restore_standing(&state, &chats);
+        self.hold_subagents();
         self.restore_cold_activities(state.operations, &chats);
         self.keep_restored();
         self.restore_borrowers(&state.borrowers);
@@ -1081,8 +1082,10 @@ impl Daemon {
                 cap,
             };
             let alone = started.parent.is_some() && parent.is_none();
-            // Never more of its own working than its parent allows.
-            let above = parent.map(|parent| self.subagents_cap(parent));
+            // Never more of its own working than its parent allows, even
+            // one made again but not as its parent, in another workspace.
+            let above = (parent.or_else(|| Some(chats.get(&started.parent?)?.0)))
+                .map(|parent| self.subagents_cap(parent));
             let Some(hosted) = self.chat(chat) else {
                 continue;
             };

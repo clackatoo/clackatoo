@@ -80,27 +80,27 @@ pub(crate) const DEEPEST: u8 = 8;
 
 impl SubagentLimits {
     /// The limits the `[subagents]` table of `document` sets, each key it
-    /// doesn't set, or sets out of range, at its default.
-    pub(crate) fn from_document(document: &toml_edit::DocumentMut) -> Self {
+    /// doesn't set, or sets out of range, at its default, and what's wrong
+    /// in it, to log: the caller logs it only as it changes.
+    pub(crate) fn from_document(document: &toml_edit::DocumentMut) -> (Self, Vec<String>) {
         let mut limits = Self::default();
+        let wrong = std::cell::RefCell::new(Vec::new());
         let Some(table) = document.get("subagents") else {
-            return limits;
+            return (limits, Vec::new());
         };
         let Some(table) = table.as_table_like() else {
-            log::warn!("agents.toml: subagents is a table of limits");
-            return limits;
+            return (limits, vec!["subagents is a table of limits".to_owned()]);
         };
         let read = |key: &str, range: RangeInclusive<i64>| -> Option<i64> {
             let item = table.get(key)?;
             match item.as_integer() {
                 Some(value) if range.contains(&value) => Some(value),
                 _ => {
-                    log::warn!(
-                        "agents.toml: subagents.{key} is a whole number from {} to {}: \
-                         the default is used",
+                    wrong.borrow_mut().push(format!(
+                        "subagents.{key} is a whole number from {} to {}: the default is used",
                         range.start(),
                         range.end()
-                    );
+                    ));
                     None
                 }
             }
@@ -131,12 +131,13 @@ impl SubagentLimits {
         if let Some(value) = read("notice_turns", 1..=10_000).and_then(large) {
             limits.notice_turns = value;
         }
+        let mut wrong = wrong.into_inner();
         for (key, _) in table.iter() {
             if !KEYS.contains(&key) {
-                log::warn!("agents.toml: subagents.{key} isn't a limit clackatoo knows");
+                wrong.push(format!("subagents.{key} isn't a limit clackatoo knows"));
             }
         }
-        limits
+        (limits, wrong)
     }
 
     /// The values the Subagents setting offers: off, the usual numbers up
@@ -159,7 +160,7 @@ mod tests {
     use super::*;
 
     fn limits(text: &str) -> SubagentLimits {
-        SubagentLimits::from_document(&text.parse().unwrap())
+        SubagentLimits::from_document(&text.parse().unwrap()).0
     }
 
     #[test]
@@ -184,6 +185,15 @@ mod tests {
             "[subagents]\nworking = 0\ndepth = 9\nhops = \"six\"\nopen = 1000\nstarted = -1\n",
         );
         assert_eq!(wrong, SubagentLimits::default());
+        let document = "[subagents]\ndepth = 9\nwide = 1\n".parse().unwrap();
+        let (_, said) = SubagentLimits::from_document(&document);
+        assert_eq!(
+            said,
+            [
+                "subagents.depth is a whole number from 1 to 8: the default is used",
+                "subagents.wide isn't a limit clackatoo knows",
+            ]
+        );
         // The default can't be more than may work at once.
         let over = limits("[subagents]\nworking = 4\ndefault = 6\n");
         assert_eq!((over.working, over.default), (4, 4));

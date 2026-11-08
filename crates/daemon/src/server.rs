@@ -2580,6 +2580,8 @@ impl Daemon {
     }
 
     fn close_terminal(&mut self, id: TerminalId) -> Result<(), Error> {
+        // While it's here to say what those it started may have.
+        self.pin_subagents_under(id);
         let slot = self
             .terminals
             .remove(&id)

@@ -173,7 +173,7 @@ After you send another message, subagents still working from earlier turns also 
 
 A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
 
-How many may work at once is the chat's **Subagents** setting, in the permissions menu after Tools and Browser: Off, or 2 up to 16, starting at 6. It counts every subagent working under your chat, however deep. A subagent starts with its chat's value, and you can lower it in the subagent's own menu, but never raise it above its chat's; Off stops the chat starting any. The agent can't change it. Open the permissions menu now and set Subagents to 2. The other limits, such as how deep subagents go, are in the daemon's `agents.toml`, under `[subagents]`.
+How many may work at once is the chat's **Subagents** setting, in the permissions menu after Tools and Browser: Off, or 2 up to 16, starting at 6. It counts every subagent working under your chat, however deep. A subagent starts with its chat's value, and you can lower it in the subagent's own menu, but never raise it above its chat's; with Off, none of its subagents work: it can't start one, or set an idle one working again. The agent can't change it. Open the permissions menu now and set Subagents to 2. The other limits, such as how deep subagents go, are in the daemon's `agents.toml`, under `[subagents]`.
 
 ## A subagent's own pane
 

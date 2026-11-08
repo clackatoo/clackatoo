@@ -38,13 +38,17 @@
 //!
 //! Each is set in the `[subagents]` table of `agents.toml` (see
 //! [`SubagentLimits`]), read as the daemon starts and again as each chat
-//! starts, never as an agent calls a tool:
+//! starts, `start_chat`'s among them, never on an agent's other tool
+//! calls:
 //!
 //! - under one of the user's chats, at most as many chats agents started
 //!   work at once as the Subagents setting of the chat starting one, and
-//!   of every chat above it, allows: off starts none. A chat an agent
-//!   starts gets its parent's, and the user may lower it there, but never
-//!   raise it above the parent's (see [`Daemon::set_subagents`]);
+//!   of every chat above it, allows: off lets none work, neither started
+//!   nor woken by a message. A chat an agent starts gets its parent's,
+//!   and the user may lower it there, but never raise it above the
+//!   parent's; lowering a chat lowers those under it, so none has more of
+//!   its own than it may, and one above closing never lets more (see
+//!   [`Daemon::set_subagents`]);
 //! - at most `working` chats agents started work at once in all, under
 //!   whichever of the user's chats;
 //! - at most `open` open under any one of the user's chats: past it,
@@ -108,6 +112,8 @@ const MAX_PROMPT: usize = 2048;
 pub(super) struct Talk {
     /// The limits on chats agents start, as `agents.toml` last said.
     pub(super) limits: SubagentLimits,
+    /// What was wrong in its `[subagents]` table, as last logged.
+    pub(super) limits_wrong: Vec<String>,
     /// How many chats agents have started under each of the user's chats,
     /// and since which of the user's turns there, by its uid, as
     /// `notice_turns` counts: the user writing there starts it again.
@@ -341,6 +347,8 @@ impl Daemon {
         // them which chat holds each closed one's card.
         self.note_subagents();
         self.note_chats_above();
+        // None has more than `working` allows, should it have been lowered.
+        self.hold_subagents();
     }
 
     /// Whether `a` and `b` are of one family: one started the other, or
@@ -426,7 +434,8 @@ impl Daemon {
             ));
         }
         let root = own.relations().root.unwrap_or(chat);
-        if let Some(why) = self.too_many_working(chat, root, starts.len()) {
+        let cap = self.subagents_cap(chat);
+        if let Some(why) = self.too_many_working((chat, cap), root, starts.len()) {
             return Some(why);
         }
         let live = (self.started_under(root)).count();
@@ -466,12 +475,18 @@ impl Daemon {
     }
 
     /// Why `more` chats can't begin working under the chat `chat`, of the
-    /// user's chat `root`, if they can't: as many work under `root` as the
-    /// Subagents settings of `chat` and the chats above it allow, or as
-    /// many work under all the user's chats as `working` does.
-    fn too_many_working(&self, chat: TerminalId, root: TerminalId, more: usize) -> Option<String> {
+    /// user's chat `root`, if they can't: as many work under `root` as
+    /// `cap`, what the Subagents settings of `chat` and the chats above it
+    /// allow, or as many work under all the user's chats as `working`
+    /// does.
+    fn too_many_working(
+        &self,
+        (chat, cap): (TerminalId, u8),
+        root: TerminalId,
+        more: usize,
+    ) -> Option<String> {
         let busy = |other: &&HostedChat| !idle(other);
-        let cap = usize::from(self.subagents_cap(chat));
+        let cap = usize::from(cap);
         let here = (self.started_under(root)).filter(busy).count();
         if cap == 0 {
             return Some(format!(
@@ -512,9 +527,12 @@ impl Daemon {
 
     /// How many chats agents started under the chat `chat` may work at
     /// once: the fewest the Subagents settings of it and of every chat
-    /// above it allow, up to the user's. 0 is off.
+    /// above it allow, up to the user's, and never more than `working`.
+    /// 0 is off. A chat's own is never more than this (see
+    /// [`Self::hold_subagents`]), so a chat above that has closed, ending
+    /// the chain, never lets more.
     pub(in crate::server) fn subagents_cap(&self, chat: TerminalId) -> u8 {
-        let mut cap = u8::MAX;
+        let mut cap = self.tools.talk.limits.working;
         let mut at = Some(chat);
         // A chain no deeper than chats go, and a little more for those
         // taken on by the chats above as their parents closed.
@@ -543,23 +561,80 @@ impl Daemon {
         let Some(own) = self.chat_ref(id) else {
             return;
         };
-        let above = (own.relations().parent).map_or(u8::MAX, |parent| self.subagents_cap(parent));
+        // With the chat that started it gone, never more than it has.
+        let above = (own.relations().parent).map_or(u8::MAX, |parent| {
+            if self.chat_ref(parent).is_some() {
+                self.subagents_cap(parent)
+            } else {
+                own.subagents()
+            }
+        });
         let count = wanted.min(above).min(self.tools.talk.limits.working);
         if let Some(chat) = self.chat(id) {
             chat.set_subagents(count);
         }
         self.collect_damage(id);
+        // Those under it may have no more than it now.
+        self.hold_subagents();
+    }
+
+    /// Lowers every chat's Subagents setting that's more than the chats
+    /// above it, and `working`, allow to what they do: after one of them is
+    /// lowered, or `working` is. So a chat's own is never more than it may
+    /// have, and a chat above it closing never lets it have more.
+    pub(in crate::server) fn hold_subagents(&mut self) {
+        let over: Vec<(TerminalId, u8)> = (self.terminals.iter())
+            .filter_map(|(&id, slot)| {
+                let own = slot.terminal.chat_ref()?.subagents();
+                let cap = self.subagents_cap(id);
+                (own > cap).then_some((id, cap))
+            })
+            .collect();
+        for (id, cap) in over {
+            if let Some(chat) = self.chat(id) {
+                chat.set_subagents(cap);
+            }
+            self.collect_damage(id);
+        }
+    }
+
+    /// Holds the Subagents setting of each chat the chat `id` started to
+    /// what it may have now, as `id` closes: what's above it then can't
+    /// let it have more.
+    pub(in crate::server) fn pin_subagents_under(&mut self, id: TerminalId) {
+        let under: Vec<(TerminalId, u8)> = (self.terminals.iter())
+            .filter_map(|(&child, slot)| {
+                let chat = slot.terminal.chat_ref()?;
+                (chat.relations().parent == Some(id))
+                    .then(|| (child, self.subagents_cap(child)))
+                    .filter(|&(_, cap)| chat.subagents() > cap)
+            })
+            .collect();
+        for (child, cap) in under {
+            if let Some(chat) = self.chat(child) {
+                chat.set_subagents(cap);
+            }
+            self.collect_damage(child);
+        }
     }
 
     /// Reads the limits on chats agents start from `agents.toml` again, as
     /// a chat starts, and has every chat's Subagents setting offer what
-    /// they allow, if they've changed.
+    /// they allow, if they've changed: none more than `working`. What's
+    /// wrong in the table is logged only as it changes, not at each start.
     pub(in crate::server) fn refresh_subagent_limits(&mut self) {
-        let limits = self.config.agents.subagent_limits();
+        let (limits, wrong) = self.config.agents.subagent_limits();
+        if wrong != self.tools.talk.limits_wrong {
+            for why in &wrong {
+                log::warn!("agents.toml: {why}");
+            }
+            self.tools.talk.limits_wrong = wrong;
+        }
         if limits == self.tools.talk.limits {
             return;
         }
         self.tools.talk.limits = limits;
+        self.hold_subagents();
         let chats: Vec<TerminalId> = (self.terminals.iter())
             .filter(|(_, slot)| slot.terminal.chat_ref().is_some())
             .map(|(&id, _)| id)
@@ -648,6 +723,9 @@ impl Daemon {
             (true, None, Some(theirs)) => theirs > 0,
             (true, own, None) => own.is_some(),
         };
+        // Each of the user's own chats has a budget of its own, which the
+        // user set: one messaging another at no more than its own uses
+        // that one's, as the user allowed, and `working` bounds them all.
         let more_subagents = self.subagents_cap(to) > self.subagents_cap(chat);
         (reach(target.tools()) > reach(own.tools())
             || limits(target) < limits(own)
@@ -665,7 +743,8 @@ impl Daemon {
     /// an idle chat an agent started, which counts towards those working
     /// at once, as a new one would, with as many working already: as the
     /// chat that started it, and those above, allow under their user's
-    /// chat, or as `working` allows in all.
+    /// chat, or as `working` allows in all. With the chat that started it
+    /// gone, its own setting, no more than that one had, holds.
     fn wakes_too_many(&self, to: TerminalId) -> Option<String> {
         let target = self.chat_ref(to)?;
         let parent = target.relations().parent?;
@@ -673,7 +752,12 @@ impl Daemon {
             return None;
         }
         let root = target.relations().root.unwrap_or(parent);
-        self.too_many_working(parent, root, 1)
+        let cap = if self.chat_ref(parent).is_some() {
+            self.subagents_cap(parent)
+        } else {
+            self.subagents_cap(to)
+        };
+        self.too_many_working((parent, cap), root, 1)
             .map(|why| format!("{why}; a message would set chat {to} working again"))
     }
 
@@ -2052,6 +2136,96 @@ mod tests {
         assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
     }
 
+    /// Shows the chat `id` in a workspace of its own.
+    fn show(daemon: &mut Daemon, id: TerminalId) {
+        let name = daemon.workspaces.name_for_new(None).unwrap();
+        (daemon.workspaces).new_workspace(name, clackatoo_protocol::Content::Terminal(id));
+    }
+
+    /// Lowering a chat's Subagents setting lowers those under it, and a
+    /// chat above closing never lets those under it have more, nor wake
+    /// more of their family, than they could (review of CLACKA-209).
+    #[test]
+    fn a_chat_above_closing_never_lets_those_under_it_have_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        let c = working_chat(&mut daemon, 3, (a, a, 1));
+        let d = working_chat(&mut daemon, 4, (a, a, 1));
+        daemon.set_subagents(a, "2");
+        for kid in [b, c, d] {
+            assert_eq!(daemon.chat_ref(kid).unwrap().subagents(), 2, "{kid}");
+        }
+        // One with more of its own, as no build of this one leaves it, is
+        // held to what it may have as a closes.
+        daemon.chat(b).unwrap().set_subagents(6);
+        for kid in [b, c, d] {
+            show(&mut daemon, kid);
+        }
+        daemon.close_terminal(a).unwrap();
+        assert_eq!(daemon.chat_ref(b).unwrap().relations().parent, Some(a));
+        assert_eq!(daemon.chat_ref(b).unwrap().subagents(), 2);
+        assert_eq!(daemon.subagents_cap(b), 2);
+        // Nor can it be set higher now.
+        daemon.set_subagents(b, "16");
+        assert_eq!(daemon.chat_ref(b).unwrap().subagents(), 2);
+        // Waking b, with c and d working, would be a third of a's family.
+        let refused = daemon.talk_refused(c, &send(b)).unwrap();
+        assert!(
+            refused.contains("its Subagents setting lets 2 work at once"),
+            "{refused}"
+        );
+    }
+
+    /// A lowered `working` holds the chats already open too: none has, or
+    /// offers, more (review of CLACKA-209).
+    #[test]
+    fn a_lowered_working_holds_the_chats_already_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        daemon.set_subagents(a, "12");
+        let file = dir.path().join("agents.toml");
+        daemon.config.agents.file = Some(file.clone());
+        std::fs::write(&file, "[subagents]\nworking = 4\nwide = 1\n").unwrap();
+        daemon.refresh_subagent_limits();
+        let chat = daemon.chat_ref(a).unwrap();
+        assert_eq!(chat.subagents(), 4);
+        let setting = (chat.node().settings.iter())
+            .find(|setting| setting.id == crate::chat::SUBAGENTS_SETTING)
+            .unwrap();
+        let values: Vec<&str> = (setting.choices.iter())
+            .map(|choice| choice.value.as_str())
+            .collect();
+        assert_eq!(values, ["off", "2", "4"]);
+        assert_eq!(
+            daemon.tools.talk.limits_wrong,
+            ["subagents.wide isn't a limit clackatoo knows"]
+        );
+    }
+
+    /// Waking a chat is held to `working` too, whatever its family's
+    /// setting allows.
+    #[test]
+    fn a_message_waking_a_chat_is_held_to_working_in_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let file = dir.path().join("agents.toml");
+        daemon.config.agents.file = Some(file.clone());
+        std::fs::write(&file, "[subagents]\nworking = 3\n").unwrap();
+        daemon.refresh_subagent_limits();
+        let other = idle_chat(&mut daemon, 9);
+        working_chat(&mut daemon, 2, (other, other, 1));
+        working_chat(&mut daemon, 3, (other, other, 1));
+        working_chat(&mut daemon, 4, (a, a, 1));
+        let idle = answered_chat(&mut daemon, 5, (a, a, 1));
+        assert_eq!(daemon.subagents_cap(a), 3);
+        let refused = daemon.talk_refused(a, &send(idle)).unwrap();
+        assert!(
+            refused.contains("3 chats started by agents are working already"),
+            "{refused}"
+        );
+    }
+
     /// The chats started under one of the user's chats are counted since
     /// the user last wrote there: writing again starts the count again.
     #[test]
@@ -3156,6 +3330,11 @@ mod tests {
             )
         );
         assert_eq!(resumed.tools.talk.starts[&a].1, 1);
+        assert_eq!(
+            resumed.starts_since_user(a),
+            1,
+            "counted since the same turn"
+        );
     }
 
     /// A chat waiting for another, not one it started, as an upgrade cut

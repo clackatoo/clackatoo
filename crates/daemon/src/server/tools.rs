@@ -159,10 +159,17 @@ enum Wait {
 
 impl Tools {
     /// What the daemon keeps for agents' tools as it starts, holding chats
-    /// agents start to `limits`.
-    pub(super) fn with_limits(limits: crate::agents::SubagentLimits) -> Self {
+    /// agents start to `limits`, as `agents.toml` sets them, `wrong` being
+    /// what's wrong in its table, which is logged.
+    pub(super) fn with_limits(
+        (limits, wrong): (crate::agents::SubagentLimits, Vec<String>),
+    ) -> Self {
+        for why in &wrong {
+            log::warn!("agents.toml: {why}");
+        }
         let mut tools = Self::default();
         tools.talk.limits = limits;
+        tools.talk.limits_wrong = wrong;
         tools
     }
 

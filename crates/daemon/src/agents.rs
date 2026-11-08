@@ -403,10 +403,10 @@ impl AgentConfig {
     }
 
     /// The limits on chats agents start, as the `[subagents]` table of
-    /// `agents.toml` sets them. It reads the file: the daemon keeps what
-    /// it says, and asks again only as a chat starts, never as an agent
-    /// calls a tool.
-    pub(crate) fn subagent_limits(&self) -> SubagentLimits {
+    /// `agents.toml` sets them, and what's wrong in it. It reads the file:
+    /// the daemon keeps what it says, and asks again only as a chat starts,
+    /// an agent's `start_chat` among them, never on its other tool calls.
+    pub(crate) fn subagent_limits(&self) -> (SubagentLimits, Vec<String>) {
         (self.file.as_deref().and_then(read_document))
             .map(|document| SubagentLimits::from_document(&document))
             .unwrap_or_default()
@@ -981,15 +981,15 @@ mod tests {
             ..AgentConfig::default()
         };
         assert_eq!(
-            config.subagent_limits(),
+            config.subagent_limits().0,
             SubagentLimits::default(),
             "no file"
         );
         fs::write(&file, "[subagents]\nworking = 4\ndepth = 2\n").unwrap();
-        let limits = config.subagent_limits();
+        let (limits, _) = config.subagent_limits();
         assert_eq!((limits.working, limits.default, limits.depth), (4, 4, 2));
         fs::write(&file, "not toml [").unwrap();
-        assert_eq!(config.subagent_limits(), SubagentLimits::default());
+        assert_eq!(config.subagent_limits().0, SubagentLimits::default());
     }
 
     #[test]
