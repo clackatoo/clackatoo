@@ -503,7 +503,7 @@ Claude Code and Codex read files from disk, so they don't see what you haven't s
 
 ### Undoing a turn
 
-Under each turn that changed files, a compact summary shows how many, with Undo or Redo beside the count. Hover over the answer to show Copy alongside it. Undo takes the turn's changes out of every file it changed, and keeps what you or later turns changed since. If something since changed the same lines, nothing is undone, and the chat says which lines: `:agentundo! 3` undoes the turn's other files anyway. A file the turn made goes to the trash, and a file that changes while the undo is being written is left as it is, and the chat says so. Once a turn is undone, Redo puts it back. `:agentundo` and `:agentredo` take a turn's number, from 1, or else take the last turn there is to undo or the first to redo. In an open file, an undo is one edit of the agent's, beside your unsaved changes. Undoing waits for the agent to finish answering.
+Under each turn that changed files, a compact summary shows how many, with Undo or Redo beside the count. Hover over the answer to show Copy alongside it. Undo takes the turn's changes out of every file it changed, and keeps what you or later turns changed since. If something since changed the same lines, nothing is undone, and the chat says which lines: `:agentundo! 3` undoes the turn's other files anyway. A file the turn made goes to the trash, and a file that changes while the undo is being written is left as it is, and the chat says so. Once a turn is undone, Redo puts it back. `:agentundo` and `:agentredo` take a turn's number, from 1, or else take the last turn there is to undo or the first to redo. In an open file, an undo is one edit of the agent's, beside your unsaved changes. Nothing is undone or redone while the agent is answering: the chat says to wait for it to finish.
 
 ### Rewinding and branches
 
@@ -528,11 +528,11 @@ Where branches part, `‹ 2/3 ›` shows over the turn: which branch is shown, o
 
 `:fork` is the deliberate way to a separate chat, when you want both conversations side by side. The copy has the same agent, folder and settings, and only the branch shown, with no other branches. A copy of a chat another agent started keeps that chat's limits and profile, so it can never do more; a browser the chat was let use must be allowed again in the copy. Its agent's session is forked from the chat's where it can be, so it knows the conversation exactly; otherwise it's told it as a summary with your first message. Files aren't touched, but what the copied turns changed is undone from the copy from then on, not from the chat copied, and both chats say so. Closing the copy gives that back to the chat copied, for the turns it still shows. A chat another agent started can be copied, and the copy is your own.
 
-A chat keeps at most 16 branches and about 4 MB of their turns; past that, the least recently shown keep only where they part and their first message, and their turns are told again by the agent when you switch to one. A branch whose agent didn't tell a turn again shows that turn as failed. The phone says where branches part ("Branch 2 of 3"), but switching is the window's for now.
+A chat keeps at most 16 branches besides the one shown: past that, the least recently shown is let go whole. It keeps about 4 MB of the turns of branches not shown, and all chats together about 64 MB; past that, the least recently shown keep only where they part and their first message, and their turns are told again by the agent when you switch to one. A branch with no agent session to tell them again is let go whole instead. A branch whose agent didn't tell a turn again shows that turn as failed. The phone says where branches part ("Branch 2 of 3"), but switching is the window's for now.
 
 ### Reviewing its changes
 
-Lines an agent changed that you haven't looked at yet get a bar of their own beside the line numbers, right of git's signs, in a colour for the chat (`agentsigns` turns it off). `:Review` opens a review beside the pane: every change of the chat's you haven't reviewed, by file, each with three lines around it, what its lines were on red and what they are on green. `:Review turn` shows the last turn's, `:Review turn 3` the third's, and `:Review base` everything changed since the branch left `main` (or `master`, or its upstream), yours included, with the agents' marked. `<Space>gr` opens one, goes to it, or closes it.
+Lines an agent changed that you haven't looked at yet get a bar of their own beside the line numbers, right of git's signs, in a colour for the chat (`agentsigns` turns it off). `:Review` (or `:Review chat`) opens a review beside the pane: every change of the chat's you haven't reviewed, by file, each with three lines around it, what its lines were on red and what they are on green. `:Review turn` shows the last turn's, `:Review turn 3` the third's, and `:Review base` everything changed since the branch left `main` (or `master`, or its upstream), yours included, with the agents' marked. `<Space>gr` opens one, goes to it, or closes it.
 
 | Key | Does |
 |---|---|
@@ -541,7 +541,7 @@ Lines an agent changed that you haven't looked at yet get a bar of their own bes
 | `/` `?` `n` `N` | Searches the lines, the files' names and the comments, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
 | Enter | Goes to the line in the editor |
 | `a`, `A` | Keeps the change, or every change in its file: its colour goes |
-| `x`, `X` | Rejects the change, or every change in its file |
+| `x`, `X` | Rejects the change, or every change in its file; `x` on a comment takes it back |
 | `gc` | Comments on the line, for the agent |
 | `S` | Sends the comments, as one message |
 | `R` | Works the list out again |
@@ -560,7 +560,7 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 | `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. |
 | `run_in_terminal` | Opens a terminal beside the chat, running your own shell, and types a command at its first prompt. You can watch it, and type into it yourself. |
 | `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/window#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
-| `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output. |
+| `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output: the last 50 lines, unless it asks for up to 500. |
 | `wait_for_terminal` | Waits until the command in a terminal finishes, for a minute unless it asks for longer, up to ten. |
 | `send_to_terminal` | Types into a terminal, as you would: an answer to a prompt, or another command. |
 | `explore` | Opens a file explorer beside the chat. |
@@ -577,7 +577,7 @@ No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a
 
 Before running a command or typing into a terminal, the agent asks: Allow, Always allow, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow lets the agent run commands in terminals it started without asking; typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project. The tools that only show or read inside the project, and those that start and message chats, never ask.
 
-The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools.
+The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. Off refuses the agent's calls at once; as the agent is given no tools at all while it's Off, turning them back on reaches it only when its session next opens. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools.
 
 Waiting for a command relies on the shell marking where each one ends, as bash, zsh and fish do in clackatoo; such a shell gets up to 30 seconds to show its first prompt before the agent is told it didn't. In other shells the agent gets the terminal's last lines, and is told it can't know when a command finishes.
 
@@ -585,7 +585,7 @@ A command is typed only while the shell has the terminal to itself, as for a ter
 
 A command typed while the shell is still drawing its next prompt is waited for from that prompt on, and a command that clears the screen and scrollback, as `clear` does, doesn't end the wait.
 
-The tools are an MCP server (the [Model Context Protocol](https://modelcontextprotocol.io)), which the agent starts as `clackatoo mcp`, for Claude Code and Codex alike. It talks to the daemon for the one chat it was started for.
+The tools are an MCP server (the [Model Context Protocol](https://modelcontextprotocol.io)), which the agent starts as `clackatoo mcp`, for Claude Code and Codex alike. It talks to the daemon for the one chat it was started for. The same server has the tools for [the browser](#the-browser), [chats working together](#chats-working-together), [native window access](#native-window-access), [managed activities](#managed-activities-and-recovery), [boards](~clackatoo/reference/boards) and `harness_capabilities` ([below](#inspecting-capabilities)).
 
 ## The browser
 
@@ -600,7 +600,7 @@ When the daemon supports browsing, the tools are advertised from the start, even
 | `browser_click`, `browser_type`, `browser_press_key` | Click or type into a thing by its ref, or press a key. |
 | `browser_screenshot`, `browser_read` | A picture of the page, or its text. |
 
-Before its first page, the chat asks: Allow for this chat, or Reject. The browser is clackatoo's own headless Chromium, with a profile of its own, never yours, so nothing is logged in, and each chat's page is kept apart from the others'. Downloads are turned off. A chat started as `explore`, or with no commands, reads pages but clicks and types in none, and opens no `data:` page. What the agent reads of a page reaches it marked as the page's, not as anything you asked.
+Before its first page, the chat asks: Allow for this chat, or Reject. The browser is clackatoo's own headless Chromium, with a profile of its own, never yours, so nothing is logged in, and each chat's page is kept apart from the others'. Downloads are turned off. A chat whose [limits](#profiles) are read-only or no commands, as `explore` and `plan` are, reads pages but clicks, types and presses keys in none, and opens no `data:` page. What the agent reads of a page reaches it marked as the page's, not as anything you asked.
 
 A snap of Chromium can only use a profile in its own folder under `~/snap`, and anywhere else it would use yours: clackatoo puts its profile there, checks once the browser has started that it's using it, and stops it at once, and never starts it again, if it isn't.
 
@@ -615,13 +615,13 @@ An agent can work with your other chats through more of clackatoo's tools.
 | Tool | Does |
 |---|---|
 | `list_chats` | Lists the chats in its workspace and family: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. |
-| `send_to_chat` | Sends a chat a message. |
+| `send_to_chat` | Sends a chat a message, of at most 16 KiB. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. |
-| `start_chats` | Starts several at once. |
+| `start_chats` | Starts several at once, up to 8. |
 | `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, opened and sent back to the background, or whose changes or comments wait for your review: those are yours to close. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat may go on by itself when that ends. |
-| `wait_for_chats` | Waits for several chats, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
+| `wait_for_chats` | Waits for several chats, up to 8, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
 
 A chat that started another and isn't waiting for it hears when it finishes: a notice from clackatoo, starting `[chat 7 finished]`, comes to it as a message would, as a turn of its own if it's idle, shown as from Clackatoo. It's framed as clackatoo's, and each chat's answer in it sits between lines of its own that the answer can't end, so no agent can pass one off. There's one notice at most waiting in a chat: what it says is worked out as it begins, every answer the chat hasn't had by then, so several finishing while the chat is busy come together, and an answer the chat has had meanwhile, through `wait_for_chat` or `read_chat`, isn't told again. A turn you had with that chat yourself isn't told. What a chat goes on to do after a notice, as reporting what its own subagent found, answers the message that started its work, so the chat above hears it too.
 
@@ -629,7 +629,7 @@ Agents are told to use `start_chat` or `start_chats`, with a profile, for all su
 
 ### Subagents
 
-A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working… 12s ›". Click it, or press Enter on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Click a line, or press Enter on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
+A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working · 12s ›", with "· 1 needs you" when one asks you something. Click it, or press Enter on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Click a line, or press Enter on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
 
 When the conversation continues with another message, subagents from earlier turns that are still working also appear in a compact shelf above the message box. Click the heading to expand it and a row to open that chat. Subagents waiting for your answer and those with background tasks still running stay there too. The shelf disappears once all that work ends; the original cards remain in the conversation.
 
@@ -649,7 +649,7 @@ Once back in the background it is like any other there: it closes with the chat 
 
 #### Closing
 
-Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Otherwise a subagent stays open, finished or not, until you close it, with `:bd`, or the agent that started it does, with `close_chat`, so an agent can send its builder fixes for as long as the work takes. None is ever closed to make room: with 32 open under one of your chats (`open` under [`[subagents]`](#subagent-limits)), starting another is refused, and the agent is told to close those it's done with. One you had in a pane and sent back is yours: only you close it. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
+Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Otherwise a subagent stays open, finished or not, until you close it, with `:bd`, or the agent that started it does, with `close_chat`, so an agent can send its builder fixes for as long as the work takes. None is ever closed to make room: with 32 open under one of your chats (`open` under [`[subagents]`](#subagent-limits)), starting another is refused, and the agent is told to close those it's done with. One you had in a pane and sent back is yours: `close_chat` won't close it, though it still closes with the chat that started it, as above. A finished one in the background lets its agent's process go after 2 minutes, and its next message brings it back in about half a second.
 
 ### Profiles
 
@@ -681,12 +681,12 @@ A message from another chat shows with "From chat 3 · Claude Code · …" over 
 
 Starting and messaging chats never asks you first. Instead, what an agent can't do through another chat is refused, and the agent is told to ask you, so it can never gain, through another chat, what its own chat isn't allowed:
 
-- An agent lists, messages, reads and waits for only chats in its own workspace or family: the chat that started it, the chats it started and their siblings. Chats in other workspaces are out of its sight, a workspace lent to another machine included.
+- An agent lists, messages, reads and waits for only chats in its own workspace or family: the chat that started it, the chats it started, and the others the chat that started it started. Chats in other workspaces are out of its sight, a workspace lent to another machine included.
 - A chat outside its family must work inside the sender's project, the git repository its folder is in, or else that folder, to be messaged.
 - A message to a chat that may do more is refused: one whose Tools setting is looser than the sender's, whose [limits](#profiles) are fewer, counting what each one's mode rules out, or whose mode comes later among those its agent offers, the first, such as Manual or Read-only, being the safest. Modes of different agents can't be compared, so a chat with another agent is messaged only in its first mode, and not at all if that agent offers no modes. A chat whose agent hasn't started yet is judged by the mode it will start in, where that's known, and otherwise the sender is told to wait for it.
 - A message that waits its turn is checked again as its turn comes. If it may no longer go, it's dropped, and the sender is told as it waits for that chat.
 - A chat is started only inside the project of the chat starting it, a folder linked from inside it to outside included.
-- A chat an agent starts gets its parent's Tools setting and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes as session settings can't be held to its safest, so a chat started with one fails to start, and says so, whenever its session opens. Modes an agent offers only through ACP's older `modes` field aren't read.
+- A chat an agent starts gets its parent's Tools and Browser settings and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes as session settings can't be held to its safest, so a chat started with one fails to start, and says so, whenever its session opens. Modes an agent offers only through ACP's older `modes` field aren't read.
 - What one agent sends another shows its control characters, and those that reorder the text around them, as `^G` or `<U+202E>`, so nothing in it hides from you. So do tag characters, which can spell out words unseen, unless they make a flag such as Scotland's, and variation selectors that follow nothing they could change. Joiners and other characters emoji and scripts such as Persian need are left as they are.
 - A chat whose [Subagents setting](#subagent-limits) lets more of its subagents work at once than the sender's may do more too, so a chat at 2 can't fan out through one at 8.
 - Agents send each other as many messages as the work needs, within the [limits](#subagent-limits) below. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
@@ -694,7 +694,7 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 
 ### Subagent limits
 
-The permissions menu beside the model, in a window or on the phone, has a **Subagents** setting after Tools and Browser: how many subagents may work at once under the chat. It offers Off, 2, 4, 6, 8, 12 and 16, none more than `working` below, and starts at 6. Off means none of the chat's subagents work: `start_chat` and `start_chats` are refused, and so is a message that would set one of its idle subagents working again, and the agent is told you turned it off. The count is of every subagent working under your chat, however deep, and the fewest that any chat on the way up allows holds: a subagent starts with its chat's value, and you can lower it in the subagent's pane, but never raise it above its chat's. Lowering a chat lowers the subagents under it that had more, and a chat closing never lets those under it have more than they had. A message that would set an idle subagent working again counts as starting one. Only you change it: an agent never can.
+The permissions menu beside the model, in a window or on the phone, has a **Subagents** setting after Tools and Browser: how many subagents may work at once under the chat. It offers Off, 2, 4, 6, 8, 12 and 16, none more than `working` below, and `default` below if that's none of them, and starts at `default`, 6 unless set. Off means none of the chat's subagents work: `start_chat` and `start_chats` are refused, and so is a message that would set one of its idle subagents working again, and the agent is told you turned it off. The count is of every subagent working under your chat, however deep, and the fewest that any chat on the way up allows holds: a subagent starts with its chat's value, and you can lower it in the subagent's pane, but never raise it above its chat's. Lowering a chat lowers the subagents under it that had more, and a chat closing never lets those under it have more than they had. A message that would set an idle subagent working again counts as starting one. Only you change it: an agent never can.
 
 Each of your own chats has its own budget, which you set. An agent may message another of your chats whose setting is no higher than its own chat's, and what that chat then starts counts against that chat's budget, not the sender's: that's by design, and `working` below bounds all of them together.
 
@@ -711,7 +711,7 @@ hops = 6           # the longest chain of messages, each in the turn the one bef
 notice_turns = 100 # turns notices start under one of your chats since you last wrote (1–10000)
 ```
 
-A value outside its range is ignored, and the default used, and the daemon's log says so once, until the table changes: it's never brought into range. The daemon reads the table as it starts and again as each chat starts, an agent's `start_chat` included, but never on an agent's other tool calls. Lowering `working` lowers any chat's Subagents setting that's above it. At a depth of 3, your chat's PM can start a builder, which can start a helper of its own.
+A value outside its range is ignored, and the default used, and the daemon's log says so once, until the table changes: it's never brought into range. So is a key it doesn't know. With `working` below 6 and no `default`, new chats start at `working`. The daemon reads the table as it starts and again as each chat starts, an agent's `start_chat` included, but never on an agent's other tool calls. Lowering `working` lowers any chat's Subagents setting that's above it. At a depth of 3, your chat's PM can start a builder, which can start a helper of its own.
 
 `started` counts the subagents started under one of your chats since you last wrote in that chat: writing there starts the count again, and so does rewinding it or switching it to another branch, which count as writing again.
 
