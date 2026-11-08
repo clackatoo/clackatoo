@@ -1414,8 +1414,11 @@ impl Daemon {
         let _ = self.poll.registry().deregister(&mut reached.stream);
         self.unread
             .retain(|&unread| unread != Flood::Reached(token));
-        let reason = why
-            .or_else(|| reached.carried.as_ref().and_then(Carried::ended))
+        // Why the daemon there said it ended the connection comes first: a
+        // reset of the way to it after that, as its bridge exits with
+        // what this daemon sent last unread, says nothing more.
+        let reason = (reached.carried.as_ref().and_then(Carried::ended))
+            .or(why)
             .unwrap_or_else(|| "the daemon there closed the connection".to_owned());
         self.let_carried_go(reached.carried.take());
         let Some(at) = self.links.find(&reached.host) else {
