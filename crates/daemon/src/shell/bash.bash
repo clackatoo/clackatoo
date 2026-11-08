@@ -105,6 +105,19 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     # other terminals' lines into the history (`history -c; history -r`).
     __clackatoo_prompt() {
         __clackatoo_history=$HISTCMD
+        # A bash that has stopped signing its commands since, by
+        # `shopt -u promptvars` or PS0 set afresh, drops its secret, as
+        # one that couldn't sign them at all does (see PS0 below), and
+        # marks them unsigned.
+        if [[ -n ${__clackatoo_secret:+1} ]] &&
+            { ! builtin shopt -q promptvars || [[ $PS0 != *'$(__clackatoo_command)'* ]]; }; then
+            builtin unset __clackatoo_secret
+            PS0=${PS0//'$(__clackatoo_command)'/'\e]133;C\a'}
+        fi
+        if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) &&
+            [[ -z ${__clackatoo_secret:+1} && $PS0 != *'\e]133;C\a'* ]]; then
+            PS0=$PS0'\e]133;C\a'
+        fi
         if [[ $PS1 != *'\e]133;A\a'* ]]; then
             PS1='\[\e]133;A\a\]'$PS1
         fi
@@ -155,8 +168,11 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     # The command and secret need PS0's `$(…)` expanded, which
     # `shopt -u promptvars` stops. Asked so that ~/.bashrc's `set -x`
     # traces `1`, not the secret. A bash that can't sign its commands so
-    # keeps no secret: a command typed at it could read it, and sign a
-    # command of its choosing in the C mark bash left unsigned.
+    # keeps no secret, which would only let a command typed at it sign a
+    # command of its choosing in the C mark bash left unsigned. That
+    # closes one way, not every: code running in the shell can always
+    # read the secret, and mark its own command's end and another's start
+    # with it (see `clackatoo_term::blocks`).
     if [[ -n ${__clackatoo_secret:+1} ]] && shopt -q promptvars &&
         (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
         PS0=$PS0'$(__clackatoo_command)'

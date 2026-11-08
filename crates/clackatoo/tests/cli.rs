@@ -1318,6 +1318,17 @@ fn bash_that_cant_sign_keeps_no_secret() {
     let mut user = UserShell::start(&bash, home.path(), &[]);
     let ran = user.run("echo \"[${#__clackatoo_secret}]\"");
     assert_eq!(user.output(&ran), "[0]");
+    // Nor does one that stops signing later, at its next prompt: promptvars
+    // turned off, or PS0 set afresh.
+    for stop in ["shopt -u promptvars", "PS0=''"] {
+        let home = tempfile::tempdir().unwrap();
+        let mut user = UserShell::start(&bash, home.path(), &[]);
+        let ran = user.run("echo \"[${#__clackatoo_secret}]\"");
+        assert_eq!(user.output(&ran), "[32]", "signing at first");
+        user.run(stop);
+        let ran = user.run("echo \"[${#__clackatoo_secret}]\"");
+        assert_eq!(user.output(&ran), "[0]", "{stop}");
+    }
 }
 
 /// bash sharing its history with other terminals, which each prompt
