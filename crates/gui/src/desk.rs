@@ -2907,7 +2907,7 @@ fn mode_name(mode: Mode) -> ModeName {
 /// one that changes which way text runs (the marks U+200E and U+200F, the
 /// embeddings and overrides U+202A to U+202E, and the isolates U+2066 to
 /// U+2069), which a title or a folder's name could hold.
-pub(super) fn shown_in_names(ch: char) -> bool {
+pub(crate) fn shown_in_names(ch: char) -> bool {
     !ch.is_control()
         && !matches!(ch, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }

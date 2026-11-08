@@ -1253,10 +1253,12 @@ impl App {
     /// Titles the window after the focused pane, and the daemon's machine.
     fn update_title(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let title = self.desk.title().unwrap_or("clackatoo");
+        let title = (self.desk.title().map(shown_title))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "clackatoo".to_owned());
         let title = match self.session.host() {
             Some(host) => format!("{title} — {host}"),
-            None => title.to_owned(),
+            None => title,
         };
         let title = self.native.grant.map_or(title.clone(), |(chat, access)| {
             format!("[{access:?} access · chat {chat}] {title}")
@@ -3924,9 +3926,34 @@ impl App {
     }
 }
 
+/// The most characters of a pane's title the window's title shows.
+const MOST_TITLE: usize = 256;
+
+/// `title`, a program's, a page's or a chat's, as the window's title shows
+/// it: as tab names are, without control characters or those that turn
+/// text round, and at most [`MOST_TITLE`] characters of it.
+fn shown_title(title: &str) -> String {
+    (title.chars())
+        .filter(|&ch| crate::desk::shown_in_names(ch))
+        .take(MOST_TITLE)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_title_is_filtered_as_tab_names_are_and_cut() {
+        // A program's title can't send controls to the desktop, or turn
+        // text round to hide what clackatoo adds after it.
+        assert_eq!(
+            shown_title("htop\x1b[31m\x07 \u{202E}ksed — "),
+            "htop[31m ksed — "
+        );
+        assert_eq!(shown_title(&"x".repeat(1000)).chars().count(), MOST_TITLE);
+        assert_eq!(shown_title("\u{2066}\x1b"), "");
+    }
 
     #[test]
     fn a_connection_that_drops_soon_after_it_was_made_counts_as_a_failed_try() {
