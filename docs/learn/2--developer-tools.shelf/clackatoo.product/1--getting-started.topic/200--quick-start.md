@@ -1,7 +1,7 @@
 ---
 title: Quick start
 type: how-to
-description: Build clackatoo, open a window on your shell, and drive terminals from the command line by starting one, typing into it, reading its screen and closing it.
+description: Install or build clackatoo, open a window on your shell, and drive terminals from the command line by starting one, typing into it, reading its screen and closing it.
 related:
   - clackatoo/getting-started/what-is-clackatoo
   - clackatoo/reference/window
@@ -9,7 +9,11 @@ related:
   - clackatoo/reference/cli
 ---
 
-## Build it
+## Install it
+
+Each release has a build for `x86_64` and `aarch64` Linux, signed with clackatoo's release key. The [README](https://github.com/clackatoo/clackatoo#install) shows how to check and install the first one; after that, [`clackatoo update`](~clackatoo/reference/cli#update) installs each new one.
+
+## Or build it
 
 clackatoo is a Cargo workspace. Build the `clackatoo` command in release mode:
 
@@ -76,7 +80,7 @@ Closing a terminal hangs up its program, as closing a terminal window would. A t
 
 ## From another machine
 
-With clackatoo built on both machines, and ssh able to log in to the other one without asking for anything:
+With clackatoo on both machines, and ssh able to log in to the other one (the window asks for a password or a key's passphrase itself, if ssh needs one):
 
 ```sh
 clackatoo --remote desktop
