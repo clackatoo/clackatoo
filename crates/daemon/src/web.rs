@@ -501,15 +501,12 @@ impl Web {
     /// the one the settings name, or else the first device's, or anyone
     /// until a device has paired.
     fn login_allowed(&self, login: &str) -> bool {
-        match &self.config.login {
-            Some(allowed) => allowed == login,
-            None => self.first_login().is_none_or(|first| first == login),
-        }
+        login_allowed(&self.config, &self.devices.list, login)
     }
 
     /// The login of the first device paired through Tailscale, if any has.
     fn first_login(&self) -> Option<&str> {
-        (self.devices.list.iter()).find_map(|device| device.login.as_deref())
+        first_login(&self.devices.list)
     }
 
     /// Whether a request came from a page of the app's own origin.
@@ -529,16 +526,7 @@ impl Web {
         let Some(device) = self.devices.list.iter().find(|device| device.id == id) else {
             return Some(Denied::Unpaired);
         };
-        if device.used.saturating_add(millis(self.config.expire_after)) < now {
-            return Some(Denied::Unpaired);
-        }
-        if let (Some(every), Some(_)) = (self.config.password_every, &self.config.password) {
-            let given = device.password.unwrap_or(device.paired);
-            if given.saturating_add(millis(every)) < now {
-                return Some(Denied::Renew);
-            }
-        }
-        None
+        lapsed(&self.config, device, now)
     }
 
     /// When a device next lapses, at the soonest: one of `connected`
@@ -1067,9 +1055,9 @@ impl Web {
     }
 
     /// Sends `payload`, about chat `topic`, to every device that asked for
-    /// notifications, urgently if `urgent`.
+    /// notifications and is let in now, urgently if `urgent`.
     pub(crate) fn notify(&self, payload: &[u8], topic: &str, urgent: bool) {
-        for device in &self.devices.list {
+        for device in notified(&self.config, &self.devices.list, epoch_millis()) {
             if let Some(subscription) = &device.push {
                 self.pusher.send(Push {
                     device: device.id,
@@ -1142,6 +1130,54 @@ impl Web {
     pub(crate) fn reload_due(&self) -> Option<Instant> {
         (!self.config.tailscale()).then_some(self.reload_at)
     }
+}
+
+/// Whether `login`, whom Tailscale says a request is from, is let in by
+/// `config`, with `devices` paired: the one it names, or else the first
+/// device's, or anyone until a device has paired.
+fn login_allowed(config: &WebConfig, devices: &[devices::Device], login: &str) -> bool {
+    match &config.login {
+        Some(allowed) => allowed == login,
+        None => first_login(devices).is_none_or(|first| first == login),
+    }
+}
+
+/// The login of the first of `devices` paired through Tailscale, if any
+/// has.
+fn first_login(devices: &[devices::Device]) -> Option<&str> {
+    devices.iter().find_map(|device| device.login.as_deref())
+}
+
+/// Why `device` isn't let in by `config` at `now`, in milliseconds since
+/// the Unix epoch, if it isn't: it's gone unused too long, or its
+/// password is to be given again.
+fn lapsed(config: &WebConfig, device: &devices::Device, now: u64) -> Option<Denied> {
+    if device.used.saturating_add(millis(config.expire_after)) < now {
+        return Some(Denied::Unpaired);
+    }
+    if let (Some(every), Some(_)) = (config.password_every, &config.password) {
+        let given = device.password.unwrap_or(device.paired);
+        if given.saturating_add(millis(every)) < now {
+            return Some(Denied::Renew);
+        }
+    }
+    None
+}
+
+/// Those of `devices` that notifications go to at `now`: those that asked
+/// for them and that `config` lets in. A device whose password is to be
+/// given again, or whose login isn't let in any more, is told nothing,
+/// not even a chat's title, until it's let in again.
+fn notified<'a>(
+    config: &'a WebConfig,
+    devices: &'a [devices::Device],
+    now: u64,
+) -> impl Iterator<Item = &'a devices::Device> {
+    devices.iter().filter(move |device| {
+        device.push.is_some()
+            && lapsed(config, device, now).is_none()
+            && (device.login.as_deref()).is_none_or(|login| login_allowed(config, devices, login))
+    })
 }
 
 /// Why a device isn't let in.
@@ -1340,6 +1376,43 @@ mod tests {
         assert_eq!(clean_name("\u{202E}enohPi\u{202C}"), "enohPi");
         assert_eq!(clean_name("a\u{200B}b\u{2066}c\u{FEFF}"), "abc");
         assert_eq!(clean_name("\u{2069}\u{200D}"), "a device");
+    }
+
+    #[test]
+    fn notifications_go_only_to_devices_let_in() {
+        let day = Duration::from_hours(24);
+        let mut config = WebConfig::new(WebMode::Tailscale, PathBuf::from("/nowhere"));
+        config.password = Some("$argon2id$…".into());
+        config.password_every = Some(day * 30);
+        config.login = Some("jack@github".into());
+        let now = millis(day * 400);
+        let device = |id: u64, given: u64, login: &str, push: bool| devices::Device {
+            id,
+            name: format!("phone {id}"),
+            token: [0; 32],
+            paired: given,
+            used: now,
+            password: Some(given),
+            login: Some(login.into()),
+            push: push.then(|| Subscription {
+                endpoint: "https://web.push.apple.com/abc".into(),
+                p256dh: vec![4; 65],
+                auth: vec![9; 16],
+            }),
+        };
+        let devices = [
+            device(1, now - millis(day), "jack@github", true),
+            // Its password is to be given again.
+            device(2, now - millis(day * 31), "jack@github", true),
+            // Its login isn't let in any more.
+            device(3, now - millis(day), "eve@github", true),
+            // It never asked.
+            device(4, now - millis(day), "jack@github", false),
+        ];
+        let told: Vec<u64> = (notified(&config, &devices, now))
+            .map(|device| device.id)
+            .collect();
+        assert_eq!(told, [1]);
     }
 
     #[test]
