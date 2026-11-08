@@ -909,8 +909,9 @@ covers managed activities, not every provider or external tool call.
 
 Activities require workspace storage and shell integration. Each chat retains
 at most 64 jobs, with 8 active; the daemon keeps at most 128. Past those,
-starting another is refused. Results retain up to 4 KiB of the terminal's last
-50 lines; the terminal keeps its own scrollback.
+starting another is refused. Results retain the end of the terminal's last 50
+lines, up to 4 KiB, with how the command ended; the terminal keeps its own
+scrollback.
 
 ## Inspecting capabilities
 

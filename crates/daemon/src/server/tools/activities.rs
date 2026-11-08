@@ -320,11 +320,7 @@ impl Daemon {
         });
         let record = &mut self.tools.activities[at];
         record.activity.state = state;
-        let mut end = result.len().min(4096);
-        while !result.is_char_boundary(end) {
-            end -= 1;
-        }
-        record.activity.result = result[..end].into();
+        record.activity.result = kept_result(&result);
         record.activity.ended = Some(now());
         let owner = record.activity.owner;
         self.publish_activities(owner);
@@ -506,9 +502,40 @@ fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> Option<u32> {
     u32::try_from(index).ok()
 }
 
+/// The most of an activity's result kept, in bytes.
+const MOST_RESULT: usize = 4096;
+
+/// What's kept of `result`, an activity's terminal described: at most
+/// [`MOST_RESULT`] bytes, from its end, which holds the newest output and
+/// how the command ended, after `…` if it's cut.
+fn kept_result(result: &str) -> String {
+    if result.len() <= MOST_RESULT {
+        return result.to_owned();
+    }
+    let mut start = result.len() - (MOST_RESULT - '…'.len_utf8());
+    while !result.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &result[start..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_result_keeps_its_end_with_how_the_command_ended() {
+        assert_eq!(
+            kept_result("$ make\nok\n[finished]"),
+            "$ make\nok\n[finished]"
+        );
+        let output: String = (0..2000).map(|line| format!("é {line}\n")).collect();
+        let result = format!("$ make\n{output}[exited with status 2]");
+        let kept = kept_result(&result);
+        assert!(kept.len() <= MOST_RESULT, "{}", kept.len());
+        assert!(kept.starts_with('…'), "{kept}");
+        assert!(kept.ends_with("é 1999\n[exited with status 2]"), "{kept}");
+    }
 
     const JOURNAL: &str = r#"[1,[{"activity":{"id":"build","owner":42,"turn":2,"title":"Build","command":"make","cwd":"/src","pane":7,"started":100,"ended":null,"state":"Running","result":""},"terminal":8,"expect":3,"renumbered":0,"notified":false}]]"#;
 
