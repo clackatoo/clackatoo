@@ -79,17 +79,39 @@ fn another_window(binary: &Path, display: &Display, report: &mut Report) -> anyh
     let (daemon, _) = DaemonProcess::start(binary)?;
     let mut client = daemon.connect()?;
     new_terminal(&mut client, workloads::generated_size(), &["cat"])?;
-    let host = Window::open(binary, &daemon, display, "clackatoo_gui=info")?;
-    host.wait_for("first frame")?;
-    let mut samples = Vec::new();
-    for _ in 0..OPEN_RUNS {
-        let started = Instant::now();
+    // Its log, in a state directory of its own.
+    let state = tempfile::tempdir()?;
+    let ask = || -> anyhow::Result<()> {
         let asked = Window::command(binary, &daemon, display, "clackatoo_gui=info")
+            .env("XDG_STATE_HOME", state.path())
+            .env_remove(OFF_VAR)
             .stderr(Stdio::null())
             .status()
             .context("could not ask for a window")?;
         anyhow::ensure!(asked.success(), "asking for a window failed: {asked}");
-        host.wait_for("first frame")?;
+        Ok(())
+    };
+    // The first starts the process of windows, apart from the harness.
+    ask()?;
+    let _host = Host::listening_in(daemon.runtime_dir())?;
+    let log = state.path().join("clackatoo/window.log");
+    let frames =
+        || std::fs::read_to_string(&log).map_or(0, |log| log.matches("first frame").count());
+    let deadline = Instant::now() + TIMEOUT;
+    while frames() == 0 {
+        anyhow::ensure!(Instant::now() < deadline, "the first window never drew");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut samples = Vec::new();
+    for _ in 0..OPEN_RUNS {
+        let before = frames();
+        let started = Instant::now();
+        let deadline = started + TIMEOUT;
+        ask()?;
+        while frames() == before {
+            anyhow::ensure!(Instant::now() < deadline, "a window never drew");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         samples.push(started.elapsed());
     }
     report.record(
@@ -99,6 +121,31 @@ fn another_window(binary: &Path, display: &Display, report: &mut Report) -> anyh
         &seconds(&samples),
     );
     Ok(())
+}
+
+/// Set to `off`, every window has a process of its own, which these
+/// measure.
+const OFF_VAR: &str = "CLACKATOO_WINDOW_HOST";
+
+/// The process of windows `clackatoo` started, ended when dropped.
+struct Host(rustix::process::Pid);
+
+impl Host {
+    /// The process listening for windows in `runtime_dir`, as its socket
+    /// says.
+    fn listening_in(runtime_dir: &Path) -> anyhow::Result<Self> {
+        let socket = runtime_dir.join("clackatoo/window.sock");
+        let stream = std::os::unix::net::UnixStream::connect(&socket)
+            .with_context(|| format!("no process of windows at {}", socket.display()))?;
+        let peer = rustix::net::sockopt::socket_peercred(&stream)?;
+        Ok(Self(peer.pid))
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::TERM);
+    }
 }
 
 /// How long the window takes to draw each frame, from starting on it to
@@ -250,7 +297,8 @@ impl Window {
         })
     }
 
-    /// `clackatoo`, opening a window on `daemon`, logging at `log`.
+    /// `clackatoo`, opening a window on `daemon` in a process of its own,
+    /// logging at `log`.
     fn command(binary: &Path, daemon: &DaemonProcess, display: &Display, log: &str) -> Command {
         let mut command = Command::new(binary);
         command
@@ -261,6 +309,8 @@ impl Window {
             .env("XDG_RUNTIME_DIR", daemon.runtime_dir())
             .envs(display.vars.iter().map(|(name, value)| (name, value)))
             .env("RUST_LOG", log)
+            // A process of its own, which logs to the harness.
+            .env(OFF_VAR, "off")
             .stdin(Stdio::null())
             .stdout(Stdio::null());
         command

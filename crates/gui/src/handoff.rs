@@ -1,36 +1,50 @@
-//! Asking the process that already has windows open for one more, so it
-//! opens without setting up a GPU of its own, which is most of the time a
-//! window takes to open (see [`crate::app::host`]).
+//! Handing a window to the process of windows, which opens it without
+//! setting up a GPU of its own, the most of the time a window takes to
+//! open (see [`crate::app::host`]).
 //!
-//! A process with windows listens on `window.sock` in the runtime
-//! directory, which only the user can get into, and both ends check the
-//! other is the user's own. `clackatoo` connects and sends, on one line of
-//! JSON, what it would open: the window's arguments, the desktop's tokens
-//! it was launched with, the [`WINDOW_ENV`] it has and how long it waits.
+//! The process of windows is started apart from whoever asked for its
+//! first window, in a session of its own with no terminal (see
+//! [`start`]), and listens on `window.sock` in the runtime directory,
+//! which only the user can get into; both ends check the other is the
+//! user's own. `clackatoo` connects and sends, on one line of JSON, what
+//! it would open: the window's arguments, the desktop's tokens it was
+//! launched with, its environment and directory, which whatever the
+//! window starts is started with, what must match for the window to be the
+//! one it would have opened ([`MATCH_ENV`] and clackatoo's directories),
+//! and by when, on the system's monotonic clock, it must be taken on and
+//! opened.
+//!
 //! The process answers `{"took":true}` once its event loop has taken the
-//! window on, only while the asker still waits, then `{"opened":true}` or
-//! `{"failed":WHY}`. One that wouldn't open exactly the window the asker
-//! would, being another build or seeing another display or config,
-//! answers `{"refused":WHY}`. Whenever the window isn't taken, the asker
-//! opens it itself, and takes the socket over for the next, unless the
-//! answer says `"keep":true`: the asker sees another display or config,
-//! and is the odd one out, or is an older build than the process asked.
+//! window on, only before the deadline to, then `{"opened":true}` or
+//! `{"failed":WHY}`. A window it opens after the deadline to open it is
+//! closed again, as the asker has opened its own by then: there are never
+//! two. One that wouldn't open exactly the window the asker would, being
+//! another build or seeing another display or config, answers
+//! `{"refused":WHY}`. The asker then starts a process of windows of its
+//! own, for the windows after it too, unless the answer says `"keep":true`:
+//! the asker is the odd one out, or an older build than the process asked,
+//! and its process takes no others. Only if that fails does the asker open
+//! the window itself.
 //!
 //! A build is the program's file, so a build put in place by `clackatoo
 //! update` or a deploy is never asked to open a window by an older one, or
-//! the other way round: the first window of the new build takes the socket
-//! over. Between builds, only the request's `build` and the `refused`
-//! answer are a contract: a process refuses any other build before reading
-//! anything else.
+//! the other way round: the first window of the new build starts its
+//! process, which takes the socket over. Between builds, only the
+//! request's `build` and the `refused` answer are a contract: a process
+//! refuses any other build before reading anything else.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::ffi::OsString;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use clackatoo_daemon::RuntimeDir;
+use clackatoo_daemon::launch::Origin;
 use clackatoo_daemon::remote::Remote;
 use serde_json::{Map, Value, json};
 
@@ -38,46 +52,39 @@ use crate::app::host::Spec;
 use crate::launch::LaunchToken;
 use crate::{FontFixed, FontOptions, GraphicsApi};
 
-/// The socket, in the runtime directory.
+/// The socket of the process of windows, in the runtime directory.
 const SOCKET: &str = "window.sock";
 
-/// How long an asker waits for its window to be taken on, before opening
-/// it itself: longer than a busy window takes to handle what's before it,
-/// shorter than opening a window without the process's GPU.
-const TAKE_WAIT: Duration = Duration::from_millis(500);
+/// The command, of the `clackatoo` program, that runs a process of
+/// windows: [`crate::host`].
+pub const HOST_COMMAND: &str = "window-host";
 
-/// How long past [`TAKE_WAIT`] the asker reads for an answer the process
-/// sent just in time.
+/// The most a request or an answer may be: a request carries an
+/// environment.
+const MOST: usize = 1024 * 1024;
+
+/// How long a request may take to arrive whole, once connected.
+const READ_WAIT: Duration = Duration::from_millis(500);
+
+/// How long past a deadline the asker reads for an answer sent just
+/// before it.
 const SLACK: Duration = Duration::from_millis(200);
 
-/// How long an asker waits for a window taken on to open.
-const OPEN_WAIT: Duration = Duration::from_secs(10);
-
-/// The most a request or an answer may be.
-const MOST: u64 = 64 * 1024;
-
-/// The environment that changes what a window does, which the process
-/// opening a window must have as the asker does: the display, where
-/// config and state are, how ssh is reached for another machine, the GPU
-/// asked for, and the desktop's bus for notifications.
-const WINDOW_ENV: [&str; 13] = [
+/// What a window must match in the process of windows to be the window
+/// its asker would have opened: the display it's shown on, and the GPU
+/// it's drawn with, which the process shares. clackatoo's config and state
+/// directories are compared too. Everything else in the asker's
+/// environment goes with the window, for what it starts.
+const MATCH_ENV: [&str; 5] = [
     "WAYLAND_DISPLAY",
     "DISPLAY",
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_STATE_HOME",
-    "XDG_DATA_HOME",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "SSH_AUTH_SOCK",
-    "CLACKATOO_SSH",
     "WGPU_POWER_PREF",
     "WGPU_BACKEND",
     "WGPU_ADAPTER_NAME",
-    "CLACKATOO_TEST_FONT",
 ];
 
-/// Set to `off`, a window neither asks another process for itself nor
-/// opens others: every window has a process of its own, as before there
+/// Set to `off`, windows neither ask a process of windows for themselves
+/// nor take others: every window has a process of its own, as before there
 /// was a choice.
 pub(crate) const OFF_VAR: &str = "CLACKATOO_WINDOW_HOST";
 
@@ -85,6 +92,30 @@ pub(crate) const OFF_VAR: &str = "CLACKATOO_WINDOW_HOST";
 /// says not.
 pub(crate) fn on() -> bool {
     std::env::var_os(OFF_VAR).is_none_or(|value| value != "off")
+}
+
+/// Now, on the system's monotonic clock, in nanoseconds: one clock for
+/// every process, so deadlines can be sent between them.
+fn now() -> u64 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let seconds = u64::try_from(now.tv_sec).unwrap_or_default();
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or_default();
+    seconds.saturating_mul(1_000_000_000).saturating_add(nanos)
+}
+
+/// `wait`, in nanoseconds.
+fn nanos(wait: Duration) -> u64 {
+    u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// `wait` from now, on [`now`]'s clock.
+fn after(wait: Duration) -> u64 {
+    now().saturating_add(nanos(wait))
+}
+
+/// How long until `deadline`, on [`now`]'s clock: none once it's passed.
+fn until(deadline: u64) -> Duration {
+    Duration::from_nanos(deadline.saturating_sub(now()))
 }
 
 /// A build of clackatoo, as the program's file: its device, inode, size
@@ -120,12 +151,62 @@ impl Build {
     }
 }
 
+/// Where a process of windows listens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Socket {
+    /// At `window.sock`, for every window asked for.
+    Shared,
+    /// At a path only the one asker knows: the process takes that window,
+    /// and any its windows open, but no others.
+    Private(PathBuf),
+}
+
+impl Socket {
+    /// A private socket in `runtime`, for this process's window.
+    pub(crate) fn private(runtime: &RuntimeDir) -> Self {
+        let name = format!("window-for-{}.sock", std::process::id());
+        Self::Private(runtime.path().join(name))
+    }
+
+    fn path(&self, runtime: &RuntimeDir) -> PathBuf {
+        match self {
+            Self::Shared => runtime.path().join(SOCKET),
+            Self::Private(path) => path.clone(),
+        }
+    }
+}
+
+/// How long an asker waits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Waits {
+    /// For its window to be taken on: longer than a busy process takes to
+    /// handle what's before it, shorter than opening a window without
+    /// its GPU.
+    pub(crate) take: Duration,
+    /// For a process just started to listen, and take the window on.
+    pub(crate) start: Duration,
+    /// For a window taken on to open: a first window waits for the GPU,
+    /// which on some machines takes many seconds.
+    pub(crate) open: Duration,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            take: Duration::from_millis(500),
+            start: Duration::from_secs(5),
+            open: Duration::from_secs(20),
+        }
+    }
+}
+
 /// What's asked for: a window, opened as this process would open it.
 #[derive(Debug)]
 pub(crate) struct Request<'a> {
     pub(crate) spec: &'a Spec,
     pub(crate) graphics_api: GraphicsApi,
     pub(crate) runtime: &'a RuntimeDir,
+    pub(crate) waits: Waits,
 }
 
 /// The window wasn't opened by another process, as this says, with the
@@ -134,8 +215,8 @@ pub(crate) struct Request<'a> {
 pub(crate) struct NotTaken {
     pub(crate) launch: LaunchToken,
     pub(crate) why: String,
-    /// Whether the process opening the window instead is to take the
-    /// windows asked for after it: not if the process asked keeps them.
+    /// Whether a process started for the window is to take the windows
+    /// asked for after it: not if the process asked keeps them.
     pub(crate) host: bool,
 }
 
@@ -155,11 +236,59 @@ impl std::fmt::Display for Kept {
 
 impl std::error::Error for Kept {}
 
-/// Asks the process with windows open, if there is one, to open the
-/// window `request` describes, with the desktop's `launch` tokens. Returns
-/// once it's open, or if it wasn't taken on, why, so this process opens it
-/// instead.
-pub(crate) fn ask(request: &Request<'_>, launch: LaunchToken) -> Result<(), NotTaken> {
+/// This process's environment and directory, for a window it asks for:
+/// whatever the window starts is started with them. Variables that aren't
+/// UTF-8 can't be sent, and are left out.
+pub(crate) fn here() -> Origin {
+    let env: Vec<(OsString, OsString)> = std::env::vars()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect();
+    Origin {
+        env: Some(env.into()),
+        dir: std::env::current_dir().ok(),
+    }
+}
+
+/// Starts a process of windows listening `at`, apart from this one: in a
+/// session of its own, so this one's terminal, its signals and its end
+/// reach none of the windows, with no input or output of its own (it logs
+/// to `window.log`), and outside any directory a window might want gone.
+/// It's this very build, even if another has been put in its place.
+///
+/// # Errors
+///
+/// If it can't be started.
+pub(crate) fn start(at: &Socket, graphics_api: GraphicsApi) -> io::Result<Child> {
+    // By its name, so it's named as clackatoo, while that's still this
+    // build.
+    let program = std::env::current_exe()
+        .ok()
+        .filter(|program| Build::of(program).is_some_and(|it| Some(it) == Build::running()))
+        .unwrap_or_else(|| PathBuf::from("/proc/self/exe"));
+    let mut command = Command::new(program);
+    command
+        .arg(HOST_COMMAND)
+        .args(["--renderer", renderer_name(graphics_api)])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .current_dir("/");
+    if let Socket::Private(path) = at {
+        command.arg("--socket").arg(path);
+    }
+    command.spawn()
+}
+
+/// Asks the process of windows listening `at` to open the window
+/// `request` describes, with the desktop's `launch` tokens; or with
+/// `starting`, the one just started for it, waiting for it to listen.
+/// Returns once the window is open, or if it wasn't, why.
+pub(crate) fn ask(
+    request: &Request<'_>,
+    launch: LaunchToken,
+    at: &Socket,
+    starting: Option<&mut Child>,
+) -> Result<(), NotTaken> {
     let not = |launch, why: String| {
         Err(NotTaken {
             launch,
@@ -170,19 +299,19 @@ pub(crate) fn ask(request: &Request<'_>, launch: LaunchToken) -> Result<(), NotT
     if !on() {
         return not(launch, format!("{OFF_VAR} is off"));
     }
-    // A local window's daemon is started by whoever opens it, with that
-    // process's environment: it must be this one's, as without a host.
-    if request.spec.remote.is_none()
-        && !request.spec.pick_remote
-        && UnixStream::connect(request.runtime.socket_path()).is_err()
-    {
-        return not(launch, "the daemon isn't running".into());
-    }
     let Some(build) = Build::running() else {
         return not(launch, "this program can't be found".into());
     };
-    let line = request_line(request, &build, &launch);
-    match asked(request.runtime, &line) {
+    let started = starting.is_some();
+    let stream = match connect(&at.path(request.runtime), starting, request.waits.start) {
+        Ok(stream) => stream,
+        Err(err) => return not(launch, format!("{err:#}")),
+    };
+    let waits = request.waits;
+    let take_by = after(if started { waits.start } else { waits.take });
+    let open_by = take_by.saturating_add(nanos(waits.open));
+    let line = request_line(request, &build, &launch, take_by, open_by);
+    match asked(&stream, &line, take_by, open_by) {
         Ok(()) => Ok(()),
         Err(err) => Err(NotTaken {
             launch,
@@ -192,17 +321,48 @@ pub(crate) fn ask(request: &Request<'_>, launch: LaunchToken) -> Result<(), NotT
     }
 }
 
-/// Sends `line` to the process listening in `runtime`, and waits for its
-/// window to open.
-fn asked(runtime: &RuntimeDir, line: &str) -> anyhow::Result<()> {
-    let stream =
-        UnixStream::connect(runtime.path().join(SOCKET)).context("no process has windows open")?;
-    ours(&stream)?;
-    stream.set_write_timeout(Some(TAKE_WAIT))?;
-    (&stream).write_all(line.as_bytes())?;
-    stream.set_read_timeout(Some(TAKE_WAIT + SLACK))?;
-    let mut answers = BufReader::new((&stream).take(MOST));
-    let took = answer(&mut answers).context("the window wasn't taken on in time")?;
+/// Connects to the socket at `path`; with `starting`, the process just
+/// started to listen there, waiting up to `wait` for it to, as long as
+/// it runs.
+fn connect(
+    path: &Path,
+    starting: Option<&mut Child>,
+    wait: Duration,
+) -> anyhow::Result<UnixStream> {
+    let Some(child) = starting else {
+        return UnixStream::connect(path).context("no process of windows");
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && Instant::now() < deadline =>
+            {
+                if let Some(status) = child.try_wait()? {
+                    anyhow::bail!("the process of windows started ended: {status}");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(err).context("the process of windows started isn't listening"),
+        }
+    }
+}
+
+/// Sends `line` on `stream`, and waits for the window to be taken on by
+/// `take_by` and to open by `open_by`.
+fn asked(stream: &UnixStream, line: &str, take_by: u64, open_by: u64) -> anyhow::Result<()> {
+    ours(stream)?;
+    stream.set_write_timeout(Some(until(take_by).max(Duration::from_millis(1))))?;
+    let mut writer = stream;
+    writer.write_all(line.as_bytes())?;
+    let mut answers = Answers::default();
+    let took = answers
+        .next(stream, until(take_by) + SLACK)
+        .context("the window wasn't taken on in time")?;
     if let Some(why) = took.get("refused").and_then(Value::as_str) {
         if took.get("keep") == Some(&Value::Bool(true)) {
             return Err(Kept(why.to_owned()).into());
@@ -210,31 +370,67 @@ fn asked(runtime: &RuntimeDir, line: &str) -> anyhow::Result<()> {
         anyhow::bail!("refused: {why}");
     }
     anyhow::ensure!(took.get("took") == Some(&Value::Bool(true)), "not taken on");
-    stream.set_read_timeout(Some(OPEN_WAIT))?;
-    let opened = answer(&mut answers);
-    match opened {
-        Ok(opened) if opened.get("opened") == Some(&Value::Bool(true)) => Ok(()),
-        Ok(failed) => {
-            let why = failed.get("failed").and_then(Value::as_str);
-            anyhow::bail!("couldn't open: {}", why.unwrap_or("it didn't say why"));
-        }
-        // Taken on, but not said to be open: it may yet open, and another
-        // would make two.
-        Err(err) => {
-            log::warn!("a window taken on by another process isn't open yet: {err:#}");
-            Ok(())
+    // Not open by then, it's closed again as it opens: this process opens
+    // it instead.
+    let opened = answers
+        .next(stream, until(open_by) + SLACK)
+        .context("the window taken on didn't open in time")?;
+    if opened.get("opened") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    let why = opened.get("failed").and_then(Value::as_str);
+    anyhow::bail!("couldn't open: {}", why.unwrap_or("it didn't say why"));
+}
+
+/// Lines read from a stream, each a JSON object.
+#[derive(Debug, Default)]
+struct Answers {
+    read: Vec<u8>,
+}
+
+impl Answers {
+    /// The next line, waiting no more than `wait` for it.
+    fn next(&mut self, stream: &UnixStream, wait: Duration) -> anyhow::Result<Map<String, Value>> {
+        let line = read_line(stream, &mut self.read, Instant::now() + wait)?;
+        match serde_json::from_slice(&line)? {
+            Value::Object(answer) => Ok(answer),
+            _ => anyhow::bail!("an answer that isn't an object"),
         }
     }
 }
 
-/// The next answer.
-fn answer(answers: &mut impl BufRead) -> anyhow::Result<Map<String, Value>> {
-    let mut line = String::new();
-    answers.read_line(&mut line)?;
-    anyhow::ensure!(line.ends_with('\n'), "no answer");
-    match serde_json::from_str(&line)? {
-        Value::Object(answer) => Ok(answer),
-        _ => anyhow::bail!("an answer that isn't an object"),
+/// Reads from `stream` into `read` until a whole line is there, by
+/// `deadline` however slowly it comes, and takes it out of `read`.
+fn read_line(
+    stream: &UnixStream,
+    read: &mut Vec<u8>,
+    deadline: Instant,
+) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = [0; 4096];
+    loop {
+        if let Some(end) = read.iter().position(|&byte| byte == b'\n') {
+            let rest = read.split_off(end + 1);
+            return Ok(std::mem::replace(read, rest));
+        }
+        anyhow::ensure!(read.len() < MOST, "a line too long");
+        let left = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!left.is_zero(), "no answer in time");
+        stream.set_read_timeout(Some(left))?;
+        let mut reader = stream;
+        match reader.read(&mut buffer) {
+            Ok(0) => anyhow::bail!("the other end hung up"),
+            Ok(n) => read.extend_from_slice(&buffer[..n]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                anyhow::bail!("no answer in time");
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
 }
 
@@ -242,19 +438,32 @@ fn answer(answers: &mut impl BufRead) -> anyhow::Result<Map<String, Value>> {
 fn ours(stream: &UnixStream) -> io::Result<()> {
     let peer = rustix::net::sockopt::socket_peercred(stream)?;
     if peer.uid != rustix::process::getuid() {
-        return Err(io::Error::other("another user's program is listening"));
+        return Err(io::Error::other(
+            "another user's program is at the other end",
+        ));
     }
     Ok(())
 }
 
 /// The request, as one line.
-fn request_line(request: &Request<'_>, build: &Build, launch: &LaunchToken) -> String {
+fn request_line(
+    request: &Request<'_>,
+    build: &Build,
+    launch: &LaunchToken,
+    take_by: u64,
+    open_by: u64,
+) -> String {
     let spec = request.spec;
     let (wayland, x11) = launch.raw();
+    let origin = &spec.origin;
+    let env: Vec<Value> = (origin.env.iter().flat_map(|env| env.iter()))
+        .filter_map(|(name, value)| Some(json!([name.to_str()?, value.to_str()?])))
+        .collect();
     let line = json!({
         "build": build.0,
-        "wait_ms": u64::try_from(TAKE_WAIT.as_millis()).unwrap_or(u64::MAX),
-        "env": window_env(),
+        "take_by": take_by,
+        "open_by": open_by,
+        "match": window_match(),
         "renderer": renderer_name(request.graphics_api),
         "remote": spec.remote.as_ref().map(|remote| &remote.host),
         "remote_command": spec.remote_command,
@@ -264,23 +473,27 @@ fn request_line(request: &Request<'_>, build: &Build, launch: &LaunchToken) -> S
         "font_fixed": [spec.font_fixed.family, spec.font_fixed.size],
         "wayland_token": wayland,
         "x11_token": x11,
+        "env": origin.env.as_ref().map(|_| env),
+        "dir": origin.dir.as_ref().and_then(|dir| dir.to_str()),
     });
     format!("{line}\n")
 }
 
-fn renderer_name(api: GraphicsApi) -> &'static str {
+/// The name a graphics API goes by on the command line.
+pub(crate) fn renderer_name(api: GraphicsApi) -> &'static str {
     match api {
         GraphicsApi::Vulkan => "vulkan",
         GraphicsApi::OpenGl => "opengl",
     }
 }
 
-/// [`WINDOW_ENV`] as this process has it. A relative `WAYLAND_DISPLAY`
+/// What a window must match, as this process has it: [`MATCH_ENV`], and
+/// clackatoo's config and state directories. A relative `WAYLAND_DISPLAY`
 /// names a socket in the runtime directory, so it's made a path, which
 /// says which display it is wherever it's read.
-fn window_env() -> Map<String, Value> {
-    let mut env = Map::new();
-    for name in WINDOW_ENV {
+fn window_match() -> Map<String, Value> {
+    let mut matched = Map::new();
+    for name in MATCH_ENV {
         let mut value = std::env::var(name).ok().filter(|value| !value.is_empty());
         if name == "WAYLAND_DISPLAY"
             && let Some(display) = &value
@@ -289,9 +502,14 @@ fn window_env() -> Map<String, Value> {
         {
             value = Some(format!("{runtime}/{display}"));
         }
-        env.insert(name.to_owned(), value.map_or(Value::Null, Value::String));
+        matched.insert(name.to_owned(), value.map_or(Value::Null, Value::String));
     }
-    env
+    let dir = |dir: Option<PathBuf>| {
+        (dir.as_deref().and_then(Path::to_str)).map_or(Value::Null, Into::into)
+    };
+    matched.insert("config".into(), dir(clackatoo_daemon::config_dir()));
+    matched.insert("state".into(), dir(clackatoo_daemon::state_dir()));
+    matched
 }
 
 /// A window asked for, which the event loop takes on or lets go.
@@ -301,15 +519,23 @@ pub(crate) struct Asked {
     pub(crate) launch: LaunchToken,
     /// When it was asked for, which the window's start is timed from.
     pub(crate) at: Instant,
-    /// When the asker stops waiting to hear it was taken on.
-    deadline: Instant,
+    /// When the asker stops waiting to hear it was taken on, and to hear
+    /// it opened, on [`now`]'s clock.
+    take_by: u64,
+    open_by: u64,
     stream: UnixStream,
 }
 
 impl Asked {
     /// Takes the window on, saying so, if the asker still waits.
     pub(crate) fn take(&mut self) -> bool {
-        Instant::now() < self.deadline && self.say(&json!({ "took": true })).is_ok()
+        now() < self.take_by && self.say(&json!({ "took": true })).is_ok()
+    }
+
+    /// Whether the asker has stopped waiting for the window to open, and
+    /// opened its own.
+    pub(crate) fn late(&self) -> bool {
+        now() >= self.open_by
     }
 
     /// Tells the asker the window opened, or why not.
@@ -327,8 +553,8 @@ impl Asked {
     }
 }
 
-/// Listening for windows asked for, as the process with windows open.
-/// Dropped, it takes the socket away, if it's still this one's.
+/// Listening for windows asked for. Dropped, it takes the socket away, if
+/// it's still this one's, and windows asked for after go elsewhere.
 #[derive(Debug)]
 pub(crate) struct Listening {
     path: PathBuf,
@@ -347,9 +573,9 @@ impl Drop for Listening {
     }
 }
 
-/// Starts listening in `runtime` for windows asked for, on a thread of its
-/// own, in place of any process listening before. Each asked for by this
-/// build of the program, with this process's environment and drawing with
+/// Starts listening `at`, in `runtime`, for windows asked for, on a thread
+/// of its own, in place of any process listening there before. Each asked
+/// for by this build of the program, matching this process and drawn with
 /// `graphics_api`, is handed to `deliver`; any other is refused.
 ///
 /// # Errors
@@ -357,74 +583,93 @@ impl Drop for Listening {
 /// If the runtime directory or the socket can't be made.
 pub(crate) fn listen(
     runtime: &RuntimeDir,
+    at: &Socket,
     graphics_api: GraphicsApi,
-    deliver: impl Fn(Asked) + Send + 'static,
+    deliver: impl Fn(Asked) + Send + Sync + 'static,
 ) -> anyhow::Result<Listening> {
     runtime.create_private()?;
     let build = Build::running().context("this program can't be found")?;
-    let ours = Expected {
+    let ours = Arc::new(Expected {
         build,
-        env: window_env(),
+        matched: window_match(),
         renderer: renderer_name(graphics_api),
+    });
+    let path = at.path(runtime);
+    // A shared socket is made under a name of its own, then put in place
+    // in one step, so whoever connects meanwhile finds the last process's
+    // socket or this one, never none; one left by a process gone is
+    // replaced.
+    let made = match at {
+        Socket::Shared => runtime
+            .path()
+            .join(format!("window-{}.sock", std::process::id())),
+        Socket::Private(path) => path.clone(),
     };
-    // Made under a name of its own, then put in place in one step, so
-    // whoever connects meanwhile finds the last process's socket or this
-    // one, never none; a socket left by a process gone is replaced.
-    let path = runtime.path().join(SOCKET);
-    let fresh = runtime
-        .path()
-        .join(format!("window-{}.sock", std::process::id()));
-    match std::fs::remove_file(&fresh) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err.into()),
-    }
-    let listener = UnixListener::bind(&fresh)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600))?;
-    }
-    let socket = std::fs::symlink_metadata(&fresh)?;
-    std::fs::rename(&fresh, &path)?;
-    let listening = Listening {
-        path,
-        id: (socket.dev(), socket.ino()),
-    };
+    let (listener, id) = bind(&made, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&made);
+    })?;
+    let listening = Listening { path, id };
+    let deliver = Arc::new(deliver);
     std::thread::Builder::new()
         .name("windows".into())
         .spawn(move || {
             for stream in listener.incoming() {
-                let asked = stream.map_err(anyhow::Error::from).and_then(|stream| {
-                    let at = Instant::now();
-                    read(stream, &ours, at)
-                });
-                match asked {
-                    Ok(Some(asked)) => deliver(asked),
-                    Ok(None) => {}
-                    Err(err) => log::info!("a window asked for wasn't taken on: {err:#}"),
+                let Ok(stream) = stream else { continue };
+                let at = Instant::now();
+                let ours = Arc::clone(&ours);
+                let deliver = Arc::clone(&deliver);
+                // Each on a thread of its own: a slow asker holds up no
+                // other.
+                let read = std::thread::Builder::new()
+                    .name("window-asked".into())
+                    .spawn(move || match read(stream, &ours, at) {
+                        Ok(Some(asked)) => deliver(asked),
+                        Ok(None) => {}
+                        Err(err) => log::info!("a window asked for wasn't taken on: {err:#}"),
+                    });
+                if let Err(err) = read {
+                    log::warn!("no thread to read a window asked for: {err}");
                 }
             }
         })?;
     Ok(listening)
 }
 
+/// Binds a socket for the user alone at `made`, and puts it at `path`.
+fn bind(made: &Path, path: &Path) -> anyhow::Result<(UnixListener, (u64, u64))> {
+    match std::fs::remove_file(made) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let listener = UnixListener::bind(made)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let socket = std::fs::symlink_metadata(made)?;
+    if made != path {
+        std::fs::rename(made, path)?;
+    }
+    Ok((listener, (socket.dev(), socket.ino())))
+}
+
 /// What a request must match to be taken on.
 #[derive(Debug)]
 struct Expected {
     build: Build,
-    env: Map<String, Value>,
+    matched: Map<String, Value>,
     renderer: &'static str,
 }
 
-/// Reads what's asked for on `stream`, at `at`. Refuses it, returning
-/// `None`, if a window opened here wouldn't be the one asked for.
+/// Reads what's asked for on `stream`, at `at`, all of it within
+/// [`READ_WAIT`]. Refuses it, returning `None`, if a window opened here
+/// wouldn't be the one asked for.
 fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<Option<Asked>> {
     ours(&stream).context("asked by another user's program")?;
-    stream.set_read_timeout(Some(TAKE_WAIT))?;
-    stream.set_write_timeout(Some(TAKE_WAIT))?;
-    let mut line = String::new();
-    BufReader::new((&stream).take(MOST)).read_line(&mut line)?;
-    let Value::Object(request) = serde_json::from_str(&line)? else {
+    stream.set_write_timeout(Some(READ_WAIT))?;
+    let line = read_line(&stream, &mut Vec::new(), at + READ_WAIT)?;
+    let Value::Object(request) = serde_json::from_slice(&line)? else {
         anyhow::bail!("a request that isn't an object");
     };
     let mut stream = stream;
@@ -435,7 +680,7 @@ fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<
         return Ok(None);
     }
     let text = |name: &str| request.get(name).and_then(Value::as_str).map(str::to_owned);
-    let wait = request.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+    let number = |name: &str| request.get(name).and_then(Value::as_u64).unwrap_or(0);
     let fixed = request.get("font_fixed").and_then(Value::as_array);
     let fixed = |index: usize| {
         fixed
@@ -449,6 +694,15 @@ fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<
         .get("font_size")
         .and_then(Value::as_f64)
         .context("no font size")? as f32;
+    let env = request.get("env").and_then(Value::as_array).map(|env| {
+        let pair = |pair: &Value| {
+            let pair = pair.as_array()?;
+            let name = pair.first()?.as_str()?;
+            let value = pair.get(1)?.as_str()?;
+            Some((OsString::from(name), OsString::from(value)))
+        };
+        env.iter().filter_map(pair).collect::<Vec<_>>().into()
+    });
     let spec = Spec {
         remote: text("remote").map(|host| Remote {
             host,
@@ -464,12 +718,17 @@ fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<
             family: fixed(0),
             size: fixed(1),
         },
+        origin: Origin {
+            env,
+            dir: text("dir").map(PathBuf::from),
+        },
     };
     Ok(Some(Asked {
         spec,
         launch: LaunchToken::from_raw(text("wayland_token"), text("x11_token")),
         at,
-        deadline: at + Duration::from_millis(wait).min(TAKE_WAIT),
+        take_by: number("take_by"),
+        open_by: number("open_by"),
         stream,
     }))
 }
@@ -495,9 +754,9 @@ fn refusal(request: &Map<String, Value>, expected: &Expected) -> Option<Refusal>
             keep: theirs.is_some_and(|theirs| expected.build.changed() > Some(theirs)),
         });
     }
-    let env = request.get("env").and_then(Value::as_object);
-    let differs = (expected.env.iter())
-        .find(|(name, value)| env.and_then(|env| env.get(*name)) != Some(value))
+    let matched = request.get("match").and_then(Value::as_object);
+    let differs = (expected.matched.iter())
+        .find(|(name, value)| matched.and_then(|matched| matched.get(*name)) != Some(value))
         .map(|(name, _)| format!("another {name}"));
     let renderer = request.get("renderer").and_then(Value::as_str);
     let differs = differs
@@ -506,213 +765,4 @@ fn refusal(request: &Map<String, Value>, expected: &Expected) -> Option<Refusal>
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::mpsc;
-
-    use super::*;
-
-    /// A runtime directory of its own, for a test.
-    fn runtime() -> (tempfile::TempDir, RuntimeDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = RuntimeDir::at(dir.path().join("clackatoo"));
-        (dir, runtime)
-    }
-
-    /// A window on another machine, which is asked for whether or not a
-    /// daemon runs here.
-    fn remote() -> Spec {
-        Spec {
-            remote: Some(Remote {
-                host: "desk".into(),
-                command: "clackatoo".into(),
-            }),
-            remote_command: "clackatoo".into(),
-            font: FontOptions {
-                family: Some("Iosevka".into()),
-                size: 13.5,
-            },
-            font_fixed: FontFixed {
-                family: true,
-                size: false,
-            },
-            ..Spec::default()
-        }
-    }
-
-    fn launched() -> LaunchToken {
-        LaunchToken::from_raw(Some("wayland-token".into()), Some("x11-token".into()))
-    }
-
-    /// Asks for `spec` from a thread, as another process would.
-    fn ask_from_thread(
-        runtime: &RuntimeDir,
-        spec: Spec,
-        graphics_api: GraphicsApi,
-    ) -> std::thread::JoinHandle<Result<(), String>> {
-        let runtime = runtime.clone();
-        std::thread::spawn(move || {
-            let request = Request {
-                spec: &spec,
-                graphics_api,
-                runtime: &runtime,
-            };
-            ask(&request, launched()).map_err(|not| not.why)
-        })
-    }
-
-    #[test]
-    fn a_window_asked_for_arrives_whole_and_the_asker_hears_it_opened() {
-        let (_dir, runtime) = runtime();
-        let (sender, delivered) = mpsc::channel();
-        let _listening = listen(&runtime, GraphicsApi::Vulkan, move |asked| {
-            sender.send(asked).unwrap();
-        })
-        .unwrap();
-        let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::Vulkan);
-        let mut asked = delivered.recv_timeout(Duration::from_secs(5)).unwrap();
-        let spec = &asked.spec;
-        assert_eq!(spec.remote, remote().remote);
-        assert_eq!(spec.remote_command, "clackatoo");
-        assert!(!spec.pick_remote);
-        assert_eq!(spec.font.family.as_deref(), Some("Iosevka"));
-        assert!((spec.font.size - 13.5).abs() < f32::EPSILON);
-        assert!(spec.font_fixed.family && !spec.font_fixed.size);
-        assert_eq!(asked.launch, launched());
-        assert!(asked.take());
-        asked.opened(Ok(()));
-        assert_eq!(waiting.join().unwrap(), Ok(()));
-    }
-
-    #[test]
-    fn a_window_that_failed_to_open_is_opened_by_the_asker_instead() {
-        let (_dir, runtime) = runtime();
-        let _listening = listen(&runtime, GraphicsApi::Vulkan, |mut asked| {
-            assert!(asked.take());
-            asked.opened(Err("no display".into()));
-        })
-        .unwrap();
-        let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::Vulkan);
-        let why = waiting.join().unwrap().unwrap_err();
-        assert!(why.contains("no display"), "{why}");
-    }
-
-    #[test]
-    fn a_window_drawn_with_another_renderer_is_refused_before_it_reaches_the_windows() {
-        let (_dir, runtime) = runtime();
-        let _listening = listen(&runtime, GraphicsApi::Vulkan, |_| {
-            panic!("a refused window was delivered");
-        })
-        .unwrap();
-        let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::OpenGl);
-        let why = waiting.join().unwrap().unwrap_err();
-        assert!(why.contains("another renderer"), "{why}");
-        // The asker is the odd one out: the process asked keeps taking
-        // windows.
-        assert!(why.contains("takes the windows asked for after"), "{why}");
-    }
-
-    #[test]
-    fn a_window_taken_on_too_late_is_left_to_the_asker() {
-        let (_dir, runtime) = runtime();
-        let (sender, delivered) = mpsc::channel();
-        let _listening = listen(&runtime, GraphicsApi::Vulkan, move |asked| {
-            sender.send(asked).unwrap();
-        })
-        .unwrap();
-        let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::Vulkan);
-        let mut asked = delivered.recv_timeout(Duration::from_secs(5)).unwrap();
-        // The event loop is busy for longer than the asker waits.
-        let why = waiting.join().unwrap().unwrap_err();
-        assert!(why.contains("in time"), "{why}");
-        assert!(!asked.take());
-    }
-
-    #[test]
-    fn with_no_process_listening_the_asker_opens_the_window() {
-        let (_dir, runtime) = runtime();
-        let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::Vulkan);
-        let why = waiting.join().unwrap().unwrap_err();
-        assert!(why.contains("no process"), "{why}");
-        // A local window isn't asked for while no daemon runs: one would be
-        // started with another process's environment.
-        let waiting = ask_from_thread(&runtime, Spec::default(), GraphicsApi::Vulkan);
-        let why = waiting.join().unwrap().unwrap_err();
-        assert!(why.contains("daemon"), "{why}");
-    }
-
-    #[test]
-    fn requests_from_another_build_or_environment_are_refused() {
-        let expected = Expected {
-            build: Build("1:2:3:4.000000005".into()),
-            env: window_env(),
-            renderer: "vulkan",
-        };
-        let request = |build: &str, env: Map<String, Value>| {
-            let Value::Object(request) = json!({
-                "build": build,
-                "env": env,
-                "renderer": "vulkan",
-            }) else {
-                unreachable!("an object")
-            };
-            request
-        };
-        let refused = |why: &str, keep| {
-            Some(Refusal {
-                why: why.into(),
-                keep,
-            })
-        };
-        let same = request("1:2:3:4.000000005", window_env());
-        assert_eq!(refusal(&same, &expected), None);
-        // A newer build takes the windows after it; an older one doesn't.
-        let newer = request("1:7:3:9.000000005", window_env());
-        assert_eq!(
-            refusal(&newer, &expected),
-            refused("another build of clackatoo", false)
-        );
-        let older = request("1:7:3:4.000000001", window_env());
-        assert_eq!(
-            refusal(&older, &expected),
-            refused("another build of clackatoo", true)
-        );
-        let mut env = window_env();
-        env.insert("WAYLAND_DISPLAY".into(), "/run/user/1000/wayland-9".into());
-        let other_display = request("1:2:3:4.000000005", env);
-        assert_eq!(
-            refusal(&other_display, &expected),
-            refused("another WAYLAND_DISPLAY", true)
-        );
-        // A build that sent no environment at all.
-        let mut bare = same.clone();
-        bare.remove("env");
-        assert!(refusal(&bare, &expected).is_some());
-    }
-
-    #[test]
-    fn a_build_is_its_file_and_one_put_in_its_place_is_another() {
-        let dir = tempfile::tempdir().unwrap();
-        let program = dir.path().join("clackatoo");
-        std::fs::write(&program, "one").unwrap();
-        let before = Build::of(&program).unwrap();
-        assert_eq!(Build::of(&program), Some(before.clone()));
-        // As `clackatoo update` and a deploy put a build in place.
-        let next = dir.path().join("clackatoo.new");
-        std::fs::write(&next, "two").unwrap();
-        std::fs::rename(&next, &program).unwrap();
-        assert_ne!(Build::of(&program), Some(before));
-        assert!(Build::running().is_some());
-    }
-
-    #[test]
-    fn a_process_that_stops_listening_leaves_a_newer_ones_socket_alone() {
-        let (_dir, runtime) = runtime();
-        let older = listen(&runtime, GraphicsApi::Vulkan, |_| {}).unwrap();
-        let newer = listen(&runtime, GraphicsApi::Vulkan, |_| {}).unwrap();
-        let socket = runtime.path().join(SOCKET);
-        drop(older);
-        assert!(socket.exists());
-        drop(newer);
-        assert!(!socket.exists());
-    }
-}
+mod tests;

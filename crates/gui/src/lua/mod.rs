@@ -707,6 +707,24 @@ mod tests {
         assert!(matches!(&said[..], [FromLua::Error(err)] if err.contains("`sideways`")));
     }
 
+    /// Every window runs its config in a process shared with the others:
+    /// nothing in it reaches the whole process, as ending it or changing
+    /// its locale, environment or files would.
+    #[test]
+    fn config_can_do_nothing_to_the_process_the_windows_share() {
+        let (_lua, said) = start(
+            r"
+            assert(os.exit == nil and os.execute == nil and os.setlocale == nil)
+            assert(os.remove == nil and os.rename == nil and os.getenv == nil)
+            assert(io == nil and package == nil and loadfile == nil and dofile == nil)
+            ",
+        );
+        assert!(
+            !said.iter().any(|said| matches!(said, FromLua::Error(_))),
+            "{said:?}"
+        );
+    }
+
     #[test]
     fn a_handler_that_runs_too_long_is_stopped() {
         let (mut lua, _) = start(

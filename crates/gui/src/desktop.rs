@@ -60,13 +60,15 @@ impl Desktop {
 /// it doesn't linger as a zombie, so the window never waits; it gets no
 /// terminal, and what it says goes nowhere. Callers only pass URLs with a
 /// known scheme (see [`crate::links`]), so one can't be taken for an
-/// option.
-pub(crate) fn open(url: &str) {
+/// option. It's started as `origin` would, the window's.
+pub(crate) fn open(url: &str, origin: &clackatoo_daemon::launch::Origin) {
     let url = url.to_owned();
+    let mut command = Command::new("xdg-open");
+    origin.apply(&mut command);
     let spawned = std::thread::Builder::new()
         .name("xdg-open".into())
         .spawn(move || {
-            let status = Command::new("xdg-open")
+            let status = command
                 .arg(&url)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

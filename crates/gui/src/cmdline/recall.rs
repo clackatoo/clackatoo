@@ -349,6 +349,13 @@ impl Writer {
         }
     }
 
+    /// Lets what's been handed over be written as the window closes, while
+    /// the process goes on with other windows, without waiting for it.
+    pub(crate) fn let_go(&mut self) {
+        self.send = None;
+        self.thread = None;
+    }
+
     /// Lets what's been handed over be written, as the window closes,
     /// waiting no more than `patience` for it.
     pub(crate) fn finish(&mut self, patience: Duration) {

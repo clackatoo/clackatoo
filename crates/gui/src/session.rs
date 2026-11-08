@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use clackatoo_daemon::launch::{self, LaunchError};
+use clackatoo_daemon::launch::{self, LaunchError, Origin};
 use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Contact, Receiver, RuntimeDir, Sender};
 use clackatoo_protocol::frame::Head;
@@ -23,9 +23,8 @@ use clackatoo_protocol::{
     BrowserUpdate, BufferId, Error, Event, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Response,
     ServerMessage, Size, TerminalId, TerminalStatus, Workspaces, wire,
 };
-use winit::event_loop::EventLoopProxy;
 
-use crate::app::host::{Wake, WindowKey};
+use crate::app::host::{Wake, Waker, WindowKey};
 
 /// How long the daemon may take to answer while the window opens.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -168,10 +167,7 @@ pub(crate) enum SessionEvent {
 /// its own loop waits on.
 #[derive(Clone, Debug)]
 pub(crate) enum Proxy {
-    EventLoop {
-        proxy: EventLoopProxy<Wake>,
-        window: WindowKey,
-    },
+    EventLoop { waker: Waker, window: WindowKey },
     Channel(mpsc::Sender<SessionEvent>),
 }
 
@@ -181,9 +177,9 @@ impl Proxy {
     /// open, it's dropped unheard.
     pub(crate) fn send_event(&self, event: SessionEvent) -> Result<(), Closed> {
         match self {
-            Self::EventLoop { proxy, window } => proxy
-                .send_event(Wake::Window(*window, event))
-                .map_err(|_| Closed),
+            Self::EventLoop { waker, window } => {
+                waker.wake(Wake::Window(*window, event)).map_err(|_| Closed)
+            }
             Self::Channel(sender) => sender.send(event).map_err(|_| Closed),
         }
     }
@@ -214,6 +210,9 @@ pub(crate) struct Session {
     commands: mpsc::Sender<SessionCommand>,
     /// Where ssh asks its questions, for a daemon on another machine.
     askpass: Option<Askpass>,
+    /// Where the window was asked for from, which the daemon and ssh are
+    /// started as.
+    origin: Origin,
 }
 
 impl Session {
@@ -235,13 +234,20 @@ impl Session {
             proxy,
             commands: mpsc::channel().0,
             askpass: None,
+            origin: Origin::default(),
         }
+    }
+
+    /// The session, starting the daemon and ssh as `origin` would.
+    pub(crate) fn from(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// Starts connecting to the daemon at `location`, in place of any
     /// before, whose thread has ended.
     pub(crate) fn connect(&mut self, location: Location) {
-        // The last one's socket goes first: the next is at the same path.
+        // The last one's socket goes, as its thread has ended.
         self.askpass = None;
         self.askpass = match location {
             Location::Local(_) | Location::Started(_) => None,
@@ -264,6 +270,7 @@ impl Session {
             location.clone(),
             askpass_path(self.askpass.as_ref()),
             self.proxy.clone(),
+            self.origin.clone(),
         );
         self.location = Some(location);
     }
@@ -313,6 +320,7 @@ impl Session {
             location,
             askpass_path(self.askpass.as_ref()),
             self.proxy.clone(),
+            self.origin.clone(),
         );
     }
 
@@ -334,11 +342,12 @@ fn spawn(
     location: Location,
     askpass: Option<PathBuf>,
     proxy: Proxy,
+    origin: Origin,
 ) -> mpsc::Sender<SessionCommand> {
     let (commands, received) = mpsc::channel();
     std::thread::Builder::new()
         .name("session".into())
-        .spawn(move || run(&location, askpass.as_deref(), &proxy, &received))
+        .spawn(move || run(&location, askpass.as_deref(), &proxy, &received, &origin))
         .expect("threads can be started");
     commands
 }
@@ -356,12 +365,13 @@ fn run(
     askpass: Option<&Path>,
     proxy: &Proxy,
     commands: &mpsc::Receiver<SessionCommand>,
+    origin: &Origin,
 ) {
     // Failing to send an event means the window has closed.
     let lost = |reason: String| drop(proxy.send_event(SessionEvent::Lost(reason)));
     let mut replace = false;
     let client = loop {
-        match connect(location, askpass, replace) {
+        match connect(location, askpass, replace, origin) {
             Connected::Client(client) => break client,
             // Replacing it started a daemon from another build: the one
             // installed on the remote machine.
@@ -466,7 +476,13 @@ fn missed(head: Head) -> Option<SessionEvent> {
 /// Connects to the daemon at `location`, starting it if it isn't running,
 /// or with `replace`, replacing it first: upgrading it if it can be, or else
 /// stopping it. ssh asks its questions through the socket at `askpass`.
-fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connected {
+/// The daemon and ssh are started as `origin` would.
+fn connect(
+    location: &Location,
+    askpass: Option<&Path>,
+    replace: bool,
+    origin: &Origin,
+) -> Connected {
     let result = match location {
         Location::Local(runtime) => {
             if replace && let Err(err) = launch::replace(runtime) {
@@ -475,7 +491,7 @@ fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connec
                     with_causes(&err)
                 ));
             }
-            launch::connect_or_start(runtime).map_err(|err| match err {
+            launch::connect_or_start_from(runtime, origin).map_err(|err| match err {
                 LaunchError::Client(ClientError::VersionMismatch { daemon, .. }) => Ok(daemon),
                 err => Err(with_causes(&err)),
             })
@@ -487,7 +503,7 @@ fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connec
             })
         }
         Location::Remote(remote) => {
-            remote::connect(remote, replace, askpass).map_err(|err| match err {
+            remote::connect_from(remote, replace, askpass, origin).map_err(|err| match err {
                 RemoteError::Client(ClientError::VersionMismatch { daemon, .. }) => Ok(daemon),
                 err => Err(with_causes(&err)),
             })

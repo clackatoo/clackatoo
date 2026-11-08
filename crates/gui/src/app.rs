@@ -150,6 +150,54 @@ pub(crate) struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Whether the device has been lost, as when the driver resets.
+    pub(crate) lost: Arc<Lost>,
+}
+
+/// Whether a GPU's device has been lost, and who to tell.
+#[derive(Default)]
+pub(crate) struct Lost {
+    gone: std::sync::atomic::AtomicBool,
+    tell: std::sync::Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl std::fmt::Debug for Lost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lost")
+            .field("gone", &self.gone())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Lost {
+    /// Whether the device has been lost.
+    pub(crate) fn gone(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Has `tell` called once the device is lost: at once, if it has been.
+    pub(crate) fn notify(&self, tell: Box<dyn Fn() + Send>) {
+        let mut slot = self
+            .tell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.gone() {
+            tell();
+        } else {
+            *slot = Some(tell);
+        }
+    }
+
+    fn lose(&self) {
+        let slot = self
+            .tell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.gone.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(tell) = slot.as_ref() {
+            tell();
+        }
+    }
 }
 
 impl Gpu {
@@ -242,11 +290,21 @@ impl Gpu {
         // A GPU error is a bug in how we drive it, but the window can often
         // carry on, so it's logged rather than fatal.
         device.on_uncaptured_error(Arc::new(|error| log::error!("GPU error: {error}")));
+        let lost = Arc::new(Lost::default());
+        let losing = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            // Destroyed is the device let go, as the process ends.
+            if reason == wgpu::DeviceLostReason::Unknown {
+                log::error!("the GPU was lost: {message}");
+                losing.lose();
+            }
+        });
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
+            lost,
         })
     }
 
@@ -523,9 +581,13 @@ pub(crate) struct App {
     /// What the window was opened with, which a window it opens on another
     /// machine copies.
     spec: host::Spec,
-    /// A window to open on another machine, waiting for the token the
-    /// desktop gives this one to hand it, so it takes focus.
-    opening: Option<host::Opening>,
+    /// Windows to open on other machines, waiting for the token the
+    /// desktop gives this one to hand them, so they take focus.
+    opening: Vec<host::Opening>,
+    /// Whether the compositor says the window can't be seen: it isn't
+    /// drawn meanwhile, so a surface that takes no frames while hidden
+    /// never holds up the other windows.
+    occluded: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -598,7 +660,8 @@ impl App {
             closing: false,
             link,
             spec,
-            opening: None,
+            opening: Vec::new(),
+            occluded: false,
             result: Ok(()),
         }
     }
@@ -1041,7 +1104,7 @@ impl App {
                 self.native.refused = true;
                 continue;
             }
-            crate::desktop::open(&url);
+            crate::desktop::open(&url, &self.spec.origin);
         }
     }
 
@@ -1060,7 +1123,12 @@ impl App {
                 }
                 Some(program) => {
                     self.updates.running = true;
-                    updates::update(program.clone(), updates::Asked::User, self.session.proxy());
+                    updates::update(
+                        program.clone(),
+                        updates::Asked::User,
+                        self.session.proxy(),
+                        self.spec.origin.clone(),
+                    );
                 }
                 None => self
                     .desk
@@ -1694,25 +1762,11 @@ impl App {
         if spec.font_fixed.size {
             args.extend(["--font-size".into(), spec.font.size.to_string().into()]);
         }
+        if let Some(renderer) = self.link.renderer() {
+            let renderer = crate::handoff::renderer_name(renderer);
+            args.extend(["--renderer".into(), renderer.into()]);
+        }
         args
-    }
-
-    /// Becomes the build `clackatoo update` just put in place of this one,
-    /// with the arguments this window was opened with, connecting to the
-    /// daemon it did: one picked from the picker of machines is named.
-    /// Returns only if it couldn't, saying why.
-    fn reopen_as_new_build(&self) -> String {
-        use std::os::unix::process::CommandExt as _;
-        let Some(program) = &self.updates.program else {
-            return "this program can't be found, to open it again".into();
-        };
-        // The build put in place: this one's, or if this is the build an
-        // update kept aside, the one that replaced it.
-        let program = clackatoo_update::install::installed(program);
-        let args = reopen_args(self.opened_with().into_iter(), self.session.host());
-        log::info!("opening the window again as the new build");
-        let err = std::process::Command::new(&program).args(args).exec();
-        format!("updated, but the window couldn't reopen ({err}): open it again yourself")
     }
 
     /// Opens the build `clackatoo update` just put in place of this one, in
@@ -1726,7 +1780,7 @@ impl App {
         let program = clackatoo_update::install::installed(program);
         let args = reopen_args(self.opened_with().into_iter(), self.session.host());
         log::info!("opening this window again as the new build, in a process of its own");
-        match spawn_window(&program, &args) {
+        match spawn_window(&program, &args, &self.spec.origin) {
             Ok(()) => {
                 self.closing = true;
                 String::new()
@@ -1734,6 +1788,21 @@ impl App {
             Err(err) => {
                 format!("updated, but the window couldn't reopen ({err}): open it again yourself")
             }
+        }
+    }
+
+    /// Opens this window again in a process started afresh, with the
+    /// arguments it was opened with, and closes it here: for when the GPU
+    /// it was drawn with is lost.
+    pub(super) fn open_elsewhere(&mut self) {
+        self.closing = true;
+        let Some(program) = self.link.program().map(std::path::Path::to_owned) else {
+            log::warn!("this program can't be found: a window closes, not to open again");
+            return;
+        };
+        let args = reopen_args(self.opened_with().into_iter(), self.session.host());
+        if let Err(err) = spawn_window(&program, &args, &self.spec.origin) {
+            log::warn!("a window closes, and couldn't open again: {err}");
         }
     }
 
@@ -1754,7 +1823,7 @@ impl App {
         };
         if !self.link.hosting() || self.link.replaced(program) {
             let args = ["--remote", host, "--remote-command", &self.remote_command];
-            match spawn_window(program, &args.map(Into::into)) {
+            match spawn_window(program, &args.map(Into::into), &self.spec.origin) {
                 Ok(()) => self.desk.say(format!("opening a window on {host}…")),
                 Err(err) => {
                     self.desk
@@ -1777,9 +1846,7 @@ impl App {
             )
         });
         match asked {
-            Some(Ok(serial)) => {
-                self.opening = Some(host::Opening::new(serial, spec));
-            }
+            Some(Ok(serial)) => self.opening.push(host::Opening::new(serial, spec)),
             // The desktop gives no tokens.
             _ => self.link.open(spec, LaunchToken::default()),
         }
@@ -1793,25 +1860,21 @@ impl App {
         serial: winit::event_loop::AsyncRequestSerial,
         token: ActivationToken,
     ) {
-        if self
-            .opening
-            .as_ref()
-            .is_some_and(|opening| opening.serial == serial)
-            && let Some(opening) = self.opening.take()
-        {
+        if let Some(at) = (self.opening.iter()).position(|opening| opening.serial == serial) {
+            let opening = self.opening.remove(at);
             self.link.open(opening.spec, LaunchToken::given(token));
         }
     }
 
-    /// Opens the window waiting for a token without one, if the desktop
-    /// has taken too long to give it by `now`.
-    fn stop_waiting_for_token(&mut self, now: Instant) {
-        if self
-            .opening
-            .as_ref()
-            .is_some_and(|opening| opening.until <= now)
-            && let Some(opening) = self.opening.take()
-        {
+    /// Opens the windows waiting for a token without one, if the desktop
+    /// has taken too long to give it by `now`, or with `now` at none, as
+    /// this window closes.
+    fn stop_waiting_for_tokens(&mut self, now: Option<Instant>) {
+        let (late, waiting) = std::mem::take(&mut self.opening)
+            .into_iter()
+            .partition(|opening| now.is_none_or(|now| opening.until <= now));
+        self.opening = waiting;
+        for opening in late {
             log::info!("the desktop gave no token for a new window in time");
             self.link.open(opening.spec, LaunchToken::default());
         }
@@ -2053,7 +2116,12 @@ impl App {
                         Some(program) => {
                             self.updates.running = true;
                             let proxy = self.session.proxy();
-                            updates::update(program.clone(), updates::Asked::ForDaemon, proxy);
+                            updates::update(
+                                program.clone(),
+                                updates::Asked::ForDaemon,
+                                proxy,
+                                self.spec.origin.clone(),
+                            );
                             None
                         }
                     };
@@ -2175,6 +2243,12 @@ impl App {
     // --- Drawing ----------------------------------------------------------
 
     fn draw(&mut self) {
+        // Not while hidden: some surfaces wait for the compositor to take a
+        // frame, and every window waits with them. Nor once the GPU is lost:
+        // the window is opening again elsewhere.
+        if self.occluded || (self.frame.as_ref()).is_some_and(|frame| frame.gpu.lost.gone()) {
+            return;
+        }
         let started = Instant::now();
         // A new font, from `:set` or config, once a frame, however many
         // times it was set since the last: one atlas thrown away, and one
@@ -3328,12 +3402,18 @@ fn reopen_args(
     kept
 }
 
-/// Starts `program` with `args`, as a window's process of its own that
-/// outlives this one: not hung up with this window's terminal, if it has
+/// Starts `program` with `args`, as `origin` would, as a window's process
+/// of its own that outlives this one: not hung up with this window's terminal, if it has
 /// one, and waited for on a thread, so it doesn't linger once it's closed.
-fn spawn_window(program: &std::path::Path, args: &[std::ffi::OsString]) -> std::io::Result<()> {
+fn spawn_window(
+    program: &std::path::Path,
+    args: &[std::ffi::OsString],
+    origin: &clackatoo_daemon::launch::Origin,
+) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt as _;
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    let mut child = origin
+        .apply(&mut command)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -3478,16 +3558,25 @@ impl Drop for App {
 }
 
 impl App {
-    /// What's left to do as the window closes, alone or with its process.
-    fn closed(&mut self) {
+    /// What's left to do as the window closes: `last` in its process, which
+    /// ends with it, or with others open.
+    fn closed(&mut self, last: bool) {
+        // Windows it was opening open anyway, without a token.
+        self.stop_waiting_for_tokens(None);
         // A lesson goes with the window, and its scratch files with it.
         self.desk.tutor_exiting();
         // What's typed in chats' boxes, for the window opened next.
         self.desk.send_drafts(true);
         self.send_outbox();
-        // The last command run is kept, unless the disk is very slow.
-        self.recall_writer
-            .finish(std::time::Duration::from_millis(500));
+        // The last command run is kept: as the process ends, unless the
+        // disk is very slow; with other windows open, it goes on being
+        // written while they're used.
+        if last {
+            self.recall_writer
+                .finish(std::time::Duration::from_millis(500));
+        } else {
+            self.recall_writer.let_go();
+        }
     }
 
     /// Opens the window with what it was made with, once the event loop
@@ -3540,7 +3629,7 @@ impl App {
             self.send_outbox();
         }
         self.retry_if_due(now);
-        self.stop_waiting_for_token(now);
+        self.stop_waiting_for_tokens(Some(now));
         self.request_redraw();
     }
 
@@ -3604,7 +3693,7 @@ impl App {
             .chain(self.desk.pane_wakes())
             .chain(self.desk.scroll_wakes())
             .chain(self.desk.config_ends())
-            .chain(self.opening.as_ref().map(|opening| opening.until))
+            .chain(self.opening.iter().map(|opening| opening.until).min())
             .min()
     }
 }
@@ -3620,6 +3709,12 @@ impl App {
             WindowEvent::CloseRequested => self.closing = true,
             WindowEvent::ActivationTokenDone { serial, token } => {
                 self.token_given(serial, token);
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if !occluded {
+                    self.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
                 log::debug!("resized to {size:?}");
@@ -3834,16 +3929,10 @@ impl App {
                 }
                 // Installed: this window opens again as the new build,
                 // connecting where it did, even if moving this machine's
-                // daemon onto it failed, as it may have; it's logged. Alone,
-                // in this process; with other windows here, which would go
-                // with it, in a process of its own, closing this one.
-                let why = why.unwrap_or_else(|| {
-                    if self.link.alone() {
-                        self.reopen_as_new_build()
-                    } else {
-                        self.open_as_new_build()
-                    }
-                });
+                // daemon onto it failed, as it may have; it's logged. The
+                // new build's process of windows takes it, and the windows
+                // after it; the others here stay as they are.
+                let why = why.unwrap_or_else(|| self.open_as_new_build());
                 if self.closing {
                     return;
                 }

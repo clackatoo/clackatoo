@@ -76,13 +76,20 @@ pub(crate) struct Updated {
     pub(crate) installed: bool,
 }
 
-/// Runs `program update` on a thread of its own, for `asked`, and sends
-/// [`SessionEvent::Updated`] with what came of it.
-pub(crate) fn update(program: PathBuf, asked: Asked, proxy: Proxy) {
+/// Runs `program update` on a thread of its own, for `asked`, as `origin`
+/// would, and sends [`SessionEvent::Updated`] with what came of it.
+pub(crate) fn update(
+    program: PathBuf,
+    asked: Asked,
+    proxy: Proxy,
+    origin: clackatoo_daemon::launch::Origin,
+) {
     let started = std::thread::Builder::new()
         .name("update".into())
         .spawn(move || {
-            let (said, installed) = match Command::new(&program).arg("update").output() {
+            let mut command = Command::new(&program);
+            let ran = origin.apply(&mut command).arg("update").output();
+            let (said, installed) = match ran {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let said = outcome(

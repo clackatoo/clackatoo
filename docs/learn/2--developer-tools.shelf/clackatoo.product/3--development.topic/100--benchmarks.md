@@ -104,8 +104,8 @@ What each group measures:
 | | Per scrollback line, before compaction | The same, measured as soon as the output ends. |
 | | Per scrollback line, typical | The same as the first, with lines of varying length, averaging half the width. |
 | `idle` | Wakeups | How often the daemon wakes up per second, with a client connected and three quiet terminals, one of which printed some history before going quiet. This should be zero. It is counted from the context switches in `/proc`. |
-| `window` | Start to first frame | From starting `clackatoo` to the window's first frame, with the daemon already running and no window open. Most of it is the GPU driver starting up. |
-| | Start to first frame, another window | From starting `clackatoo` to the first frame of a window it asks the process with a window open for (see [another window](~clackatoo/reference/window#another-window)), which opens it on the GPU it set up already. Most of what's left is the compositor answering a new window. |
+| `window` | Start to first frame | From starting `clackatoo` to the window's first frame, in a process of its own (`CLACKATOO_WINDOW_HOST=off`), with the daemon already running. Most of it is the GPU driver starting up. |
+| | Start to first frame, another window | From starting `clackatoo` to the first frame of a window it hands to the [process of windows](~clackatoo/reference/window#windows-share-one-process) with a window open already, which opens it on the GPU it set up then, as the process's log says. |
 | | Frame drawn, during a flood | How long the window takes over each frame, from starting on it to handing it to the compositor, while its terminal prints for two seconds without stopping. |
 | | Wakeups of the window's own threads | How often the window wakes up per second with nothing to draw. This should be zero. |
 | | Wakeups, the GPU driver's threads too | The same, counting threads the GPU driver started inside the window. Some drivers wake up on their own: NVIDIA's Vulkan driver about 110 times a second, even with no window at all. |

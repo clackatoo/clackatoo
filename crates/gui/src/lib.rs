@@ -82,6 +82,7 @@ pub use complete::Ranking;
 pub use editor::EditorBench;
 pub use fonts::FontOptions;
 pub use launch::LaunchToken;
+pub use handoff::HOST_COMMAND;
 use winit::event_loop::EventLoop;
 
 /// How to open the window.
@@ -166,12 +167,17 @@ pub fn take_launch_token() -> LaunchToken {
     launch::LaunchToken::take()
 }
 
-/// Opens a window on the daemon's workspaces, making one if there are none.
-/// If a process of this build already has windows open, it's asked to open
-/// this one, which it does in a few milliseconds, sharing its GPU, and this
-/// returns once it's open. Otherwise the window opens in this process,
-/// which runs until its last window closes, and opens the windows asked of
-/// it until then (see [`app::host`]).
+/// Opens a window on the daemon's workspaces, making one if there are none,
+/// and returns once it's open.
+///
+/// The window opens in the process of windows, which shares its GPU with
+/// every window, so that only the first sets it up: one already running is
+/// asked for it, or else one is started, apart from this process and its
+/// terminal (see [`host`]). Whatever the window starts, the daemon and ssh
+/// among them, is started with this process's environment and directory.
+/// Only if no process of windows can open it does the window open in this
+/// one, which then runs until it closes; with `CLACKATOO_WINDOW_HOST=off`,
+/// it always does.
 ///
 /// It takes the desktop's launch token out of the environment first, so
 /// it must be called before this process starts any thread.
@@ -188,41 +194,158 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     if launch.token().is_some() {
         log::debug!("launched with the desktop's activation token");
     }
-    let spec = app::host::Spec {
-        remote: options.remote,
+    let mut spec = app::host::Spec {
+        remote: options.remote.clone(),
         pick_remote: options.pick_remote,
-        remote_command: options.remote_command,
-        font: options.font,
+        remote_command: options.remote_command.clone(),
+        font: options.font.clone(),
         font_fixed: options.font_fixed,
+        origin: clackatoo_daemon::launch::Origin::default(),
     };
+    if !handoff::on() {
+        return open_here(options, spec, launch, started, false);
+    }
+    spec.origin = handoff::here();
     let request = handoff::Request {
         spec: &spec,
         graphics_api: options.graphics_api,
         runtime: &options.runtime,
+        waits: handoff::Waits::default(),
     };
-    let (launch, hosting) = match handoff::ask(&request, launch) {
+    let opened = |how: &str| {
+        log::info!("window opened by {how}, after {:.1?}", started.elapsed());
+    };
+    let not = match handoff::ask(&request, launch, &handoff::Socket::Shared, None) {
         Ok(()) => {
-            log::info!(
-                "window opened by the process with windows open, after {:.1?}",
-                started.elapsed()
-            );
+            opened("the process of windows");
             return Ok(());
         }
-        Err(not) => {
-            log::debug!("opening the window in this process: {}", not.why);
-            (not.launch, not.host)
-        }
+        Err(not) => not,
     };
+    log::debug!("starting a process of windows: {}", not.why);
+    // One for every window from now on, unless the process asked keeps
+    // them, and this window has one of its own.
+    let at = if not.host {
+        handoff::Socket::Shared
+    } else {
+        handoff::Socket::private(&options.runtime)
+    };
+    let mut launch = not.launch;
+    match handoff::start(&at, options.graphics_api) {
+        Ok(mut child) => match handoff::ask(&request, launch, &at, Some(&mut child)) {
+            Ok(()) => {
+                opened("a process of windows started for it");
+                return Ok(());
+            }
+            Err(not) => {
+                log::warn!(
+                    "the process of windows started didn't open the window: {}",
+                    not.why
+                );
+                launch = not.launch;
+            }
+        },
+        Err(err) => log::warn!("couldn't start a process of windows: {err}"),
+    }
+    spec.origin = clackatoo_daemon::launch::Origin::default();
+    open_here(options, spec, launch, started, true)
+}
+
+/// Opens the window for `spec` in this process, which runs until it's
+/// closed; windows it opens itself, with `share`, open here too.
+fn open_here(
+    options: Options,
+    spec: app::host::Spec,
+    launch: launch::LaunchToken,
+    started: Instant,
+    share: bool,
+) -> anyhow::Result<()> {
     let start = options::Options::drawing_with(&spec.font);
+    let (event_loop, fonts, gpu) = starting(&start.font_options(), options.graphics_api)?;
+    let process = app::host::Process {
+        runtime: options.runtime,
+        config: options.config,
+        graphics_api: options.graphics_api,
+        listen: None,
+        share,
+    };
+    let waker = app::host::Waker::EventLoop(event_loop.create_proxy());
+    let mut host = app::host::Host::new(process, waker);
+    let startup = app::Startup { fonts, gpu, launch };
+    host.add(spec, start, started, startup);
+    event_loop.run_app(&mut host)?;
+    host.result
+}
+
+/// What a process of windows runs with.
+#[derive(Clone, Debug)]
+pub struct HostOptions {
+    /// Where the daemon is, and windows are asked for.
+    pub runtime: RuntimeDir,
+    /// clackatoo's config directory, whose `client/init.lua` configures
+    /// each window, if there is one.
+    pub config: Option<PathBuf>,
+    /// The graphics API to draw with.
+    pub graphics_api: GraphicsApi,
+    /// The font the first window is likely to want, found as the process
+    /// starts.
+    pub font: FontOptions,
+    /// Where to listen for the one window it's started for, if only that
+    /// window, and those it opens, are to be taken.
+    pub socket: Option<PathBuf>,
+}
+
+/// Runs the process of windows: started by `clackatoo` (see [`run`]) in a
+/// session of its own, with no terminal, it sets up the GPU and finds the
+/// fonts at once, takes the windows asked for, sharing them, and ends
+/// with its last window.
+///
+/// # Errors
+///
+/// If no window can be opened at all.
+pub fn host(options: HostOptions) -> anyhow::Result<()> {
+    // Apart from whoever started it: no terminal, signals of its own.
+    if let Err(err) = rustix::process::setsid() {
+        log::warn!("the process of windows shares a session: {err}");
+    }
+    let (event_loop, fonts, gpu) = starting(&options.font, options.graphics_api)?;
+    let process = app::host::Process {
+        runtime: options.runtime,
+        config: options.config,
+        graphics_api: options.graphics_api,
+        listen: Some(match options.socket {
+            Some(path) => handoff::Socket::Private(path),
+            None => handoff::Socket::Shared,
+        }),
+        share: true,
+    };
+    let waker = app::host::Waker::EventLoop(event_loop.create_proxy());
+    let mut host = app::host::Host::new(process, waker);
+    host.starting(fonts, gpu);
+    event_loop.run_app(&mut host)?;
+    host.result
+}
+
+/// The event loop, and the fonts and GPU being made for the first window.
+type Starting = (
+    EventLoop<app::host::Wake>,
+    app::Pending<(fonts::Fonts, desktop::Desktop)>,
+    app::Pending<app::Gpu>,
+);
+
+/// Starts finding the fonts in `font`, and setting up the GPU with
+/// `graphics_api`, on threads of their own, and makes the event loop
+/// meanwhile.
+fn starting(font: &FontOptions, graphics_api: GraphicsApi) -> anyhow::Result<Starting> {
     let fonts = {
-        let options = start.font_options();
+        let font = font.clone();
         std::thread::Builder::new()
             .name("fonts".into())
             .spawn(move || {
                 // Asking the desktop takes a few milliseconds, which the
                 // GPU takes longer than anyway.
                 let desktop = desktop::Desktop::read();
-                let fonts = fonts::Fonts::for_window(&options, &desktop)?;
+                let fonts = fonts::Fonts::for_window(&font, &desktop)?;
                 // The chat's fonts are found from now, alongside the GPU,
                 // so a chat on screen as the window opens doesn't wait.
                 chat::warm_fonts(&fonts);
@@ -230,7 +353,6 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             })?
     };
     let (display, display_received) = std::sync::mpsc::channel();
-    let graphics_api = options.graphics_api;
     let gpu = std::thread::Builder::new()
         .name("gpu".into())
         .spawn(move || app::Gpu::new(graphics_api, &display_received))?;
@@ -239,19 +361,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         .context("could not open a window")?;
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
-    let process = app::host::Process {
-        runtime: options.runtime,
-        config: options.config,
-        graphics_api,
-        hosting,
-    };
-    let mut host = app::host::Host::new(process, event_loop.create_proxy());
-    let startup = app::Startup {
-        fonts: app::Pending::Thread(fonts),
-        gpu: app::Pending::Thread(gpu),
-        launch,
-    };
-    host.add(spec, start, started, startup);
-    event_loop.run_app(&mut host)?;
-    host.result
+    Ok((
+        event_loop,
+        app::Pending::Thread(fonts),
+        app::Pending::Thread(gpu),
+    ))
 }
