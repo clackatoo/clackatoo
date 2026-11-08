@@ -889,7 +889,7 @@ fn read_document(path: &Path) -> Option<toml_edit::DocumentMut> {
 
 /// The agents an `agents.toml` adds, and what's wrong with those left
 /// out: one wrong leaves the others in.
-fn parse(document: &toml_edit::DocumentMut) -> (Vec<CustomAgent>, Vec<String>) {
+pub(crate) fn parse(document: &toml_edit::DocumentMut) -> (Vec<CustomAgent>, Vec<String>) {
     let Some(agents) = document.get("agents") else {
         return (Vec::new(), Vec::new());
     };

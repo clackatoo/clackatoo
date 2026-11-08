@@ -29,6 +29,9 @@ mod elicit;
 mod explorer;
 mod find;
 pub mod forward;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod git;
 mod group;
 mod handoff;

@@ -2163,6 +2163,50 @@ fn safe_steering(result: &Value) -> bool {
         )
 }
 
+/// Reads `message`, from an agent, through every walker [`Agent::receive`]
+/// and [`Agent::answered`] read what agents send with, for the fuzzer
+/// (see `crate::fuzzing`): an answer is read as every kind of answer, as
+/// the fuzzer can't know what it answers.
+///
+/// # Panics
+///
+/// If a walker keeps more than its caps allow.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_receive(message: &crate::rpc::Message) {
+    let params = &message.params;
+    if let Some(method) = &message.method {
+        let _ = elicitation_notice(method, params);
+    }
+    if let Some((_, results)) = tool_results(params) {
+        assert!(results.len() <= 64);
+        for (id, text) in &results {
+            assert!(id.len() <= MOST_TASK_ID);
+            // Fenced: a fence, the text cut short and said so, a fence.
+            let fence = text.lines().next().map_or(0, str::len);
+            assert!(text.len() <= MOST_RESULT + 2 * fence + 32, "{}", text.len());
+        }
+    }
+    let _ = task(params);
+    let _ = serde_json::from_value::<SessionNotification>(params.clone());
+    let id = message.id.clone().unwrap_or_default();
+    if let Some(Incoming::Permission { unknown, .. }) = permission(params.clone(), &id) {
+        assert!(unknown.len() <= 64);
+    }
+    let _ = crate::elicit::read(params);
+    let _ = serde_json::from_value::<ReadTextFileRequest>(params.clone());
+    let _ = serde_json::from_value::<WriteTextFileRequest>(params.clone());
+    let Some(result) = &message.result else {
+        return;
+    };
+    let listed = listed_page(result);
+    assert!(listed.len() <= MOST_READ);
+    let _ = newest(listed);
+    let _ = settings(result);
+    let _ = Forking::said(result);
+    let _ = safe_steering(result);
+    let _ = prompt_answer(Ok(result.clone()));
+}
+
 #[cfg(test)]
 mod steering_tests {
     use super::*;

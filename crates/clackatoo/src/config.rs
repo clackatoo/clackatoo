@@ -318,6 +318,61 @@ mod tests {
         assert!(problems[2].contains("no setting called `colour`"));
     }
 
+    // The file is the user's, so it's checked on anything at all here, as
+    // the fuzzer checks the daemon's `agents.toml` (see `fuzz/`), which
+    // can't reach into this program.
+    proptest::proptest! {
+        #[test]
+        fn any_file_is_read_or_refused(text in file()) {
+            let (config, _) = parse(&text);
+            let size = config.font_size.map_or(12.0, f64::from);
+            proptest::prop_assert!((4.0..=200.0).contains(&size));
+            proptest::prop_assert!(config.font.is_none_or(|font| !font.is_empty()));
+        }
+
+        #[test]
+        fn what_is_set_is_read_back(name in "font|font-size|renderer", text in "\\PC{0,20}") {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("startup.toml");
+            if set(&path, &name, &text).is_ok() {
+                let (config, problems) = parse(&std::fs::read_to_string(&path).unwrap());
+                proptest::prop_assert!(problems.is_empty(), "{:?}", problems);
+                let read = match name.as_str() {
+                    "font" => config.font.as_deref() == Some(text.as_str()),
+                    "font-size" => config.font_size.is_some(),
+                    _ => config.renderer.is_some(),
+                };
+                proptest::prop_assert!(read, "{} = {:?} isn't read back", name, text);
+            }
+        }
+    }
+
+    /// Files shaped like the settings, or not.
+    fn file() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let name = prop_oneof![
+            "font",
+            "font-size",
+            "renderer",
+            "[a-z-]{1,8}",
+            "\"[^\"]{0,4}\""
+        ];
+        let value = prop_oneof![
+            "-?[0-9]{1,4}(\\.[0-9]{0,3})?",
+            "(nan|inf|-inf|1e400|0x10|1_0)",
+            "\"[^\"\\\\]{0,12}\"",
+            "(true|\\[\\]|\\{\\}|\\[1, \"a\"\\])",
+            "\\PC{0,6}",
+        ];
+        let line = prop_oneof![
+            4 => (name, value).prop_map(|(name, value)| format!("{name} = {value}")),
+            1 => "\\[[a-z.]{0,6}\\]",
+            1 => "#\\PC{0,10}",
+            1 => "\\PC{0,12}",
+        ];
+        prop::collection::vec(line, 0..6).prop_map(|lines| lines.join("\n"))
+    }
+
     #[test]
     fn a_broken_file_means_the_defaults() {
         let (config, problems) = parse("font = \"unclosed\n");

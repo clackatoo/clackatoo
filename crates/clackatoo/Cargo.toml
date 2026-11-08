@@ -34,6 +34,7 @@ flate2.workspace = true
 [dev-dependencies]
 clackatoo-bench.workspace = true
 clackatoo-update = { workspace = true, features = ["fake"] }
+proptest.workspace = true
 tempfile.workspace = true
 
 [[bench]]

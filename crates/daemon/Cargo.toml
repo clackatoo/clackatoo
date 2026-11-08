@@ -47,6 +47,11 @@ unicode-width.workspace = true
 ureq.workspace = true
 url.workspace = true
 
+[features]
+## Entry points for the fuzzer in `fuzz/`, which reach what the crate keeps
+## to itself. Never for the product.
+fuzzing = []
+
 [dev-dependencies]
 clackatoo-netem.workspace = true
 tempfile.workspace = true

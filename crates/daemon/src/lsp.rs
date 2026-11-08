@@ -2188,6 +2188,91 @@ fn path_of(uri: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// Reads `message`, from a language server, through every walker that
+/// reads what servers send, for the fuzzer (see `crate::fuzzing`): an
+/// answer is read as every kind of answer, as the fuzzer can't know what
+/// it answers, and the places it gives are found in `text`.
+///
+/// # Panics
+///
+/// If a walker keeps more than its caps allow, or a place found in
+/// `text` isn't one.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_receive(message: &Message, text: &Rope) {
+    const MOST: usize = 64;
+    let placed = |position: Position| {
+        for encoding in [Encoding::Utf8, Encoding::Utf16] {
+            let at = place(text, position, encoding);
+            assert!(at <= text.len_bytes());
+            assert_eq!(text.char_to_byte(text.byte_to_char(at)), at);
+        }
+    };
+    let params = &message.params;
+    if let Some(Incoming::Diagnostics { diagnostics, .. }) = diagnostics("fuzz", params.clone()) {
+        for reported in diagnostics {
+            for encoding in [Encoding::Utf8, Encoding::Utf16] {
+                let made = diagnostic(text, reported.clone(), encoding);
+                assert!(made.start <= made.end && made.end <= text.len_bytes());
+            }
+        }
+    }
+    for (_, options) in registered(params, "registrations") {
+        assert!(watchers(options, Path::new("/project")).len() <= MOST_WATCHERS);
+    }
+    let Some(answer) = &message.result else {
+        return;
+    };
+    for (_, position) in locations(answer) {
+        placed(position);
+    }
+    let _ = hover(answer);
+    if let Some((start, end)) = hover_range(answer) {
+        placed(start);
+        placed(end);
+    }
+    assert!(uses(answer, MOST).len() <= MOST);
+    let hints = inlay_hints(answer, MOST);
+    assert!(hints.len() <= MOST);
+    for hint in hints {
+        assert!(hint.label.chars().count() <= MAX_HINT_LABEL);
+        assert!(!hint.label.contains(char::is_control));
+        placed(hint.at);
+    }
+    let (mut found, _) = symbols(answer, MOST);
+    assert!(found.len() <= MOST);
+    outline(&mut found);
+    for symbol in &found {
+        assert!(symbol.name.len() <= MAX_SYMBOL_NAME);
+        assert!(symbol.container.len() <= MAX_SYMBOL_NAME);
+        assert!(symbol.depth <= MAX_SYMBOL_DEPTH);
+        placed(symbol.start);
+    }
+    let _ = prepared(answer);
+    for edit in text_edits(answer).unwrap_or_default() {
+        placed(edit.start);
+        placed(edit.end);
+    }
+    let _ = workspace_edit(answer);
+    let (items, _) = completion_items(answer.clone());
+    let (picked, _, _) = best_completions(items, MOST);
+    assert!(picked.len() <= MOST);
+    for (_, item) in &picked {
+        let _ = documentation(item);
+    }
+    for (_, action) in code_actions(answer.clone()) {
+        let _ = (action_title(&action), is_command(&action));
+    }
+    for encoding in [Encoding::Utf8, Encoding::Utf16] {
+        let Some(signature) = signature(answer, encoding) else {
+            continue;
+        };
+        assert!(signature.index < signature.count);
+        if let Some((start, end)) = signature.parameter {
+            assert!(start <= end && signature.label.get(start..end).is_some());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

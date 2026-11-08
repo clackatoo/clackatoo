@@ -18,6 +18,9 @@ mod clipboard;
 mod damage;
 mod dispatch;
 mod document;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod grid;
 mod links;
 pub mod mouse;

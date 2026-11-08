@@ -1620,6 +1620,76 @@ fn parse(name: &str, body: &[u8]) -> Option<Message> {
         .ok()
 }
 
+/// The messages `pieces`, read one after another from a program framing
+/// them as `framing` says, hold, for the fuzzer (see `crate::fuzzing`).
+/// Read whole, read in those pieces, and handed over to a next build
+/// after the first piece, they must be the same messages.
+///
+/// # Panics
+///
+/// If they aren't.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_read(framing: Framing, pieces: &[&[u8]]) -> Vec<Message> {
+    // A parser waking a loop nobody polls, the poll kept rather than
+    // leaked, so the fuzzer's leak check stays quiet.
+    thread_local! {
+        static PARSER: (mio::Poll, Parser) = {
+            let poll = mio::Poll::new().expect("a poll");
+            let waker = Waker::new(poll.registry(), mio::Token(0)).expect("a waker");
+            let parser = Parser::new(&Arc::new(waker), PARSE_WAIT);
+            (poll, parser)
+        };
+    }
+    let read = |inbox: &mut Inbox, piece: &[u8], messages: &mut Vec<Message>| {
+        let ok = inbox.push("fuzz", piece, messages, |_| {}).is_ok();
+        inbox.take(messages, usize::MAX);
+        ok
+    };
+    let said = |messages: &[Message]| -> Vec<String> {
+        (messages.iter())
+            .map(|message| {
+                let error = message.error.as_ref();
+                format!(
+                    "{:?} {:?} {} {:?} {:?}",
+                    message.id,
+                    message.method,
+                    message.params,
+                    message.result,
+                    error.map(|error| (error.code, &error.message, &error.data)),
+                )
+            })
+            .collect()
+    };
+    let whole = pieces.concat();
+    let _ = Head::of(&whole);
+    // Big messages are parsed on the parser's thread, which may not have
+    // finished with them when they're taken.
+    if whole.len() >= BIG {
+        return Vec::new();
+    }
+    PARSER.with(|(_, parser)| {
+        let mut at_once = Vec::new();
+        let unbroken = read(&mut Inbox::new(framing, parser), &whole, &mut at_once);
+        let mut inbox = Inbox::new(framing, parser);
+        let mut piecemeal = Vec::new();
+        let mut handed = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            if !read(&mut inbox, piece, &mut piecemeal) {
+                assert!(!unbroken, "it broke read in pieces, but not whole");
+                return at_once;
+            }
+            if index == 0 && inbox.can_hand_over() {
+                handed = std::mem::take(&mut piecemeal);
+                inbox = Inbox::resume(framing, parser, inbox.into_bytes());
+            }
+        }
+        assert!(unbroken, "it broke read whole, but not in pieces");
+        handed.append(&mut piecemeal);
+        assert_eq!(said(&handed), said(&at_once));
+        at_once
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};

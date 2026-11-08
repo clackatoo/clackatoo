@@ -1,0 +1,89 @@
+# clackatoo's fuzz targets, run with cargo-fuzz on a nightly toolchain:
+# see docs/learn's development topic. A workspace of
+# its own, so the main workspace's builds, tests and CI never build it.
+[package]
+name = "clackatoo-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+clackatoo-daemon = { path = "../crates/daemon", features = ["fuzzing"] }
+clackatoo-protocol = { path = "../crates/protocol" }
+clackatoo-term = { path = "../crates/term", features = ["fuzzing", "serde"] }
+clackatoo-text = { path = "../crates/text" }
+libfuzzer-sys = "0.4.13"
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+serde = "1.0"
+
+# Each target, a program libFuzzer runs.
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal"
+path = "fuzz_targets/terminal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transform"
+path = "fuzz_targets/transform.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "history"
+path = "fuzz_targets/history.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handover"
+path = "fuzz_targets/handover.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workspaces"
+path = "fuzz_targets/workspaces.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agents_toml"
+path = "fuzz_targets/agents_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_rpc"
+path = "fuzz_targets/json_rpc.rs"
+test = false
+doc = false
+bench = false

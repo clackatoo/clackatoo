@@ -21,6 +21,8 @@
 //! It knows nothing of what sequences mean; [`Perform`] implementations
 //! decide that.
 
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) mod oracle;
 mod params;
 mod scan;
 #[cfg(test)]

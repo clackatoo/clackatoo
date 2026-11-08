@@ -1,0 +1,99 @@
+#!/bin/sh
+# Fills fuzz/corpus/TARGET with seeds for each fuzz target, from the
+# repository's fixtures and a few messages written here, in the shape
+# each target reads (see the comment at the top of each target). Run it
+# once before the first run; running it again only adds what's missing.
+set -eu
+export LC_ALL=C
+cd "$(dirname "$0")"
+root=..
+mkdir -p corpus/parser corpus/terminal corpus/frames corpus/handover \
+    corpus/workspaces corpus/agents_toml corpus/json_rpc corpus/transform corpus/history
+
+# The terminal: recordings of programs, without their header line. The
+# parser's input starts with how many cuts (none), the terminal's with
+# its width and height less one, how much it reads at once less one, and
+# its scrollback.
+for recording in "$root"/crates/term/tests/fixtures/*.rec; do
+    name=$(basename "$recording" .rec)
+    { printf '\000'; tail -n +2 "$recording"; } > "corpus/parser/$name"
+    { printf '\117\027\377\021'; tail -n +2 "$recording"; } > "corpus/terminal/$name"
+done
+
+# Frames: each protocol fixture, with its version after it.
+for fixture in "$root"/crates/protocol/fixtures/protocol-v*.bin; do
+    version=${fixture##*-v}
+    version=${version%.bin}
+    { cat "$fixture"; printf "\\$(printf %03o "$version")"; } > "corpus/frames/v$version"
+done
+
+# Handovers and the saved workspaces, as they are.
+cp "$root"/crates/daemon/tests/fixtures/handover-v*.bin corpus/handover/
+cp "$root"/crates/daemon/tests/fixtures/workspaces-v*.json corpus/workspaces/
+
+# agents.toml, as the docs show it.
+cat > corpus/agents_toml/docs <<'EOF'
+[agents.opencode]
+name = "OpenCode"
+command = ["opencode", "acp"]
+mode = "build"
+
+[agents.claude]
+command = ["claude-agent-acp"]
+tasks = false
+
+[upgrade]
+keep_agents = false
+
+[subagents]
+working = 16
+default = 6
+open = 32
+started = 128
+depth = 3
+hops = 6
+notice_turns = 100
+
+[profiles.review]
+about = "Reviews a change for bugs"
+agent = "codex"
+model = { claude = "haiku", codex = "gpt-6-luna" }
+effort = "low"
+limits = "read-only"
+prompt = "You review changes for bugs."
+EOF
+
+# JSON-RPC: what agents send, a message a line, and what language servers
+# send, each after a header, with a text for their places.
+text='fn main() {\n    println!("h\303\251 \360\237\230\200");\n}\n'
+{
+    printf '\000'
+    printf "$text"
+    printf '\000'
+    cat <<'EOF'
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"fork":{},"resume":{},"list":{},"close":{}},"promptCapabilities":{"image":true,"embeddedContext":true}},"agentInfo":{"name":"@agentclientprotocol/claude-agent-acp","version":"0.98.0"},"_meta":{"steering":{"supported":true}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read a.rs","kind":"read","status":"pending","locations":[{"path":"/a.rs","line":3}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"async_task_started","asyncTaskId":"b1","description":"cargo test","outputFilePath":"/tmp/claude-1000/x/tasks/b1.output"}}}
+{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t2","title":"rm -rf target"},"options":[{"optionId":"a","name":"Allow","kind":"allow_once"},{"optionId":"n","name":"Never","kind":"reject_forever"}]}}
+{"jsonrpc":"2.0","id":8,"method":"elicitation/create","params":{"sessionId":"s1","mode":"form","message":"Which?","requestedSchema":{"type":"object","properties":{"q":{"type":"string","enum":["a","b"]}},"required":["q"]}}}
+{"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{"sessionId":"s1","message":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"one\ntwo"}]},"tool_use_result":{"type":"text","file":{"content":"one\ntwo\n","startLine":3}}}}}
+{"jsonrpc":"2.0","id":3,"result":{"sessions":[{"sessionId":"s0","cwd":"/p","updatedAt":"2026-11-08T00:00:00Z","title":"Old"}],"nextCursor":"c"}}
+{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":8}}
+EOF
+} > corpus/json_rpc/acp
+message() {
+    printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"
+}
+{
+    printf '\001'
+    printf "$text"
+    printf '\000'
+    message '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///a.rs","version":2,"diagnostics":[{"range":{"start":{"line":1,"character":14},"end":{"line":1,"character":40}},"severity":1,"message":"bad","code":"E1"}]}}'
+    message '{"jsonrpc":"2.0","id":1,"result":[{"name":"main","kind":12,"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":1}},"selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":7}},"children":[{"name":"inner","kind":13,"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":9}},"selectionRange":{"start":{"line":1,"character":4},"end":{"line":1,"character":9}}}]}]}'
+    message '{"jsonrpc":"2.0","id":2,"result":{"isIncomplete":true,"items":[{"label":"println!","kind":3,"sortText":"a","textEdit":{"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":7}},"newText":"println!($1)"},"insertTextFormat":2,"additionalTextEdits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"use x;\n"}]}]}}'
+    message '{"jsonrpc":"2.0","id":3,"result":[{"position":{"line":1,"character":20},"label":[{"value":": "},{"value":"String"}],"kind":1,"paddingLeft":true}]}'
+    message '{"jsonrpc":"2.0","id":4,"result":{"signatures":[{"label":"f(a: u8, b: é)","parameters":[{"label":[2,7]},{"label":"b: é"}],"activeParameter":1}],"activeSignature":0}}'
+    message '{"jsonrpc":"2.0","id":5,"result":{"documentChanges":[{"textDocument":{"uri":"file:///a.rs","version":2},"edits":[{"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":7}},"newText":"start"}]}]}}'
+    message '{"jsonrpc":"2.0","id":6,"method":"client/registerCapability","params":{"registrations":[{"id":"w","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.rs"},{"globPattern":{"baseUri":"file:///p","pattern":"src/**"},"kind":7}]}}]}}'
+} > corpus/json_rpc/lsp
