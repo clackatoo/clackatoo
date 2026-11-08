@@ -726,11 +726,11 @@ Which chat started which, messages waiting their turn, which answers each chat h
 
 A chat talks to Claude Code unless you name another: `claude`, `codex` (OpenAI's Codex), `antigravity` (Google Antigravity), or `gemini` (Gemini CLI for existing API-key setups). The chat says which in its box: "Message Codex".
 
-clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.com). Claude Code and Codex don't speak it themselves, so each runs through an ACP adapter, at a version tried with clackatoo. The daemon looks for an agent's adapter where clackatoo installs it, `~/.local/share/clackatoo/agents`, then on your `PATH`, then runs it with `npx`, which needs Node.js. While it runs from `PATH` or `npx`, the chat offers once to install it, which makes it start faster and work offline: Claude Code's takes about 620 MB and Codex's about 450 MB, each with its own copy of the agent, installed from a lock file so nothing it depends on can change. With none of the three, the chat asks to install it before it can start. A new build that moves to a newer adapter asks again, and removes the old one once nothing uses it.
+clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.com). Claude Code and Codex don't speak it themselves, so each runs through an ACP adapter, at a version tried with clackatoo. The daemon looks for an agent's adapter where clackatoo installs it, `~/.local/share/clackatoo/agents`, then on your `PATH`, then runs it with `npx`, which needs Node.js. While it runs from `PATH` or `npx`, the chat offers once to install it, which makes it start faster and work offline: Claude Code's takes about 620 MB and Codex's about 450 MB, each with its own copy of the agent, installed from a lock file so nothing it depends on can change. With none of the three, the chat asks to install it before it can start. A new build that moves to a newer adapter asks again, and installing it removes the older ones nothing is running from.
 
-Each agent uses its own login: run `claude`, or `codex login`, once in a terminal. A chat with an agent no one's logged in to says what to run. With a subscription, chats count towards its limits.
+Each agent uses its own login: run `claude`, `codex login` or `gemini` once in a terminal, or for Antigravity, [its own](#gemini-through-antigravity). A chat with an agent no one's logged in to says what to run. With a subscription, chats count towards its limits.
 
-If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`. `codex mcp list` or `claude mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx may be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which Esc picks, **Retry**, which stops the agent and starts it again, or **Stop**; Ctrl+C stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
+If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`, `claude mcp list` or `gemini mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx may be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which Esc picks, **Retry**, which stops the agent and starts it again, or **Stop**; Ctrl+C stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
 
 An agent that stops listening, say because its input broke, is still read for a moment for the rest of what it says, but nothing more is sent to it: a message to it ends at once, saying the agent stopped, and so does stopping the chat or changing a setting. A chat that tries to start it meanwhile waits, saying it's stopping, and starts it again once it has gone, sending any message you typed.
 
@@ -763,7 +763,7 @@ keep_agents = false          # stop agents as the daemon upgrades
 working = 16                 # see Subagent limits
 ```
 
-The daemon reads it whenever a chat starts, and as it upgrades. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
+The daemon reads it whenever a chat starts, and as it upgrades. Each agent there needs its `command`: one without it, or with a key of the wrong kind, leaves out every agent in the file, and the daemon's log says why. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
 
 Each agent runs one process for all its chats, and stops when its last chat closes. Claude Code's adapter also runs a Claude Code process per chat, of about 250 MB.
 
@@ -781,7 +781,7 @@ What each turn changed in files lasts through an upgrade, so turns can still be 
 
 A chat that moved between agents keeps the sessions it had with each, and goes back to them after an upgrade too.
 
-When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, model, tools, Browser and Subagents settings, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
+When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, folder, model, Tools, Browser and Subagents settings (the last no more than `working`) and whether it may use Claude Code's own Task tool, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
 
 A [subagent](#subagents) in a pane comes back a subagent of its chat, if that chat is in a pane of the same workspace and so comes back with it: with its band, on its chat's card, under the turn that started it, and with its profile and that profile's limits. `:q` sends it back to the card, its chat can message it and wait for it, and one you'd sent back and opened again is still yours to close. It never comes back able to do more than it could: it keeps its limits (ones this build doesn't know count as read-only), never fewer than its chat's, it can start no deeper chats than it could, and it asks its agent for the mode it had chosen only if that's no higher than its chat's: otherwise for the safest, Manual or Read-only, and never the mode your own new chats start in. An agent whose modes clackatoo doesn't know is asked for none. A subagent whose chat didn't come back, because it was in no pane, or is in another workspace, comes back on its own, with its profile and limits, in a mode no higher than its agent's safest, and says so. Its Subagents setting is never more than its chat's. Some things start again: how many chats agents have started under each of yours (128 may be), how many turns notices have started (100), messages from other agents still waiting their turn, and waits under way, which end. What its chat had already heard from it isn't told again: the conversation it tells again counts as no answer to anyone. One kept by a build from before then comes back as a chat of its own.
 
@@ -797,7 +797,7 @@ An upgrade stops the browser; the next page starts it again. The daemon stopping
 
 ### Through an upgrade
 
-An agent's process goes on through an upgrade, rather than being stopped: the new build takes over its pipes as it takes over terminals, and the agent never knows. Everything it runs goes on with it, the same processes: shells it left in the background, a dev server, a build, and a command it's waiting for in its turn, such as a deploy that upgrades the daemon itself. A turn under way goes on, its words coming into the same turn, which ends as it would have; no message is sent to carry it on. Its background tasks stay running. A question it asked you is still asked, and your answer reaches it. Calls to clackatoo's tools go on too, as the connections they're served on are taken over: a `wait_for_chat` or `wait_for_terminal` under way is answered as it would have been, and a question a tool asked you still waits for your answer. Only calls waiting on clackatoo's browser, which an upgrade stops, or on a window, fail, so the agent calls them again.
+An agent's process goes on through an upgrade, rather than being stopped: the new build takes over its pipes as it takes over terminals, and the agent never knows. Everything it runs goes on with it, the same processes: shells it left in the background, a dev server, a build, and a command it's waiting for in its turn, such as a deploy that upgrades the daemon itself. A turn under way goes on, its words coming into the same turn, which ends as it would have; no message is sent to carry it on. Its background tasks stay running. A question asking leave is still asked, and your answer reaches it. A [form](#questions-forms-and-plans) can't be carried: it's cancelled, the chat says so, and the agent is told you didn't cancel it, so it can ask again. Calls to clackatoo's tools go on too, as the connections they're served on are taken over: a `wait_for_chat` or `wait_for_terminal` under way is answered as it would have been, and a question a tool asked you still waits for your answer. Only calls waiting on clackatoo's browser, which an upgrade stops, or on a window, fail, so the agent calls them again.
 
 An agent is stopped instead, as the daemon upgrades, with all it runs, if:
 
@@ -817,11 +817,9 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 - The phone's chats don't colour code. Sideways swipes on a trackpad don't scroll tables: use Shift and the wheel.
 - Moving a file in the explorer forgets which of its lines agents changed. Rejecting every change of a file an agent made leaves it empty, rather than in the trash. Reviews of everything since the base stop past about 8 MB of changes: narrow them with `:Review turn` or `chat`.
 - A file the agent changed with a command, or that clackatoo couldn't read before the agent wrote it, can't be undone. The chat says which.
-- There's no menu of agents to pick from: name one after `:Agent`.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
-- Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
-- The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
-- `/` commands aren't listed or completed as you type them.
+- Agents don't see what you've selected in an editor until you send it with `<Space>a` or `:Ask`. Commands Claude Code runs with its own tool, rather than `run_in_terminal`, show their output once they're done; Codex's show it as it comes.
+- Gemini CLI and custom adapters don't yet have read-only subscription probes.
 - A board's link to a chat's turn names the turn by its number, so after a rewind or a switch it goes to whatever turn has that number on the branch shown. Switching branches from the phone, and a summary of a branch from where it parts, are still to come.
 - Ctrl+? doesn't list a form's keys yet. What an input method is composing doesn't show in a form's box until it's committed.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
@@ -836,7 +834,7 @@ then run `:agentaccess inspect` for screenshots and visible controls, or
 `:agentaccess control` to also allow clicks, text and keys throughout that
 window. This is broad access to what the window can display and operate.
 The title and top bar identify the grant. Click the top bar's **Revoke** badge
-or use `:agentaccess off` from any pane. Closing the window, disconnecting or upgrading also clears it.
+or use `:agentaccess off` from any pane. Closing the window or the chat, disconnecting or upgrading also clears it.
 Automation cannot use window input to answer approval questions, change chat
 permissions or grant itself access. Control is not an operating-system sandbox.
 
@@ -845,6 +843,9 @@ Federated mirrored chats cannot receive a grant; open a window directly on the
 remote daemon with `--remote` instead. The browser app cannot grant native access.
 Each input consumes an observed screenshot revision; changed targets or human
 input require another screenshot. These tools do not change desktop focus.
+The tools are `native_snapshot`, and with Control, `native_click`,
+`native_type` and `native_key`; a chat whose limits are read-only or no
+commands gets Inspect's alone.
 
 ## Managed activities and recovery
 
@@ -857,8 +858,8 @@ also available through `:Background`.
 
 The harness tells agents when to use `start_activity`, `read_activities` and
 `cancel_activity`. Existing command approvals apply. A stable operation ID is
-saved before execution; asking to start the same ID and command returns the
-existing record. Reusing it for a different command is refused. Completion
+saved before execution; asking to start the same ID, command and folder returns
+the existing record. Reusing it for a different command or folder is refused. Completion
 notifies the owning chat, without resuming a chat explicitly stopped by you.
 
 Jobs and their records survive a planned daemon upgrade. After a full restart,
@@ -868,13 +869,15 @@ inspect the record and current state before deciding what to do. This recovery
 covers managed activities, not every provider or external tool call.
 
 Activities require workspace storage and shell integration. Each chat retains
-at most 64 jobs, with 8 active; the daemon keeps at most 128. Results retain the
-last inspected terminal output up to 4 KiB; the terminal keeps its own scrollback.
+at most 64 jobs, with 8 active; the daemon keeps at most 128. Past those,
+starting another is refused. Results retain up to 4 KiB of the terminal's last
+lines as last inspected; the terminal keeps its own scrollback.
 
 ## Inspecting capabilities
 
 `:Capabilities` shows the focused chat's tools policy, command restrictions,
-browser configuration and permission, native grant, and tool connection.
+browser configuration and permission, native grant, managed activities, tool
+connection, and catalogue discovery.
 On the web, open the model selector and choose its **Tools** tab for the same report. Agents can call
 `harness_capabilities` themselves. A requested tool catalogue is reported
 separately from model acknowledgment: the harness cannot prove a model saw it.
