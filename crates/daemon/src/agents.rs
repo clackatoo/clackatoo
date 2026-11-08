@@ -858,15 +858,17 @@ fn is_program(path: &Path) -> bool {
 }
 
 /// The agents `agents.toml` at `path` adds, or none if it isn't there or
-/// doesn't make sense, which is logged.
+/// doesn't make sense: one that doesn't is left out, and what's wrong is
+/// logged.
 fn read_file(path: &Path) -> Vec<CustomAgent> {
     let Some(document) = read_document(path) else {
         return Vec::new();
     };
-    parse(&document).unwrap_or_else(|err| {
-        log::warn!("{}: {err}", path.display());
-        Vec::new()
-    })
+    let (agents, wrong) = parse(&document);
+    for why in wrong {
+        log::warn!("{}: {why}", path.display());
+    }
+    agents
 }
 
 /// `agents.toml` at `path`, if it's there and is TOML: what's wrong
@@ -885,55 +887,71 @@ fn read_document(path: &Path) -> Option<toml_edit::DocumentMut> {
         .ok()
 }
 
-/// The agents an `agents.toml` adds.
-fn parse(document: &toml_edit::DocumentMut) -> Result<Vec<CustomAgent>, String> {
+/// The agents an `agents.toml` adds, and what's wrong with those left
+/// out: one wrong leaves the others in.
+fn parse(document: &toml_edit::DocumentMut) -> (Vec<CustomAgent>, Vec<String>) {
     let Some(agents) = document.get("agents") else {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     };
-    let agents = agents
-        .as_table_like()
-        .ok_or("agents is a table, of agents by name")?;
+    let Some(agents) = agents.as_table_like() else {
+        return (
+            Vec::new(),
+            vec!["agents is a table, of agents by name".into()],
+        );
+    };
     let mut parsed = Vec::new();
+    let mut wrong = Vec::new();
     for (name, agent) in agents.iter() {
-        let agent = (agent.as_table_like()).ok_or_else(|| format!("agents.{name} is a table"))?;
-        let text = |key: &str| -> Result<Option<String>, String> {
-            agent.get(key).map_or(Ok(None), |item| {
-                (item.as_str().map(|text| Some(text.to_owned())))
-                    .ok_or_else(|| format!("agents.{name}.{key} is a string"))
-            })
-        };
-        let command = (agent.get("command").and_then(toml_edit::Item::as_array))
-            .ok_or_else(|| format!("agents.{name} needs a command, a list of strings"))?;
-        let command = (command.iter())
-            .map(|word| word.as_str().map(OsString::from))
-            .collect::<Option<Vec<_>>>()
-            .filter(|command| !command.is_empty())
-            .ok_or_else(|| format!("agents.{name}.command is a list of strings"))?;
-        let tasks = agent.get("tasks").map_or(Ok(None), |item| {
-            (item.as_bool().map(Some))
-                .ok_or_else(|| format!("agents.{name}.tasks is true or false"))
-        })?;
-        parsed.push(CustomAgent {
-            name: name.to_owned(),
-            title: text("name")?,
-            command,
-            starting_mode: text("mode")?,
-            tasks,
-        });
+        match parse_agent(name, agent) {
+            Ok(agent) => parsed.push(agent),
+            Err(why) => wrong.push(format!("{why}; agents.{name} is left out")),
+        }
     }
-    Ok(parsed)
+    (parsed, wrong)
+}
+
+/// The agent called `name` that `agent`, its table in `agents.toml`, adds.
+fn parse_agent(name: &str, agent: &toml_edit::Item) -> Result<CustomAgent, String> {
+    let agent = (agent.as_table_like()).ok_or_else(|| format!("agents.{name} is a table"))?;
+    let text = |key: &str| -> Result<Option<String>, String> {
+        agent.get(key).map_or(Ok(None), |item| {
+            (item.as_str().map(|text| Some(text.to_owned())))
+                .ok_or_else(|| format!("agents.{name}.{key} is a string"))
+        })
+    };
+    let command = (agent.get("command").and_then(toml_edit::Item::as_array))
+        .ok_or_else(|| format!("agents.{name} needs a command, a list of strings"))?;
+    let command = (command.iter())
+        .map(|word| word.as_str().map(OsString::from))
+        .collect::<Option<Vec<_>>>()
+        .filter(|command| !command.is_empty())
+        .ok_or_else(|| format!("agents.{name}.command is a list of strings"))?;
+    let tasks = agent.get("tasks").map_or(Ok(None), |item| {
+        (item.as_bool().map(Some)).ok_or_else(|| format!("agents.{name}.tasks is true or false"))
+    })?;
+    Ok(CustomAgent {
+        name: name.to_owned(),
+        title: text("name")?,
+        command,
+        starting_mode: text("mode")?,
+        tasks,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The agents `text`, an `agents.toml`, adds.
+    /// The agents `text`, an `agents.toml`, adds, or what's wrong with
+    /// it, if anything is.
     fn parse(text: &str) -> Result<Vec<CustomAgent>, String> {
         let document = text
             .parse()
             .map_err(|err: toml_edit::TomlError| err.to_string())?;
-        super::parse(&document)
+        match super::parse(&document) {
+            (agents, wrong) if wrong.is_empty() => Ok(agents),
+            (_, wrong) => Err(wrong.join("\n")),
+        }
     }
 
     fn custom(name: &str, command: &[&str]) -> CustomAgent {
@@ -1115,6 +1133,19 @@ mod tests {
                 .contains("mode")
         );
         assert!(parse("agents = 3").is_err());
+    }
+
+    #[test]
+    fn an_agent_wrong_in_agents_toml_leaves_the_others_in() {
+        let document = "[agents.bad]\nname = \"Bad\"\n\n[agents.good]\ncommand = [\"good\"]"
+            .parse()
+            .unwrap();
+        let (agents, wrong) = super::parse(&document);
+        assert_eq!(agents, vec![custom("good", &["good"])]);
+        assert_eq!(
+            wrong,
+            ["agents.bad needs a command, a list of strings; agents.bad is left out"]
+        );
     }
 
     #[test]

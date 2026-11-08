@@ -775,7 +775,7 @@ keep_agents = false          # stop agents as the daemon upgrades
 working = 16                 # see Subagent limits
 ```
 
-The daemon reads it whenever a chat starts, and as it upgrades. Each agent there needs its `command`: one without it, or with a key of the wrong kind, leaves out every agent in the file, and the daemon's log says why. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
+The daemon reads it whenever a chat starts, and as it upgrades. Each agent there needs its `command`: one without it, or with a key of the wrong kind, is left out, and the daemon's log says why; the others are still added. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
 
 Each agent runs one process for all its chats, and stops when its last chat closes. Claude Code's adapter also runs a Claude Code process per chat, of about 250 MB.
 
