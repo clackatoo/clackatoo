@@ -22,12 +22,13 @@ use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use ignore::gitignore::Gitignore;
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::explorer::{MOST_IGNORE, exclude_file, ignore_file, lines_of};
+use crate::explorer::{MOST_IGNORE, exclude_file, lines_of};
 use crate::regular::Links;
 
 /// The user's own ignore file, git's `core.excludesFile`, as it is now:
@@ -109,6 +110,10 @@ pub(crate) struct Rules {
     /// files or a repository: the many with neither share the one above
     /// them.
     dirs: RwLock<Dirs>,
+    /// How much of its ignore files the walk has read (see
+    /// [`MOST_PER_WALK`]), and whether it has said it's read the most.
+    read: AtomicU64,
+    said_too_much: AtomicBool,
 }
 
 /// Each directory a walk has asked about, and whether it's above the
@@ -122,11 +127,11 @@ struct Dir {
     /// they really are.
     above_root: bool,
     /// Its `.ignore`.
-    ignore: Option<Gitignore>,
+    ignore: Option<Arc<Gitignore>>,
     /// Its `.gitignore`.
-    gitignore: Option<Gitignore>,
+    gitignore: Option<Arc<Gitignore>>,
     /// Its repository's `info/exclude`, if its top is here.
-    exclude: Option<Gitignore>,
+    exclude: Option<Arc<Gitignore>>,
     /// Whether a repository's top is here.
     git: bool,
     /// Whether one is here or above.
@@ -144,6 +149,8 @@ impl Rules {
             real: root.canonicalize().ok(),
             user: global(),
             dirs: RwLock::new(HashMap::new()),
+            read: AtomicU64::new(0),
+            said_too_much: AtomicBool::new(false),
         }
     }
 
@@ -188,7 +195,7 @@ impl Rules {
             });
             real.as_deref().unwrap_or(path)
         };
-        let said = |file: &Option<Gitignore>, above_root: bool| match file {
+        let said = |file: &Option<Arc<Gitignore>>, above_root: bool| match file {
             Some(file) => {
                 let path = if above_root { as_real() } else { path };
                 file.matched(path, is_dir).map(|_| ())
@@ -253,7 +260,7 @@ impl Rules {
             unread.push(key);
         }
         for key in unread.into_iter().rev() {
-            let dir = Dir::read(&key.0, key.1, self.require_git, found);
+            let dir = Dir::read(self, &key.0, key.1, found);
             // As another thread of the walk may have read it meanwhile.
             let mut dirs = self.dirs.write().unwrap_or_else(PoisonError::into_inner);
             found = dirs.entry(key).or_insert(dir).as_ref().map(Arc::clone);
@@ -262,23 +269,102 @@ impl Rules {
     }
 }
 
+/// The most of all its ignore files together that one walk reads, those
+/// it has compiled already aside: far more than a project has, but short
+/// of a folder from anyone with a big ignore file in every directory
+/// costing a walk minutes. Past it, the rest are passed over.
+const MOST_PER_WALK: u64 = 32 << 20;
+
+/// The most of the ignore files' text that's kept compiled, for every
+/// walk, before what's kept is let go.
+const MOST_KEPT: u64 = 64 << 20;
+
+/// How long since an ignore file was changed before what's compiled of it
+/// is kept: longer than its time stamp's steps.
+const SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// An ignore file as it was compiled: where it is, and what was there.
+type Stamp = (PathBuf, u64, u64, i64, i64, u64);
+
+/// The ignore files compiled for walks, by what they were, so a file not
+/// changed since isn't read or compiled again by the next walk, and how
+/// many bytes of text they came from.
+static COMPILED: std::sync::LazyLock<Mutex<(HashMap<Stamp, Arc<Gitignore>>, u64)>> =
+    std::sync::LazyLock::new(|| Mutex::new((HashMap::new(), 0)));
+
+impl Rules {
+    /// The ignore file at `file`, whose patterns are from `dir`, as
+    /// [`crate::explorer::ignore_file`] reads it: compiled already, if it hasn't changed
+    /// since, or else read if the walk hasn't read [`MOST_PER_WALK`] yet.
+    fn ignore_file(&self, dir: &Path, file: &Path) -> Option<Arc<Gitignore>> {
+        // Only looked at: whatever it is, it's opened only as a regular
+        // file, by `ignore_file`.
+        let meta = std::fs::symlink_metadata(file).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let stamp = (
+            file.to_owned(),
+            meta.dev(),
+            meta.ino(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.len(),
+        );
+        // One changed a moment ago may change again within the time its
+        // stamp tells apart, so it isn't kept, as git's index doesn't trust
+        // a racily clean file.
+        let settled = (meta.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|since| since >= SETTLED);
+        let compiled = || COMPILED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(known) = compiled().0.get(&stamp).filter(|_| settled) {
+            return Some(Arc::clone(known));
+        }
+        if self.read.load(Ordering::Relaxed) >= MOST_PER_WALK {
+            if !self.said_too_much.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "a walk of {} read {} MiB of ignore files: the rest are passed over",
+                    self.root.display(),
+                    MOST_PER_WALK >> 20
+                );
+            }
+            return None;
+        }
+        let text = crate::regular::read_lines(file, Links::Refuse, MOST_IGNORE)?;
+        let read = text.len() as u64;
+        self.read.fetch_add(read, Ordering::Relaxed);
+        let rules = Arc::new(lines_of(dir, file, &text));
+        if settled {
+            let mut compiled = compiled();
+            if compiled.1.saturating_add(read) > MOST_KEPT {
+                *compiled = (HashMap::new(), 0);
+            }
+            compiled.0.insert(stamp, Arc::clone(&rules));
+            compiled.1 += read;
+        }
+        Some(rules)
+    }
+}
+
 impl Dir {
     /// The ignore files of the directory at `path`, `above_root` or not,
-    /// under `above`, those of the directories above it: `above` itself if
-    /// it has none, and holds no repository's top. A `.jj` is looked for
-    /// only if `require_git`, as only then does a repository's top count.
+    /// under `above`, those of the directories above it, read for `rules`:
+    /// `above` itself if it has none, and holds no repository's top. A
+    /// `.jj` is looked for only if `require_git`, as only then does a
+    /// repository's top count.
     fn read(
+        rules: &Rules,
         path: &Path,
         above_root: bool,
-        require_git: bool,
         above: Option<Arc<Dir>>,
     ) -> Option<Arc<Dir>> {
-        let ignore = ignore_file(path, &path.join(".ignore"));
-        let gitignore = ignore_file(path, &path.join(".gitignore"));
+        let ignore = rules.ignore_file(path, &path.join(".ignore"));
+        let gitignore = rules.ignore_file(path, &path.join(".gitignore"));
         let dot_git = path.join(".git").exists();
-        let git = dot_git || (require_git && path.join(".jj").exists());
+        let git = dot_git || (rules.require_git && path.join(".jj").exists());
         let exclude = (dot_git.then(|| exclude_file(path)).flatten())
-            .and_then(|exclude| ignore_file(path, &exclude));
+            .and_then(|exclude| rules.ignore_file(path, &exclude));
         if ignore.is_none() && gitignore.is_none() && exclude.is_none() && !git {
             return above;
         }
@@ -424,6 +510,62 @@ mod tests {
                 "src/main.rs",
             ]
         );
+    }
+
+    #[test]
+    fn a_walk_reads_only_so_much_and_what_it_compiled_is_kept_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Written a while ago, as a project's ignore files are: one changed
+        // a moment ago is read again by each walk.
+        let aged = |path: &Path, text: &str| {
+            write(path, text);
+            let ago = std::time::SystemTime::now() - Duration::from_mins(1);
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(ago)
+                .unwrap();
+        };
+        aged(&root.join(".gitignore"), "a.txt\n");
+        aged(&root.join("sub/.gitignore"), "b.txt\n");
+        for file in ["a.txt", "b.txt", "sub/a.txt", "sub/b.txt"] {
+            write(&root.join(file), "");
+        }
+        let found = |rules: Rules| {
+            let rules = Arc::new(rules);
+            let walking = Arc::clone(&rules);
+            let mut found = walked(
+                walker(root).filter_entry(move |entry| walking.keeps(entry)),
+                root,
+            );
+            found.retain(|path| path.extension().is_some_and(|ext| ext == "txt"));
+            (found, rules.read.load(Ordering::Relaxed))
+        };
+        let b = || PathBuf::from("b.txt");
+        // Read once: the next walk has them compiled, and reads nothing.
+        let (first, read) = found(Rules::new(root, false, false));
+        assert_eq!(first, [b()]);
+        // Its two, and whatever the folders above have.
+        assert!(read >= 12, "{read}");
+        assert_eq!(found(Rules::new(root, false, false)), (vec![b()], 0));
+        // Changed, it's read again.
+        aged(&root.join("sub/.gitignore"), "a.txt\n\n");
+        let both = vec![b(), PathBuf::from("sub/b.txt")];
+        assert_eq!(found(Rules::new(root, false, false)), (both.clone(), 7));
+        // Changed a moment ago, it's read by each walk.
+        write(&root.join("sub/.gitignore"), "a.txt\n\n\n");
+        assert_eq!(found(Rules::new(root, false, false)), (both.clone(), 8));
+        assert_eq!(found(Rules::new(root, false, false)), (both.clone(), 8));
+        // A walk that's read the most reads no more, but still has what's
+        // compiled: the root's still leaves out `sub/a.txt`, but `sub`'s
+        // new one isn't read, so `sub/b.txt` isn't left out.
+        aged(&root.join("sub/.gitignore"), "a.txt\nb.txt\n");
+        let full = Rules::new(root, false, false);
+        full.read.store(MOST_PER_WALK, Ordering::Relaxed);
+        let (found_full, _) = found(full);
+        assert_eq!(found_full, both);
     }
 
     #[test]
