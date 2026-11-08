@@ -779,7 +779,14 @@ mod tests {
             host: "desk".to_owned(),
             command: "clackatoo".to_owned(),
         };
-        let ssh = ssh_command(&remote, OsStr::new("ssh"), false, None, false);
+        let ssh = ssh_command(
+            &remote,
+            OsStr::new("ssh"),
+            false,
+            None,
+            false,
+            &Origin::default(),
+        );
         let args: Vec<&OsStr> = ssh.get_args().collect();
         let options = &args[..args.iter().position(|&arg| arg == "--").unwrap()];
         for wanted in [
@@ -792,6 +799,46 @@ mod tests {
                 "{wanted:?} in {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn ssh_is_found_and_started_as_the_origin_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("ssh");
+        let seen = dir.path().join("seen");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s %s' \"$MARKER\" \"$(pwd -P)\" > '{}'\nexit 255\n",
+            seen.display()
+        );
+        // Written by a child: a program written by a test process can't
+        // be run while another test's child holds it open.
+        let written = Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$2\" > \"$1\" && chmod +x \"$1\"", "sh"])
+            .arg(&ssh)
+            .arg(script)
+            .status()
+            .unwrap();
+        assert!(written.success());
+        let origin = Origin {
+            env: Some(
+                vec![
+                    ("MARKER".into(), "from-the-asker".into()),
+                    ("CLACKATOO_SSH".into(), ssh.into_os_string()),
+                ]
+                .into(),
+            ),
+            dir: Some(dir.path().to_owned()),
+        };
+        let remote = Remote {
+            host: "nowhere".into(),
+            command: "clackatoo".into(),
+        };
+        assert!(connect_from(&remote, false, None, &origin).is_err());
+        let real = dir.path().canonicalize().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            format!("from-the-asker {}", real.display())
+        );
     }
 
     #[test]

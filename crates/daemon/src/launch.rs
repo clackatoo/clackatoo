@@ -106,6 +106,62 @@ pub enum LaunchError {
     Io(#[from] std::io::Error),
 }
 
+/// Which side of [`fork_apart`] this is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forked {
+    /// The process that forked, and its new child.
+    Parent(rustix::process::Pid),
+    /// The child, apart from the parent.
+    Child,
+}
+
+/// Forks this process into a child apart from it: in a session of its own,
+/// so with no terminal, and neither the parent's terminal, its signals nor
+/// its end reach it; with no input or output (`/dev/null` for each); and in
+/// `/`, so it keeps no directory in use. The child carries on as this
+/// process would, with no second program to start, which is what makes it
+/// quick.
+///
+/// Refused while this process has more than one thread: only the thread
+/// that forks goes on in the child, and anything another held, a lock
+/// say, would stay held there for ever.
+///
+/// # Errors
+///
+/// If there's more than one thread, or the system won't fork.
+#[allow(unsafe_code)]
+pub fn fork_apart() -> std::io::Result<Forked> {
+    let threads = std::fs::read_dir("/proc/self/task")?.count();
+    if threads != 1 {
+        return Err(std::io::Error::other(format!(
+            "not forking with {threads} threads running"
+        )));
+    }
+    // SAFETY: with only this thread running, as just checked (nothing in
+    // this process starts threads behind its back), the child is a whole
+    // copy of the process: no lock or allocation is half done by another
+    // thread. Only this thread can start one between the check and here.
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => Err(std::io::Error::last_os_error()),
+        0 => {
+            rustix::process::setsid()?;
+            std::env::set_current_dir("/")?;
+            let null = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")?;
+            rustix::stdio::dup2_stdin(&null)?;
+            rustix::stdio::dup2_stdout(&null)?;
+            rustix::stdio::dup2_stderr(&null)?;
+            Ok(Forked::Child)
+        }
+        pid => Ok(Forked::Parent(
+            rustix::process::Pid::from_raw(pid).ok_or_else(std::io::Error::last_os_error)?,
+        )),
+    }
+}
+
 /// Connects to the daemon, starting one in the background if none is
 /// running. It logs to `daemon.log` in the runtime directory.
 ///
@@ -360,5 +416,58 @@ fn signal_and_wait(
             Err(LockError::AlreadyRunning) => return Err(LaunchError::DidNotStop),
             Err(err) => return Err(err.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_with_other_threads_is_never_forked() {
+        // As a test, with the harness's threads besides.
+        let held = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(500)));
+        let refused = fork_apart().unwrap_err();
+        assert!(refused.to_string().contains("threads running"), "{refused}");
+        held.join().unwrap();
+    }
+
+    /// Runs `sh` as `origin` would, saying what it sees.
+    fn seen_by_sh(origin: &Origin) -> String {
+        let mut command = Command::new("/bin/sh");
+        let output = origin
+            .apply(&mut command)
+            .args(["-c", "printf '%s %s' \"${MARKER-unset}\" \"$(pwd -P)\""])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn what_a_client_starts_has_its_origins_environment_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = Origin {
+            env: Some(vec![("MARKER".into(), "from-the-asker".into())].into()),
+            dir: Some(dir.path().to_owned()),
+        };
+        let real = dir.path().canonicalize().unwrap();
+        assert_eq!(
+            seen_by_sh(&origin),
+            format!("from-the-asker {}", real.display())
+        );
+        assert_eq!(origin.var("MARKER").unwrap(), "from-the-asker");
+        assert_eq!(origin.var("HOME"), None);
+        // A directory gone since is left alone, rather than fail the start.
+        let gone = Origin {
+            dir: Some(dir.path().join("gone")),
+            ..origin
+        };
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            seen_by_sh(&gone),
+            format!("from-the-asker {}", here.display())
+        );
+        // No origin: this process's own.
+        assert_eq!(Origin::default().var("PATH"), std::env::var_os("PATH"));
     }
 }
