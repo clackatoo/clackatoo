@@ -3115,7 +3115,7 @@ impl Editor {
     }
 
     /// `r`: replaces `times` characters at the cursor with `ch`, if there
-    /// are that many on the line.
+    /// are that many on the line; if not, fails, as Vim's beeps.
     fn replace_chars(&mut self, ch: char, times: usize, copy: &mut BufferCopy) {
         let text = self.text(copy);
         let at = self.cursor.at;
@@ -3123,13 +3123,12 @@ impl Editor {
             return;
         };
         let start = laid.byte_at(at.col);
-        let mut end = start;
-        for _ in 0..times {
-            if end >= laid.text().len() {
-                return;
-            }
-            end = laid.char_end(end);
-        }
+        let len = laid.text().len();
+        let end = (0..times).try_fold(start, |end, _| (end < len).then(|| laid.char_end(end)));
+        let Some(end) = end else {
+            drop(text);
+            return self.fail();
+        };
         let line_start = text.line_start(at.line);
         let removed = &laid.text()[start..end];
         let with = ch.to_string().repeat(times);

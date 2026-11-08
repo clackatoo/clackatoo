@@ -24,6 +24,7 @@ mod mouse;
 mod objects;
 mod prose;
 mod rendered;
+mod replace;
 mod snippets;
 mod substitute;
 mod uses;
