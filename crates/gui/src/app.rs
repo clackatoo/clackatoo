@@ -748,6 +748,8 @@ impl App {
         // The strips scroll only as far as they must, from where they were.
         self.scrolls = chrome.scrolls;
         self.noticing = chrome.cut.is_some();
+        // A question about a link is answered only once it's been seen whole.
+        self.desk.palette_drawn(chrome.palette_whole);
         Some(chrome)
     }
 

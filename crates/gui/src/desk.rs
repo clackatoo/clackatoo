@@ -8978,6 +8978,14 @@ mod tests {
         assert!(desk.take_opened().is_empty());
         assert!(matches!(desk.status(), Status::Typing { choices, .. }
             if choices.iter().map(|row| row.text.as_str()).collect::<String>() == target));
+        // Not yet drawn whole, as in a window too small for it: not opened.
+        desk.palette_drawn(false);
+        type_keys(&mut desk, "y");
+        assert!(desk.take_opened().is_empty());
+        assert!((desk.message.as_deref()).is_some_and(|said| said.contains("shown whole")));
+        type_keys(&mut desk, "gggx");
+        // Drawn whole.
+        desk.palette_drawn(true);
         type_keys(&mut desk, "yq");
         assert_eq!(desk.take_opened(), [target]);
         // The macro's own `y` doesn't answer it.
@@ -8993,8 +9001,10 @@ mod tests {
         );
         type_keys(&mut desk, "Z");
         assert!(desk.take_opened().is_empty());
-        // Nor one held while something was waited for, had after.
+        // Nor one held while something was waited for, had after, though
+        // the question was drawn whole.
         type_keys(&mut desk, "gggx");
+        desk.palette_drawn(true);
         desk.hold_key(&KeyPress {
             key: &Key::Character("y".into()),
             text: Some("y"),
@@ -9006,6 +9016,7 @@ mod tests {
         assert!(desk.take_opened().is_empty());
         // A paste gives up too, and isn't pasted.
         type_keys(&mut desk, "gggx");
+        desk.palette_drawn(true);
         desk.paste("y");
         assert!(desk.take_opened().is_empty());
         assert!(matches!(desk.status(), Status::Tabs { .. }));

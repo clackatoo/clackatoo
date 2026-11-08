@@ -117,14 +117,16 @@ pub(crate) fn opens_unasked(url: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'?' | b'%'))
 }
 
-/// `url` as the bar shows it to ask whether to open it: whole, with what
-/// wouldn't show as itself, a control or a character that hides or moves
-/// text ([`clackatoo_protocol::invisible`], as the daemon has them),
-/// written as `<U+202E>`.
+/// `url` as the bar shows it to ask whether to open it: whole, with every
+/// character but ASCII's letters, digits and marks written as `<U+202E>`.
+/// Not only controls and what hides or moves text
+/// ([`clackatoo_protocol::invisible`]): blanks, marks that combine with
+/// the letter before, letters that look like others, and those the font
+/// has no glyph for can't be told apart by looking either.
 pub(crate) fn shown_whole(url: &str) -> String {
     let mut shown = String::with_capacity(url.len());
     for ch in url.chars() {
-        if ch.is_control() || clackatoo_protocol::invisible(ch) {
+        if !ch.is_ascii_graphic() {
             let _ =
                 std::fmt::Write::write_fmt(&mut shown, format_args!("<U+{:04X}>", u32::from(ch)));
         } else {
@@ -420,7 +422,13 @@ mod tests {
         }
         assert_eq!(
             shown_whole("ssh://a\u{202e}b\n\u{200b}c/é\u{2028}\u{ad}\u{e0041}\u{fe0f}\u{3164}"),
-            "ssh://a<U+202E>b<U+000A><U+200B>c/é<U+2028><U+00AD><U+E0041><U+FE0F><U+3164>"
+            "ssh://a<U+202E>b<U+000A><U+200B>c/<U+00E9><U+2028><U+00AD><U+E0041><U+FE0F><U+3164>"
+        );
+        // Blanks, a mark that combines, a Cyrillic letter that looks like a
+        // Latin one, a wide letter: none shown as itself.
+        assert_eq!(
+            shown_whole("git://a b\u{3000}e\u{301}/\u{430}字"),
+            "git://a<U+0020>b<U+3000>e<U+0301>/<U+0430><U+5B57>"
         );
     }
 

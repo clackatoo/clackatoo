@@ -43,6 +43,9 @@ const SPLIT_COLS: u16 = 160;
 pub(super) struct LinkAsked {
     confirm: Confirm<String>,
     rows: Vec<String>,
+    /// Whether the window last drew all of them, none cut short: only
+    /// then is the answer taken.
+    drawn_whole: bool,
 }
 
 /// The most columns of a link's target a row of the palette shows: few
@@ -125,7 +128,11 @@ impl Desk {
             return;
         };
         let confirm = Confirm::new("Open this link? (y/n)").choice('y', "Open the link", url);
-        self.link_asked = Some(LinkAsked { confirm, rows });
+        self.link_asked = Some(LinkAsked {
+            confirm,
+            rows,
+            drawn_whole: false,
+        });
     }
 
     /// Takes `press` as the answer to whether to open a link, if that's
@@ -141,10 +148,23 @@ impl Desk {
             .filter(|_| pressed)
             .and_then(|&stroke| asked.confirm.answer(stroke));
         match answer {
-            Some(url) => self.opened.push(url),
+            Some(url) if asked.drawn_whole => self.opened.push(url),
+            Some(_) => self.say(
+                "the link wasn't opened: where it goes couldn't be shown whole; \
+                 make the window bigger and open it again"
+                    .to_owned(),
+            ),
             None => self.say("the link wasn't opened".to_owned()),
         }
         true
+    }
+
+    /// The window has drawn the palette: all of it, none cut short, if
+    /// `whole`. A link asked about is opened only once it has been.
+    pub(crate) fn palette_drawn(&mut self, whole: bool) {
+        if let Some(asked) = &mut self.link_asked {
+            asked.drawn_whole = whole;
+        }
     }
 
     /// The question asked about a link, for the bar, with where it goes

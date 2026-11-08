@@ -458,6 +458,9 @@ pub(crate) struct Chrome {
     pub(crate) palette: Option<Rect>,
     /// Where each of the palette's choices goes.
     pub(crate) choices: Vec<Rect>,
+    /// Whether the palette shows every one of its choices, none cut short:
+    /// what a question that must be read whole is answered by.
+    pub(crate) palette_whole: bool,
     /// Where the palette's text starts, after its label.
     pub(crate) palette_text_x: f32,
     /// The `+` after the workspaces, which makes one.
@@ -687,6 +690,7 @@ impl Chrome {
         );
         // Drawn only with the bottom bar, as notices take its place.
         let messages = (contents.messages).map(|lines| raise(&geometry, lines, None, false));
+        let mut palette_whole = false;
         let (palette, palette_text_x, choices) = match &mut status {
             Status::Typing { label, choices, .. } => {
                 let described = choices.iter().any(|choice| !choice.description.is_empty());
@@ -696,12 +700,16 @@ impl Chrome {
                     .iter()
                     .position(|choice| choice.picked)
                     .map_or(0, |picked| (picked + 1).saturating_sub(rows.len()));
+                let all = choices.len();
                 choices.drain(..top);
                 choices.truncate(rows.len());
+                palette_whole = choices.len() == all;
                 let width = rect.width - 6.0 * padding;
                 for choice in choices {
-                    choice.text = cut_to(&choice.text, width, false, measure);
-                    choice.description = cut_to(&choice.description, width, false, measure);
+                    let text = cut_to(&choice.text, width, false, measure);
+                    let description = cut_to(&choice.description, width, false, measure);
+                    palette_whole &= text == choice.text && description == choice.description;
+                    (choice.text, choice.description) = (text, description);
                 }
                 let label = label
                     .as_deref()
@@ -738,6 +746,7 @@ impl Chrome {
             palette,
             palette_text_x,
             choices,
+            palette_whole,
             new_workspace,
             new_tab: bottom.new_tab,
             background: bottom.background,
@@ -2606,8 +2615,13 @@ mod tests {
 
     /// An 800 × 600 window.
     fn chrome(status: Status, buttons: &ButtonLayout) -> Chrome {
+        chrome_sized([800, 600], status, buttons)
+    }
+
+    /// A window `size` big.
+    fn chrome_sized(size: [u32; 2], status: Status, buttons: &ButtonLayout) -> Chrome {
         Chrome::new(
-            Geometry::new([800, 600], METRICS),
+            Geometry::new(size, METRICS),
             Contents {
                 workspaces: vec![
                     WorkspaceName::plain(1, "clackatoo", 2, true),
@@ -2990,24 +3004,29 @@ mod tests {
     fn a_links_target_asked_about_is_drawn_whole() {
         // As the desk asks: in at most 8 rows of at most 32 columns.
         let rows: Vec<String> = (0..8).map(|row| format!("{row}").repeat(32)).collect();
-        let chrome = chrome(
-            Status::Typing {
-                label: None,
-                text: "Open this link? (y/n)".into(),
-                choices: (rows.iter())
-                    .map(|row| PaletteChoice::from((row.clone(), false)))
-                    .collect(),
-                selected: None,
-                under: None,
-            },
-            &ButtonLayout::default(),
-        );
+        let asked = || Status::Typing {
+            label: None,
+            text: "Open this link? (y/n)".into(),
+            choices: (rows.iter())
+                .map(|row| PaletteChoice::from((row.clone(), false)))
+                .collect(),
+            selected: None,
+            under: None,
+        };
+        let chrome = chrome(asked(), &ButtonLayout::default());
         let Status::Typing { choices, .. } = &chrome.status else {
             panic!("palette")
         };
         let drawn: Vec<&str> = choices.iter().map(|choice| choice.text.as_str()).collect();
         assert_eq!(drawn, rows);
         assert_eq!(chrome.choices.len(), rows.len());
+        assert!(chrome.palette_whole);
+        // A window too narrow cuts the rows short, and one too short drops
+        // some: either way, it says so.
+        for size in [[300, 600], [800, 150]] {
+            let chrome = chrome_sized(size, asked(), &ButtonLayout::default());
+            assert!(!chrome.palette_whole, "{size:?}");
+        }
     }
 
     #[test]

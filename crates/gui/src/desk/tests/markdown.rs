@@ -149,6 +149,8 @@ fn a_link_that_isnt_a_plain_web_link_shows_its_target_and_opens_only_on_y() {
     assert_eq!(asked(&desk), None);
     assert_eq!(desk.message.as_deref(), Some("the link wasn't opened"));
     desk.open_rendered_link(PaneId(1), target);
+    // Once the window has drawn it whole.
+    desk.palette_drawn(true);
     type_keys(&mut desk, "y");
     assert_eq!(desk.take_opened(), [target]);
     // A terminal's link the same way: here, one a program printed with a
