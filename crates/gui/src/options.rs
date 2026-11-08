@@ -640,7 +640,7 @@ options! {
     /// own, never yours, and asks before its first page. Off, as it is
     /// unless you turn it on, a chat gets no browser until you turn it on
     /// in the chat's settings.
-    chatbrowser("cb", "Enable browser tools in new chats"): bool = false;
+    chatbrowser("cbr", "Enable browser tools in new chats"): bool = false;
     /// About the most of a conversation, in tokens, a chat tells an agent
     /// it moves to, as the model menu moves it from Claude Code to Codex,
     /// say: the newest turns whole, older ones a line each. An agent it
@@ -1160,6 +1160,22 @@ mod tests {
             find("numbr").unwrap_err(),
             "no option ‘numbr’: did you mean ‘number’?"
         );
+    }
+
+    #[test]
+    fn no_two_options_share_a_name_or_a_short_name() {
+        let mut names = std::collections::HashSet::new();
+        for info in ALL {
+            assert!(names.insert(info.name), "{} twice", info.name);
+            // Some are short already, as `wrap`.
+            let own = info.short.is_empty() || info.short == info.name;
+            assert!(
+                own || names.insert(info.short),
+                "{} is {}'s short name and another's",
+                info.short,
+                info.name
+            );
+        }
     }
 
     #[test]
