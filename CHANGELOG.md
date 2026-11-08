@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026.11.11 (2026-11-08)
+
+### Features
+
+- **explorer:** send a folder listed again as what changed in it (a4e0bc05)
+- **explorer:** drag files with the mouse onto a folder, an editor or a terminal (70deea36)
+
+### Fixes
+
+- **explorer:** a drop is typed safely, where it was dropped, and asked where it lands (6b8c06d0)
+- **explorer:** ask for changes again when the last window that didn't leaves (3bb76144)
+
 ## 2026.11.10 (2026-11-08)
 
 ### Features
