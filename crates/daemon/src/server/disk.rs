@@ -398,6 +398,24 @@ impl Daemon {
         }
     }
 
+    /// Tells the client at `token`, which has just attached to buffer `id`,
+    /// that changes to its file won't be seen, if they won't, as the
+    /// user's inotify instances or watches are all in use.
+    pub(super) fn tell_if_unwatched(&mut self, token: Token, id: BufferId) {
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        if slot.watched || slot.buffer.is_blank() {
+            return;
+        }
+        let Some(why) = self.out_of_inotify() else {
+            return;
+        };
+        let file = file_name(slot.buffer.path());
+        let notice = format!("{file}: changes on disk and to git's index won't be seen, as {why}");
+        self.tell(token, id, BufferUpdate::Notice(notice));
+    }
+
     /// Tells the client at `to`, or else every client following buffer
     /// `id`, which has no changes not saved, that its file has changed
     /// from outside: for each to read it again as its `autoread` says, or,
@@ -553,6 +571,7 @@ pub(in crate::server) mod tests {
 
     #[test]
     fn a_buffers_file_is_watched_until_it_closes() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().canonicalize().unwrap().join("a.txt");
         std::fs::write(&path, "one\n").unwrap();
@@ -570,6 +589,7 @@ pub(in crate::server) mod tests {
 
     #[test]
     fn a_buffer_in_a_directory_not_there_yet_is_watched_once_it_is() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().canonicalize().unwrap().join("sub");
         let path = sub.join("a.txt");
@@ -591,8 +611,40 @@ pub(in crate::server) mod tests {
         assert_eq!(daemon.disk.rewatch, None);
     }
 
+    /// With the user's inotify instances all in use, nothing is watched,
+    /// and it's tried again later; once one is free, the buffer is watched,
+    /// and its file looked at, as it may have changed meanwhile.
+    #[test]
+    fn a_buffer_opened_while_inotify_cant_be_used_is_watched_once_it_can() {
+        crate::server::explorers::needs_inotify();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("a.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        daemon.explorers.refuse_instance = true;
+        let id = open(&mut daemon, &path);
+        assert!(!daemon.buffers[&id].watched);
+        assert!(daemon.next_watch_retry().is_some());
+        // Said, with the limit to raise.
+        let why = daemon.out_of_inotify().unwrap_or_default();
+        assert!(why.contains("fs.inotify.max_user_instances"), "{why}");
+        daemon.retry_watches_now();
+        assert!(daemon.next_watch_retry().is_some(), "still refused");
+
+        daemon.explorers.refuse_instance = false;
+        std::fs::write(&path, "two\n").unwrap();
+        daemon.retry_watches_now();
+        assert_eq!(daemon.next_watch_retry(), None);
+        assert_eq!(daemon.out_of_inotify(), None);
+        daemon.check_disk();
+        assert!(daemon.buffers[&id].watched);
+        assert_eq!(watched(&daemon), [id]);
+        assert!(daemon.buffers[&id].stale(), "looked at again");
+    }
+
     #[test]
     fn with_no_room_for_more_watches_a_directory_watched_already_still_is() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("other")).unwrap();
@@ -662,6 +714,7 @@ pub(in crate::server) mod tests {
 
     #[test]
     fn a_change_inotify_tells_of_after_its_command_finished_is_still_the_agents() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().canonicalize().unwrap().join("a.txt");
         std::fs::write(&path, "one\n").unwrap();

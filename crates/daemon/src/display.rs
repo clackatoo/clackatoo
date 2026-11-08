@@ -22,6 +22,12 @@
 //! change with no socket coming or going, which its shell picks up by its
 //! first prompt. Nothing is read on a timer.
 //!
+//! The sockets' directories are watched on the daemon's one inotify
+//! instance, which its loop reads (see `server::explorers`): the loop
+//! tells the thread when a socket appears or goes ([`Display::sockets_changed`]),
+//! and the thread does the rest. A directory that can't be watched is
+//! tried again, a while later each time.
+//!
 //! ## What's taken
 //!
 //! Only [`VARIABLES`], each checked ([`valid`]):
@@ -66,11 +72,9 @@
 //! integration's scripts ([`DisplayConfig::file`]), changing only
 //! variables the user hasn't set in that shell themselves.
 
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read as _, Write as _};
-use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -80,7 +84,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec};
-use rustix::fs::inotify;
 use rustix::io::Errno;
 
 /// The variables that say which display programs open their windows on,
@@ -547,6 +550,9 @@ struct Shared {
     /// The command reading systemd's environment, by its pidfd, while one
     /// runs, to be killed as the daemon lets the display go.
     reading: Mutex<Option<OwnedFd>>,
+    /// Set as the loop hears a display's socket appear or go, and taken by
+    /// the thread as it wakes.
+    sockets: AtomicBool,
 }
 
 /// The display followed, by a thread of its own (see the [module
@@ -561,6 +567,8 @@ pub(crate) struct Display {
     /// to have it end. `None` if there's no thread.
     wake: Option<OwnedFd>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The directories the sockets are in, for the loop to watch.
+    dirs: [(Option<PathBuf>, Watched); 2],
 }
 
 impl Display {
@@ -590,6 +598,10 @@ impl Display {
             .map(|text| parse_systemd(text));
         let env = effective(systemd.as_ref(), &inherited, &sockets);
         let current = Arc::new(Mutex::new(Arc::new(env)));
+        let dirs = [
+            (config.runtime_dir.clone(), Watched::Wayland),
+            (config.x11_dir.clone(), Watched::X),
+        ];
         let pipe = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC);
         let (read, write) = match pipe {
             Ok(pipe) => pipe,
@@ -600,6 +612,7 @@ impl Display {
                     shared,
                     wake: None,
                     thread: None,
+                    dirs,
                 };
             }
         };
@@ -613,8 +626,6 @@ impl Display {
             current: Arc::clone(&current),
             shared: Arc::clone(&shared),
             wake: read,
-            inotify: None,
-            watches: HashMap::new(),
             written: false,
             systemd_failed: false,
         };
@@ -628,6 +639,7 @@ impl Display {
             shared,
             wake: Some(write),
             thread,
+            dirs,
         }
     }
 
@@ -646,6 +658,20 @@ impl Display {
             // Full means a read is coming anyway.
             let _ = rustix::io::write(wake, &[0]);
         }
+    }
+
+    /// The directories a display's sockets are in, each with what it's for,
+    /// to be watched.
+    pub(crate) fn dirs(&self) -> impl Iterator<Item = (&Path, Watched)> {
+        (self.dirs.iter()).filter_map(|(dir, watched)| Some((dir.as_deref()?, *watched)))
+    }
+
+    /// Has the environment read again, now and a few times in the seconds
+    /// after ([`DisplayConfig::again_after`]), as a display's socket has
+    /// appeared or gone, or may have while it wasn't watched.
+    pub(crate) fn sockets_changed(&self) {
+        self.shared.sockets.store(true, Ordering::SeqCst);
+        self.terminal_made();
     }
 }
 
@@ -667,9 +693,9 @@ impl Drop for Display {
     }
 }
 
-/// What a watch is on.
+/// What a directory watched for a display's sockets is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Watched {
+pub(crate) enum Watched {
     /// The runtime directory, for Wayland's sockets.
     Wayland,
     /// X's sockets' directory.
@@ -683,8 +709,6 @@ struct Follower {
     current: Arc<Mutex<Arc<Env>>>,
     shared: Arc<Shared>,
     wake: OwnedFd,
-    inotify: Option<OwnedFd>,
-    watches: HashMap<i32, Watched>,
     /// Whether the file has been written since the daemon started.
     written: bool,
     /// Whether reading systemd's environment failed last time, so it's
@@ -697,7 +721,6 @@ impl Follower {
     /// environment was read as as the daemon started, or reading it if
     /// that took too long.
     fn run(mut self, first: Option<io::Result<Vec<u8>>>) {
-        self.watch();
         match first {
             Some(first) => self.take(first),
             None => self.read(),
@@ -712,10 +735,7 @@ impl Follower {
                     tv_nsec: i64::from(left.subsec_nanos()),
                 }
             });
-            let mut fds = vec![PollFd::new(&self.wake, PollFlags::IN)];
-            if let Some(inotify) = &self.inotify {
-                fds.push(PollFd::new(inotify, PollFlags::IN));
-            }
+            let mut fds = [PollFd::new(&self.wake, PollFlags::IN)];
             match rustix::event::poll(&mut fds, timeout.as_ref()) {
                 Ok(_) | Err(Errno::INTR) => {}
                 Err(err) => {
@@ -724,7 +744,6 @@ impl Follower {
                 }
             }
             let woken = fds[0].revents();
-            let changed = fds.get(1).is_some_and(|fd| !fd.revents().is_empty());
             if woken.intersects(PollFlags::HUP | PollFlags::ERR)
                 || self.shared.stopped.load(Ordering::SeqCst)
             {
@@ -737,7 +756,7 @@ impl Follower {
                 let _ = rustix::io::read(&self.wake, &mut bytes);
                 read = true;
             }
-            if changed && self.socket_changed() {
+            if self.shared.sockets.swap(false, Ordering::SeqCst) {
                 let now = Instant::now();
                 again = (self.config.again_after.iter())
                     .map(|&after| now + after)
@@ -754,95 +773,6 @@ impl Follower {
                 self.read();
             }
         }
-    }
-
-    /// Watches the runtime directory for Wayland's sockets, and X's
-    /// sockets' directory. If that can't be done, says so: then the
-    /// environment is read again only as terminals are made.
-    fn watch(&mut self) {
-        let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
-        let inotify = match inotify::init(flags) {
-            Ok(inotify) => inotify,
-            Err(err) => {
-                log::info!(
-                    "display: sockets can't be watched ({err}), so the display is read again \
-                     only as terminals are made"
-                );
-                return;
-            }
-        };
-        let flags = inotify::WatchFlags::CREATE
-            | inotify::WatchFlags::DELETE
-            | inotify::WatchFlags::MOVED_TO
-            | inotify::WatchFlags::MOVED_FROM
-            | inotify::WatchFlags::ONLYDIR;
-        let dirs = [
-            (&self.config.runtime_dir, Watched::Wayland),
-            (&self.config.x11_dir, Watched::X),
-        ];
-        for (dir, watched) in dirs {
-            let Some(dir) = dir else { continue };
-            match inotify::add_watch(&inotify, dir, flags) {
-                Ok(watch) => {
-                    self.watches.insert(watch, watched);
-                }
-                // No X sockets yet: a Wayland desktop makes its own.
-                Err(Errno::NOENT) if watched == Watched::X => {
-                    log::debug!("display: {} isn't there to watch", dir.display());
-                }
-                Err(err) => log::info!(
-                    "display: {} can't be watched ({err}), so the display is read again only \
-                     as terminals are made",
-                    dir.display()
-                ),
-            }
-        }
-        self.inotify = Some(inotify);
-    }
-
-    /// Reads what inotify says, and whether a display's socket appeared or
-    /// went.
-    fn socket_changed(&mut self) -> bool {
-        let Some(inotify) = &self.inotify else {
-            return false;
-        };
-        let mut changed = false;
-        let mut gone = Vec::new();
-        let mut buffer = [MaybeUninit::uninit(); 4096];
-        let mut reader = inotify::Reader::new(inotify, &mut buffer);
-        loop {
-            let event = match reader.next() {
-                Ok(event) => event,
-                Err(Errno::INTR) => continue,
-                Err(Errno::WOULDBLOCK) => break,
-                Err(err) => {
-                    log::warn!("display: reading what changed failed: {err}");
-                    break;
-                }
-            };
-            if event.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
-                changed = true;
-                continue;
-            }
-            if event.events().contains(inotify::ReadFlags::IGNORED) {
-                gone.push(event.wd());
-                continue;
-            }
-            let Some(&watched) = self.watches.get(&event.wd()) else {
-                continue;
-            };
-            let name = event.file_name().map(std::ffi::CStr::to_bytes);
-            changed |= name.is_some_and(|name| socket(watched, name));
-        }
-        for watch in gone {
-            if self.watches.remove(&watch) == Some(Watched::Wayland) {
-                log::info!(
-                    "display: the runtime directory is no longer watched, so the display is read \
-                     again only as terminals are made"
-                );
-            }
-        }
-        changed
     }
 
     /// Reads systemd's environment, and takes what it says.
@@ -904,7 +834,7 @@ impl Follower {
 /// Whether `name`, a file in a directory `watched`, is a display's
 /// socket: `wayland-N` in the runtime directory, not its `.lock`; `XN` in
 /// X's.
-fn socket(watched: Watched, name: &[u8]) -> bool {
+pub(crate) fn socket(watched: Watched, name: &[u8]) -> bool {
     match watched {
         Watched::Wayland => name.starts_with(b"wayland-") && !name.ends_with(b".lock"),
         Watched::X => name.first() == Some(&b'X'),
@@ -1026,6 +956,8 @@ fn write_file(path: &Path, text: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     fn values(pairs: &[(&str, &str)]) -> Values {

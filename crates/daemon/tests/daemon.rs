@@ -6244,7 +6244,10 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     loop {
-        match client.next_event().expect("a buffer update") {
+        match client
+            .next_event()
+            .unwrap_or_else(starved("a buffer update"))
+        {
             Event::Buffer { update, .. } => return update,
             Event::Workspaces(_) => {}
             other @ (Event::View { .. }
@@ -6901,7 +6904,7 @@ fn until_told(log: &Path, paths: impl Fn(usize) -> PathBuf) {
             return;
         }
     }
-    panic!("it was never told of a change");
+    panic!("it was never told of a change{}", inotify_note());
 }
 
 #[test]
@@ -12631,7 +12634,10 @@ fn next_files_update(client: &mut Client) -> FilesUpdate {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     loop {
-        if let Event::Files { update, .. } = client.next_event().expect("an explorer update") {
+        let event = client
+            .next_event()
+            .unwrap_or_else(starved("an explorer update"));
+        if let Event::Files { update, .. } = event {
             return update;
         }
     }
@@ -23130,7 +23136,8 @@ impl TestDaemon {
             }
             assert!(
                 Instant::now() < deadline,
-                "the display never became {what:?}: {text:?}"
+                "the display never became {what:?}: {text:?}{}",
+                inotify_note()
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -23194,6 +23201,29 @@ fn new_programs_follow_the_desktops_display_as_it_logs_in_and_out() {
     std::fs::remove_file(run.join("wayland-0")).unwrap();
     daemon.wait_for_display("#none\nXDG_SESSION_TYPE=tty\n");
     assert_eq!(display_seen(&mut client), "[unset|unset|tty]");
+}
+
+/// The runtime directory, gone and made again, as systemd does as the
+/// user's last session ends and a new one begins, is watched again, a
+/// moment after: the display that logs in then is followed (CLACKA-222).
+#[test]
+fn the_runtime_directory_made_again_is_watched_again() {
+    let daemon = following_the_display(&[], Some("HOME=/home/someone\n"));
+    daemon.wait_for_display("#none\n");
+    let run = daemon.dir.path().join("run");
+    std::fs::remove_dir(&run).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::create_dir(&run).unwrap();
+    let socket = std::os::unix::net::UnixListener::bind(run.join("wayland-1")).unwrap();
+    let logged_in = "WAYLAND_DISPLAY=wayland-1\nXDG_SESSION_TYPE=wayland\n";
+    std::fs::write(daemon.dir.path().join("systemd"), logged_in).unwrap();
+    daemon.wait_for_display("#systemd\nWAYLAND_DISPLAY=wayland-1\nXDG_SESSION_TYPE=wayland\n");
+
+    // Its socket going is heard of again.
+    std::fs::write(daemon.dir.path().join("systemd"), "HOME=/home/someone\n").unwrap();
+    drop(socket);
+    std::fs::remove_file(run.join("wayland-1")).unwrap();
+    daemon.wait_for_display("#none\n");
 }
 
 /// Without systemd's user manager, a display the daemon was started on,
@@ -23288,6 +23318,134 @@ fn agents_are_started_on_the_desktops_display() {
     let mut client = daemon.client();
     start_chat(&mut client);
     assert_eq!(std::fs::read_to_string(&seen).unwrap(), "wayland-4");
+}
+
+/// Why what a test waits for may not have come, if inotify has been
+/// refused in this process: the user's instances, which every program
+/// shares, were all in use, so a daemon watched nothing until one was
+/// free. Empty if it hasn't.
+fn inotify_note() -> String {
+    match clackatoo_daemon::inotify_refused() {
+        0 => String::new(),
+        refused => format!(
+            "\n\nNote: inotify was refused {refused} times in this process, as the user's \
+             instances or watches were all in use (fs.inotify.max_user_instances, \
+             fs.inotify.max_user_watches), so a daemon may have watched nothing. Count them \
+             with `find /proc/*/fd -lname anon_inode:inotify | wc -l`, free some or raise the \
+             limit, and run again."
+        ),
+    }
+}
+
+/// A panic saying `what` never came, and why it may not have, for
+/// `unwrap_or_else`.
+fn starved<T>(what: &str) -> impl FnOnce(ClientError) -> T + '_ {
+    move |err| panic!("{what}: {err}{}", inotify_note())
+}
+
+/// The inotify instances of this process that watch any of `dirs`, each
+/// with which of them it watches, as `/proc/self/fdinfo` lists an
+/// instance's watches by inode. Other tests' daemons, in this process
+/// too, watch only their own directories.
+fn inotify_instances_watching(dirs: &[&Path]) -> Vec<Vec<PathBuf>> {
+    let inodes: Vec<(u64, &Path)> = (dirs.iter())
+        .map(|dir| (std::fs::metadata(dir).unwrap().ino(), *dir))
+        .collect();
+    let mut instances = Vec::new();
+    for fd in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        let instance = std::fs::read_link(fd.path())
+            .is_ok_and(|link| link.as_os_str() == "anon_inode:inotify");
+        let info = Path::new("/proc/self/fdinfo").join(fd.file_name());
+        // Closed meanwhile, by another test.
+        let (true, Ok(info)) = (instance, std::fs::read_to_string(info)) else {
+            continue;
+        };
+        let watched: Vec<PathBuf> = (info.lines())
+            .filter_map(|line| line.strip_prefix("inotify wd:"))
+            .filter_map(|line| {
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix("ino:"))
+            })
+            .filter_map(|ino| u64::from_str_radix(ino, 16).ok())
+            .filter_map(|ino| inodes.iter().find(|(inode, _)| *inode == ino))
+            .map(|(_, dir)| dir.to_path_buf())
+            .collect();
+        if !watched.is_empty() {
+            instances.push(watched);
+        }
+    }
+    instances
+}
+
+/// A daemon watches everything on one inotify instance (CLACKA-222): an
+/// explorer's folders, a buffer's directory, what a language server asks
+/// to hear of, the index of the buffer's repository for signs, and the
+/// display's sockets. A user has only 128 instances, shared with every
+/// other program.
+#[test]
+fn a_daemon_watches_everything_on_one_inotify_instance() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        std::fs::create_dir(dir.join("run")).unwrap();
+        config.display = Some(clackatoo_daemon::DisplayConfig {
+            source: vec!["false".into()],
+            runtime_dir: Some(dir.join("run")),
+            x11_dir: None,
+            inherited: Vec::new(),
+            file: Some(dir.join("display")),
+            again_after: Vec::new(),
+        });
+        let watchers = r#"[{ "globPattern": "**/*.fk" }]"#.to_owned();
+        config.languages = Some(fake_language_server_pack(
+            dir,
+            vec!["--watch".into(), watchers],
+        ));
+    });
+    let dir = daemon.dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(dir.join("app/deep")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    run_git(&dir.join("app"), &["init", "-q"]);
+    run_git(&dir.join("app"), &["add", "a.fk"]);
+    std::fs::create_dir_all(dir.join("tree/branch")).unwrap();
+
+    let mut client = daemon.client();
+    open_attached(&mut client, &dir, "app/a.fk");
+    let mut explorer = daemon.client();
+    let (files, _) = explore(&mut explorer, &dir.join("tree"));
+    let branch = dir.join("tree/branch");
+    files_action(
+        &mut explorer,
+        files,
+        FilesAction::Expand(branch.display().to_string()),
+    );
+    next_listing(&mut explorer, &branch);
+
+    // The run directory for the display, the buffer's, the language
+    // server's (deep isn't the buffer's), the repository's git
+    // directory, and the explorer's folder.
+    let (run, app, deep, git) = (
+        dir.join("run"),
+        dir.join("app"),
+        dir.join("app/deep"),
+        dir.join("app/.git"),
+    );
+    let all: [&Path; 5] = [&run, &app, &deep, &git, &branch];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let instances = inotify_instances_watching(&all);
+        let watched =
+            |dir: &&Path| (instances.iter()).any(|watched| watched.iter().any(|one| one == dir));
+        if all.iter().all(watched) {
+            assert_eq!(instances.len(), 1, "{instances:?}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never all watched: {instances:?}{}",
+            inotify_note()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 // --- Background tabs (CLACKA-121) ------------------------------------------

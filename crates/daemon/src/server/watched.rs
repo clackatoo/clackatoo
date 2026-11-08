@@ -208,6 +208,17 @@ impl Daemon {
         }
     }
 
+    /// Watches again the directories of the files not open servers that
+    /// ask to hear of nothing have said are wrong, as they couldn't be.
+    pub(super) fn watch_diagnosed_again(&mut self) {
+        let diagnosed: Vec<(ServerId, PathBuf)> = (self.servers.elsewhere.iter())
+            .map(|(path, (server, _))| (*server, path.clone()))
+            .collect();
+        for (server, path) in diagnosed {
+            self.watch_diagnosed(server, &path);
+        }
+    }
+
     /// No longer watches the directory of the file at `path` for server
     /// `server`, which has stopped saying the file is wrong, if it was
     /// watched for files it said were wrong, and no other such file is in
@@ -269,7 +280,7 @@ impl Daemon {
     /// heard of: what's watched already costs nothing more. A server with
     /// a walk still to come back is passed over, so overflow after
     /// overflow doesn't stack walks up.
-    fn watch_for_servers_again(&mut self) {
+    pub(super) fn watch_for_servers_again(&mut self) {
         let walking: BTreeSet<ServerId> = (self.servers.walks.values())
             .map(|walking| walking.server)
             .collect();
@@ -602,6 +613,7 @@ mod tests {
 
     #[test]
     fn a_folder_watched_for_files_said_to_be_wrong_goes_once_none_are() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let other = root.join("app/other.fk");
@@ -622,6 +634,7 @@ mod tests {
 
     #[test]
     fn a_registration_made_again_lets_go_of_what_it_asked_for_before() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         for sub in ["app/one", "app/two"] {
@@ -639,6 +652,7 @@ mod tests {
 
     #[test]
     fn servers_share_the_watches_they_may_have() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let (mut daemon, first) = daemon_with_fake(&root, &[]);

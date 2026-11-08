@@ -431,6 +431,7 @@ impl Daemon {
         self.offer_install(token, id);
         self.ask_trust(id, Some(token));
         self.tell_if_changed_on_disk(token, id);
+        self.tell_if_unwatched(token, id);
         self.tell_recovered(token, id);
         Ok(())
     }
@@ -1205,6 +1206,7 @@ mod tests {
 
     #[test]
     fn a_blank_buffer_with_changes_outlives_an_upgrade_and_is_named_after() {
+        crate::server::explorers::needs_inotify();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let (mut daemon, _) = super::super::agent_files::tests::daemon_with_chat(&root);

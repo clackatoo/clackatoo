@@ -221,10 +221,10 @@ enum Source {
     Agent(AgentId, Pipe),
     /// One of a language server's pipes.
     Server(ServerId, Pipe),
-    /// The inotify instance watching repositories' indexes.
-    Index,
-    /// The inotify instance watching the directories explorers show, and
-    /// those buffers' files are in.
+    /// The daemon's one inotify instance, watching the directories
+    /// explorers show, those buffers' files are in, those language servers
+    /// asked to hear of, repositories' indexes and the display's sockets
+    /// (see [`explorers`]).
     Files,
     Client(Client),
     Carrier(Carrier),
@@ -1237,6 +1237,7 @@ impl Daemon {
         })
         .map(|mut daemon| {
             daemon.start_web();
+            daemon.watch_display();
             daemon
         })
     }
@@ -1876,7 +1877,10 @@ impl Daemon {
                 let clipboard = self.next_clipboard_timeout();
                 let explore = self.next_explore();
                 let tools = self.next_tool_due();
-                let rewatch = self.next_rewatch();
+                let rewatch = self
+                    .next_rewatch()
+                    .into_iter()
+                    .chain(self.next_watch_retry());
                 let reviews = self.next_review_due();
                 let next = (compaction.into_iter().chain(quic).chain(idle))
                     .chain(retry)
@@ -1952,6 +1956,7 @@ impl Daemon {
             self.restart_kept();
             self.tell_restated();
             self.explore();
+            self.retry_watches();
             // After what the daemon's own threads wrote has been taken, so
             // it isn't taken for a change from outside.
             self.check_disk();
@@ -2196,7 +2201,6 @@ impl Daemon {
                 Some(Source::Orphan(_)) => self.reap_orphan(token),
                 Some(&Source::Agent(id, pipe)) => self.agent_event(id, pipe),
                 Some(&Source::Server(id, pipe)) => self.server_event(id, pipe),
-                Some(Source::Index) => self.read_index_changes(),
                 Some(Source::Files) => self.read_files_changes(),
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),

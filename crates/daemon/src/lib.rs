@@ -79,6 +79,18 @@ pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
 pub use trust::Trusting;
 
+/// How many times inotify has been refused in this process, as the user's
+/// instances or watches were all in use.
+static INOTIFY_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times inotify has been refused in this process, as the user's
+/// instances (`fs.inotify.max_user_instances`) or watches were all in use:
+/// for a test waiting for a change a daemon never heard of to say why.
+#[must_use]
+pub fn inotify_refused() -> usize {
+    INOTIFY_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Numbers every chat's turns from `from` from now on, not 0, so a turn's
 /// uid, which what's kept of it is keyed by, is never its index: for
 /// tests, which would otherwise not tell the two apart (CLACKA-198).

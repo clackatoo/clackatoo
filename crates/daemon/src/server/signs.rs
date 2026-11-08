@@ -9,33 +9,25 @@
 //! rather than the index file: git writes a new index beside the old and
 //! renames it over it, so a watch on the file would stop at the first
 //! change. A watch costs nothing until something changes, where checking
-//! the index's time on a timer would wake the daemon forever.
+//! the index's time on a timer would wake the daemon forever. The watch is
+//! on the daemon's one instance, which [`super::explorers`] reads.
 
 use std::collections::HashMap;
-use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clackatoo_protocol::{Answer, BufferId, BufferUpdate};
 use clackatoo_text::{Bias, Hunks};
 use mio::Token;
-use rustix::fs::inotify;
-use rustix::io::Errno;
 
-use super::{Daemon, Source};
+use super::Daemon;
 use crate::git::{Found, Git};
 
-/// The thread comparing buffers with git, once a buffer needs it, the
-/// indexes watched, and the stages asked for.
+/// The thread comparing buffers with git, once a buffer needs it, and
+/// the stages asked for.
 #[derive(Debug, Default)]
 pub(super) struct Signs {
     git: Option<Git>,
-    /// The inotify instance indexes are watched with, once one is, and
-    /// its token.
-    inotify: Option<(OwnedFd, Token)>,
-    /// The git directory each watch is on.
-    watches: HashMap<i32, PathBuf>,
     /// Stages on their way, by the number the thread answers them with.
     stages: HashMap<u64, Staging>,
     next_ticket: u64,
@@ -109,13 +101,7 @@ impl Daemon {
         if (self.buffers.values()).any(|slot| slot.git_dir.as_ref() == Some(&git_dir)) {
             return;
         }
-        let watch = (self.signs.watches.iter()).find(|(_, dir)| **dir == git_dir);
-        if let (Some((&watch, _)), Some((inotify, _))) = (watch, &self.signs.inotify) {
-            self.signs.watches.remove(&watch);
-            if let Err(err) = inotify::remove_watch(inotify, watch) {
-                log::debug!("no longer watching {}: {err}", git_dir.display());
-            }
-        }
+        self.remove_index_watch(&git_dir);
     }
 
     /// Answers [`ClientMessage::Stage`](clackatoo_protocol::ClientMessage::Stage):
@@ -192,7 +178,7 @@ impl Daemon {
                     // nothing would take away.
                     if let Some(slot) = self.buffers.get_mut(&id) {
                         slot.git_dir = Some(git_dir.clone());
-                        self.watch_index(&git_dir);
+                        self.add_index_watch(&git_dir);
                     }
                 }
                 Found::Hunks {
@@ -252,91 +238,26 @@ impl Daemon {
         self.tell_viewers(id, None, &update);
     }
 
-    /// Watches the index of the repository whose git directory is
-    /// `git_dir`, if it isn't watched already.
-    fn watch_index(&mut self, git_dir: &PathBuf) {
-        if self.signs.watches.values().any(|dir| dir == git_dir) {
-            return;
+    /// Watches the indexes of the repositories buffers are in again, as
+    /// they couldn't be, and has those buffers compared again, as an index
+    /// may have changed meanwhile.
+    pub(super) fn watch_indexes_again(&mut self) {
+        let mut git_dirs: Vec<PathBuf> = (self.buffers.values())
+            .filter_map(|slot| slot.git_dir.clone())
+            .collect();
+        git_dirs.sort();
+        git_dirs.dedup();
+        for git_dir in &git_dirs {
+            self.add_index_watch(git_dir);
         }
-        if self.signs.inotify.is_none() {
-            let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
-            let made = inotify::init(flags).map_err(std::io::Error::from);
-            let registered = made.and_then(|fd| {
-                let token = self.register_fd(Some(fd.as_raw_fd()), Source::Index)?;
-                Ok((fd, token.expect("an fd was given")))
-            });
-            match registered {
-                Ok(inotify) => self.signs.inotify = Some(inotify),
-                Err(err) => {
-                    log::warn!("indexes won't be watched: {err}");
-                    return;
-                }
-            }
-        }
-        let Some((inotify, _)) = &self.signs.inotify else {
-            return;
-        };
-        // A new index is renamed over the old; some tools write it in place.
-        let flags = inotify::WatchFlags::MOVED_TO
-            | inotify::WatchFlags::CLOSE_WRITE
-            | inotify::WatchFlags::CREATE
-            | inotify::WatchFlags::DELETE
-            | inotify::WatchFlags::ONLYDIR;
-        match inotify::add_watch(inotify, git_dir, flags) {
-            Ok(watch) => {
-                self.signs.watches.insert(watch, git_dir.clone());
-            }
-            Err(err) => log::warn!("{} won't be watched: {err}", git_dir.display()),
-        }
+        self.indexes_changed(git_dirs);
     }
 
-    /// Reads what inotify says has changed in the git directories watched,
-    /// and has the buffers in those whose index changed compared again.
-    pub(super) fn read_index_changes(&mut self) {
-        let Some((inotify, _)) = &self.signs.inotify else {
-            return;
-        };
-        let mut changed: Vec<PathBuf> = Vec::new();
-        let mut gone: Vec<i32> = Vec::new();
-        let mut buffer = [MaybeUninit::uninit(); 4096];
-        let mut reader = inotify::Reader::new(inotify, &mut buffer);
-        // Read until there's nothing left: the loop hears of more only
-        // once something new comes.
-        loop {
-            let event = match reader.next() {
-                Ok(event) => event,
-                Err(Errno::INTR) => continue,
-                Err(Errno::WOULDBLOCK) => break,
-                Err(err) => {
-                    log::warn!("reading what changed in git directories failed: {err}");
-                    break;
-                }
-            };
-            if event.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
-                // Changes were lost: any index may have changed.
-                changed = self.signs.watches.values().cloned().collect();
-                continue;
-            }
-            if event.events().contains(inotify::ReadFlags::IGNORED) {
-                gone.push(event.wd());
-                continue;
-            }
-            let index = event
-                .file_name()
-                .is_some_and(|name| name.to_bytes() == b"index");
-            if let Some(git_dir) = self.signs.watches.get(&event.wd())
-                && index
-                && !changed.contains(git_dir)
-            {
-                changed.push(git_dir.clone());
-            }
-        }
-        for watch in gone {
-            // Its directory went, as a repository deleted does.
-            self.signs.watches.remove(&watch);
-        }
+    /// Has the buffers in the repositories whose git directories are
+    /// `git_dirs` compared again, as their indexes have changed.
+    pub(super) fn indexes_changed(&mut self, git_dirs: Vec<PathBuf>) {
         if let Some(git) = &self.signs.git {
-            for git_dir in changed {
+            for git_dir in git_dirs {
                 git.index_changed(git_dir);
             }
         }

@@ -33,6 +33,28 @@
 //! the buffers make of a change is in [`super::disk`]. They serve language
 //! servers too, for the files they ask to hear of, up to
 //! [`MAX_SERVER_WATCHES`]: what's told them is in [`super::watched`].
+//!
+//! ## One inotify instance
+//!
+//! The daemon has one inotify instance, made as it's first needed, and
+//! read here, on the loop, for everything it watches: explorers'
+//! directories, buffers' files, language servers' directories, git's
+//! indexes for signs (see [`super::signs`]) and the directories a
+//! display's sockets are in (see [`crate::display`]), whose thread is
+//! told when one appears or goes. Each watch says what it's on, so what
+//! inotify says of it goes to each that wants it. The kernel gives one
+//! watch for a directory, however many ask for it, so each adds what it
+//! wants to hear to what the watch hears already, and the watch goes only
+//! once nothing wants it: a user has few instances (128, by
+//! `fs.inotify.max_user_instances`, shared with every other program),
+//! and watches are many.
+//!
+//! An instance that can't be made, as when the user's are all in use, is
+//! said once, and tried again, a while later each time; once it's made,
+//! everything is watched again, and looked at again, as anything may
+//! have changed meanwhile. A watch that can't be made for lack of room
+//! (`fs.inotify.max_user_watches`) is said once too: what it was for
+//! isn't watched, as for one past [`MAX_WATCHES`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -47,6 +69,7 @@ use clackatoo_protocol::{
     BufferId, Error, Event, FileOp, FileOpError, FilesAction, FilesId, FilesUpdate, ListingChanges,
     MarksChanges, OpenFiles, PaneId, Response,
 };
+use inotify::{ReadFlags, WatchFlags};
 use mio::Token;
 use rustix::fs::inotify;
 use rustix::io::Errno;
@@ -54,7 +77,7 @@ use rustix::io::Errno;
 use super::language::ServerId;
 use super::{Daemon, Source};
 use crate::explorer::{Changed, Done, Listing, Marks, Open, Said, Workers};
-use crate::handover;
+use crate::{display, handover};
 
 /// The most directories watched at once: far more than anyone expands,
 /// and well inside the kernel's limit, which other programs need too.
@@ -67,7 +90,49 @@ pub(super) const MAX_SERVER_WATCHES: usize = 3072;
 
 /// Something inotify said happened in a directory watched: the watch, the
 /// name in the directory it happened to, if it says, and what happened.
-type Touched = (i32, Option<Vec<u8>>, inotify::ReadFlags);
+type Touched = (i32, Option<Vec<u8>>, ReadFlags);
+
+/// What's heard of in a directory watched for explorers, buffers and
+/// language servers.
+const FILES_HEAR: WatchFlags = WatchFlags::CREATE
+    .union(WatchFlags::DELETE)
+    .union(WatchFlags::MOVED_FROM)
+    .union(WatchFlags::MOVED_TO)
+    .union(WatchFlags::ATTRIB)
+    .union(WatchFlags::CLOSE_WRITE)
+    .union(WatchFlags::DELETE_SELF)
+    .union(WatchFlags::MOVE_SELF)
+    .union(WatchFlags::EXCL_UNLINK);
+
+/// What, heard of in a directory, has it listed again.
+const RELIST: ReadFlags = ReadFlags::CREATE
+    .union(ReadFlags::DELETE)
+    .union(ReadFlags::MOVED_FROM)
+    .union(ReadFlags::MOVED_TO)
+    .union(ReadFlags::ATTRIB)
+    .union(ReadFlags::DELETE_SELF)
+    .union(ReadFlags::MOVE_SELF);
+
+/// What's heard of in a git directory watched for its index: a new index
+/// is renamed over the old; some tools write it in place.
+const INDEX_HEAR: WatchFlags = WatchFlags::MOVED_TO
+    .union(WatchFlags::CLOSE_WRITE)
+    .union(WatchFlags::CREATE)
+    .union(WatchFlags::DELETE);
+
+/// What's heard of in a directory watched for a display's sockets.
+const DISPLAY_HEAR: WatchFlags = WatchFlags::CREATE
+    .union(WatchFlags::DELETE)
+    .union(WatchFlags::MOVED_TO)
+    .union(WatchFlags::MOVED_FROM);
+
+/// How long after the instance, or a display's directory's watch,
+/// couldn't be made, it's tried again, at first. The wait doubles each
+/// time, up to [`RETRY_MOST`].
+const RETRY_LEAST: Duration = Duration::from_secs(1);
+
+/// The longest wait between tries.
+const RETRY_MOST: Duration = Duration::from_mins(1);
 
 /// The least time between two listings of a directory.
 const LIST_GAP: Duration = Duration::from_millis(100);
@@ -96,12 +161,27 @@ pub(super) struct Explorers {
     failed: HashMap<PathBuf, Instant>,
     /// Every repository an explorer's root is in, by its work tree's top.
     repos: HashMap<PathBuf, Repo>,
-    /// The inotify instance directories are watched with, once one is, and
-    /// its token.
+    /// The daemon's inotify instance, once one is made, and its token.
     inotify: Option<(OwnedFd, Token)>,
+    /// When to try again to make the instance, as it couldn't be, and how
+    /// long the wait was.
+    instance_retry: Option<(Instant, Duration)>,
+    /// Why there's no instance, or no room for more watches, as the
+    /// user's are all in use, while it's so: said once in the log, and to
+    /// each client that opens a buffer not watched meanwhile.
+    out_of_instances: Option<String>,
+    out_of_watches: Option<String>,
+    /// When to try again to watch the display's directories not watched,
+    /// and how long the wait was.
+    display_retry: Option<(Instant, Duration)>,
+    /// Making the instance fails, as if the user's were all in use, for
+    /// tests.
+    #[cfg(test)]
+    pub(super) refuse_instance: bool,
     /// What each watch is on: directories expanded, repositories' git
-    /// directories, and the directories of buffers' files. One directory
-    /// reached by two paths is one watch.
+    /// directories, the directories of buffers' files, those watched for
+    /// language servers, git directories for signs, and the display's. One
+    /// directory reached by two paths is one watch.
     watches: HashMap<i32, Watched>,
     /// Watches weren't made for lack of room, which is said once.
     full: bool,
@@ -161,6 +241,12 @@ impl Default for Explorers {
             failed: HashMap::new(),
             repos: HashMap::new(),
             inotify: None,
+            instance_retry: None,
+            out_of_instances: None,
+            out_of_watches: None,
+            display_retry: None,
+            #[cfg(test)]
+            refuse_instance: false,
             watches: HashMap::new(),
             full: false,
             server_watches: 0,
@@ -240,6 +326,8 @@ struct Dir {
 /// for its index changing.
 #[derive(Debug)]
 struct Repo {
+    /// Its git directory, watched.
+    git_dir: PathBuf,
     /// What git last said of its files, as absolute paths.
     marks: Option<Arc<Marks>>,
     /// git is being asked.
@@ -259,6 +347,10 @@ pub(super) struct Watched {
     pub(super) buffers: Vec<BufferId>,
     /// The language servers it's watched for, and its path for each.
     servers: Vec<(ServerId, PathBuf)>,
+    /// The git directory it is, watched for its index for signs.
+    index: Option<PathBuf>,
+    /// What it is to the display, watched for its sockets.
+    display: Option<display::Watched>,
 }
 
 impl Watched {
@@ -268,6 +360,79 @@ impl Watched {
             && self.repo.is_none()
             && self.buffers.is_empty()
             && self.servers.is_empty()
+            && self.index.is_none()
+            && self.display.is_none()
+    }
+}
+
+impl Watched {
+    /// Notes what inotify says happened in it, `flags`, to the file
+    /// `name` in it, if it says, for signs and the display, as each wants
+    /// to hear it: its git directory, if its index changed, in `indexes`,
+    /// and whether a display's socket appeared or went in `sockets`.
+    fn heard_by_others(
+        &self,
+        flags: ReadFlags,
+        name: Option<&[u8]>,
+        indexes: &mut Vec<PathBuf>,
+        sockets: &mut bool,
+    ) {
+        let heard = |hear: WatchFlags| flags.intersects(ReadFlags::from_bits_retain(hear.bits()));
+        if let Some(git_dir) = &self.index
+            && name == Some(b"index")
+            && heard(INDEX_HEAR)
+            && !indexes.contains(git_dir)
+        {
+            indexes.push(git_dir.clone());
+        }
+        if let (Some(kind), Some(name)) = (self.display, name) {
+            *sockets |= heard(DISPLAY_HEAR) && display::socket(kind, name);
+        }
+    }
+}
+
+/// Fails a test that needs inotify at once, saying why, if the user's
+/// instances are all in use, rather than leaving it to fail later with
+/// nothing watched: every program the user runs shares them.
+#[cfg(test)]
+pub(super) fn needs_inotify() {
+    let flags = inotify::CreateFlags::CLOEXEC;
+    if let Err(err) = inotify::init(flags) {
+        panic!(
+            "this test needs inotify, which can't be used: {err}: {} Count them with `find \
+             /proc/*/fd -lname anon_inode:inotify | wc -l`, and free some or raise the limit",
+            out_of("instances", "max_user_instances")
+        );
+    }
+}
+
+/// That the user's inotify `what` are all in use, and the sysctl,
+/// `fs.inotify.SYSCTL`, that says how many there may be.
+fn out_of(what: &str, sysctl: &str) -> String {
+    let most = std::fs::read_to_string(format!("/proc/sys/fs/inotify/{sysctl}"));
+    let most = most.as_deref().map_or("", str::trim);
+    format!("all {most} of the user's inotify {what} are in use (raise fs.inotify.{sysctl})")
+}
+
+/// Why a directory isn't watched.
+#[derive(Debug)]
+pub(super) enum Unwatched {
+    /// There's no room for more: [`MAX_WATCHES`] are, or the user's
+    /// inotify watches are all in use.
+    Full,
+    /// There's no inotify instance.
+    NoInstance,
+    /// It couldn't be, as when it isn't there.
+    Failed(Errno),
+}
+
+impl std::fmt::Display for Unwatched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => f.write_str("there's no room for more watches"),
+            Self::NoInstance => f.write_str("inotify can't be used"),
+            Self::Failed(err) => write!(f, "{err}"),
+        }
     }
 }
 
@@ -632,7 +797,7 @@ impl Daemon {
     /// Watches `dir`, as a directory expanded, or as the git directory of
     /// the repository whose top is `repo`, unless there's no room.
     fn watch(&mut self, dir: &Path, repo: Option<&Path>) {
-        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
+        let Ok(watch) = self.add_watch(dir, MAX_WATCHES, FILES_HEAR) else {
             return;
         };
         let watched = self.explorers.watches.entry(watch).or_default();
@@ -655,7 +820,7 @@ impl Daemon {
         let Some(dir) = path.parent() else {
             return false;
         };
-        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
+        let Ok(watch) = self.add_watch(dir, MAX_WATCHES, FILES_HEAR) else {
             return false;
         };
         let watched = self.explorers.watches.entry(watch).or_default();
@@ -675,7 +840,7 @@ impl Daemon {
     /// for any more watches: how many servers may have is for
     /// [`super::watched`] to say. Returns whether it's watched.
     pub(super) fn add_server_watch(&mut self, server: ServerId, dir: &Path) -> bool {
-        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
+        let Ok(watch) = self.add_watch(dir, MAX_WATCHES, FILES_HEAR) else {
             return false;
         };
         let watched = self.explorers.watches.entry(watch).or_default();
@@ -735,44 +900,251 @@ impl Daemon {
         }
     }
 
-    /// Has inotify watch `dir`, the first time making the instance watches
-    /// are made with, unless there are `most` watches already. Returns the
-    /// watch, which is the one `dir` already had if it had one.
-    fn add_watch(&mut self, dir: &Path, most: usize) -> Option<i32> {
-        if self.explorers.inotify.is_none() {
-            let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
-            let made = inotify::init(flags).map_err(std::io::Error::from);
-            let registered = made.and_then(|fd| {
-                let token = self.register_fd(Some(fd.as_raw_fd()), Source::Files)?;
-                Ok((fd, token.expect("an fd was given")))
-            });
-            match registered {
-                Ok(inotify) => self.explorers.inotify = Some(inotify),
+    /// Watches the git directory `git_dir` for its index, for signs.
+    /// Returns whether it's watched.
+    pub(super) fn add_index_watch(&mut self, git_dir: &Path) -> bool {
+        if (self.explorers.watches.values())
+            .any(|watched| watched.index.as_deref() == Some(git_dir))
+        {
+            return true;
+        }
+        match self.add_watch(git_dir, usize::MAX, INDEX_HEAR) {
+            Ok(watch) => {
+                let watched = self.explorers.watches.entry(watch).or_default();
+                watched.index = Some(git_dir.to_owned());
+                true
+            }
+            Err(err) => {
+                log::warn!("{} won't be watched: {err}", git_dir.display());
+                false
+            }
+        }
+    }
+
+    /// No longer watches the git directory `git_dir` for its index.
+    pub(super) fn remove_index_watch(&mut self, git_dir: &Path) {
+        self.unwatch(|watched| {
+            if watched.index.as_deref() == Some(git_dir) {
+                watched.index = None;
+            }
+        });
+    }
+
+    /// Watches the directories the display's sockets are in that aren't
+    /// watched, if the display is followed. One that can't be is tried
+    /// again later, and one watched again has the display read again, as
+    /// a socket may have come or gone meanwhile. X's sockets' directory,
+    /// if it isn't there, isn't tried again: a Wayland desktop makes none.
+    pub(super) fn watch_display(&mut self) {
+        let Some(display) = &self.display else { return };
+        let dirs: Vec<(PathBuf, display::Watched)> = (display.dirs())
+            .map(|(dir, watched)| (dir.to_owned(), watched))
+            .collect();
+        let again = self.explorers.display_retry.take();
+        let mut failed = false;
+        let mut made = false;
+        for (dir, kind) in dirs {
+            let explorers = &self.explorers;
+            if (explorers.watches.values()).any(|watched| watched.display == Some(kind)) {
+                continue;
+            }
+            match self.add_watch(&dir, usize::MAX, DISPLAY_HEAR) {
+                Ok(watch) => {
+                    let watched = self.explorers.watches.entry(watch).or_default();
+                    watched.display = Some(kind);
+                    made = true;
+                }
+                Err(Unwatched::Failed(Errno::NOENT)) if kind == display::Watched::X => {
+                    log::debug!("display: {} isn't there to watch", dir.display());
+                }
                 Err(err) => {
-                    log::warn!("changes to files won't be seen: {err}");
-                    return None;
+                    if again.is_none() {
+                        log::info!(
+                            "display: {} can't be watched ({err}), so the display is read \
+                             again as terminals are made, and it's tried again later",
+                            dir.display()
+                        );
+                    }
+                    failed = true;
                 }
             }
         }
-        let (inotify, _) = self.explorers.inotify.as_ref()?;
+        if failed {
+            let wait = again.map_or(RETRY_LEAST, |(_, wait)| (wait * 2).min(RETRY_MOST));
+            self.explorers.display_retry = Some((Instant::now() + wait, wait));
+        } else if again.is_some() {
+            log::info!("display: its sockets are watched again");
+        }
+        if made
+            && again.is_some()
+            && let Some(display) = &self.display
+        {
+            display.sockets_changed();
+        }
+    }
+
+    /// When the instance, or the display's directories, are next tried
+    /// again, if they're to be.
+    pub(super) fn next_watch_retry(&self) -> Option<Instant> {
+        let explorers = &self.explorers;
+        (explorers
+            .instance_retry
+            .iter()
+            .chain(&explorers.display_retry))
+        .map(|(due, _)| *due)
+        .min()
+    }
+
+    /// Has the instance, or the display's directories, tried again now,
+    /// if they're to be, for tests.
+    #[cfg(test)]
+    pub(super) fn retry_watches_now(&mut self) {
+        let now = Instant::now();
+        let explorers = &mut self.explorers;
+        for (due, _) in [&mut explorers.instance_retry, &mut explorers.display_retry]
+            .into_iter()
+            .flatten()
+        {
+            *due = now;
+        }
+        self.retry_watches();
+    }
+
+    /// Tries again to make the instance, or watch the display's
+    /// directories, if it's time.
+    pub(super) fn retry_watches(&mut self) {
+        let now = Instant::now();
+        if self
+            .explorers
+            .instance_retry
+            .is_some_and(|(due, _)| due <= now)
+        {
+            self.make_instance();
+        }
+        if self
+            .explorers
+            .display_retry
+            .is_some_and(|(due, _)| due <= now)
+        {
+            self.watch_display();
+        }
+    }
+
+    /// Makes the inotify instance, unless there is one. If it can't be,
+    /// says so once, and has it tried again later; once it's made after
+    /// that, everything is watched again.
+    fn make_instance(&mut self) -> bool {
+        if self.explorers.inotify.is_some() {
+            return true;
+        }
+        let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
+        let made = inotify::init(flags).map_err(std::io::Error::from);
+        #[cfg(test)]
+        let made = made.and_then(|fd| {
+            if self.explorers.refuse_instance {
+                Err(Errno::MFILE.into())
+            } else {
+                Ok(fd)
+            }
+        });
+        let registered = made.and_then(|fd| {
+            let token = self.register_fd(Some(fd.as_raw_fd()), Source::Files)?;
+            Ok((fd, token.expect("an fd was given")))
+        });
+        let explorers = &mut self.explorers;
+        match registered {
+            Ok(inotify) => {
+                explorers.inotify = Some(inotify);
+                explorers.out_of_instances = None;
+                if explorers.instance_retry.take().is_some() {
+                    log::info!("changes to files can be watched again");
+                    self.watch_everything_again();
+                }
+                true
+            }
+            Err(err) => {
+                // Said once, until it's made.
+                if explorers.instance_retry.is_none() {
+                    let why = if err.raw_os_error() == Some(Errno::MFILE.raw_os_error()) {
+                        crate::INOTIFY_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        out_of("instances", "max_user_instances")
+                    } else {
+                        format!("inotify can't be used: {err}")
+                    };
+                    log::warn!(
+                        "changes to files won't be seen, and are watched for again later: {why}"
+                    );
+                    explorers.out_of_instances = Some(why);
+                    explorers.instance_retry = Some((Instant::now() + RETRY_LEAST, RETRY_LEAST));
+                } else if let Some((due, wait)) = &mut explorers.instance_retry
+                    && *due <= Instant::now()
+                {
+                    *wait = (*wait * 2).min(RETRY_MOST);
+                    *due = Instant::now() + *wait;
+                }
+                false
+            }
+        }
+    }
+
+    /// Watches again everything that wants watching, now the instance has
+    /// been made after it couldn't be, and looks again at what may have
+    /// changed meanwhile: buffers' files, expanded directories, which are
+    /// listed again, repositories, the indexes of buffers' repositories,
+    /// what language servers asked to hear of, and the display.
+    fn watch_everything_again(&mut self) {
+        self.rewatch_now();
+        let now = Instant::now();
+        for entry in self.explorers.dirs.values_mut() {
+            if !entry.watched {
+                entry.due.get_or_insert(now);
+            }
+        }
+        let repos: Vec<(PathBuf, PathBuf)> = (self.explorers.repos.iter())
+            .map(|(top, repo)| (top.clone(), repo.git_dir.clone()))
+            .collect();
+        for (top, git_dir) in repos {
+            self.watch(&git_dir, Some(&top));
+            if let Some(repo) = self.explorers.repos.get_mut(&top) {
+                repo.due.get_or_insert(now);
+            }
+        }
+        self.watch_indexes_again();
+        self.watch_for_servers_again();
+        self.watch_diagnosed_again();
+        self.watch_display();
+        if let Some(display) = &self.display {
+            display.sockets_changed();
+        }
+    }
+
+    /// Has inotify watch `dir`, hearing what `hear` says, the first time
+    /// making the instance, unless there are `most` watches already.
+    /// Returns the watch, which is the one `dir` already had if it had
+    /// one: what it hears then is added to what it heard.
+    pub(super) fn add_watch(
+        &mut self,
+        dir: &Path,
+        most: usize,
+        hear: WatchFlags,
+    ) -> Result<i32, Unwatched> {
+        if !self.make_instance() {
+            return Err(Unwatched::NoInstance);
+        }
+        let (inotify, _) = (self.explorers.inotify.as_ref()).ok_or(Unwatched::NoInstance)?;
         // Added to what's watched already, as a directory reached by
-        // another path, or a git directory expanded, is one watch.
-        let flags = inotify::WatchFlags::CREATE
-            | inotify::WatchFlags::DELETE
-            | inotify::WatchFlags::MOVED_FROM
-            | inotify::WatchFlags::MOVED_TO
-            | inotify::WatchFlags::ATTRIB
-            | inotify::WatchFlags::CLOSE_WRITE
-            | inotify::WatchFlags::DELETE_SELF
-            | inotify::WatchFlags::MOVE_SELF
-            | inotify::WatchFlags::EXCL_UNLINK
-            | inotify::WatchFlags::ONLYDIR
-            | inotify::WatchFlags::MASK_ADD;
+        // another path, or watched for something else, is one watch.
+        let flags = hear | WatchFlags::ONLYDIR | WatchFlags::MASK_ADD;
         let full = self.explorers.watches.len() >= most;
         match inotify::add_watch(inotify, dir, flags) {
             // The directory's watch already, which costs nothing more, or a
             // new one with room for it.
-            Ok(watch) if !full || self.explorers.watches.contains_key(&watch) => Some(watch),
+            Ok(watch) if !full || self.explorers.watches.contains_key(&watch) => {
+                if !self.explorers.watches.contains_key(&watch) {
+                    self.explorers.out_of_watches = None;
+                }
+                Ok(watch)
+            }
             Ok(watch) => {
                 if let Err(err) = inotify::remove_watch(inotify, watch) {
                     log::debug!("a watch couldn't be taken away: {err}");
@@ -782,13 +1154,32 @@ impl Daemon {
                     log::warn!("{MAX_WATCHES} directories are watched: no more will be");
                     self.explorers.full = true;
                 }
-                None
+                Err(Unwatched::Full)
+            }
+            Err(Errno::NOSPC) => {
+                crate::INOTIFY_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if self.explorers.out_of_watches.is_none() {
+                    let why = out_of("watches", "max_user_watches");
+                    log::warn!(
+                        "changes in {} and other directories won't be seen: {why}",
+                        dir.display()
+                    );
+                    self.explorers.out_of_watches = Some(why);
+                }
+                Err(Unwatched::Full)
             }
             Err(err) => {
                 log::debug!("{} won't be watched: {err}", dir.display());
-                None
+                Err(Unwatched::Failed(err))
             }
         }
+    }
+
+    /// Why directories may not be watched now, if it's that the user's
+    /// inotify instances or watches are all in use.
+    pub(super) fn out_of_inotify(&self) -> Option<&str> {
+        let explorers = &self.explorers;
+        (explorers.out_of_instances.as_deref()).or(explorers.out_of_watches.as_deref())
     }
 
     /// Notes that there may be room for more watches again, as some have
@@ -828,7 +1219,8 @@ impl Daemon {
     }
 
     /// Reads what inotify says has changed in the directories watched,
-    /// and has those listed again, and git asked again, in good time.
+    /// and has those listed again, and git asked again, in good time; and
+    /// tells signs of indexes changed, and the display of sockets.
     pub(super) fn read_files_changes(&mut self) {
         let Some((inotify, _)) = &self.explorers.inotify else {
             return;
@@ -839,6 +1231,10 @@ impl Daemon {
         let mut index: Vec<i32> = Vec::new();
         let mut gone: Vec<i32> = Vec::new();
         let mut everything = false;
+        // The git directories whose index changed, for signs, and whether
+        // a display's socket appeared or went.
+        let mut indexes: Vec<PathBuf> = Vec::new();
+        let mut sockets = false;
         let mut buffer = [MaybeUninit::uninit(); 4096];
         let mut reader = inotify::Reader::new(inotify, &mut buffer);
         // Read until there's nothing left: the loop hears of more only
@@ -854,35 +1250,31 @@ impl Daemon {
                 }
             };
             let flags = event.events();
-            if flags.contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
+            if flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                 everything = true;
                 continue;
             }
-            if flags.contains(inotify::ReadFlags::IGNORED) {
+            if flags.contains(ReadFlags::IGNORED) {
                 gone.push(event.wd());
                 continue;
             }
             let wd = event.wd();
-            if (event.file_name()).is_some_and(|name| name.to_bytes() == b"index") {
+            let name = event.file_name().map(std::ffi::CStr::to_bytes);
+            if name == Some(b"index") {
                 index.push(wd);
             }
-            let listing = flags.intersects(
-                inotify::ReadFlags::CREATE
-                    | inotify::ReadFlags::DELETE
-                    | inotify::ReadFlags::MOVED_FROM
-                    | inotify::ReadFlags::MOVED_TO
-                    | inotify::ReadFlags::ATTRIB
-                    | inotify::ReadFlags::DELETE_SELF
-                    | inotify::ReadFlags::MOVE_SELF,
-            );
+            if let Some(watched) = self.explorers.watches.get(&wd) {
+                watched.heard_by_others(flags, name, &mut indexes, &mut sockets);
+            }
+            let listing = flags.intersects(RELIST);
             if listing {
                 relist.push(wd);
             }
-            if listing || flags.contains(inotify::ReadFlags::CLOSE_WRITE) {
-                let name = event.file_name().map(|name| name.to_bytes().to_vec());
-                touched.push((wd, name, flags));
+            if listing || flags.contains(ReadFlags::CLOSE_WRITE) {
+                touched.push((wd, name.map(<[u8]>::to_vec), flags));
             }
         }
+        self.tell_others(indexes, sockets, everything);
         self.files_touched(&touched, everything);
         let now = Instant::now();
         let explorers = &mut self.explorers;
@@ -940,6 +1332,22 @@ impl Daemon {
         self.forget_watches(&gone);
     }
 
+    /// Tells signs that the indexes in the git directories `indexes` have
+    /// changed, and the display that a socket has appeared or gone, if
+    /// `sockets`. With `everything`, changes were lost: any may have.
+    fn tell_others(&mut self, mut indexes: Vec<PathBuf>, mut sockets: bool, everything: bool) {
+        if everything {
+            indexes = (self.explorers.watches.values())
+                .filter_map(|watched| watched.index.clone())
+                .collect();
+            sockets = true;
+        }
+        self.indexes_changed(indexes);
+        if sockets && let Some(display) = &self.display {
+            display.sockets_changed();
+        }
+    }
+
     /// Hands what's `touched` on to the buffers and language servers whose
     /// files it may be. With `everything`, changes were lost.
     fn files_touched(&mut self, touched: &[Touched], everything: bool) {
@@ -953,13 +1361,13 @@ impl Daemon {
     /// at the path it had, nor are those in it: they're watched afresh
     /// where they are now, if that's anywhere it watches.
     fn server_files_touched(&mut self, touched: &[Touched], everything: bool) {
-        let mut served: Vec<(ServerId, PathBuf, inotify::ReadFlags)> = Vec::new();
+        let mut served: Vec<(ServerId, PathBuf, ReadFlags)> = Vec::new();
         let mut moved: Vec<(ServerId, PathBuf)> = Vec::new();
         for (wd, name, flags) in touched {
             let Some(watched) = self.explorers.watches.get(wd) else {
                 continue;
             };
-            if flags.contains(inotify::ReadFlags::MOVE_SELF) {
+            if flags.contains(ReadFlags::MOVE_SELF) {
                 moved.extend(watched.servers.iter().cloned());
             }
             let Some(name) = name else { continue };
@@ -1010,8 +1418,16 @@ impl Daemon {
         let now = Instant::now();
         let mut buffers = Vec::new();
         let mut servers = Vec::new();
+        let mut display = false;
         for wd in gone {
             if let Some(watched) = explorers.watches.remove(wd) {
+                if let Some(kind) = watched.display {
+                    log::info!(
+                        "display: the {kind:?} sockets' directory is no longer watched, so the \
+                         display is read again as terminals are made, and it's tried again later"
+                    );
+                    display = true;
+                }
                 for dir in watched.dirs {
                     if let Some(entry) = explorers.dirs.get_mut(&dir) {
                         entry.watched = false;
@@ -1028,6 +1444,10 @@ impl Daemon {
         self.watches_gone();
         self.buffer_files_unwatched(&buffers);
         self.server_dirs_unwatched(servers);
+        if display && self.explorers.display_retry.is_none() {
+            let wait = RETRY_LEAST;
+            self.explorers.display_retry = Some((Instant::now() + wait, wait));
+        }
     }
 
     /// Has git asked again about the repository the file at `path` is in,
@@ -1320,6 +1740,7 @@ impl Daemon {
             return;
         }
         let repo = Repo {
+            git_dir: git_dir.clone(),
             marks: None,
             asking: false,
             last: None,
