@@ -345,37 +345,49 @@ impl State {
         self.request(Request::WatchWorkspaces, Asked::Quiet);
         self.request(Request::WatchChats, Asked::Quiet);
         self.list_terminals();
-        self.outbox.push(ClientMessage::Present { here: self.here });
         if let Some(open) = &mut self.open {
+            open.history_pending = None;
+            open.unacknowledged = false;
+        }
+        if let Some(term) = &mut self.term {
+            // Keys go again: those turned down while lost are of the past.
+            term.refused = 0;
+            term.unacknowledged = false;
+            term.fit = Fit::Off;
+            term.dirty.header = true;
+        }
+        self.dirty.home = true;
+    }
+
+    /// The workspaces came, the first time since the connection opened,
+    /// from the run of the daemon the page's numbers are of: says whether
+    /// the user is there, follows again the chat or terminal shown, and
+    /// tells what was typed meanwhile.
+    fn run_confirmed_same(&mut self) {
+        self.outbox.push(ClientMessage::Present { here: self.here });
+        if let Some(open) = &self.open {
             let first = open
                 .view
                 .as_ref()
                 .and_then(View::chat)
                 .map(|n| n.first_turn);
-            open.history_pending = None;
-            open.unacknowledged = false;
             let terminal = open.id;
             self.request(
                 Request::AttachRecent { terminal, first },
                 Asked::Doing("opening the chat"),
             );
         }
-        if let Some(term) = &mut self.term {
-            // Keys go again: those turned down while lost are of the past.
-            term.refused = 0;
-        }
-        if let Some(term) = self.term.as_mut().filter(|term| !term.paused) {
-            term.unacknowledged = false;
-            term.fit = Fit::Off;
-            term.dirty.header = true;
-            let terminal = term.id;
+        if let Some(terminal) = (self.term.as_ref())
+            .filter(|term| !term.paused)
+            .map(|term| term.id)
+        {
             self.select_terminal(terminal);
             self.request(
                 Request::Attach { terminal },
                 Asked::Doing("opening the terminal"),
             );
         }
-        self.dirty.home = true;
+        self.tell_draft();
     }
 
     /// The connection was lost, and is tried again in `retry` seconds.
@@ -403,6 +415,7 @@ impl State {
     pub(crate) fn connected_now(&mut self) {
         self.connected();
         self.run_confirmed = true;
+        self.run_confirmed_same();
     }
 
     /// Takes in a message from the daemon.
@@ -582,7 +595,7 @@ impl State {
     fn workspaces_came(&mut self, workspaces: Workspaces) {
         let run = (workspaces.machine.as_ref()).map(|machine| (machine.id, machine.run));
         self.workspaces = workspaces;
-        let confirmed = !std::mem::replace(&mut self.run_confirmed, true);
+        let confirming = !self.run_confirmed;
         // From a daemon that doesn't say, there's nothing to compare.
         if let Some(run) = run
             && self.run != Some(run)
@@ -595,14 +608,9 @@ impl State {
             }
             self.run = Some(run);
         }
-        if confirmed {
-            if let Some(terminal) = (self.term.as_ref())
-                .filter(|term| !term.paused)
-                .map(|term| term.id)
-            {
-                self.select_terminal(terminal);
-            }
-            self.tell_draft();
+        self.run_confirmed = true;
+        if confirming {
+            self.run_confirmed_same();
         }
     }
 
@@ -614,8 +622,15 @@ impl State {
     /// none is sent to, or told as the draft of, a chat it wasn't for.
     pub fn started_afresh(&mut self) {
         let shown = self.open.is_some() || self.term.is_some();
-        self.close_chat();
-        self.close_terminal();
+        if self.run_confirmed {
+            self.close_chat();
+            self.close_terminal();
+        } else {
+            // Not followed again on this connection: nothing to let go.
+            self.open = None;
+            self.term = None;
+            self.dirty.home = true;
+        }
         for (asked, _) in &mut self.asked {
             if matches!(asked, Asked::Doing(_)) {
                 *asked = Asked::Quiet;
@@ -1286,7 +1301,8 @@ impl State {
     /// Tells the daemon whether the user is looking at the app.
     pub fn present(&mut self, here: bool) {
         self.here = here;
-        if self.online == Online::Open {
+        // Said once the run is confirmed, if not now.
+        if self.online == Online::Open && self.run_confirmed {
             self.outbox.push(ClientMessage::Present { here });
         }
     }
@@ -1631,6 +1647,15 @@ mod tests {
         state.lost(1);
         state.connected();
         state.take_outbox();
+        // Typed while the page reconnects, for the chat it showed.
+        type_in_box(&mut state, "the staging password is: hunter2");
+        state.present(true);
+        state.tell_draft();
+        assert!(
+            (state.take_outbox().iter())
+                .all(|message| !matches!(message, ClientMessage::Present { .. })),
+            "nothing is said before the run is confirmed"
+        );
         let answers = [
             Response::Workspaces(workspaces_of_run(2)),
             Response::Chats(Vec::new()),
@@ -1643,17 +1668,10 @@ mod tests {
         assert_eq!(state.run(), Some(2));
         assert!(state.open.is_none() && state.term.is_none());
         assert_eq!(shown(&state), "");
-        assert_eq!(
-            state.take_outbox(),
-            [ClientMessage::Request(Request::Detach {
-                terminal: TerminalId(4)
-            })]
-        );
-        // The attach sent before the daemon was known to be new, answered
-        // either way: nothing is shown or said of it.
-        state.receive(ServerMessage::Response(Response::Error(
-            clackatoo_protocol::Error::NoSuchTerminal(TerminalId(4)),
-        )));
+        // Chat 4 was never followed again: there's nothing to let go, and
+        // only that the user is there is said.
+        assert_eq!(state.take_outbox(), [ClientMessage::Present { here: true }]);
+        // An update of chat 4 still on its way is acknowledged, not shown.
         state.receive(kept(""));
         assert!(state.open.is_none());
         let note = state.note.as_deref().unwrap_or_default();
@@ -1683,13 +1701,8 @@ mod tests {
         )));
         assert!(state.term.is_none());
         assert_eq!(state.run_news, Some(RunNews::Restarted));
-        assert!(
-            state
-                .take_outbox()
-                .contains(&ClientMessage::Request(Request::Detach {
-                    terminal: TerminalId(9)
-                })),
-        );
+        // Terminal 9 was never followed again, nor focused.
+        assert_eq!(state.take_outbox(), [ClientMessage::Present { here: true }]);
         // Keys typed now reach no terminal.
         state.type_key(&Key::Text("y".into()), Modifiers::default());
         assert!(typed(&mut state).is_empty());
@@ -1901,6 +1914,16 @@ mod tests {
                 ClientMessage::Request(Request::WatchWorkspaces),
                 ClientMessage::Request(Request::WatchChats),
                 ClientMessage::Request(Request::ListTerminals),
+            ]
+        );
+        // Once the workspaces say the run is the page's, the chat shown is
+        // followed again.
+        state.receive(ServerMessage::Response(Response::Workspaces(
+            Workspaces::default(),
+        )));
+        assert_eq!(
+            state.take_outbox(),
+            [
                 ClientMessage::Present { here: true },
                 ClientMessage::Request(Request::AttachRecent {
                     first: None,

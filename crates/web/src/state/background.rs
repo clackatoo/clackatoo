@@ -46,6 +46,10 @@ impl State {
     /// Says the failures of every workspace's background tabs were seen,
     /// keeping them for the list to go on saying while it's shown.
     fn see_background_failures(&mut self) {
+        // Tab numbers too may be another run's.
+        if !self.run_confirmed {
+            return;
+        }
         let mut seen: Vec<WorkspaceId> = Vec::new();
         for workspace in &self.workspaces.list {
             for background in &workspace.background {
