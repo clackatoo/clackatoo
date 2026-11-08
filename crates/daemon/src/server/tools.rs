@@ -2100,6 +2100,7 @@ impl Daemon {
         self.tools.talk.forget(terminal);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
+        self.forget_activities_of(terminal);
         self.drop_browser_acts(terminal, "the chat has closed");
         self.chat_left_browser(terminal);
         if let Some((window, _)) = self.tools.native.remove(&terminal) {

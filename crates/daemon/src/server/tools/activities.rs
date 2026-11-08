@@ -8,8 +8,14 @@ use clackatoo_term::Progress;
 use super::{Commanded, Daemon, Source};
 use crate::chat::{Message, now};
 
-const MAX_PER_CHAT: usize = 64;
+/// The most activities running at once, per chat and in all.
 const MAX_RUNNING: usize = 8;
+const MOST_RUNNING: usize = 64;
+
+/// The most finished activities kept, newest first, per chat and in all:
+/// those older are let go, with their ids, as each new one starts.
+const KEPT_PER_CHAT: usize = 16;
+const KEPT: usize = 64;
 
 use crate::saved::Operation as Record;
 
@@ -41,17 +47,9 @@ impl Daemon {
             }
             return self.read_activities(chat, Some(id));
         }
-        let own: Vec<_> = self
-            .tools
-            .activities
-            .iter()
-            .filter(|r| r.activity.owner == chat)
-            .collect();
-        if self.tools.activities.len() >= 128
-            || own.len() >= MAX_PER_CHAT
-            || own.iter().filter(|r| r.activity.state.active()).count() >= MAX_RUNNING
-        {
-            return Err("Activity limit reached (64 retained, 8 running per chat). Inspect existing work before starting more.".into());
+        self.forget_old_activities();
+        if let Some(why) = self.too_many_running(chat) {
+            return Err(why);
         }
         // Unmarked shells cannot provide a reliable lifecycle.
         if !crate::shell::marks(&self.config.shell, self.config.shell_integration.as_deref()) {
@@ -121,6 +119,66 @@ impl Daemon {
             }
         }
         self.read_activities(chat, Some(id))
+    }
+
+    /// Why the chat `chat` may start no more activities now, if it may
+    /// not: as many run already, of its own or in all. Those finished
+    /// don't count: only so many are kept (see
+    /// [`Self::forget_old_activities`]).
+    fn too_many_running(&self, chat: TerminalId) -> Option<String> {
+        let running = |r: &&Record| r.activity.state.active();
+        let all = self.tools.activities.iter().filter(running).count();
+        let own = (self.tools.activities.iter())
+            .filter(|r| r.activity.owner == chat)
+            .filter(running)
+            .count();
+        (own >= MAX_RUNNING || all >= MOST_RUNNING).then(|| {
+            format!(
+                "Activity limit reached ({MAX_RUNNING} running per chat, {MOST_RUNNING} in all). \
+                 Wait for or cancel existing work before starting more."
+            )
+        })
+    }
+
+    /// Lets go of finished activities past the newest [`KEPT_PER_CHAT`]
+    /// of each chat's and [`KEPT`] in all, with their ids: one reused
+    /// after that starts afresh. Those running are always kept.
+    pub(in crate::server) fn forget_old_activities(&mut self) {
+        let mut kept_of = std::collections::HashMap::new();
+        let mut kept = 0;
+        let mut keep = vec![true; self.tools.activities.len()];
+        let mut owners = std::collections::BTreeSet::new();
+        for (at, record) in self.tools.activities.iter().enumerate().rev() {
+            if record.activity.state.active() {
+                continue;
+            }
+            let of = kept_of.entry(record.activity.owner).or_insert(0);
+            if *of < KEPT_PER_CHAT && kept < KEPT {
+                *of += 1;
+                kept += 1;
+            } else {
+                keep[at] = false;
+                owners.insert(record.activity.owner);
+            }
+        }
+        if owners.is_empty() {
+            return;
+        }
+        let mut keep = keep.into_iter();
+        (self.tools.activities).retain(|_| keep.next().unwrap_or(true));
+        for owner in owners {
+            self.publish_activities(owner);
+        }
+    }
+
+    /// The chat `chat` has closed: its activities go, as nothing can read
+    /// them now. What they run in the background goes on, as the user's.
+    pub(in crate::server) fn forget_activities_of(&mut self, chat: TerminalId) {
+        let had = self.tools.activities.len();
+        (self.tools.activities).retain(|r| r.activity.owner != chat);
+        if self.tools.activities.len() != had {
+            self.keep_soon();
+        }
     }
 
     pub(in crate::server) fn activities_written(&mut self, serial: u64) {
@@ -194,6 +252,8 @@ impl Daemon {
             owners.insert(owner);
             self.tools.activities.push(r);
         }
+        // An older build kept them all.
+        self.forget_old_activities();
         for owner in owners {
             self.publish_activities(owner);
         }
@@ -438,6 +498,8 @@ impl Daemon {
                 );
             }
         }
+        // An older build kept them all.
+        self.forget_old_activities();
         for owner in owners {
             self.publish_activities(owner);
         }
@@ -478,7 +540,9 @@ impl Daemon {
         } else if own.is_none_or(|c| c.limits().no_commands()) {
             "Read-only: starting and cancelling jobs is refused".into()
         } else {
-            format!("Available; {MAX_RUNNING} running / {MAX_PER_CHAT} retained per chat")
+            format!(
+                "Available; {MAX_RUNNING} running / last {KEPT_PER_CHAT} finished kept per chat"
+            )
         };
         let rows = vec![
             ("Harness tools", format!("{tools:?}; individual calls still enforce project and command permissions")),
@@ -585,6 +649,65 @@ mod tests {
         assert_eq!(r.activity.turn, uid.0);
         assert_eq!(hosted.node().activities[0].turn, 3);
         assert_eq!(daemon.saved_activities()[0].activity.turn, 3);
+    }
+
+    /// Finished activities don't fill the caps for good: only the newest
+    /// are kept, per chat and in all, those running always, and a chat
+    /// that closes takes its own with it (CLACKA-220).
+    #[test]
+    fn only_so_many_finished_activities_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let (_, records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
+        let record = |owner: TerminalId, n: usize, state: ActivityState| {
+            let mut record = records[0].clone();
+            record.activity.owner = owner;
+            record.activity.id = format!("op-{owner}-{n}");
+            record.activity.state = state;
+            record
+        };
+        let b = TerminalId(77);
+        for n in 0..100 {
+            let owner = if n % 2 == 0 { a } else { b };
+            (daemon.tools.activities).push(record(owner, n, ActivityState::Exited(0)));
+        }
+        (daemon.tools.activities).push(record(a, 100, ActivityState::Running));
+        assert!(
+            daemon.too_many_running(a).is_none(),
+            "finished ones don't count"
+        );
+        daemon.forget_old_activities();
+        let of = |daemon: &Daemon, owner: TerminalId| {
+            (daemon.tools.activities.iter())
+                .filter(|r| r.activity.owner == owner)
+                .map(|r| r.activity.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let kept = of(&daemon, a);
+        assert_eq!(kept.len(), KEPT_PER_CHAT + 1, "{kept:?}");
+        assert_eq!(kept.first().unwrap(), &format!("op-{a}-68"), "the newest");
+        assert!(kept.contains(&format!("op-{a}-100")), "running");
+        assert_eq!(of(&daemon, b).len(), KEPT_PER_CHAT);
+        // Seven more chats' newest fill what's kept in all.
+        for owner in 80..88 {
+            for n in 0..KEPT_PER_CHAT {
+                let owner = TerminalId(owner);
+                (daemon.tools.activities).push(record(owner, n, ActivityState::Exited(0)));
+            }
+        }
+        daemon.forget_old_activities();
+        let finished = (daemon.tools.activities.iter())
+            .filter(|r| !r.activity.state.active())
+            .count();
+        assert_eq!(finished, KEPT);
+        // As many running as may be, in a chat, hold the next.
+        for n in 0..MAX_RUNNING {
+            (daemon.tools.activities).push(record(b, 200 + n, ActivityState::Running));
+        }
+        assert!(daemon.too_many_running(b).is_some());
+        daemon.forget_activities_of(b);
+        assert!(of(&daemon, b).is_empty());
+        assert!(daemon.too_many_running(b).is_none());
     }
 
     #[test]
