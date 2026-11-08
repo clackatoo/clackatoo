@@ -1260,6 +1260,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "web.toml's lock_after sets how many wrong passwords lock pairing; a key it doesn't know is logged",
     },
     News {
+        id: "vim-visual-lines",
+        date: "2026-11-08",
+        lesson: "basics",
+        what: "As Vim's: visual D X C S R take whole lines, visual A types after the selection, r Enter breaks a line",
+    },
+    News {
         id: "y-to-end",
         date: "2026-11-08",
         lesson: "text-objects",
