@@ -2531,18 +2531,31 @@ pub(crate) fn unhidden(text: &str) -> String {
     // Whether the last character may take a supplementary variation
     // selector: it's an ideograph, and none has followed it yet.
     let mut selectable = false;
-    // The character before, to see what a joiner joins.
-    let mut before = None;
+    // Whether the last character shows as itself, and is past ASCII, so a
+    // joiner after it may join it to the next; and how many joiners have
+    // come in a row.
+    let (mut joinable, mut joiners) = (false, 0);
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         let was_selectable = std::mem::replace(&mut selectable, false);
-        let after = chars.clone().next();
-        let joins = [before, after]
-            .iter()
-            .all(|side| side.is_some_and(|side: char| !side.is_ascii()));
-        before = Some(ch);
+        if matches!(ch, '\u{200C}' | '\u{200D}') {
+            joiners += 1;
+            // What follows the joiners must show as itself too.
+            let joins = joinable
+                && joiners <= MOST_JOINERS
+                && (chars.clone())
+                    .find(|&next| !matches!(next, '\u{200C}' | '\u{200D}'))
+                    .is_some_and(|next| !next.is_ascii() && shows_itself(next));
+            if joins {
+                shown.push(ch);
+            } else {
+                push_shown(&mut shown, ch);
+            }
+            continue;
+        }
+        joiners = 0;
+        joinable = !ch.is_ascii() && shows_itself(ch);
         match ch {
-            '\u{200C}' | '\u{200D}' if joins => shown.push(ch),
             '\n' | '\t' => shown.push(ch),
             '\u{1F3F4}' => {
                 shown.push(ch);
@@ -2559,9 +2572,7 @@ pub(crate) fn unhidden(text: &str) -> String {
                 }
             }
             '\u{E0100}'..='\u{E01EF}' if was_selectable => shown.push(ch),
-            ch if ch.is_control() || bidi_control(ch) || hidden_letter(ch) || zero_width(ch) => {
-                push_shown(&mut shown, ch);
-            }
+            ch if !shows_itself(ch) => push_shown(&mut shown, ch),
             ch => {
                 selectable = ideograph(ch);
                 shown.push(ch);
@@ -2569,6 +2580,16 @@ pub(crate) fn unhidden(text: &str) -> String {
         }
     }
     shown
+}
+
+/// The most joiners in a row that [`unhidden`] leaves be: emoji and
+/// scripts need one at a time.
+const MOST_JOINERS: usize = 3;
+
+/// Whether [`unhidden`] shows `ch` as itself, where it doesn't keep it
+/// for what's around it, as a joiner or a flag's tags.
+fn shows_itself(ch: char) -> bool {
+    !(ch.is_control() || bidi_control(ch) || hidden_letter(ch) || zero_width(ch))
 }
 
 /// Whether `ch` shows nothing, and takes no room, so it could pad or
@@ -3389,6 +3410,15 @@ mod tests {
         assert_eq!(unhidden(family), family);
         let persian = "می\u{200c}خواهم";
         assert_eq!(unhidden(persian), persian);
+        // Joined to what's hidden, or too many in a row, they show.
+        assert_eq!(
+            unhidden("👩\u{200d}\u{202e}👩 \u{2066}\u{200d}👩"),
+            "👩<U+200D><U+202E>👩 <U+2066><U+200D>👩"
+        );
+        assert_eq!(
+            unhidden("👩\u{200d}\u{200d}\u{200d}\u{200d}👧"),
+            "👩\u{200d}\u{200d}\u{200d}<U+200D>👧"
+        );
         // Characters of no width elsewhere show.
         assert_eq!(
             unhidden("r\u{200b}m \u{feff}co\u{ad}op a\u{200d}b \u{2060}x\u{200c}"),
