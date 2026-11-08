@@ -1113,7 +1113,15 @@ impl UserShell {
     /// workspaces in `kept`, and moves to a shell in a pane of a
     /// workspace, as only panes are kept, once it shows a prompt.
     fn start_in_pane(shell: &Path, home: &Path, kept: &Path) -> Self {
-        let mut user = Self::start(shell, home, &[("CLACKATOO_WORKSPACES", kept)]);
+        Self::start_in_pane_with(shell, home, kept, &[])
+    }
+
+    /// As [`start_in_pane`](Self::start_in_pane), with `env` in the
+    /// daemon's environment too.
+    fn start_in_pane_with(shell: &Path, home: &Path, kept: &Path, env: &[(&str, &Path)]) -> Self {
+        let mut env = env.to_vec();
+        env.push(("CLACKATOO_WORKSPACES", kept));
+        let mut user = Self::start(shell, home, &env);
         let pane = clackatoo_protocol::PaneTerminal::New(clackatoo_protocol::NewTerminal {
             size: clackatoo_protocol::Size::new(120, 20).unwrap(),
             command: None,
@@ -1256,7 +1264,7 @@ fn shells_mark_what_they_run_with_a_secret_no_program_they_run_learns() {
 
 /// A shell traced from its start, by its startup files or by bash's
 /// `SHELLOPTS` in its environment, never prints the secret as its
-/// integration reads it.
+/// integration reads it, and still has it, to sign what it runs.
 #[test]
 fn shells_traced_from_their_start_never_print_the_secret() {
     /// A startup file, what it says, and the shell's environment.
@@ -1277,10 +1285,15 @@ fn shells_traced_from_their_start_never_print_the_secret() {
             let file = home.path().join(file);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, script).unwrap();
-            let mut user = UserShell::start(&shell, home.path(), env);
+            let kept = home.path().join("workspaces");
+            let mut user = UserShell::start_in_pane_with(&shell, home.path(), &kept, env);
             user.run("echo ran");
+            // Signed, so offered after a restart.
+            user.type_in(b"sleep 600\r");
+            user.wait_kept(&kept, "\"ran\": \"sleep 600\"", true);
             let text = user.text();
-            assert!(text.contains("echo ran\n"), "{name}: {text}");
+            let traced = text.contains("+ echo ran\n") || text.contains("> echo ran\n");
+            assert!(traced, "{name} {script:?} {env:?} isn't traced: {text}");
             // fish traces reading its environment, which may hold
             // secrets of this test's own.
             let ours: Vec<String> = std::env::vars().map(|(_, value)| value).collect();

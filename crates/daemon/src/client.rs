@@ -1318,7 +1318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_socket_another_user_listens_on_is_refused() {
+    fn only_a_peer_running_as_this_user_is_taken() {
         // Another user can't be had in a test, so the rule is tried alone.
         let (them, me) = (Uid::from_raw(1234), Uid::from_raw(1000));
         let refused = same_user(them, me).unwrap_err();
