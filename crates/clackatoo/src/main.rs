@@ -279,8 +279,9 @@ struct ConfigArgs {
 
 #[derive(Debug, Args)]
 struct BridgeArgs {
-    /// Stop the daemon that's running first, closing its terminals, as
-    /// when it's from another version of clackatoo.
+    /// Replace the daemon that's running first, as when it's from another
+    /// build: upgrade it if it can, keeping its terminals, or else stop it,
+    /// closing them.
     #[arg(long)]
     replace: bool,
 }
