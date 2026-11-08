@@ -1259,9 +1259,11 @@ fn shells_mark_what_they_run_with_a_secret_no_program_they_run_learns() {
 /// integration reads it.
 #[test]
 fn shells_traced_from_their_start_never_print_the_secret() {
+    /// A startup file, what it says, and the shell's environment.
+    type Traced<'a> = (&'a str, &'a str, &'a [(&'a str, &'a Path)]);
     for (shell, zshenv) in integrated_shells() {
         let name = shell.file_name().unwrap().to_string_lossy().into_owned();
-        let traced: &[(&str, &str, &[(&str, &Path)])] = match name.as_str() {
+        let traced: &[Traced] = match name.as_str() {
             "fish" => &[(".config/fish/config.fish", "set -g fish_trace 1\n", &[])],
             "zsh" => &[(".zshrc", "setopt xtrace\n", &[])],
             _ => &[
