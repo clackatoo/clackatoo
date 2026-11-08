@@ -60,6 +60,23 @@ const STARTS: u8 = 2;
 /// it's not started again until the program is there.
 const NOT_FOUND: u8 = u8::MAX;
 
+/// The program a server's command `name`s, by its absolute path: as given
+/// if it's one, else found in `$PATH`'s absolute directories, else where
+/// clackatoo installed it, in `servers`. Never one found from the folder
+/// it's run in, the project's, which anyone could have filled: not by an
+/// empty or relative directory of `$PATH`, nor by a relative path.
+fn server_program(name: &str, servers: Option<&Path>) -> Option<PathBuf> {
+    let found = match servers {
+        Some(servers) => clackatoo_syntax::servers::find_program(name, servers),
+        None => clackatoo_syntax::servers::on_path(name),
+    }?;
+    if !found.is_absolute() {
+        log::warn!("{name}: a language server is named by a bare name or an absolute path");
+        return None;
+    }
+    found.is_file().then_some(found)
+}
+
 /// A language server, its event-loop registrations, and what it's for.
 #[derive(Debug)]
 pub(super) struct ServerSlot {
@@ -514,34 +531,24 @@ impl Daemon {
                 servers.started.len() - 1
             });
         let started = &mut servers.started[index].2;
-        let name = command.first().map_or("language server", String::as_str);
-        if *started == NOT_FOUND {
-            // Looked for again, as it may have been installed meanwhile.
-            let found = if name.contains('/') {
-                Path::new(name).is_file()
-            } else {
-                match self.config.servers.as_deref() {
-                    Some(servers) => clackatoo_syntax::servers::find_program(name, servers),
-                    None => clackatoo_syntax::servers::on_path(name),
-                }
-                .is_some()
-            };
-            if !found {
-                return None;
-            }
-            *started = 0;
-        }
-        if *started >= STARTS {
+        if *started != NOT_FOUND && *started >= STARTS {
             return None;
+        }
+        let name = command.first()?;
+        // Looked for each time, as it may have been installed meanwhile.
+        let Some(program) = server_program(name, self.config.servers.as_deref()) else {
+            if *started != NOT_FOUND {
+                log::warn!("{name} isn't installed, so it isn't started");
+                *started = NOT_FOUND;
+            }
+            return None;
+        };
+        if *started == NOT_FOUND {
+            *started = 0;
         }
         *started += 1;
         let mut args: Vec<OsString> = command.iter().map(OsString::from).collect();
-        // Not on PATH, it may be where clackatoo installed it.
-        if let Some(program) = (self.config.servers.as_deref())
-            .and_then(|servers| clackatoo_syntax::servers::find_program(name, servers))
-        {
-            args[0] = program.into_os_string();
-        }
+        args[0] = program.into_os_string();
         let trace = self.config.lsp_trace.as_deref();
         // Not `display_env`: `servers` is borrowed.
         let display = self.display.as_ref().map(crate::display::Display::current);

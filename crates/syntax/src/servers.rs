@@ -17,8 +17,10 @@
 //! it into place. What an install cut off by an exit or an upgrade left
 //! beside is removed by the next install of the same program.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -458,16 +460,37 @@ fn make_executable(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, permissions)
 }
 
-/// The program called `name` on `PATH`, if it's there.
+/// The program called `name` on `PATH`, if it's in one of its absolute
+/// directories (see [`absolute_only`]), by its absolute path.
 #[must_use]
 pub fn on_path(name: &str) -> Option<PathBuf> {
+    find_on(name, &std::env::var_os("PATH")?)
+}
+
+/// `path`, a `$PATH`, with only its absolute directories. An empty or
+/// relative one would find a program in whatever folder it's looked for
+/// from, or run in, which may be a project anyone could have filled, so
+/// a program is looked for only in the others, run by the absolute path
+/// found, and given this `$PATH`.
+#[must_use]
+pub fn absolute_only(path: &OsStr) -> OsString {
+    let kept: Vec<&[u8]> = (path.as_bytes().split(|&byte| byte == b':'))
+        .filter(|dir| dir.starts_with(b"/"))
+        .collect();
+    OsString::from(OsStr::from_bytes(&kept.join(&b':')))
+}
+
+/// The first file called `name` that may be run in the absolute
+/// directories of `path`, a `$PATH`.
+#[must_use]
+pub fn find_on(name: &str, path: &OsStr) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| {
-            fs::metadata(candidate)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    (path.as_bytes().split(|&byte| byte == b':'))
+        .filter(|dir| dir.starts_with(b"/"))
+        .map(|dir| Path::new(OsStr::from_bytes(dir)).join(name))
+        .find(|program| {
+            fs::metadata(program)
+                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
         })
 }
 
@@ -512,6 +535,30 @@ mod tests {
             assert_eq!(server.command[0], program);
             assert!(known_server(program).is_some());
         }
+    }
+
+    #[test]
+    fn a_program_is_found_only_in_paths_absolute_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            absolute_only(OsStr::new(":/usr/bin:.:bin::/bin:")),
+            OsStr::new("/usr/bin:/bin")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("rust-analyzer");
+        // Not run, only looked for.
+        fs::write(&program, "").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let here = std::env::current_dir().unwrap();
+        // The same directory, named from where this runs, as an empty or
+        // relative directory of `$PATH` names whatever folder it's in.
+        let up = "../".repeat(here.components().count());
+        let relative = format!("{up}{}", dir.path().strip_prefix("/").unwrap().display());
+        assert!(Path::new(&relative).join("rust-analyzer").is_file());
+        let path = OsString::from(format!("{relative}::/nowhere"));
+        assert_eq!(find_on("rust-analyzer", &path), None);
+        let path = OsString::from(format!("{relative}:{}", dir.path().display()));
+        assert_eq!(find_on("rust-analyzer", &path), Some(program));
     }
 
     #[test]

@@ -173,6 +173,26 @@ struct Capped {
 /// one set aside, at most about twice this is kept for each agent.
 pub(crate) const AGENT_TRACE_CAP: u64 = 16 * 1024 * 1024;
 
+/// What runs `command`, in `cwd` if given. It's given only the absolute
+/// directories of the daemon's `$PATH` (see
+/// [`clackatoo_syntax::servers::absolute_only`]), so neither it, if it's
+/// named by a bare name, nor what it runs is found in the folder it runs
+/// in, a project anyone could have filled.
+fn command_for(command: &[OsString], cwd: Option<&Path>) -> io::Result<Command> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command"))?;
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", clackatoo_syntax::servers::absolute_only(&path));
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    Ok(command)
+}
+
 /// How many of a program's last lines of stderr are kept.
 const LAST_ERRORS: usize = 4;
 
@@ -191,18 +211,11 @@ impl Peer {
         framing: Framing,
         parser: &Parser,
     ) -> io::Result<Self> {
-        let (program, args) = command
-            .split_first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command"))?;
-        let mut command = Command::new(program);
+        let mut command = command_for(command, cwd)?;
         command
-            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
         if let Some(display) = display {
             display.apply(&mut command);
         }
@@ -1985,6 +1998,25 @@ mod tests {
         inbox.parsed.lock().unwrap().finished = Some(finished);
         assert_eq!(inbox.gone_due(), Some(finished + PARSE_WAIT));
         assert!(inbox.gone(), "nothing more is with the thread");
+    }
+
+    #[test]
+    fn a_peer_is_given_only_the_absolute_directories_of_path() {
+        let command = [OsString::from("rust-analyzer")];
+        let command = command_for(&command, Some(Path::new("/project"))).unwrap();
+        let path = (command.get_envs())
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value);
+        let daemons = std::env::var_os("PATH").unwrap_or_default();
+        assert_eq!(
+            path,
+            Some(clackatoo_syntax::servers::absolute_only(&daemons).as_os_str())
+        );
+        let path = path.unwrap().as_encoded_bytes();
+        assert!(
+            path.split(|&byte| byte == b':')
+                .all(|dir| dir.starts_with(b"/"))
+        );
     }
 
     #[test]

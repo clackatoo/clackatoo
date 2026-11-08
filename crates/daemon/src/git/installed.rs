@@ -21,11 +21,11 @@
 //! commands a repository names to reach a remote or log in never run.
 
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+
+use clackatoo_syntax::servers::{absolute_only, find_on as find_program};
 
 /// The oldest git clackatoo runs.
 pub(crate) const OLDEST: (u32, u32) = (2, 38);
@@ -104,26 +104,6 @@ fn run(installed: &Installed, args: &[&str], env: &[(&str, &str)]) -> Option<Vec
     super::output_within(&mut command, super::PATIENCE)
 }
 
-/// `path`, a `$PATH`, with only its absolute directories.
-fn absolute_only(path: &OsStr) -> OsString {
-    let kept: Vec<&[u8]> = (path.as_bytes().split(|&byte| byte == b':'))
-        .filter(|dir| dir.starts_with(b"/"))
-        .collect();
-    OsString::from(OsStr::from_bytes(&kept.join(&b':')))
-}
-
-/// The first file called `name` that may be run in the directories of
-/// `path`, a `$PATH`.
-fn find_program(name: &str, path: &OsStr) -> Option<PathBuf> {
-    (path.as_bytes().split(|&byte| byte == b':'))
-        .filter(|dir| dir.starts_with(b"/"))
-        .map(|dir| Path::new(OsStr::from_bytes(dir)).join(name))
-        .find(|program| {
-            std::fs::metadata(program)
-                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
-        })
-}
-
 /// The major and minor version in what `git --version` printed: "git
 /// version 2.53.0", or "git version 2.39.3 (Apple Git-146)".
 fn version(said: &str) -> Option<(u32, u32)> {
@@ -134,6 +114,9 @@ fn version(said: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
     use super::*;
 
     #[test]
