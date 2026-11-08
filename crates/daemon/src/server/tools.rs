@@ -404,14 +404,11 @@ impl Daemon {
         chat: TerminalId,
         shown: Option<&str>,
     ) -> Result<Response, Error> {
-        let served = self.config.mcp.is_some();
-        let hosted = self.chat(chat).ok_or(Error::NotAChat(chat))?;
-        if hosted.tools() == AgentTools::Off || !served {
+        let tools = self.chat(chat).ok_or(Error::NotAChat(chat))?.tools();
+        if tools == AgentTools::Off || self.config.mcp.is_none() {
             return Err(Error::NoTools(format!("chat {chat} has none")));
         }
-        let secret = shown
-            .filter(|shown| hosted.gave_mcp_token(shown))
-            .map(str::to_owned);
+        let secret = (shown.filter(|shown| self.mcp_secret_valid(chat, shown))).map(str::to_owned);
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return Err(Error::NoTools("the connection closed".to_owned()));
         };
@@ -461,8 +458,46 @@ impl Daemon {
         }
         let address = self.listener.local_addr().ok()?;
         let socket = address.as_pathname()?.to_owned();
-        let token = self.chat(chat)?.give_mcp_token();
+        let token = self.mcp_secret(chat)?;
+        self.chat(chat)?.gave_mcp_token(token.clone());
         Some(mcp::server_entry(&command, &socket, chat, &token))
+    }
+
+    /// The key the secrets given chats' MCP servers are signed with: made
+    /// from the machine's identity key's seed, for this alone, so a secret
+    /// given before an upgrade is still known after it.
+    fn mcp_key(&self) -> ring::hmac::Key {
+        let seed = self.signer.seed();
+        let made = ring::digest::digest(
+            &ring::digest::SHA256,
+            &[b"clackatoo: MCP servers' secrets\0".as_slice(), &seed.0].concat(),
+        );
+        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, made.as_ref())
+    }
+
+    /// A new secret for the chat `chat`'s MCP server: a random nonce, and
+    /// the key's signature of it with the chat, in hex. `None` only if
+    /// the system's random source fails, before it's ready.
+    pub(super) fn mcp_secret(&self, chat: TerminalId) -> Option<String> {
+        use ring::rand::SecureRandom as _;
+        let mut nonce = [0u8; 16];
+        ring::rand::SystemRandom::new().fill(&mut nonce).ok()?;
+        let nonce = hex(&nonce);
+        let signed = ring::hmac::sign(&self.mcp_key(), format!("{chat}:{nonce}").as_bytes());
+        Some(format!("{nonce}.{}", hex(signed.as_ref())))
+    }
+
+    /// Whether `shown` is a secret given the chat `chat`'s MCP server.
+    pub(super) fn mcp_secret_valid(&self, chat: TerminalId, shown: &str) -> bool {
+        let Some((nonce, signature)) = shown.split_once('.') else {
+            return false;
+        };
+        let Some(signature) = unhex(signature) else {
+            return false;
+        };
+        let signed = format!("{chat}:{nonce}");
+        nonce.len() == 32
+            && ring::hmac::verify(&self.mcp_key(), signed.as_bytes(), &signature).is_ok()
     }
 
     /// Turns the client at `token`, which asked to serve a chat's tools
@@ -2592,6 +2627,26 @@ fn shows_itself(ch: char) -> bool {
     !(ch.is_control() || bidi_control(ch) || hidden_letter(ch) || zero_width(ch))
 }
 
+/// `bytes` in lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+/// The bytes `text`, in hex, says, if it's hex.
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+        .collect()
+}
+
 /// Whether `ch` shows nothing, and takes no room, so it could pad or
 /// split a word unseen: the zero-width space, non-joiner and joiner, the
 /// word joiner, the byte-order mark and the soft hyphen. All are among
@@ -3308,7 +3363,15 @@ mod tests {
             session: session.to_owned(),
             settings: None,
         };
-        let first = daemon.chat(chat).unwrap().give_mcp_token();
+        let first = daemon.mcp_secret(chat).unwrap();
+        assert!(daemon.mcp_secret_valid(chat, &first));
+        assert!(
+            !daemon.mcp_secret_valid(TerminalId(9), &first),
+            "another chat's"
+        );
+        let forged = format!("{}.{}", &first[..32], "0".repeat(64));
+        assert!(!daemon.mcp_secret_valid(chat, &forged));
+        daemon.chat(chat).unwrap().gave_mcp_token(first.clone());
         daemon.chat(chat).unwrap().connected(opened("s2"));
         assert!(!daemon.serves_tools(chat), "nothing connected");
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -3319,7 +3382,8 @@ mod tests {
         connection.token = Some(first);
         daemon.sources.insert(Source::Tools(connection));
         assert!(daemon.serves_tools(chat));
-        daemon.chat(chat).unwrap().give_mcp_token();
+        let second = daemon.mcp_secret(chat).unwrap();
+        daemon.chat(chat).unwrap().gave_mcp_token(second);
         daemon.chat(chat).unwrap().connected(opened("s3"));
         assert!(!daemon.serves_tools(chat), "an older session's server");
     }
