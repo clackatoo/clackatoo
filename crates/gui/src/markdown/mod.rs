@@ -595,11 +595,14 @@ mod tests {
                     ..Style::default()
                 },
             ),
+            // A link can't hold a link, but an image's text can: links in
+            // images in links, as deep as the rest.
             (
-                "[x ",
-                " x](u)",
+                "[x ![x ",
+                " x](u) x](u)",
                 Style {
                     link: true,
+                    image: true,
                     ..Style::default()
                 },
             ),
