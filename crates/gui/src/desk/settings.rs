@@ -47,6 +47,17 @@ impl Desk {
         self.options_changed();
     }
 
+    /// Notes that `fonts` were loaded in `family` (`None` for the system's
+    /// monospace font) at `points`, which may not be the font the options
+    /// say: [`use_font`](Self::use_font) puts that right before the window
+    /// opens.
+    pub(crate) fn fonts_loaded(&mut self, family: Option<&str>, points: f32) {
+        self.font_in_use = FontInUse::of(&options::Options::drawing_with(&crate::FontOptions {
+            family: family.map(str::to_owned),
+            size: points,
+        }));
+    }
+
     /// Sets `info`'s option to `value` for config, unless `init.lua` is
     /// running and the command line set it: what's set where the window
     /// starts outdoes the config file, which may be shared between
@@ -190,5 +201,32 @@ impl Desk {
     pub(super) fn reset_options(&mut self) {
         self.options = self.start_options.clone();
         self.options_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The process of windows finds the fonts for its first window as it
+    /// starts, and every window after starts from another's: whichever
+    /// size or family they were found at, a window opens in its own, as
+    /// `--font-size` and `--font` say.
+    #[test]
+    fn a_window_opens_in_its_own_font_whatever_the_fonts_were_found_for() {
+        let mut desk = Desk::default();
+        let wanted = crate::FontOptions {
+            family: None,
+            size: 17.0,
+        };
+        desk.start_options(options::Options::drawing_with(&wanted), Vec::new());
+        let mut fonts = Fonts::load(&crate::FontOptions::default(), 1.0).expect("a font");
+        assert!((fonts.points() - 12.0).abs() < f32::EPSILON);
+        desk.fonts_loaded(fonts.mono_family.as_deref(), fonts.points());
+        assert!(desk.use_font(&mut fonts));
+        assert!((fonts.points() - 17.0).abs() < f32::EPSILON);
+        // Found in the window's own font, there's nothing to change.
+        desk.fonts_loaded(fonts.mono_family.as_deref(), fonts.points());
+        assert!(!desk.use_font(&mut fonts));
     }
 }

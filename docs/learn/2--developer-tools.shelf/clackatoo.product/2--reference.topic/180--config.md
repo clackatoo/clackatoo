@@ -242,11 +242,11 @@ Nothing is shown while `init.lua` first runs, so `client.focused` is nil then: h
 
 ## When it goes wrong
 
-A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane that has closed, is shown in the bottom bar, with the file and line, until the next key, and printed on stderr in full. A mistake in `init.lua` itself stops it there, as an error in any Lua program does: what it bound before that line stays bound.
+A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane that has closed, is shown in the bottom bar, with the file and line, until the next key, and written in full to the window's log, `window.log` in clackatoo's state directory (and to stderr, for a window opened in a process of its own). A mistake in `init.lua` itself stops it there, as an error in any Lua program does: what it bound before that line stays bound.
 
 `init.lua` may run for 2 seconds before it's stopped where it is. A handler or binding that runs for more than a quarter of a second at a time, as a loop that never ends would, is stopped there, and its key is decided as if it had done nothing more.
 
-`print` writes to stderr.
+`print` writes to the window's log, `window.log` in clackatoo's state directory, as a warning, which the log keeps unless `RUST_LOG` says otherwise (and to stderr, for a window opened in a process of its own).
 
 ## Not yet
 

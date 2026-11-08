@@ -146,7 +146,10 @@ impl Runtime {
                     .iter()
                     .map(|value| value.to_string().unwrap_or_else(|_| "?".into()))
                     .collect();
-                eprintln!("clackatoo: init.lua: {}", words.join("\t"));
+                // Logged, so it reaches the window's log as well as
+                // stderr: a window in the process of windows has no
+                // stderr to see.
+                log::warn!(target: "clackatoo::init.lua", "{}", words.join("\t"));
                 Ok(())
             })?,
         )?;
@@ -296,7 +299,7 @@ impl Runtime {
 
     fn report(&self, err: &mlua::Error) {
         let text = err.to_string();
-        eprintln!("clackatoo: {text}");
+        log::error!(target: "clackatoo::init.lua", "{text}");
         let first = text.lines().next().unwrap_or_default();
         let first = (["runtime error: ", "syntax error: "].iter())
             .find_map(|kind| first.strip_prefix(kind))

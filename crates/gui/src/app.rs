@@ -676,8 +676,11 @@ impl App {
     fn open(&mut self, event_loop: &ActiveEventLoop, startup: Startup) -> anyhow::Result<Frame> {
         let (mut fonts, desktop) = startup.fonts.wait("font")?;
         let fonts_ready = self.started.elapsed();
-        // In config's font, if it's run, so the window opens at the size
-        // that font makes.
+        // In the window's font, or config's, if it's run, so the window
+        // opens at the size that font makes: the fonts may have been found
+        // for another window's.
+        self.desk
+            .fonts_loaded(fonts.mono_family.as_deref(), fonts.points());
         self.desk.use_font(&mut fonts);
         self.buttons = desktop.buttons.clone();
         // Fonts were loaded at one pixel per point; the window's display

@@ -291,6 +291,11 @@ impl Fonts {
         Ok(())
     }
 
+    /// The terminal's size, in points.
+    pub(crate) fn points(&self) -> f32 {
+        self.points
+    }
+
     /// Sizes text for a display with `scale` physical pixels per logical
     /// pixel. Glyphs rasterised at the old size must be thrown away.
     pub(crate) fn set_scale(&mut self, scale: f64) {

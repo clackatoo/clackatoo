@@ -707,9 +707,11 @@ mod tests {
         assert!(matches!(&said[..], [FromLua::Error(err)] if err.contains("`sideways`")));
     }
 
-    /// Every window runs its config in a process shared with the others:
-    /// nothing in it reaches the whole process, as ending it or changing
-    /// its locale, environment or files would.
+    /// Every window runs its config in a process shared with the others,
+    /// so nothing in it may reach the whole process, as ending it or
+    /// changing its locale, environment or files would. Luau's libraries
+    /// never had any of that, unlike Lua's: this only keeps it so, should
+    /// a library be added.
     #[test]
     fn config_can_do_nothing_to_the_process_the_windows_share() {
         let (_lua, said) = start(

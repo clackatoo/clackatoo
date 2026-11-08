@@ -166,6 +166,7 @@ impl Start {
     /// stopped without doing so themselves. `remote` if the daemon is on
     /// another machine.
     pub(crate) fn read(remote: bool) -> Self {
+        static WINDOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let state_path = state_dir().map(|dir| dir.join("clackatoo/tutor"));
         let state = (state_path.as_deref())
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -186,12 +187,15 @@ impl Start {
             );
             return start;
         };
-        let own = std::process::id();
-        start.lock = lock(&root.join(own.to_string()));
+        // A window's own, of the windows a process may have: its process's
+        // ID, and which of its windows it is.
+        let window = WINDOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let own = format!("{}-{window}", std::process::id());
+        start.lock = lock(&root.join(&own));
         // As the daemon names the files in it, through any links.
         let root = root.canonicalize().unwrap_or(root);
-        let scratch = root.join(own.to_string());
-        start.leftovers = clear_leftovers(&root, own);
+        let scratch = root.join(&own);
+        start.leftovers = clear_leftovers(&root, &own);
         start.scratch = Some(scratch);
         start
     }
@@ -215,19 +219,21 @@ const LOCK: &str = "lock";
 
 /// Removes the scratch directories in `root` of windows no longer
 /// running, other than this one, `own`, and returns them. A directory is
-/// left alone while its window holds the lock on it, or, if it has none
-/// yet, as a window just starting may not, while its process runs.
-fn clear_leftovers(root: &Path, own: u32) -> Vec<PathBuf> {
+/// named after its window's process, then which of its windows it is (or
+/// only the process, from before a process had several). It's left alone
+/// while its window holds the lock on it, or, if it has none yet, as a
+/// window just starting may not, while its process runs.
+fn clear_leftovers(root: &Path, own: &str) -> Vec<PathBuf> {
     let mut cleared = Vec::new();
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
             continue;
         };
-        if pid == own {
+        let Some(pid) = (name.split('-').next()).and_then(|pid| pid.parse::<u32>().ok()) else {
+            continue;
+        };
+        if name == own {
             continue;
         }
         let dir = entry.path();
@@ -423,23 +429,26 @@ mod tests {
     fn a_scratch_directory_is_cleared_only_once_its_lock_is_free() {
         let root = fresh("leftovers");
         // A window running, holding its lock.
-        let held = lock(&root.join("101")).unwrap();
+        let held = lock(&root.join("101-0")).unwrap();
         // A window gone, its lock free.
-        drop(lock(&root.join("102")).unwrap());
+        drop(lock(&root.join("102-3")).unwrap());
         // A directory with no lock yet, of a process running (this one,
-        // as if it were another), and of one long gone.
-        std::fs::create_dir_all(root.join("1")).unwrap();
+        // as if it were another), and of one long gone, from before a
+        // process had several windows.
+        std::fs::create_dir_all(root.join("1-0")).unwrap();
         std::fs::create_dir_all(root.join("999999999")).unwrap();
-        let own = 4_000_000_000;
+        let own = "4000000000-0";
         let mut cleared = clear_leftovers(&root, own);
         cleared.sort();
-        assert_eq!(cleared, [root.join("102"), root.join("999999999")]);
-        assert!(root.join("101").exists() && root.join("1").exists());
+        assert_eq!(cleared, [root.join("102-3"), root.join("999999999")]);
+        assert!(root.join("101-0").exists() && root.join("1-0").exists());
         drop(held);
-        assert_eq!(clear_leftovers(&root, own), [root.join("101")]);
-        // Its own is never cleared.
-        let _own = lock(&root.join("5")).unwrap();
-        assert!(clear_leftovers(&root, 5).is_empty());
+        assert_eq!(clear_leftovers(&root, own), [root.join("101-0")]);
+        // Its own is never cleared, nor another window's of the same
+        // process, while it holds its lock.
+        let _own = lock(&root.join("5-0")).unwrap();
+        let _sibling = lock(&root.join("5-1")).unwrap();
+        assert!(clear_leftovers(&root, "5-0").is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
