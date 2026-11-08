@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use bitflags::bitflags;
 
@@ -79,6 +80,15 @@ pub enum CursorShape {
 /// a program's output can hold far more queries than this, each answered
 /// with several times its own length.
 const MAX_REPLIES: usize = 64 * 1024;
+
+/// The longest command a block keeps, in bytes: clackatoo's shell
+/// integration says none longer, and none longer is offered to run again,
+/// so a longer one only costs memory, for as long as the block is kept.
+const LONGEST_COMMAND: usize = 1024;
+
+/// The longest working directory taken from OSC 7, in bytes: Linux's
+/// `PATH_MAX`.
+const LONGEST_PATH: usize = 4096;
 
 /// A terminal emulator, minus everything that touches the outside world.
 ///
@@ -425,7 +435,7 @@ impl Terminal {
         // Snapshots don't carry the count, which counts only this
         // process's renumberings.
         emulator.blocks = blocks.renumbered_as(emulator.blocks.renumbered());
-        emulator.cwd.clone_from(&snapshot.cwd);
+        emulator.cwd = snapshot.cwd.as_deref().map(Arc::from);
     }
 
     /// The number of links the terminal holds.
@@ -731,8 +741,9 @@ pub(crate) struct Emulator {
     scroll_region: Range<usize>,
     tabs: TabStops,
     pub(crate) title: String,
-    /// The working directory the shell last reported.
-    cwd: Option<String>,
+    /// The working directory the shell last reported, shared with the
+    /// blocks that ran in it.
+    cwd: Option<Arc<str>>,
     /// The commands the shell marked (see [`crate::blocks`]).
     blocks: Blocks,
     /// The secret clackatoo's own shell integration adds to its marks in
@@ -1717,10 +1728,18 @@ impl Emulator {
         self.links.len()
     }
 
-    /// OSC 7: the shell's working directory, as a `file://` URL.
+    /// OSC 7: the shell's working directory, as a `file://` URL. A path
+    /// longer than any directory's can be isn't one.
     pub(crate) fn set_cwd(&mut self, url: &[u8]) {
-        if let Some(path) = blocks::file_url_path(url) {
-            self.cwd = Some(path);
+        // Each byte is at most three escaped, and a host comes first.
+        if url.len() > 3 * LONGEST_PATH + 512 {
+            return;
+        }
+        if let Some(path) = blocks::file_url_path(url)
+            && path.len() <= LONGEST_PATH
+            && self.cwd.as_deref() != Some(path.as_str())
+        {
+            self.cwd = Some(path.into());
         }
     }
 
@@ -1735,9 +1754,12 @@ impl Emulator {
 }
 
 /// The command a `C` mark's `options` say started, from its
-/// `cmdline_url=`.
+/// `cmdline_url=`, unless it's longer than [`LONGEST_COMMAND`].
 fn cmdline(options: &[&[u8]]) -> Option<String> {
-    (options.iter())
-        .find_map(|option| option.strip_prefix(b"cmdline_url="))
-        .map(blocks::percent_decode)
+    let url = (options.iter()).find_map(|option| option.strip_prefix(b"cmdline_url="))?;
+    // Each byte is at most three escaped.
+    if url.len() > 3 * LONGEST_COMMAND {
+        return None;
+    }
+    Some(blocks::percent_decode(url)).filter(|command| command.len() <= LONGEST_COMMAND)
 }

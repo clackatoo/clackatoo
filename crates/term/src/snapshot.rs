@@ -24,6 +24,7 @@
 //! are part of which link, and a terminal restored without one has none.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::blocks::{Blocks, Entry, Mark, Phase as LivePhase};
 use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
@@ -176,7 +177,7 @@ impl BlocksSnapshot {
                 .iter()
                 .map(|entry| BlockEntry {
                     command: entry.command.clone(),
-                    cwd: entry.cwd.clone(),
+                    cwd: entry.cwd.as_deref().map(str::to_owned),
                     phase: match entry.phase {
                         LivePhase::Prompt => Phase::Prompt,
                         LivePhase::Running => Phase::Running,
@@ -202,12 +203,17 @@ impl BlocksSnapshot {
                 (marked.line, mark)
             })
             .collect();
+        // Blocks that ran in one directory share it again.
+        let mut shared: Option<Arc<str>> = None;
         let entries: VecDeque<Entry> = self
             .blocks
             .iter()
             .map(|entry| Entry {
                 command: entry.command.clone(),
-                cwd: entry.cwd.clone(),
+                cwd: entry.cwd.as_deref().map(|cwd| match &shared {
+                    Some(last) if **last == *cwd => Arc::clone(last),
+                    _ => shared.insert(Arc::from(cwd)).clone(),
+                }),
                 phase: match entry.phase {
                     Phase::Prompt => LivePhase::Prompt,
                     Phase::Running => LivePhase::Running,

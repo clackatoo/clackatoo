@@ -30,6 +30,7 @@
 //! programs run, takes no marks.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::terminal::Terminal;
 
@@ -69,8 +70,9 @@ impl Mark {
 pub(crate) struct Entry {
     /// The command line, if the shell said.
     pub(crate) command: Option<String>,
-    /// Where it ran, if the shell said.
-    pub(crate) cwd: Option<String>,
+    /// Where it ran, if the shell said: shared with the blocks that ran
+    /// there too.
+    pub(crate) cwd: Option<Arc<str>>,
     pub(crate) phase: Phase,
     /// Its exit status, once finished, if the shell said.
     pub(crate) exit: Option<i32>,
@@ -225,7 +227,7 @@ impl Blocks {
     pub(crate) fn command(
         &mut self,
         command: Option<String>,
-        cwd: Option<String>,
+        cwd: Option<Arc<str>>,
         trusted: bool,
     ) -> u32 {
         self.marks_commands = true;
@@ -541,7 +543,7 @@ impl Terminal {
             last,
             output: span.output.filter(|&output| output <= last),
             command: entry.and_then(|entry| entry.command.clone()),
-            cwd: entry.and_then(|entry| entry.cwd.clone()),
+            cwd: entry.and_then(|entry| entry.cwd.as_deref().map(str::to_owned)),
             running: entry.is_some_and(|entry| entry.phase == Phase::Running),
             exit: entry.and_then(|entry| entry.exit),
         })
@@ -1221,6 +1223,53 @@ mod tests {
             t.block(0, Which::At).unwrap().cwd.as_deref(),
             Some("/home/j p")
         );
+    }
+
+    #[test]
+    fn a_directory_too_long_to_be_one_is_ignored() {
+        let mut t = terminal(20, 3, 100);
+        t.advance(b"\x1b]7;file://host/home\x07");
+        t.advance(format!("\x1b]7;file://host/{}\x07", "a".repeat(4096)).as_bytes());
+        assert_eq!(t.cwd(), Some("/home"));
+        t.advance(format!("\x1b]7;file://host/{}\x07", "%61".repeat(4096)).as_bytes());
+        assert_eq!(t.cwd(), Some("/home"));
+        let longest = format!("/{}", "a".repeat(4095));
+        t.advance(format!("\x1b]7;file://host{longest}\x07").as_bytes());
+        assert_eq!(t.cwd(), Some(longest.as_str()));
+    }
+
+    #[test]
+    fn blocks_share_the_directory_they_ran_in() {
+        // Kept once, however many blocks ran there, so a long one isn't
+        // kept again for each.
+        let mut t = terminal(20, 3, 100);
+        t.advance(b"\x1b]7;file://host/home\x07");
+        for _ in 0..2 {
+            t.advance(PROMPT.as_bytes());
+            t.advance(command("ls", "", 0).as_bytes());
+        }
+        let cwd = |block| t.block_entry(block).unwrap().cwd.clone().unwrap();
+        assert!(Arc::ptr_eq(&cwd(0), &cwd(1)));
+    }
+
+    #[test]
+    fn a_command_too_long_to_offer_isnt_kept() {
+        let mut t = terminal(20, 3, 100);
+        let long = "a".repeat(1025);
+        for said in [&long[..1024], &long] {
+            t.advance(PROMPT.as_bytes());
+            t.advance(format!("\x1b]133;C;cmdline_url={said}\x07\x1b]133;D;0\x07\r\n").as_bytes());
+        }
+        assert_eq!(
+            t.block_entry(0).unwrap().command.as_deref(),
+            Some(&long[..1024])
+        );
+        assert_eq!(t.block_entry(1).unwrap().command, None);
+        // Nor one whose escapes make it longer than it says.
+        t.advance(PROMPT.as_bytes());
+        let escaped = format!("{}{}", "%C3%A9".repeat(200), "a".repeat(700));
+        t.advance(format!("\x1b]133;C;cmdline_url={escaped}\x07").as_bytes());
+        assert_eq!(t.block_entry(2).unwrap().command, None);
     }
 
     #[test]
