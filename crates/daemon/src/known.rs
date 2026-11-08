@@ -96,22 +96,34 @@ struct Keys {
 impl Keys {
     /// Knows `machine` by `pin`, unless it knows it already and not
     /// `replace`, making room for it if it must: returns whether that
-    /// changed what's known. Replacing counts as using it.
+    /// changed what's known. Replacing counts as using it, and only ever
+    /// takes the same key, met now if it wasn't: a key that differs from
+    /// the one known is kept only once that's forgotten, never in its
+    /// place, whatever a check made meanwhile, elsewhere, found.
     fn learn(&mut self, machine: MachineId, pin: Pin, replace: bool) -> bool {
         if let Some((known, learned)) = self.pins.get_mut(&machine) {
             if !replace {
                 return false;
             }
+            if known.key != pin.key {
+                log::error!(
+                    "{machine} is known by another key than the one just checked: it's kept, \
+                     and the new one isn't"
+                );
+                return false;
+            }
             *learned = self.learned;
             self.learned += 1;
-            let changed = *known != pin;
-            *known = pin;
+            let met = known.met || pin.met;
+            let changed = known.met != met;
+            known.met = met;
             return changed;
         }
-        if self.pins.len() >= MOST_KEYS && !self.make_room() {
+        if self.pins.len() >= MOST_KEYS && !self.make_room(pin.met) {
             log::error!(
-                "{MOST_KEYS} machines' keys met straight are known: {machine}'s isn't kept, and \
-                 it's met again next time"
+                "no key known can be forgotten to make room for {machine}'s, so it isn't kept, \
+                 and it's checked again next time: every one known was met straight, or is in \
+                 use"
             );
             return false;
         }
@@ -121,13 +133,19 @@ impl Keys {
     }
 
     /// Forgets the key only vouched for, and not in use, that was learned
-    /// or used longest ago, returning whether there was one.
-    fn make_room(&mut self) -> bool {
-        let oldest = (self.pins.iter())
-            .filter(|(machine, (pin, _))| !pin.met && !self.in_use.contains(machine))
-            .min_by_key(|(_, (_, learned))| *learned)
-            .map(|(&machine, _)| machine);
-        let Some(oldest) = oldest else {
+    /// or used longest ago, returning whether there was one. For a key
+    /// `met` straight, which is never turned away for room, one in use
+    /// goes if no other can.
+    fn make_room(&mut self, met: bool) -> bool {
+        let oldest = |in_use: bool| {
+            (self.pins.iter())
+                .filter(|(machine, (pin, _))| {
+                    !pin.met && (in_use || !self.in_use.contains(machine))
+                })
+                .min_by_key(|(_, (_, learned))| *learned)
+                .map(|(&machine, _)| machine)
+        };
+        let Some(oldest) = oldest(false).or_else(|| if met { oldest(true) } else { None }) else {
             return false;
         };
         log::warn!(
@@ -526,20 +544,56 @@ mod tests {
         let (passed, used) = (nth(0, false), nth(1, false));
         known.in_use(BTreeSet::from([passed.0]));
         assert!(!known.insert(used.0, used.1), "nothing new");
-        // Vouched for, one machine after another, as many again.
-        for n in MOST_KEYS..MOST_KEYS * 2 {
+        // Vouched for, one machine after another: room is made for as many
+        // as were learned before it was used, and it stays.
+        for n in MOST_KEYS..MOST_KEYS * 2 - 2 {
             let (machine, pin) = nth(n, false);
             assert!(known.insert(machine, pin));
         }
         assert_eq!(known.get(passed.0), Some(passed.1));
-        assert_eq!(known.get(nth(2, false).0), None);
-        // Used again, it went after every one learned before that, and
-        // before those learned since.
+        assert_eq!(known.get(used.0), Some(used.1));
         assert_eq!(known.get(nth(MOST_KEYS - 1, false).0), None);
+        // It goes next, before those learned since.
+        let (next, pin) = nth(MOST_KEYS * 2, false);
+        assert!(known.insert(next, pin));
         assert_eq!(known.get(used.0), None);
-        assert_eq!(known.get(nth(MOST_KEYS, false).0), None);
-        assert!(known.get(nth(MOST_KEYS + 1, false).0).is_some());
+        assert!(known.get(nth(MOST_KEYS, false).0).is_some());
         assert_eq!(known.all().len(), MOST_KEYS);
+        // A key met straight is never turned away while one only vouched
+        // for is known, even one in use.
+        let vouched = Known::load(None);
+        for n in 0..MOST_KEYS {
+            let (machine, pin) = nth(n, false);
+            assert!(vouched.insert(machine, pin));
+        }
+        vouched.in_use((0..MOST_KEYS).map(|n| nth(n, false).0).collect());
+        let (late, pin) = nth(MOST_KEYS, false);
+        assert!(
+            !vouched.insert(late, pin),
+            "no room for one only vouched for"
+        );
+        let (met, pin) = nth(MOST_KEYS + 1, true);
+        assert!(vouched.insert(met, pin));
+        assert_eq!(vouched.get(nth(0, false).0), None);
+    }
+
+    #[test]
+    fn a_key_known_is_never_replaced_by_another() {
+        let known = Known::load(None);
+        let (machine, met) = nth(0, true);
+        assert!(known.insert(machine, met));
+        let other = Pin {
+            key: [0xee; 32],
+            met: true,
+        };
+        assert!(!known.insert(machine, other));
+        assert_eq!(known.get(machine), Some(met));
+        // Nor is one met only vouched for again.
+        assert!(!known.insert(machine, Pin { met: false, ..met }));
+        assert_eq!(known.get(machine), Some(met));
+        // Forgotten, another is taken.
+        assert!(known.remove(machine));
+        assert!(known.insert(machine, other));
     }
 
     #[test]

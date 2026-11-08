@@ -453,8 +453,8 @@ impl Ways {
         }
         let pinned = self.pins.get(machine);
         let forget = format!(
-            "if its daemon chose a new key, as when its `machine` file was deleted, \
-             `clackatoo forget {name}` takes it"
+            "if its daemon's key really changed, its ID kept, as when its `machine` file was \
+             put back from another copy, `clackatoo forget {name}` takes it"
         );
         if through.is_empty() {
             return match pinned {
@@ -776,6 +776,7 @@ mod tests {
         // Known by another key, met or vouched for: refused, loudly.
         for met in [true, false] {
             let pin = Pin { key: [9; 32], met };
+            ways.pins.remove(machine);
             ways.pins.insert(machine, pin);
             let refused = ways
                 .trusts(&[], None, b"certificate", Some(&signed), PROTOCOL_VERSION)
@@ -806,6 +807,7 @@ mod tests {
         ways.set_through(Some(machine), "server", vec![way(&[DESK])]);
         for met in [true, false] {
             let pin = Pin { key: real.key, met };
+            ways.pins.remove(machine);
             ways.pins.insert(machine, pin);
             for through in [&[][..], &[DESK][..]] {
                 let refused = ways
