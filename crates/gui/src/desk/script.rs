@@ -163,8 +163,10 @@ impl Desk {
     fn ask_lua(&mut self, message: impl FnOnce(u64) -> ToLua) -> Option<bool> {
         self.sync_lua();
         let (stop, said) = self.script.lua.as_mut()?.decide(message);
-        // For a key an agent pressed, it's the agent's.
-        let guarded = self.automating;
+        // For a key an agent pressed, it's the agent's; and what Lua had
+        // queued by itself comes too, which a chat with Control may have
+        // had it say.
+        let guarded = self.automating || self.controlled;
         for message in said {
             self.lua_says(message, guarded);
         }

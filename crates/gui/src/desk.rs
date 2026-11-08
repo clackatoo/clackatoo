@@ -10454,6 +10454,14 @@ mod tests {
             "{:?}",
             desk.message
         );
+        // Nor update clackatoo, which the window runs itself.
+        desk.run(Command::Update(None));
+        assert!(
+            (desk.message.as_deref()).is_some_and(|said| said.contains("can't update")),
+            "{:?}",
+            desk.message
+        );
+        assert!(desk.take_update_asked().is_none());
         desk.automating = false;
         // What Lua says by itself while a chat has Control isn't done.
         let close = || crate::lua::FromLua::Close { pane: PaneId(1) };

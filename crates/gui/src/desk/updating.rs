@@ -22,6 +22,11 @@ pub(crate) enum UpdateAsked {
 impl Desk {
     /// Carries out `:update`, here, or on the machine named.
     pub(super) fn ask_update(&mut self, host: Option<String>) {
+        // The window runs it itself, past what's sent to the daemon, which
+        // is where an agent's input is checked: so it's refused here.
+        if self.automating {
+            return self.warn("an agent's input can't update clackatoo".into());
+        }
         self.update_asked = Some(host.map_or(UpdateAsked::Here, UpdateAsked::On));
         self.say("updating clackatoo…".into());
     }

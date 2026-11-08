@@ -860,9 +860,11 @@ in another chat; keeping, rejecting or commenting on agents' changes in a
 review, or sending its comments; posting on a board; closing panes, tabs,
 workspaces, terminals or background tabs; pairing or revoking devices,
 unlocking pairing, `:keep`, connecting to or forgetting other machines,
-forwarding ports, installing, upgrading and `:reload`. While a chat has Control,
-what the config's Lua does by itself, rather than for a key you pressed, runs
-no commands, makes or closes no panes and connects to nothing. Keys automation
+forwarding ports, installing, upgrading, `:update` and `:reload`. While a chat
+has Control, what the config's Lua does runs no commands, makes or closes no
+panes and connects to nothing: what it does by itself, and for your keys too.
+So `:reload`, run by you while a chat has Control, doesn't run the config's
+startup splits or commands either; reload again once it's revoked. Keys automation
 left to go on later, as the rest of a macro waiting for the daemon to answer,
 are dropped as each input ends. `:set` changes only this window, as ever, so
 Control can change the window's options. None of this is an operating-system
