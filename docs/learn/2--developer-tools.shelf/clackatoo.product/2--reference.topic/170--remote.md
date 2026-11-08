@@ -132,7 +132,7 @@ Through a jump host (`ProxyJump`), ssh reached the other machine at an address o
 
   The command is run by the remote shell, so it can be any command line that ends by running clackatoo, such as `env XDG_RUNTIME_DIR=/tmp/ck clackatoo`. Setting `CLACKATOO_REMOTE_COMMAND` saves typing it each time.
 
-- **A way to log in.** A key loaded into `ssh-agent` logs in without asking anything. Otherwise, the window asks for ssh's password, or the key's passphrase, itself, in place of the terminal, and asks again on every reconnect. It also asks whether to trust a host ssh hasn't seen before. The `clackatoo` command leaves ssh to ask on the terminal it runs in.
+- **A way to log in.** A key loaded into `ssh-agent` logs in without asking anything. Otherwise, the window asks for ssh's password, or the key's passphrase, itself, in place of the terminal, and asks again on every reconnect. It also asks whether to trust a host ssh hasn't seen before. What you type is hidden, but for that question: what a server asks as you log in is in its own words, so it's hidden whatever it says. The `clackatoo` command leaves ssh to ask on the terminal it runs in.
 
 - **On a server nobody is logged in to:** systemd removes your runtime directory (`/run/user/<uid>`) when your last session ends, taking the daemon's socket with it. The daemon keeps running, but the next connection can't find it and starts another. Run this once on the server so your runtime directory stays:
 

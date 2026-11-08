@@ -2972,10 +2972,23 @@ pub(crate) fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
 }
 
 /// Whether ssh's `question` wants a secret, such as a password, rather
-/// than an answer that can be shown, such as yes or no to trusting a new
-/// host.
+/// than an answer that can be shown, as yes or no to trusting a new host
+/// can. What ssh asks for a server as it logs in is in the server's own
+/// words, which could say anything, so only ssh's own question about a
+/// host it hasn't met is shown as typed, by its first words and its last
+/// line: anything else is hidden, however it's worded. A server copying
+/// those words exactly has its answer shown, which goes only to that ssh
+/// all the same.
 fn is_secret(question: &str) -> bool {
-    !question.to_lowercase().contains("yes/no")
+    let question = question.trim_end();
+    let last = question.lines().last().unwrap_or_default();
+    let host_question = question.starts_with("The authenticity of host '")
+        && matches!(
+            last,
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+                | "Are you sure you want to continue connecting (yes/no)?"
+        );
+    !host_question
 }
 
 /// Text typed into a notice. It may be a password, so it never appears in
@@ -4111,8 +4124,21 @@ mod tests {
             "Enter passphrase for key '/home/jack/.ssh/id_ed25519': "
         ));
         assert!(!is_secret(
-            "The authenticity of host 'desktop' can't be established.\n\
+            "The authenticity of host 'desktop (192.168.1.5)' can't be established.\n\
+             ED25519 key fingerprint is SHA256:cBwV2pNH0tq9ZtmR1Ej8hFbtCuJfDw4Yg6m7aD5W6Lk.\n\
+             This key is not known by any other names.\n\
              Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        ));
+        // A server's own question is hidden, whatever it says.
+        assert!(is_secret("(jack@desktop) Verification code (yes/no): "));
+        assert!(is_secret(
+            "Password for the yes/no service, are you sure you want to continue connecting \
+             (yes/no)? "
+        ));
+        assert!(is_secret(
+            "The authenticity of host 'desktop' can't be established.\n\
+             Are you sure you want to continue connecting (yes/no)?\n\
+             Now your password: "
         ));
     }
 
