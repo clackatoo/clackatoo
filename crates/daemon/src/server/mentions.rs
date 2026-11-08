@@ -58,7 +58,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::StopReason;
-use clackatoo_protocol::{TerminalId, lines_suffix, mention, mentions, slash_command};
+use clackatoo_protocol::{TerminalId, agent_command, lines_suffix, mention, mentions};
 use clackatoo_text::Rope;
 use serde_json::{Value, json};
 
@@ -328,9 +328,10 @@ impl Daemon {
     }
 
     /// What's to be read for `text`, a message to the chat in `id`, if it
-    /// mentions anything and isn't a slash command.
+    /// mentions anything and isn't a command its agent runs: one that only
+    /// starts with a `/`, as a path does, is words, as the digest takes it.
     fn mention_job(&mut self, id: TerminalId, text: &str) -> Option<Job> {
-        if slash_command(text).is_some() {
+        if agent_command(text, &self.chat_ref(id)?.node().commands) {
             return None;
         }
         let found = mentions(text);
@@ -841,6 +842,15 @@ mod tests {
                 .push((1, Read::default()));
             daemon.take_mentions();
             assert!(!held(&daemon, chat));
+        }
+
+        #[test]
+        fn only_a_command_the_agent_runs_goes_without_what_it_mentions() {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, chat) = daemon_with_chat(dir.path());
+            assert!(daemon.mention_job(chat, "/compact @a.rs").is_none());
+            // A path first is words, as the digest takes them.
+            assert!(daemon.mention_job(chat, "/usr is full @a.rs").is_some());
         }
     }
 }
