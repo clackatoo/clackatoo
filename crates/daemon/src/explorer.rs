@@ -23,8 +23,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use clackatoo_protocol::{Entry, EntryKind, FileOp, FileOpError, GitMark, ListingChanges};
@@ -353,7 +353,7 @@ pub(crate) fn churns(name: &std::ffi::OsStr) -> bool {
 fn walk(dir: &Path, made: bool, most: usize) -> Walk {
     let mut found = Walk::default();
     // `.gitignore` says what's left out in a project with no git too.
-    let rules = Arc::new(crate::ignores::Rules::new(false, false));
+    let rules = Arc::new(crate::ignores::Rules::new(dir, false, false));
     // Left out by `.gitignore`, as a walk of the folder it's in has it.
     if made && rules.ignored(dir, true) {
         return found;
@@ -409,23 +409,15 @@ impl Ignores {
         let Some(top) = dir.ancestors().find(|dir| dir.join(".git").exists()) else {
             return Self { files: Vec::new() };
         };
-        // Each read as the files naming git directories are: a regular
-        // file, never followed nor waited on, and not too big.
         let mut files: Vec<Gitignore> = dir
             .ancestors()
             .take_while(|ancestor| ancestor.starts_with(top))
-            .filter_map(|ancestor| {
-                let file = ancestor.join(".gitignore");
-                let text = read_regular(&file, MOST_IGNORE)?;
-                Some(lines_of(ancestor, &file, &text))
-            })
+            .filter_map(|ancestor| ignore_file(ancestor, &ancestor.join(".gitignore")))
             .collect();
-        let exclude = exclude_file(top);
-        let read = (exclude.as_deref()).and_then(|exclude| read_regular(exclude, MOST_IGNORE));
-        if let (Some(exclude), Some(text)) = (exclude, read) {
-            files.push(lines_of(top, &exclude, &text));
+        if let Some(exclude) = exclude_file(top).and_then(|exclude| ignore_file(top, &exclude)) {
+            files.push(exclude);
         }
-        files.push(global().clone());
+        files.push(Gitignore::clone(&crate::ignores::global()));
         Self { files }
     }
 
@@ -452,10 +444,12 @@ impl Ignores {
 /// Only regular files are read for the names, as git writes them, and
 /// only their first few KiB: a link, a pipe or a huge file put there by a
 /// folder from anyone is passed over, never followed, waited on or read
-/// whole.
+/// whole. A `.git` that's a link to a directory, as Android's `repo`
+/// makes them, is followed, as it's how the user's repository is laid
+/// out; the files in it are still read only as they are.
 pub(crate) fn exclude_file(top: &Path) -> Option<PathBuf> {
     let dot_git = top.join(".git");
-    let git_dir = if fs::symlink_metadata(&dot_git).ok()?.is_dir() {
+    let git_dir = if fs::metadata(&dot_git).ok()?.is_dir() {
         dot_git
     } else {
         let named = read_pointer(&dot_git)?;
@@ -475,8 +469,8 @@ pub(crate) fn exclude_file(top: &Path) -> Option<PathBuf> {
 const MOST_POINTER: u64 = 4096;
 
 /// The most of an ignore file, or a repository's own excludes, that's
-/// read: far more than anyone writes.
-pub(crate) const MOST_IGNORE: u64 = 64 << 10;
+/// read: far more than anyone writes. Its lines past that are left out.
+pub(crate) const MOST_IGNORE: u64 = 1 << 20;
 
 /// The text of the file at `path`, if it's a regular file, not a link,
 /// of no more than [`MOST_POINTER`] bytes.
@@ -490,6 +484,15 @@ fn read_regular(path: &Path, most: u64) -> Option<String> {
     crate::regular::read_small(path, most)
 }
 
+/// The ignore file at `file`, whose patterns are from `dir`, if it's a
+/// regular file, not a link: the lines in its first [`MOST_IGNORE`]
+/// bytes, with what isn't UTF-8 in them read as U+FFFD, as git reads them
+/// as bytes and a line that can't be read shouldn't lose the rest.
+pub(crate) fn ignore_file(dir: &Path, file: &Path) -> Option<Gitignore> {
+    let text = crate::regular::read_lines(file, crate::regular::Links::Refuse, MOST_IGNORE)?;
+    Some(lines_of(dir, file, &text))
+}
+
 /// The ignore file `file`, read as `text`, whose patterns are from `dir`.
 /// A byte order mark it starts with is passed over, as git passes it over.
 pub(crate) fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
@@ -500,12 +503,6 @@ pub(crate) fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
         }
     }
     builder.build().unwrap_or_else(|_| Gitignore::empty())
-}
-
-/// The user's own ignore file, git's `core.excludesFile`, read once.
-pub(crate) fn global() -> &'static Gitignore {
-    static GLOBAL: OnceLock<Gitignore> = OnceLock::new();
-    GLOBAL.get_or_init(|| Gitignore::global().0)
 }
 
 #[cfg(test)]
@@ -692,9 +689,13 @@ mod tests {
         // A link to patterns: not followed.
         std::os::unix::fs::symlink(&patterns, &exclude).unwrap();
         assert!(!ignored(&top, "secret.txt"));
-        // Too big: not read.
+        // Past the most read: not read.
         fs::remove_file(&exclude).unwrap();
-        fs::write(&exclude, format!("{}\nsecret.txt\n", "#".repeat(70_000))).unwrap();
+        fs::write(
+            &exclude,
+            format!("{}\nsecret.txt\n", "#".repeat((1 << 20) + 10)),
+        )
+        .unwrap();
         assert!(!ignored(&top, "secret.txt"));
         // As git writes it: read.
         fs::write(&exclude, "secret.txt\n").unwrap();

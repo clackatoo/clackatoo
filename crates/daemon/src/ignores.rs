@@ -15,17 +15,63 @@
 //! What's left out is as the crate has it: `.ignore` first, then
 //! `.gitignore`, then the repository's `info/exclude`, then the user's own
 //! excludes, each kind decided by the deepest file to say anything of a
-//! path, from the walk's directories and every directory above them.
+//! path, from the walk's directories and every directory above them, those
+//! above found from where the walk's root really is, its links resolved.
 
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use ignore::gitignore::Gitignore;
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::explorer::{MOST_IGNORE, exclude_file, global, lines_of};
+use crate::explorer::{MOST_IGNORE, exclude_file, ignore_file, lines_of};
+use crate::regular::Links;
+
+/// The user's own ignore file, git's `core.excludesFile`, as it is now:
+/// read again only when it has changed, or the config names another. It's
+/// the user's, so a link is followed to it, but it's read as any other
+/// ignore file is, only if it's a regular file, and only its first
+/// [`MOST_IGNORE`] bytes.
+pub(crate) fn global() -> Arc<Gitignore> {
+    match ignore::gitignore::gitconfig_excludes_path() {
+        Some(path) => global_at(path),
+        None => Arc::new(Gitignore::empty()),
+    }
+}
+
+/// The user's own ignore file, at `path`, as [`global`] reads it.
+fn global_at(path: PathBuf) -> Arc<Gitignore> {
+    /// The file last read, as it was, and what it said.
+    type Read = (PathBuf, Option<(u64, u64, i64, i64, u64)>, Arc<Gitignore>);
+    static LAST: Mutex<Option<Read>> = Mutex::new(None);
+    // What it is: changed by a write, or replaced by another file.
+    let stamp = std::fs::metadata(&path).ok().map(|meta| {
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.len(),
+        )
+    });
+    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((was, stamped, read)) = last.as_ref()
+        && *was == path
+        && *stamped == stamp
+    {
+        return Arc::clone(read);
+    }
+    let read = crate::regular::read_lines(&path, Links::Follow, MOST_IGNORE)
+        .map_or_else(Gitignore::empty, |text| {
+            lines_of(Path::new(""), &path, &text)
+        });
+    let read = Arc::new(read);
+    *last = Some((path, stamp, Arc::clone(&read)));
+    read
+}
 
 /// A walker of `root` that reads no ignore files of its own, nor leaves
 /// out hidden files: [`Rules`] does both, in its `filter_entry`.
@@ -51,15 +97,26 @@ pub(crate) struct Rules {
     /// Whether what's hidden, by a name starting `.`, is left out, unless
     /// an ignore file says to keep it.
     hidden: bool,
-    /// Each directory asked about, with the nearest of it and the
-    /// directories above it that has ignore files or a repository: the
-    /// many with neither share the one above them.
-    dirs: RwLock<HashMap<PathBuf, Option<Arc<Dir>>>>,
+    /// Where the walk starts, as it was given.
+    root: PathBuf,
+    /// Where that really is, its links resolved, which the directories
+    /// above it are found from, as git finds them.
+    real: Option<PathBuf>,
+    /// The user's own ignore file, as it was when the walk started.
+    user: Arc<Gitignore>,
+    /// Each directory asked about, and whether it's above the root, with
+    /// the nearest of it and the directories above it that has ignore
+    /// files or a repository: the many with neither share the one above
+    /// them.
+    dirs: RwLock<HashMap<(PathBuf, bool), Option<Arc<Dir>>>>,
 }
 
 /// A directory's ignore files, and those of the directories above it.
 struct Dir {
     above: Option<Arc<Dir>>,
+    /// Whether it's above the walk's root, where paths are matched as
+    /// they really are.
+    above_root: bool,
     /// Its `.ignore`.
     ignore: Option<Gitignore>,
     /// Its `.gitignore`.
@@ -73,12 +130,15 @@ struct Dir {
 }
 
 impl Rules {
-    /// Rules for a walk: as git has them if `require_git`, and leaving out
-    /// what's hidden if `hidden`.
-    pub(crate) fn new(require_git: bool, hidden: bool) -> Self {
+    /// Rules for a walk from `root`: as git has them if `require_git`, and
+    /// leaving out what's hidden if `hidden`.
+    pub(crate) fn new(root: &Path, require_git: bool, hidden: bool) -> Self {
         Self {
             require_git,
             hidden,
+            root: root.to_owned(),
+            real: root.canonicalize().ok(),
+            user: global(),
             dirs: RwLock::new(HashMap::new()),
         }
     }
@@ -109,8 +169,26 @@ impl Rules {
     /// What the ignore files of `dir` and above say of `path`.
     fn matched(&self, dir: Option<&Dir>, path: &Path, is_dir: bool) -> Match<()> {
         let in_git = !self.require_git || dir.is_some_and(|dir| dir.in_git);
-        let said = |file: &Option<Gitignore>| match file {
-            Some(file) => file.matched(path, is_dir).map(|_| ()),
+        // As it really is, for the files above the root, worked out if
+        // there are any.
+        let real = std::cell::OnceCell::new();
+        let as_real = || {
+            let real = real.get_or_init(|| {
+                let rest = path.strip_prefix(&self.root).ok()?;
+                let real = self.real.as_deref()?;
+                Some(if rest.as_os_str().is_empty() {
+                    real.to_owned()
+                } else {
+                    real.join(rest)
+                })
+            });
+            real.as_deref().unwrap_or(path)
+        };
+        let said = |file: &Option<Gitignore>, above_root: bool| match file {
+            Some(file) => {
+                let path = if above_root { as_real() } else { path };
+                file.matched(path, is_dir).map(|_| ())
+            }
             None => Match::None,
         };
         let (mut ignore, mut gitignore, mut exclude) = (Match::None, Match::None, Match::None);
@@ -120,21 +198,21 @@ impl Rules {
         let mut at = dir;
         while let Some(dir) = at {
             if ignore.is_none() {
-                ignore = said(&dir.ignore);
+                ignore = said(&dir.ignore, dir.above_root);
             }
             if in_git && !past_top {
                 if gitignore.is_none() {
-                    gitignore = said(&dir.gitignore);
+                    gitignore = said(&dir.gitignore, dir.above_root);
                 }
                 if exclude.is_none() {
-                    exclude = said(&dir.exclude);
+                    exclude = said(&dir.exclude, dir.above_root);
                 }
             }
             past_top |= self.require_git && dir.git;
             at = dir.above.as_deref();
         }
         let user = if in_git {
-            global().matched(path, is_dir).map(|_| ())
+            self.user.matched(path, is_dir).map(|_| ())
         } else {
             Match::None
         };
@@ -142,62 +220,68 @@ impl Rules {
     }
 
     /// The ignore files for what's in the directory at `path`, read for it
-    /// and each directory above it not yet asked about.
+    /// and each directory above it not yet asked about: the walk's, as
+    /// they're named in it, up to its root, and then those above where the
+    /// root really is.
     fn dir(&self, path: &Path) -> Option<Arc<Dir>> {
-        let known = |path: &Path| {
+        let known = |key: &(PathBuf, bool)| {
             let dirs = self.dirs.read().unwrap_or_else(PoisonError::into_inner);
-            dirs.get(path).cloned()
+            dirs.get(key).cloned()
         };
+        // Only the root's parent is asked about from outside it.
+        let walked = (path.ancestors())
+            .take_while(|dir| dir.starts_with(&self.root))
+            .map(|dir| (dir.to_owned(), false));
+        let real = self.real.as_deref().unwrap_or(&self.root);
+        let above = (real.parent().into_iter())
+            .flat_map(Path::ancestors)
+            .map(|dir| (dir.to_owned(), true));
         let mut unread = Vec::new();
-        let mut above = None;
-        for dir in path.ancestors().filter(|dir| !dir.as_os_str().is_empty()) {
-            if let Some(known) = known(dir) {
-                above = known;
+        let mut found = None;
+        for key in walked.chain(above) {
+            if key.0.as_os_str().is_empty() {
                 break;
             }
-            unread.push(dir);
+            if let Some(known) = known(&key) {
+                found = known;
+                break;
+            }
+            unread.push(key);
         }
-        for dir in unread.into_iter().rev() {
-            let read = Dir::read(dir, above);
+        for key in unread.into_iter().rev() {
+            let read = Dir::read(&key.0, key.1, self.require_git, found);
             // As another thread of the walk may have read it meanwhile.
             let mut dirs = self.dirs.write().unwrap_or_else(PoisonError::into_inner);
-            above = dirs
-                .entry(dir.to_owned())
-                .or_insert(read)
-                .as_ref()
-                .map(Arc::clone);
+            found = dirs.entry(key).or_insert(read).as_ref().map(Arc::clone);
         }
-        above
+        found
     }
 }
 
 impl Dir {
-    /// The ignore files of the directory at `path`, under `above`, those of
-    /// the directories above it: `above` itself if it has none, and holds
-    /// no repository's top.
-    fn read(path: &Path, above: Option<Arc<Dir>>) -> Option<Arc<Dir>> {
-        let file = |name: &str| {
-            let file = path.join(name);
-            let text = crate::regular::read_small(&file, MOST_IGNORE)?;
-            Some(lines_of(path, &file, &text))
-        };
-        let ignore = file(".ignore");
-        let gitignore = file(".gitignore");
+    /// The ignore files of the directory at `path`, `above_root` or not,
+    /// under `above`, those of the directories above it: `above` itself if
+    /// it has none, and holds no repository's top. A `.jj` is looked for
+    /// only if `require_git`, as only then does a repository's top count.
+    fn read(
+        path: &Path,
+        above_root: bool,
+        require_git: bool,
+        above: Option<Arc<Dir>>,
+    ) -> Option<Arc<Dir>> {
+        let ignore = ignore_file(path, &path.join(".ignore"));
+        let gitignore = ignore_file(path, &path.join(".gitignore"));
         let dot_git = path.join(".git").exists();
-        let git = dot_git || path.join(".jj").exists();
-        let exclude = dot_git
-            .then(|| exclude_file(path))
-            .flatten()
-            .and_then(|exclude| {
-                let text = crate::regular::read_small(&exclude, MOST_IGNORE)?;
-                Some(lines_of(path, &exclude, &text))
-            });
+        let git = dot_git || (require_git && path.join(".jj").exists());
+        let exclude = (dot_git.then(|| exclude_file(path)).flatten())
+            .and_then(|exclude| ignore_file(path, &exclude));
         if ignore.is_none() && gitignore.is_none() && exclude.is_none() && !git {
             return above;
         }
         let in_git = git || above.as_ref().is_some_and(|above| above.in_git);
         Some(Arc::new(Self {
             above,
+            above_root,
             ignore,
             gitignore,
             exclude,
@@ -229,7 +313,7 @@ mod tests {
 
     /// The same, with no ignore file read but by [`Rules`].
     fn walked_by_rules(root: &Path, require_git: bool, hidden: bool) -> Vec<PathBuf> {
-        let rules = Rules::new(require_git, hidden);
+        let rules = Rules::new(root, require_git, hidden);
         walked(
             walker(root).filter_entry(move |entry| rules.keeps(entry)),
             root,
@@ -268,6 +352,7 @@ mod tests {
                 "src/gen.rs",
                 "src/main.rs",
                 "src/b.log",
+                "src/other.log",
                 "src/anchored.txt",
                 "src/deep/x.log",
                 "nested/excluded.txt",
@@ -285,7 +370,23 @@ mod tests {
         // Above where a walk starts.
         write(&top.join(".gitignore"), "main.rs\n");
         write(&top.join(".ignore"), "deep/\n");
-        for root in ["", "repo", "repo/src", "repo/nested", "plain", "plain/src"] {
+        // Walked through a link: what's above it is above where it leads.
+        std::os::unix::fs::symlink(top.join("plain/src"), top.join("link")).unwrap();
+        // A `.git` that's a link to a directory, as Android's `repo` makes.
+        write(&top.join("git-dirs/android/info/exclude"), "excluded.txt\n");
+        write(&top.join("android/excluded.txt"), "");
+        write(&top.join("android/kept.txt"), "");
+        std::os::unix::fs::symlink(top.join("git-dirs/android"), top.join("android/.git")).unwrap();
+        for root in [
+            "",
+            "repo",
+            "repo/src",
+            "repo/nested",
+            "plain",
+            "plain/src",
+            "link",
+            "android",
+        ] {
             let root = top.join(root);
             // As the walk for language servers' watches had it, and as the
             // finder had it.
@@ -319,6 +420,74 @@ mod tests {
                 "src/main.rs",
             ]
         );
+    }
+
+    #[test]
+    fn the_users_own_ignore_file_is_read_again_once_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ignore");
+        let ignored = |name: &str| {
+            global_at(path.clone())
+                .matched(Path::new(name), false)
+                .is_ignore()
+        };
+        fs::write(&path, "*.a\n").unwrap();
+        assert!(ignored("x.a"));
+        fs::write(&path, "*.bb\n").unwrap();
+        assert!(!ignored("x.a"));
+        assert!(ignored("x.bb"));
+        // Its own, so through a link too.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(
+            global_at(link)
+                .matched(Path::new("x.bb"), false)
+                .is_ignore()
+        );
+    }
+
+    #[test]
+    fn linked_worktrees_and_submodules_have_their_git_directorys_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        let main = top.join("main");
+        write(&main.join(".git/info/exclude"), "excluded.txt\n");
+        write(&main.join(".git/worktrees/wt/commondir"), "../..\n");
+        // As git writes them: a linked worktree's `.git` naming its git
+        // directory whole, and a submodule's from where it is.
+        let git_dir = main.join(".git/worktrees/wt");
+        write(
+            &top.join("wt/.git"),
+            &format!("gitdir: {}\n", git_dir.display()),
+        );
+        write(
+            &main.join(".git/modules/sub/info/exclude"),
+            "excluded.txt\n",
+        );
+        write(&main.join("sub/.git"), "gitdir: ../.git/modules/sub\n");
+        for tree in [top.join("wt"), main.join("sub")] {
+            write(&tree.join("excluded.txt"), "");
+            write(&tree.join("kept.txt"), "");
+        }
+        let names = |found: Vec<PathBuf>| -> Vec<String> {
+            (found.iter())
+                .filter_map(|path| Some(path.file_name()?.to_str()?.to_owned()))
+                .filter(|name| name.ends_with(".txt"))
+                .collect()
+        };
+        // The finder's way, as the crate had it for a worktree.
+        let wt = top.join("wt");
+        let before = walked(&mut WalkBuilder::new(&wt), &wt);
+        assert_eq!(walked_by_rules(&wt, true, true), before);
+        assert_eq!(names(before), ["kept.txt"]);
+        // And as git has it where the crate didn't: a submodule's git
+        // directory named from where it is, not from where the daemon runs,
+        // and a worktree's excludes for the watch walk too.
+        let sub = main.join("sub");
+        for (tree, require_git) in [(&sub, true), (&sub, false), (&wt, false)] {
+            let found = walked_by_rules(tree, require_git, false);
+            assert_eq!(names(found), ["kept.txt"], "{tree:?} {require_git}");
+        }
     }
 
     /// A walk of a folder from anyone, with what it finds.
@@ -386,10 +555,16 @@ mod tests {
     /// A repository with `a.txt` in it, whose `.gitignore` is made by
     /// `ignore`.
     fn repository(ignore: impl FnOnce(&Path)) -> tempfile::TempDir {
+        repository_with(".gitignore", ignore)
+    }
+
+    /// The same, with its ignore file `name`.
+    fn repository_with(name: &str, ignore: impl FnOnce(&Path)) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join("a.txt"), "").unwrap();
-        ignore(&dir.path().join(".gitignore"));
+        fs::write(dir.path().join("b.txt"), "").unwrap();
+        ignore(&dir.path().join(name));
         dir
     }
 
@@ -424,31 +599,47 @@ mod tests {
     }
 
     #[test]
-    fn an_ignore_file_too_big_is_never_read() {
+    fn an_ignore_file_is_read_up_to_the_most_and_never_past_it() {
         for (name, walk) in WALKS {
             let dir = repository(|file| {
-                fs::write(file, format!("*.txt\n{}\n", "#".repeat(70_000))).unwrap();
+                let past = "#".repeat(usize::try_from(MOST_IGNORE).unwrap());
+                fs::write(file, format!("b.txt\n{past}\na.txt\n")).unwrap();
             });
             let (found, _) = walk_within(walk, dir.path(), || {});
             assert!(found.contains(&"a.txt".to_owned()), "{name}: {found:?}");
+            assert!(!found.contains(&"b.txt".to_owned()), "{name}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn an_ignore_file_that_isnt_all_utf8_still_counts() {
+        for (name, walk) in WALKS {
+            let dir = repository(|file| fs::write(file, b"\xff\xfe\nb.txt\n").unwrap());
+            let (found, _) = walk_within(walk, dir.path(), || {});
+            assert!(found.contains(&"a.txt".to_owned()), "{name}: {found:?}");
+            assert!(!found.contains(&"b.txt".to_owned()), "{name}: {found:?}");
         }
     }
 
     #[test]
     fn an_ignore_file_thats_a_link_to_the_daemons_own_pipe_is_never_read() {
         for (name, walk) in WALKS {
-            let (reader, writer) =
-                rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
-            let mut writer = fs::File::from(writer);
-            writer.write_all(b"*.txt\n").unwrap();
-            // A name a repository can commit: the pipe's, in
-            // `/proc/self/fd`, as whoever opens it sees it.
-            let pipe = format!("/proc/self/fd/{}", reader.as_raw_fd());
-            let dir = repository(|file| std::os::unix::fs::symlink(&pipe, file).unwrap());
-            let (found, in_time) = walk_within(walk, dir.path(), || drop(writer));
-            assert!(in_time, "{name}: waited on the pipe");
-            assert!(found.contains(&"a.txt".to_owned()), "{name}: {found:?}");
-            assert_eq!(left_in(reader), "*.txt\n", "{name}: the pipe was read");
+            for file in [".gitignore", ".ignore"] {
+                let (reader, writer) =
+                    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+                let mut writer = fs::File::from(writer);
+                writer.write_all(b"*.txt\n").unwrap();
+                // A name a repository can commit: the pipe's, in
+                // `/proc/self/fd`, as whoever opens it sees it.
+                let pipe = format!("/proc/self/fd/{}", reader.as_raw_fd());
+                let dir = repository_with(file, |file| {
+                    std::os::unix::fs::symlink(&pipe, file).unwrap();
+                });
+                let (found, in_time) = walk_within(walk, dir.path(), || drop(writer));
+                assert!(in_time, "{name}: waited on {file}");
+                assert!(found.contains(&"a.txt".to_owned()), "{name}: {found:?}");
+                assert_eq!(left_in(reader), "*.txt\n", "{name}: {file} was read");
+            }
         }
     }
 

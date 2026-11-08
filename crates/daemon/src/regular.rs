@@ -58,6 +58,29 @@ pub(crate) fn read_small(path: &Path, most: u64) -> Option<String> {
     Some(text)
 }
 
+/// The whole lines in the first `most` bytes of the file at `path`, as
+/// [`open`] opens it with `links`, if it's a regular file: a line cut
+/// short by `most` is left out, and bytes that aren't UTF-8 are read as
+/// U+FFFD, so the rest of the file still counts. For files of lines a
+/// folder from anyone may hold, such as ignore files, which git reads as
+/// bytes.
+pub(crate) fn read_lines(path: &Path, links: Links, most: u64) -> Option<String> {
+    let file = open(path, links).ok()?;
+    let mut bytes = Vec::new();
+    file.take(most.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > most {
+        // More than `most`: up to its last whole line.
+        let end = bytes[..bytes.len() - 1]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
+        bytes.truncate(end);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +115,33 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         let err = open(dir.path(), Links::Follow).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
+    }
+
+    #[test]
+    fn lines_are_read_whole_up_to_the_most_whatever_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"one\n\xff\xfe two\nthree\nfour").unwrap();
+        let read = |most| read_lines(&file, Links::Refuse, most);
+        assert_eq!(
+            read(100).as_deref(),
+            Some("one\n\u{fffd}\u{fffd} two\nthree\nfour")
+        );
+        // Cut short within `three`: up to the line before.
+        assert_eq!(read(12).as_deref(), Some("one\n\u{fffd}\u{fffd} two\n"));
+        // Just after it.
+        assert_eq!(
+            read(17).as_deref(),
+            Some("one\n\u{fffd}\u{fffd} two\nthree\n")
+        );
+        assert_eq!(read(2).as_deref(), Some(""));
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_lines(&link, Links::Refuse, 100), None);
+        assert!(read_lines(&link, Links::Follow, 100).is_some());
+        let pipe = dir.path().join("pipe");
+        fifo(&pipe);
+        assert_eq!(read_lines(&pipe, Links::Follow, 100), None);
     }
 
     #[test]

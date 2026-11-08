@@ -524,7 +524,7 @@ fn walk<'s, V: ParallelVisitor + 's>(root: &'s Path, visitor: impl FnMut(&'s Pat
     let threads =
         thread::available_parallelism().map_or(1, |threads| threads.get().min(MAX_THREADS));
     // What's hidden, and what git ignores in a repository, is left out.
-    let rules = Arc::new(Rules::new(true, true));
+    let rules = Arc::new(Rules::new(root, true, true));
     let walker = crate::ignores::walker(root)
         .threads(threads)
         .same_file_system(true)
