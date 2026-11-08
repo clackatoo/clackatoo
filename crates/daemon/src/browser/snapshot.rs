@@ -134,9 +134,13 @@ impl Writer {
             _ if ignored => {}
             "InlineTextBox" => return None,
             "StaticText" => {
-                let text = name.trim();
+                // As much as is written: both cut, so a page of short
+                // texts in a container named with megabytes costs no more
+                // than any other.
+                let whole = name.trim();
+                let text = first_chars(whole, MAX_NAME);
                 if !text.is_empty() && !around.contains(text) {
-                    let line = format!("- text \"{}\"", clipped(text));
+                    let line = format!("- text \"{}\"", clipped(whole));
                     self.line(depth, &line);
                 }
                 return None;
@@ -146,7 +150,7 @@ impl Writer {
                 let mut line = format!("- {}", shown_role(role));
                 if !name.trim().is_empty() {
                     let _ = write!(line, " \"{}\"", clipped(name.trim()));
-                    inner_around = Some(Rc::from(name));
+                    inner_around = Some(Rc::from(first_chars(name, MAX_NAME * 2)));
                 }
                 let value = text_of(&node["value"]);
                 if !value.is_empty() && value != name {
@@ -226,6 +230,14 @@ fn states(node: &Value) -> Vec<String> {
 
 /// `text` on one line, cut to [`MAX_NAME`] characters, with quotes
 /// escaped.
+/// The first `most` characters of `text`, or all of it.
+fn first_chars(text: &str, most: usize) -> &str {
+    match text.char_indices().nth(most) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
 fn clipped(text: &str) -> String {
     let mut clipped: String = (text.chars().take(MAX_NAME))
         .map(|ch| if ch.is_control() { ' ' } else { ch })
@@ -255,6 +267,31 @@ mod tests {
             node["parentId"] = json!(parent);
         }
         node
+    }
+
+    /// A container named with megabytes, holding thousands of short texts,
+    /// is outlined as fast as any other: each text is looked for in only
+    /// as much of the name as is written (CLACKA-220).
+    #[test]
+    fn a_long_name_around_many_texts_costs_nothing_more() {
+        let children: Vec<String> = (0..10_000).map(|n| format!("{}", n + 3)).collect();
+        let ids: Vec<&str> = children.iter().map(String::as_str).collect();
+        let mut nodes = vec![
+            node("1", None, "RootWebArea", "Page", &["2"]),
+            node("2", Some("1"), "list", &"a".repeat(2_000_000), &ids),
+        ];
+        for id in &ids {
+            nodes.push(node(id, Some("2"), "StaticText", &format!("a{id}b"), &[]));
+        }
+        let started = std::time::Instant::now();
+        let out = outline(&nodes, 40 * 1024);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(out.contains("- text \"a3b\""), "{out}");
+        assert!(out.contains("more lines"), "{out}");
     }
 
     #[test]

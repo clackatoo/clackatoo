@@ -325,19 +325,28 @@ impl Browser {
     /// Stops the browser and its thread, waiting for them. The browser is
     /// told to stop at once, if it hasn't been, so whatever the thread waits
     /// on fails, rather than the daemon waiting for a page to load; one that
-    /// hasn't gone a moment after it was told is killed.
+    /// hasn't gone a moment after it was told is killed. A thread still busy
+    /// a moment after that, at work of its own that no browser holds up, as
+    /// outlining a huge page, is left to end with the daemon, rather than
+    /// holding up its stop or upgrade.
     pub(crate) fn stop(&mut self) {
         self.begin_stop();
         let Some(thread) = self.thread.take() else {
             return;
         };
         let told = self.told_to_stop.unwrap_or_else(Instant::now);
-        let deadline = told + STOP_GRACE;
-        while !thread.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if !thread.is_finished() {
+        let finished_by = |deadline: Instant| {
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            thread.is_finished()
+        };
+        if !finished_by(told + STOP_GRACE) {
             self.running.stop(rustix::process::Signal::KILL);
+            if !finished_by(Instant::now() + STOP_GRACE) {
+                log::warn!("the browser's thread is still busy: it's left to end by itself");
+                return;
+            }
         }
         if thread.join().is_err() {
             log::error!("the browser's thread panicked");
