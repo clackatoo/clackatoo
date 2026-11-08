@@ -1411,7 +1411,9 @@ impl Daemon {
         let Some(asked) = path.to_str() else {
             return Err((FAILED, format!("{} isn't UTF-8", path.display())));
         };
-        let path = resolve(asked, &cwd, &self.config.home);
+        // As they really are, links and all, so a link in the project
+        // can't lead out of it.
+        let path = real(&resolve(asked, &cwd, &self.config.home));
         let root = agent_root(&cwd);
         if !path.starts_with(&root) {
             return Err((
@@ -1445,6 +1447,25 @@ impl Daemon {
 /// so it never takes in a repository the cache happens to be in.
 pub(super) fn agent_root(cwd: &Path) -> PathBuf {
     root_below(cwd, cache_dir().as_deref())
+}
+
+/// `path`, an absolute one, as it really is: the deepest part of it that's
+/// there with its links followed and `..` worked out, and the rest, not
+/// there yet, as a file to be made is, after it.
+fn real(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    for there in path.ancestors() {
+        if let Ok(real) = there.canonicalize() {
+            return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+        match there.file_name() {
+            Some(name) => rest.push(name),
+            // `..` not worked out: kept as it is, which no root starts
+            // with past it.
+            None => return path.to_owned(),
+        }
+    }
+    path.to_owned()
 }
 
 /// The git worktree `cwd` is in, or else `cwd`, looking no higher than

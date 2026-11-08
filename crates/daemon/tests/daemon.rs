@@ -4918,6 +4918,19 @@ fn an_agents_write_to_a_file_not_open_merges_with_the_file_and_keeps_its_lines()
     let write = format!("write {}\nhi\n", new.display());
     assert_eq!(agent_says(&mut chatter, chat, &write), "wrote");
     assert_eq!(std::fs::read_to_string(&new).unwrap(), "hi\n");
+    // Nothing through a link out of the project: not a file there, nor
+    // one in a folder still to be made there.
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("secret.txt"), "mine").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.join("out")).unwrap();
+    for asked in [
+        format!("read {}", dir.join("out/secret.txt").display()),
+        format!("write {}\nhi\n", dir.join("out/new/x.txt").display()),
+    ] {
+        let said = agent_says(&mut chatter, chat, &asked);
+        assert!(said.contains("is outside"), "{asked}: {said}");
+    }
+    assert!(!elsewhere.path().join("new").exists());
     // A file that isn't there can't be read.
     let read = format!("read {}", dir.join("none").display());
     let said = agent_says(&mut chatter, chat, &read);
