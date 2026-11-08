@@ -142,6 +142,25 @@ fn a_terminals_yank_is_put_by_p_in_an_editor_and_lines_as_lines() {
 }
 
 #[test]
+fn y_yanks_to_the_lines_end_in_every_pane_as_neovims_and_a_mapping_makes_it_the_line() {
+    let (mut desk, screen) = terminal_beside_editor("one two\r\nthree", "abc def\n");
+    type_keys(&mut desk, "0lY");
+    serve(&mut desk, &screen);
+    assert_eq!(register(&mut desk, '"').as_deref(), Some("hree"));
+    ctrl(&mut desk, "l");
+    type_keys(&mut desk, "0wY");
+    assert_eq!(register(&mut desk, '"').as_deref(), Some("def"));
+    // Vim's own `Y`, the line, is a mapping away.
+    desk.lua_from(r#"client.keys.map("n", "Y", "yy")"#);
+    let shifted = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("Y".into()), None, shifted);
+    assert_eq!(register(&mut desk, '"').as_deref(), Some("abc def\n"));
+}
+
+#[test]
 fn a_terminals_yank_keeps_off_the_clipboard_when_clipboard_says_so() {
     let (mut desk, screen) = terminal_beside_editor("one", "abc\n");
     command(&mut desk, "set clipboard=none");

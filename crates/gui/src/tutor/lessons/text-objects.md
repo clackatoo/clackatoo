@@ -132,6 +132,16 @@ Put the cursor in the middle of `fn double`'s first line, and type `vjY`.
 register 0 "fn double(width: u32) -> u32 {\n    width * 3\n"
 ```
 
+## Copy to the line's end with Y
+
+In normal mode, `Y` copies from the cursor to the line's end, as `y$` does, as Neovim's `Y` does; Vim's copies the whole line. It's the same in terminals and chats. To have Vim's, put `client.keys.map("n", "Y", "yy")` in your `init.lua`.
+
+Put the cursor on the `(` in `fn double`'s first line, and type `Y`.
+
+```check
+register 0 "(width: u32) -> u32 {"
+```
+
 ## Undo goes back to where you were
 
 `u` puts the cursor back where it was as the change began, as Vim's does: where an operator began, such as the start of what `dk` took. The last selection comes back as it was then, for `gv`. A command that changes nothing where Vim's makes a step all the same, such as `3J` on the last line, is a step of its own, which `u` undoes alone. Every window editing the file shares the steps, and what they keep follows other windows' and agents' edits.

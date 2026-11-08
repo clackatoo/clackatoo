@@ -266,7 +266,7 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](#mentioning-files)). |
 | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops; `gv` restores the last selection, or swaps it with the current one. |
-| `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, or whole lines, into the registers (see [Yanking](#yanking)). In visual mode, `y` yanks what's selected and `Y` its lines. |
+| `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, whole lines, or to the line's end, into the registers (see [Yanking](#yanking)), `Y` as `y$`, as Neovim's. In visual mode, `y` yanks what's selected and `Y` its lines. |
 | `"a` before `y` | Yanks into register `a`, or onto its end with `"A`. |
 | `/` `?`, `n` `N` | Searches the chat's text forward or back, and again (see [Searching](#searching)). |
 | `za` `zo` `zc`, Enter on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |
@@ -286,7 +286,7 @@ The mouse wheel scrolls in either mode. While you're at the end, the view follow
 
 ### Yanking
 
-`y` is Vim's yank operator. It takes any motion the chat moves by, with Vim's rules for what each takes: `yw` up to the next word, `ye` and `y$` to the word's or the line's end, `yfx` up to `x`, `yj`, `yk`, `ygg` and `yG` whole lines. `yy` and `Y` take the line, and a count takes more, as `3yy` or `y2w`. A chat's lines are each block's own lines, as it breaks them, not the rows they wrap onto: the cursor moves by rows, but `y$`, `y0`, `yfx` and `yj` go by lines, and `yw` on a line's last word stops at its end, as Vim's. Text objects are Vim's, found in the block of text the cursor's in: `iw` `aw`, `iW` `aW`, `is` `as`, `ip` `ap`, `i"` `a"`, `i(` `a(` (and `ib` `ab`, as in Vim) and their kin, `iB` `aB` for braces, and `it` `at`. Four are a chat's own:
+`y` is Vim's yank operator. It takes any motion the chat moves by, with Vim's rules for what each takes: `yw` up to the next word, `ye` and `y$` to the word's or the line's end, `yfx` up to `x`, `yj`, `yk`, `ygg` and `yG` whole lines. `yy` takes the line, and `Y` the rest of it, as `y$` does, as Neovim's; a count takes more, as `3yy` or `y2w`. A chat's lines are each block's own lines, as it breaks them, not the rows they wrap onto: the cursor moves by rows, but `y$`, `y0`, `yfx` and `yj` go by lines, and `yw` on a line's last word stops at its end, as Vim's. Text objects are Vim's, found in the block of text the cursor's in: `iw` `aw`, `iW` `aW`, `is` `as`, `ip` `ap`, `i"` `a"`, `i(` `a(` (and `ib` `ab`, as in Vim) and their kin, `iB` `aB` for braces, and `it` `at`. Four are a chat's own:
 
 | Object | Is |
 |---|---|

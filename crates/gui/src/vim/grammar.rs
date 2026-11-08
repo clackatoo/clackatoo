@@ -476,7 +476,9 @@ impl Reader<'_> {
             'C' => Action::DeleteToEnd { change: true },
             's' => Action::Substitute,
             'S' => Action::Operate(Operator::Change, Target::Lines),
-            'Y' => Action::Operate(Operator::Yank, Target::Lines),
+            // To the line's end, as Neovim's `Y` is `y$` (`:h default-mappings`);
+            // Vim's own, the line, is `client.keys.map("n", "Y", "yy")` away.
+            'Y' => Action::Operate(Operator::Yank, Target::Motion(Motion::LineEnd)),
             'p' => Action::Put { before: false },
             'P' => Action::Put { before: true },
             'J' => Action::Join,

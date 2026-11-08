@@ -2633,7 +2633,8 @@ mod tests {
             yank("gg03yy").as_deref(),
             Some("one two six\nfour five\nseven\n")
         );
-        assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five\n"));
+        // `Y` is `y$`, as Neovim's: by characters, to the next line's end.
+        assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five"));
         assert_eq!(yank("y2w").as_deref(), Some("one two "));
         assert_eq!(yank("2y2w").as_deref(), Some("one two six\nfour "));
         assert_eq!(

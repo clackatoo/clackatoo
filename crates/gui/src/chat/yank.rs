@@ -1,7 +1,7 @@
 //! `y` as Vim's operator in a chat's normal mode: `y` and a motion yanks
-//! what the motion moves over (`yw`, `y$`, `yj`, `y}`), `yy` and `Y` whole
-//! lines, and `y` and a text object the object, a count before either as
-//! in Vim. In visual mode `y` yanks what's selected, and `Y` its lines.
+//! what the motion moves over (`yw`, `y$`, `yj`, `y}`), `Y` to the line's
+//! end, as Neovim's, `yy` whole lines, and `y` and a text object the
+//! object, a count before either as in Vim. In visual mode `y` yanks what's selected, and `Y` its lines.
 //!
 //! What's yanked goes into the window's registers exactly as an editor's
 //! yank does, as a terminal's does (see [`crate::pane::Yanked`]): `"ay` into `a`, `"Ay` onto its end, and with
@@ -722,8 +722,10 @@ mod tests {
             yanked(&mut chat, &mut fonts),
             [lines("first line\nsecond line\n")]
         );
-        read(&mut chat, "Y");
-        assert_eq!(yanked(&mut chat, &mut fonts), [lines("first line\n")]);
+        // `Y` is `y$`, as Neovim's.
+        read(&mut chat, "wY");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("line")]);
+        read(&mut chat, "0");
         read(&mut chat, "yj");
         assert_eq!(
             yanked(&mut chat, &mut fonts),

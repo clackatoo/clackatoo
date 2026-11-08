@@ -1259,6 +1259,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "web.toml's lock_after sets how many wrong passwords lock pairing; a key it doesn't know is logged",
     },
+    News {
+        id: "y-to-end",
+        date: "2026-11-08",
+        lesson: "text-objects",
+        what: "Y copies to the line's end, as Neovim's, in every pane; map Y to yy for Vim's whole line",
+    },
 ];
 
 impl News {

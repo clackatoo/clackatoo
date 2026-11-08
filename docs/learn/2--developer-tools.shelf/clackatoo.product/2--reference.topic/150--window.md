@@ -454,7 +454,8 @@ The keys are read as an editor reads them, so a command half typed, as `y3` or `
 | `gv` | Selects the last selection again, as it was; in visual mode, swaps the two. |
 | `y`, Ctrl+Shift+C | Yanks the selection into the registers, or with Ctrl+Shift+C onto the clipboard and into `"+` as shown, by characters, and returns to normal mode. |
 | `Y`, in visual mode | Yanks the lines selected, whole, or a block as it is. |
-| `yy`, `Y` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
+| `yy` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
+| `Y` | Copies to the line's end, as `y$` does, as Neovim's `Y` does; with a count, to the end of as many lines. For Vim's, the line, map it: `client.keys.map("n", "Y", "yy")`. |
 | `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top, `yH` up to the view's top. |
 | `y` and a [text object](#text-objects) | Copies the object around the cursor: `yiw` the word, `yi"` what's in the quotes, `yib` a command's output. |
 | `"a` and any of these | Keeps what's copied in the register named, as in an editor: `"ayy`, `"Ayw` adds to `"a`, `"+yib` puts a command's output on the clipboard. A register before anything else does nothing. |
