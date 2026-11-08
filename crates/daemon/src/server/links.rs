@@ -911,8 +911,6 @@ impl Daemon {
     /// to keep, for the next build.
     pub(super) fn end_links(&mut self) -> Vec<Kept> {
         let kept = self.links.kept();
-        // The keys learned, written before the daemon goes.
-        self.links.pins.kept();
         for ask in std::mem::take(&mut self.links.asks) {
             let _ = ask.reply.send(None);
         }
@@ -933,6 +931,11 @@ impl Daemon {
                 THREADS_WAIT.as_secs()
             );
         }
+        // The keys learned, written before the daemon goes: once the
+        // threads that may learn one, meeting a daemon on a connection or
+        // a better way to it, have finished, so none starts a write that
+        // isn't waited for.
+        self.links.pins.kept();
         kept
     }
 
