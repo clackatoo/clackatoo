@@ -3445,6 +3445,16 @@ fn padding(scale: f64) -> u32 {
     padding
 }
 
+impl Drop for App {
+    /// Hangs up on the daemon, whose session thread then ends: the
+    /// process may go on with other windows.
+    fn drop(&mut self) {
+        if let Some(sender) = &self.sender {
+            sender.close();
+        }
+    }
+}
+
 impl App {
     /// What's left to do as the window closes, alone or with its process.
     fn closed(&mut self) {

@@ -473,6 +473,13 @@ impl ApplicationHandler<Wake> for Host {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, wake: Wake) {
         match wake {
+            // A window that closed as it connected: its session thread
+            // waits on the connection until it's hung up.
+            Wake::Window(key, SessionEvent::Connected { sender, .. })
+                if !self.windows.contains_key(&key) =>
+            {
+                sender.close();
+            }
             Wake::Window(key, event) => {
                 self.on_window(event_loop, key, |app| {
                     // Every workspace has closed.

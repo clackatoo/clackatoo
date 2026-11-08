@@ -24785,6 +24785,21 @@ fn managed_activity_cancelled_before_persistence_never_runs() {
     assert!(!marker.exists());
 }
 
+/// A window closing in a process that goes on with other windows hangs
+/// up: the thread waiting on its connection wakes, and the daemon lets
+/// the client go.
+#[test]
+fn a_client_that_hangs_up_wakes_its_own_receiver() {
+    let daemon = TestDaemon::start();
+    let (sender, mut receiver) = daemon.client().split().unwrap();
+    let waiting = std::thread::spawn(move || receiver.receive());
+    std::thread::sleep(Duration::from_millis(100));
+    sender.close();
+    let woke = waiting.join().unwrap();
+    assert!(woke.is_err(), "{woke:?}");
+    assert!(daemon.client().list_terminals().is_ok());
+}
+
 #[test]
 fn native_access_defaults_off_and_inspect_cannot_control() {
     use clackatoo_protocol::{NativeAccess, NativeReply};

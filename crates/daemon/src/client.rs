@@ -1112,6 +1112,14 @@ impl Sender {
         self.stream.write_all(&frame::encode(self.wire, message)?)?;
         Ok(())
     }
+
+    /// Hangs up, both ways: the daemon sees the client go, and a thread
+    /// waiting on the [`Receiver`] wakes to the connection closed. For a
+    /// client whose process lives on after it, as a window's does beside
+    /// the other windows in it.
+    pub fn close(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// The receiving half of a [split](Client::split) connection.
