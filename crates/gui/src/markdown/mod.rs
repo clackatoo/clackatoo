@@ -153,17 +153,17 @@ struct Reader {
     lists: Vec<Option<u64>>,
     /// The marker of an item whose first block hasn't started.
     marker: Option<String>,
-    quotes: u8,
+    quotes: u32,
     /// The table being read: how many came before it, how its columns
     /// line up, and the row and column of the cell next.
     table: Option<TableAt>,
     tables: usize,
     /// How deep in each style the text is.
-    bold: u8,
-    italic: u8,
-    strike: u8,
-    link: u8,
-    image: u8,
+    bold: u32,
+    italic: u32,
+    strike: u32,
+    link: u32,
+    image: u32,
     /// Where the event being read starts in the Markdown.
     at: usize,
     /// Where the item whose first block hasn't started starts.
@@ -266,7 +266,7 @@ impl Reader {
                 let marker = match self.lists.last_mut() {
                     Some(Some(number)) => {
                         let marker = format!("{number}.");
-                        *number += 1;
+                        *number = number.saturating_add(1);
                         marker
                     }
                     _ => "•".to_owned(),
@@ -276,17 +276,17 @@ impl Reader {
             }
             Tag::BlockQuote(_) => {
                 self.finish_block();
-                self.quotes += 1;
+                self.quotes = self.quotes.saturating_add(1);
             }
-            Tag::Strong => self.bold += 1,
-            Tag::Emphasis => self.italic += 1,
-            Tag::Strikethrough => self.strike += 1,
+            Tag::Strong => self.bold = self.bold.saturating_add(1),
+            Tag::Emphasis => self.italic = self.italic.saturating_add(1),
+            Tag::Strikethrough => self.strike = self.strike.saturating_add(1),
             Tag::Link { dest_url, .. } => {
-                self.link += 1;
+                self.link = self.link.saturating_add(1);
                 self.open_link(dest_url);
             }
             Tag::Image { dest_url, .. } => {
-                self.image += 1;
+                self.image = self.image.saturating_add(1);
                 self.open_link(dest_url);
             }
             _ => {}
@@ -345,9 +345,11 @@ impl Reader {
         }
     }
 
-    /// How far blocks are indented here.
+    /// How far blocks are indented here: at most `u8::MAX`, however deep
+    /// the Markdown goes.
     fn indent(&self) -> u8 {
-        u8::try_from(self.lists.len().saturating_sub(1)).unwrap_or(u8::MAX) + self.quotes
+        let lists = u32::try_from(self.lists.len().saturating_sub(1)).unwrap_or(u32::MAX);
+        u8::try_from(lists.saturating_add(self.quotes)).unwrap_or(u8::MAX)
     }
 
     /// Starts a block of `kind`: an item's first block, if one is waiting.
@@ -361,7 +363,7 @@ impl Reader {
         };
         // A list's later blocks line up with its items' text.
         let item = matches!(kind, BlockKind::Item(_));
-        let indent = self.indent() + u8::from(in_item && !item);
+        let indent = self.indent().saturating_add(u8::from(in_item && !item));
         let starts_list = item && std::mem::take(&mut self.list_starts);
         self.open = Some(Block {
             kind,
@@ -539,6 +541,81 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn markdown_nested_past_what_a_byte_counts_is_read_whole() {
+        const DEEP: usize = 300;
+        let quoted = format!("{}text\n", "> ".repeat(DEEP));
+        assert_eq!(
+            blocks(&quoted).last().map(|block| block.indent),
+            Some(u8::MAX)
+        );
+        let mut listed = String::new();
+        for deep in 0..DEEP {
+            listed.push_str("> ");
+            listed.push_str(&"  ".repeat(deep));
+            listed.push_str("- item\n");
+        }
+        assert_eq!(
+            blocks(&listed).last().map(|block| block.indent),
+            Some(u8::MAX)
+        );
+        // The deepest text has each style, and the text after it has
+        // none, as deep as they go.
+        let style_of = |markdown: &str, text: &str| {
+            let block = blocks(markdown).pop().unwrap();
+            let at = block.text.rfind(text).unwrap();
+            (block.spans.iter())
+                .find(|span| span.range.contains(&at))
+                .map_or_else(Style::default, |span| span.style)
+        };
+        for (open, close, style) in [
+            (
+                "*x ",
+                " x*",
+                Style {
+                    italic: true,
+                    ..Style::default()
+                },
+            ),
+            (
+                "**x ",
+                " x**",
+                Style {
+                    bold: true,
+                    ..Style::default()
+                },
+            ),
+            (
+                "~~x ",
+                " x~~",
+                Style {
+                    strike: true,
+                    ..Style::default()
+                },
+            ),
+            (
+                "[x ",
+                " x](u)",
+                Style {
+                    link: true,
+                    ..Style::default()
+                },
+            ),
+            (
+                "![x ",
+                " x](u)",
+                Style {
+                    image: true,
+                    ..Style::default()
+                },
+            ),
+        ] {
+            let nested = format!("{}deepest{} after", open.repeat(DEEP), close.repeat(DEEP));
+            assert_eq!(style_of(&nested, "deepest"), style, "{open}");
+            assert_eq!(style_of(&nested, "after"), Style::default(), "{open}");
+        }
     }
 
     #[test]
