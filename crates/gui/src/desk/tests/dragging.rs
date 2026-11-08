@@ -173,3 +173,134 @@ fn a_file_dragged_onto_an_editor_opens_there_and_onto_a_terminal_types_its_path(
         bytes: b"/p/a.txt ".to_vec(),
     }));
 }
+
+/// An explorer of `/p` and one of `/q`, which holds the folder `d`, side
+/// by side, the first focused.
+fn two_explorers() -> Desk {
+    use clackatoo_protocol::{FilesId, FilesUpdate};
+    let layout = side_by_side(vec![files_pane(2, 1), files_pane(5, 2)]);
+    let mut desk = desk(one_tab(layout));
+    explore_p(&mut desk);
+    let root = FilesUpdate::Root {
+        path: "/q".into(),
+        name: "/q".into(),
+    };
+    desk.files_changed(FilesId(2), root);
+    let listed = FilesUpdate::Listed {
+        dir: "/q".into(),
+        entries: vec![entry("d", true)],
+        cut_short: false,
+    };
+    desk.files_changed(FilesId(2), listed);
+    answer_all(&mut desk);
+    desk.show_pane(PaneId(2));
+    desk
+}
+
+#[test]
+fn a_drop_on_another_explorer_focuses_it_so_its_question_is_answered_there() {
+    let mut desk = two_explorers();
+    // `..` is row 1 of `/q`, `d` row 2.
+    let d = at(&desk, 5, 2);
+    let said = drag(&mut desk, 3, d, Modifiers::default());
+    assert_eq!(said, "move a.txt into /q/d/  (Ctrl copies, Esc stops)");
+    assert_eq!(shown_pane(&desk), PaneId(5));
+    let ops = file_ops(&mut desk);
+    let [(id, FileOp::Move { to, .. })] = &ops[..] else {
+        panic!("one move: {ops:?}");
+    };
+    assert_eq!(to, "/q/d/a.txt");
+    let stamp = clackatoo_protocol::FileStamp {
+        device: 1,
+        inode: 2,
+        len: 3,
+        seconds: 4,
+        nanoseconds: 5,
+    };
+    let exists = clackatoo_protocol::FileOpError::Exists {
+        path: "/q/d/a.txt".into(),
+        what: "a file of 3 bytes".into(),
+        stamp,
+    };
+    desk.file_op_done(*id, Err(exists));
+    let Status::Typing { text, .. } = desk.status() else {
+        panic!("no question asked");
+    };
+    assert!(text.contains("write over it"), "{text}");
+    type_keys(&mut desk, "y");
+    assert!(
+        matches!(
+            &file_ops(&mut desk)[..],
+            [(_, FileOp::Move { overwrite: Some(over), .. })] if *over == stamp
+        ),
+        "the answer went to the explorer that asked"
+    );
+}
+
+#[test]
+fn a_lesson_explorer_takes_in_nothing_from_outside_its_folder() {
+    let mut desk = two_explorers();
+    desk.fence_explorer(PaneId(5), "/q", "lesson");
+    let d = at(&desk, 5, 1);
+    let said = drag(&mut desk, 3, d, Modifiers::default());
+    assert_eq!(said, crate::explorer::FENCED);
+    assert_eq!(file_ops(&mut desk), []);
+}
+
+#[test]
+fn a_path_with_a_control_character_is_never_typed() {
+    use clackatoo_protocol::{FilesId, FilesUpdate};
+    let mut desk = three_panes();
+    let listed = FilesUpdate::Listed {
+        dir: "/p".into(),
+        entries: vec![entry("src", true), entry("a\nrm -rf ~\n", false)],
+        cut_short: false,
+    };
+    desk.files_changed(FilesId(1), listed);
+    answer_all(&mut desk);
+    let terminal = at(&desk, 3, 2);
+    let said = drag(&mut desk, 3, terminal, Modifiers::default());
+    assert_eq!(
+        said,
+        "a\\nrm -rf ~\\n's name has a control character in it, so it isn't typed"
+    );
+    let typed = (answer_all(&mut desk).into_iter())
+        .any(|request| matches!(request, Request::SendInput { .. }));
+    assert!(!typed);
+}
+
+#[test]
+fn a_path_dropped_on_a_terminal_goes_to_its_program_whatever_is_being_typed() {
+    let mut desk = three_panes();
+    type_keys(&mut desk, ":");
+    let (from, terminal) = (at(&desk, 2, 3), at(&desk, 3, 2));
+    let none = Modifiers::default();
+    desk.mouse(from, MouseAction::Press(LEFT), 1, none);
+    desk.mouse(terminal, MouseAction::Motion(Some(LEFT)), 1, none);
+    desk.mouse(terminal, MouseAction::Release(LEFT), 1, none);
+    assert!(answer_all(&mut desk).contains(&Request::SendInput {
+        terminal: TerminalId(3),
+        bytes: b"/p/a.txt ".to_vec(),
+    }));
+    if let Status::Typing { text, .. } = desk.status() {
+        assert!(!text.contains("a.txt"), "{text}");
+    }
+}
+
+#[test]
+fn a_drag_whose_release_was_lost_ends_as_the_mouse_moves_with_no_button() {
+    let mut desk = three_panes();
+    let (from, src) = (at(&desk, 2, 3), at(&desk, 2, 2));
+    desk.mouse(from, MouseAction::Press(LEFT), 1, Modifiers::default());
+    desk.mouse(
+        src,
+        MouseAction::Motion(Some(LEFT)),
+        1,
+        Modifiers::default(),
+    );
+    assert!(note(&desk).starts_with("move a.txt"));
+    desk.mouse(src, MouseAction::Motion(None), 1, Modifiers::default());
+    assert!(!note(&desk).starts_with("move a.txt"), "{}", note(&desk));
+    desk.mouse(src, MouseAction::Release(LEFT), 1, Modifiers::default());
+    assert_eq!(file_ops(&mut desk), []);
+}

@@ -64,10 +64,10 @@ Press on a file or folder and move the mouse half a line away, holding the butto
 | `..` | Moves it into the folder above the root. |
 | The explorer's heading, or below the tree | Moves it into the root. |
 | An editor | Opens it there, as `:e` would. |
-| A terminal | Types its path at the prompt, quoted for the shell, with a space after. Nothing runs. |
+| A terminal | Types its path for the program there, quoted so bash, zsh and fish each read it as one word, with a space after. Nothing runs. |
 | A chat | Types its path in the message box. |
 
-A move or copy works like `x` or `y` then `p`: nothing is written over unless you say so, and the bar asks first if something's already there. Nothing can be dropped into itself, or into the folder it's already in. A path belongs to its machine, so a file can't be dropped on a pane of another machine. Every drop but a move or copy focuses the pane you let go on.
+Every drop focuses the pane you let go on. A move or copy works like `x` or `y` then `p`: nothing is written over unless you say so, and if something's already there, that explorer asks first, in the bar. Nothing can be dropped into itself, or into the folder it's already in, and a lesson's explorer moves nothing into or out of the lesson's folder. A path belongs to its machine, so a file can't be dropped on a pane of another machine. A path with a control character in it, such as a line break, is never typed into a terminal or a chat. The path goes to the terminal's program, or the chat's box, even while the command line or a search is open.
 
 ## Opening files
 

@@ -11,17 +11,20 @@
 //!   folder, into it; on a file, into the folder it's in; on `..`, into
 //!   the folder above; on the heading or below the tree, into the root;
 //! - on an editor, opens it there, as `:e` would;
-//! - on a terminal, types its path at the cursor, quoted for the shell,
-//!   with a space after, as file managers' drops do; on a chat, types it
-//!   in the box, as it is.
+//! - on a terminal, types its path at the cursor, quoted so bash, zsh
+//!   and fish each read it as one word, with a space after, as file
+//!   managers' drops do; on a chat, types it in the box, as it is. A path
+//!   with a control character in it, as a line break or an escape, isn't
+//!   typed anywhere. The text goes to that pane's program or box, never
+//!   to a command line or a search being typed.
 //!
-//! Each focuses the pane it's dropped on but a move or a copy, which
-//! leaves the focus in the explorer it's dragged from, and the explorer
-//! dropped on shows it where it went. Anywhere else, or after Esc, does
-//! nothing. A path is its machine's, so it's never dropped on a pane of
-//! another.
+//! Each focuses the pane it's dropped on, so an explorer asking whether
+//! to write over what's there is the one keys go to, and shows where it
+//! went. Anywhere else, or after Esc, does nothing. A path is its
+//! machine's, so it's never dropped on a pane of another, and a lesson's
+//! explorer moves nothing into or out of the lesson's folder.
 
-use clackatoo_protocol::{FileOp, PaneId};
+use clackatoo_protocol::{FileOp, PaneId, TerminalId};
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
@@ -56,9 +59,11 @@ enum Drop {
     Into { pane: PaneId, dir: String },
     /// Open it in the editor `pane`.
     Open(PaneId),
-    /// Type its path in the terminal or the chat `pane`, quoted for the
-    /// shell if `quoted`.
-    Type { pane: PaneId, quoted: bool },
+    /// Type its path for the program of the terminal the pane shows,
+    /// quoted for the shell.
+    Terminal(PaneId, TerminalId),
+    /// Type its path in the box of the chat the pane shows.
+    Chat(PaneId, TerminalId),
     /// Nothing, as this says why.
     No(String),
 }
@@ -94,7 +99,13 @@ impl Desk {
         let drag = self.file_drag.as_mut()?;
         drag.at = point;
         match action {
-            MouseAction::Motion(_) => {
+            // No button held: its release was lost, as outside the window.
+            MouseAction::Motion(None) => {
+                let moving = drag.moving;
+                self.end_file_drag();
+                Some(moving)
+            }
+            MouseAction::Motion(Some(_)) => {
                 let cell = self.area.as_ref().map_or(8.0, |area| area.cell[1]);
                 let gone = (point[0] - drag.start[0]).hypot(point[1] - drag.start[1]);
                 if !drag.moving && gone < cell / 2.0 {
@@ -188,7 +199,7 @@ impl Desk {
                 format!("{how} {name} into {shown}{slash}  ({keys})")
             }
             Drop::Open(_) => format!("open {name} here"),
-            Drop::Type { .. } => format!("type {name}'s path here"),
+            Drop::Terminal(..) | Drop::Chat(..) => format!("type {name}'s path here"),
             Drop::No(why) => why,
         };
         if let Some(drag) = &mut self.file_drag {
@@ -229,11 +240,11 @@ impl Desk {
             if inside {
                 return Drop::No(format!("{} can't go into itself", name_of(&path)));
             }
-            let fenced = [Some(from), Some(pane)]
-                .into_iter()
-                .flatten()
-                .filter_map(|pane| self.explorers.panes.get(&pane))
-                .any(|explorer| explorer.fenced_out(&dir));
+            // As the explorer dropped on, which asks, would refuse it.
+            let explorers = &self.explorers.panes;
+            let fenced = (explorers.get(&from)).is_some_and(|it| it.fenced_out(&dir))
+                || (explorers.get(&pane))
+                    .is_some_and(|it| it.fenced_out(&dir) || it.fenced_out(&path));
             if fenced {
                 return Drop::No(crate::explorer::FENCED.to_owned());
             }
@@ -245,14 +256,20 @@ impl Desk {
         if self.takes_files(pane) {
             return Drop::Open(pane);
         }
-        match self.pane_view(pane).map(super::view::PaneView::focus) {
-            Some(Focus::Terminal(_)) => Drop::Type { pane, quoted: true },
-            Some(Focus::Chat(_)) => Drop::Type {
-                pane,
-                quoted: false,
-            },
-            _ => Drop::No("drop it on a folder, an editor or a terminal".to_owned()),
+        let typed = match self.pane_view(pane).map(super::view::PaneView::focus) {
+            Some(Focus::Terminal(terminal)) => Drop::Terminal(pane, terminal),
+            Some(Focus::Chat(chat)) => Drop::Chat(pane, chat),
+            _ => return Drop::No("drop it on a folder, an editor or a terminal".to_owned()),
+        };
+        // Never typed: a line break would run what's typed so far, and an
+        // escape would be read as keys.
+        if path.chars().any(char::is_control) {
+            return Drop::No(format!(
+                "{}'s name has a control character in it, so it isn't typed",
+                name_of(&path).escape_debug()
+            ));
         }
+        typed
     }
 
     /// Does what letting go of `path`, dragged from the explorer `from`,
@@ -277,7 +294,9 @@ impl Desk {
                     }
                 };
                 // Asked of the explorer dropped on, which shows where it
-                // went, or asks before writing over what's there.
+                // went, or asks before writing over what's there, with the
+                // focus, so the answer goes to it.
+                self.show_pane(pane);
                 self.file_op(pane, op);
             }
             Drop::Open(pane) => {
@@ -286,10 +305,19 @@ impl Desk {
                     self.open_here(pane, path);
                 }
             }
-            Drop::Type { pane, quoted } => {
-                let text = if quoted { shell_quoted(&path) } else { path };
+            // To the program, or the box, whatever's being typed in the
+            // window, as the command line or a search.
+            Drop::Terminal(pane, terminal) => {
                 self.show_pane(pane);
-                self.paste(&format!("{text} "));
+                if let Some(shown) = self.panes.get_mut(&terminal) {
+                    shown.paste(&format!("{} ", shell_quoted(&path)));
+                }
+            }
+            Drop::Chat(pane, chat) => {
+                self.show_pane(pane);
+                if let Some(chat) = self.chats.get_mut(&chat) {
+                    chat.paste(&format!("{path} "));
+                }
             }
             Drop::No(why) => {
                 if let Some(explorer) = self.explorers.panes.get_mut(&from)
@@ -325,19 +353,59 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// `path` as a shell reads it as one word: as it is if nothing in it means
-/// anything to a shell, or else in single quotes.
+/// `path` as bash, zsh and fish each read it, as one word and nothing
+/// more: as it is if nothing in it means anything to them, or else in
+/// single quotes, but for each `'` and `\`, which go between them, each
+/// after a `\`. Inside single quotes fish reads `\'` and `\\` as escapes,
+/// which the others don't, so neither is ever put there.
 fn shell_quoted(path: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c);
     if !path.is_empty() && path.chars().all(plain) {
         return path.to_owned();
     }
-    format!("'{}'", path.replace('\'', r"'\''"))
+    let mut quoted = String::with_capacity(path.len() + 2);
+    let mut open = false;
+    for c in path.chars() {
+        let escaped = c == '\'' || c == '\\';
+        if escaped == open {
+            quoted.push('\'');
+            open = !open;
+        }
+        if escaped {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    if open {
+        quoted.push('\'');
+    }
+    quoted
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::shell_quoted;
+
+    /// Names a shell would make something else of, given the chance.
+    const HOSTILE: &[&str] = &[
+        "/p/my notes.txt",
+        "/p/it's",
+        r"/p/a\'; rm -rf ~ #",
+        r"/p/back\slash",
+        r"/p/two\\slashes\\",
+        r"/p/ends\",
+        r"/p/'\''",
+        "/p/$HOME and $(echo hi) and `echo hi`",
+        "/p/*.rs ~ {a,b} [ab] ?",
+        "/p/\"double\" ; & | > < !",
+        "/p/%self",
+        "/p/line\nbreak\ttab",
+        "~/not home",
+        "'",
+        "\\",
+    ];
 
     #[test]
     fn a_path_is_quoted_only_if_a_shell_would_read_it_otherwise() {
@@ -345,5 +413,54 @@ mod tests {
         assert_eq!(shell_quoted("/p/my notes.txt"), "'/p/my notes.txt'");
         assert_eq!(shell_quoted("/p/it's"), r"'/p/it'\''s'");
         assert_eq!(shell_quoted("/p/$HOME*"), "'/p/$HOME*'");
+        // Never a `\` inside the quotes, which fish reads as an escape.
+        assert_eq!(shell_quoted(r"/p/a\'b"), r"'/p/a'\\\''b'");
+        for path in HOSTILE {
+            let quoted = shell_quoted(path);
+            if quoted == *path {
+                continue;
+            }
+            let (mut inside, mut chars) = (false, quoted.chars());
+            while let Some(c) = chars.next() {
+                match (inside, c) {
+                    (true, '\\') => panic!("a \\ inside quotes: {quoted}"),
+                    (false, '\\') => assert!(chars.next().is_some(), "{quoted}"),
+                    (_, '\'') => inside = !inside,
+                    _ => assert!(inside, "{c:?} outside quotes: {quoted}"),
+                }
+            }
+            assert!(!inside, "{quoted}");
+        }
+    }
+
+    /// Each shell installed reads each hostile name back as it is: bash,
+    /// zsh and fish, those that are here, with no config read.
+    #[test]
+    fn bash_zsh_and_fish_each_read_a_quoted_path_as_it_is() {
+        let shells: [(&str, &[&str]); 3] = [
+            ("bash", &["--norc", "--noprofile", "-c"]),
+            ("zsh", &["-f", "-c"]),
+            ("fish", &["--no-config", "-c"]),
+        ];
+        let mut ran = 0;
+        for (shell, flags) in shells {
+            for path in HOSTILE {
+                let script = format!("printf '%s|' {}", shell_quoted(path));
+                let Ok(out) = Command::new(shell)
+                    .args(flags)
+                    .arg(&script)
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                else {
+                    break;
+                };
+                ran += 1;
+                let read = String::from_utf8_lossy(&out.stdout);
+                assert_eq!(read, format!("{path}|"), "{shell} read {script}");
+            }
+        }
+        // bash, at least, is everywhere this is built.
+        assert!(ran >= HOSTILE.len(), "no shell ran");
     }
 }
