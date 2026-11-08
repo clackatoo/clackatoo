@@ -223,10 +223,13 @@ struct Commanded {
 /// command over (see [`Daemon::shell_back`]).
 #[derive(Clone, Copy, Debug)]
 struct Looked {
-    /// The blocks as they were then (see [`Commanded::blocks_of`]).
-    blocks: Blocks,
+    /// The blocks as they were then (see [`Commanded::blocks_of`]), if
+    /// there were any.
+    blocks: Option<Blocks>,
     /// Whether the shell was back.
     back: bool,
+    /// When it was looked at.
+    at: Instant,
     /// When to look again, if it wasn't.
     again: Instant,
     /// How long that was after looking.
@@ -323,7 +326,13 @@ impl Commanded {
         if this.is_some_and(|commanded| commanded.typing.is_some()) {
             return Some(false);
         }
-        let (latest, progress) = grid.latest_block()?;
+        let Some((latest, progress)) = grid.latest_block() else {
+            // The marks of a command typed at a prompt are gone, as a
+            // reset (`ESC c`) takes them: whether it has ended is the
+            // shell's to say, by having the terminal back (see
+            // `Daemon::shell_back`).
+            return this.and_then(|commanded| commanded.expect).map(|_| true);
+        };
         if this.is_some_and(|commanded| commanded.expect_first) {
             return Some(false);
         }
@@ -1582,13 +1591,14 @@ impl Daemon {
             return looked.back;
         }
         let back = shell_is_back(slot.terminal.shell_has_terminal());
-        if let (Some(commanded), Some(blocks)) = (self.tools.commanded.get_mut(&terminal), blocks) {
+        if let Some(commanded) = self.tools.commanded.get_mut(&terminal) {
             let wait = looked.map_or(LOOK_AGAIN, |looked| {
                 (looked.wait * 2).min(LOOK_AGAIN_AT_MOST)
             });
             commanded.looked = Some(Looked {
                 blocks,
                 back,
+                at: now,
                 again: now + wait,
                 wait,
             });
@@ -1612,7 +1622,7 @@ impl Daemon {
     /// being `blocks`.
     fn looked(&self, terminal: TerminalId, blocks: Option<Blocks>) -> Option<Looked> {
         let looked = self.tools.commanded.get(&terminal)?.looked?;
-        (Some(looked.blocks) == blocks).then_some(looked)
+        (looked.blocks == blocks).then_some(looked)
     }
 
     /// `send_to_terminal`: types `text` into `pane`'s terminal, a newline
@@ -1669,6 +1679,14 @@ impl Daemon {
                 .and_then(|slot| slot.terminal.grid())
                 .map_or(0, Terminal::block_renumberings);
             commanded.expect_first = false;
+        }
+        // Output since a look that found the shell not back may be the
+        // command's real end, which a forged one before it hid: looked at
+        // again soon, but no more often than every LOOK_AGAIN.
+        if let Some(looked) = &mut commanded.looked
+            && !looked.back
+        {
+            looked.again = looked.again.min(looked.at + LOOK_AGAIN);
         }
         let looking = (commanded.typing.as_ref()).is_some_and(|typing| typing.again.is_none());
         if looking && self.prompting(terminal) {
@@ -1810,8 +1828,19 @@ impl Daemon {
         let Some(block) = last_command(grid, last) else {
             let start = last.saturating_sub(lines as u64 - 1).max(first);
             let text = whole_lines(grid, start, last);
+            // A reset took the marks of what was typed.
+            let why = if commanded.is_some_and(|commanded| commanded.expect.is_some()) {
+                if self.shell_seen_back(terminal) {
+                    "its command has finished, but the terminal was reset, so how it ended isn't \
+                     known"
+                } else {
+                    "its command is still running, and the terminal was reset"
+                }
+            } else {
+                "its shell doesn't mark its commands"
+            };
             return format!(
-                "Pane {pane}'s shell doesn't mark its commands, so here are its last lines:\n{}",
+                "Pane {pane}: {why}, so here are its last lines:\n{}",
                 bounded(text.trim_end(), lines)
             );
         };
@@ -1900,9 +1929,12 @@ impl Daemon {
         let commanded: Vec<TerminalId> = self.tools.commanded.keys().copied().collect();
         let mut back_now = Vec::new();
         for &terminal in &commanded {
+            // Looked at for every end the marks say, as the closing timer
+            // waits on it too; answered while anything waits, as a wait
+            // asked after the shell was seen back would be otherwise.
             if let Some(Ended { looks: true, .. }) = self.ended_by_marks(terminal)
-                && !self.seen_back(terminal)
                 && self.shell_back(terminal, now)
+                && self.awaited(terminal)
             {
                 back_now.push(terminal);
             }
@@ -1951,16 +1983,36 @@ impl Daemon {
     fn ended_by_marks(&self, terminal: TerminalId) -> Option<Ended> {
         let slot = self.terminals.get(&terminal)?;
         let commanded = self.tools.commanded.get(&terminal)?;
-        let said = slot.terminal.grid().is_some_and(|grid| {
+        let grid = slot.terminal.grid();
+        let said = grid.is_some_and(|grid| {
             Commanded::finished(Some(commanded), grid) == Some(true)
                 && !matches!(grid.latest_block(), Some((_, Progress::Running)))
         });
+        // An activity waits for the block it was typed as, which a later
+        // command typed there doesn't change.
+        let activity = (self.tools.activities.iter())
+            .filter(|record| record.terminal == terminal && record.activity.state.active())
+            .any(|record| {
+                grid.filter(|grid| grid.block_renumberings() == record.renumbered)
+                    .and_then(|grid| grid.block_progress(record.expect?))
+                    .is_some_and(|progress| matches!(progress, Progress::Finished(_)))
+            });
         let running = slot.terminal.status() == clackatoo_protocol::TerminalStatus::Running;
         Some(Ended {
             said,
             running,
-            looks: said && running && commanded.failed.is_none(),
+            looks: (said || activity) && running && commanded.failed.is_none(),
         })
+    }
+
+    /// Whether anything waits for `terminal`'s command to end: a call
+    /// waiting for it, or an activity it runs.
+    fn awaited(&self, terminal: TerminalId) -> bool {
+        let waits = (self.tools.waiting.iter())
+            .any(|wait| matches!(wait.what, Wait::Finish { terminal: id, .. } if id == terminal));
+        waits
+            || (self.tools.activities.iter())
+                .any(|record| record.terminal == terminal && record.activity.state.active())
     }
 
     /// Whether `terminal`'s shell was seen back already, its blocks as
@@ -2003,12 +2055,20 @@ impl Daemon {
             .commanded
             .values()
             .filter_map(|commanded| commanded.next_close_tick(now));
-        // Only those still to come: one passed is looked at as the loop
-        // goes round, if the marks still say the command ended.
-        let looks = (self.tools.commanded.values())
-            .filter_map(|commanded| commanded.looked)
-            .filter(|looked| !looked.back && looked.again > now)
-            .map(|looked| looked.again);
+        // One passed is due now while the marks still say the command
+        // ended: each look sets the next, so the loop doesn't spin.
+        let looks = (self.tools.commanded.iter())
+            .filter_map(|(&terminal, commanded)| Some((terminal, commanded.looked?)))
+            .filter(|(_, looked)| !looked.back)
+            .filter_map(|(terminal, looked)| {
+                if looked.again > now {
+                    return Some(looked.again);
+                }
+                let looks = self
+                    .ended_by_marks(terminal)
+                    .is_some_and(|ended| ended.looks);
+                looks.then_some(now)
+            });
         typing
             .chain(waits)
             .chain(finished)
@@ -2727,7 +2787,7 @@ mod keeping_whose {
             },
         });
         // What it prints says it ended, and a prompt came.
-        emulator(&mut daemon, terminal).advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;D;0\x07\r\n\x1b]133;A\x07$ ");
         daemon.answer_finished(terminal, false);
         assert_eq!(daemon.tools.waiting.len(), 1, "the wait goes on");
         assert_eq!(
@@ -2752,9 +2812,104 @@ mod keeping_whose {
         daemon.maintain_agent_terminals(first.again.checked_sub(Duration::from_millis(1)).unwrap());
         assert_eq!(looked(&daemon).again, first.again);
         daemon.maintain_agent_terminals(first.again);
-        assert_eq!(looked(&daemon).wait, first.wait * 2);
+        let second = looked(&daemon);
+        assert_eq!(second.wait, first.wait * 2);
+        // Output since brings the next look nearer, but no nearer than
+        // a moment after the last.
+        daemon.terminal_moved_on(terminal);
+        assert_eq!(looked(&daemon).again, second.at + super::LOOK_AGAIN);
+        // A look that's due and was missed is due at once.
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        (daemon
+            .tools
+            .commanded
+            .get_mut(&terminal)
+            .unwrap()
+            .looked
+            .as_mut())
+        .unwrap()
+        .again = past;
+        assert!(daemon.next_tool_due().unwrap() <= Instant::now());
         daemon.maintain_agent_terminals(now + Duration::from_mins(2));
         assert!(daemon.terminals.contains_key(&terminal), "never closed");
+        // The activity waits for its own block, whatever the agent typed
+        // there since.
+        daemon.tools.commanded.get_mut(&terminal).unwrap().expect = Some(block + 5);
+        assert!(daemon.ended_by_marks(terminal).unwrap().looks);
+    }
+
+    #[test]
+    fn a_reset_while_a_command_runs_doesnt_end_it() {
+        use super::{Commanded, Wait, Waiting};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.workspaces.new_workspace("test".into(), chat);
+        daemon.next_id = chat.0 + 1;
+        let terminal = daemon
+            .new_terminal(&NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec!["sh".into(), "-c".into(), "sleep 600; :".into()]),
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        let pane = daemon
+            .place_beside(chat, clackatoo_protocol::PaneTerminal::Existing(terminal))
+            .unwrap();
+        daemon.tools.commanded.insert(
+            terminal,
+            Commanded {
+                owner: Some(chat),
+                ..Commanded::default()
+            },
+        );
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        let hosted = slot.terminal.pty().unwrap();
+        let pid = hosted.info().pid.unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while crate::ports::children_of(std::path::Path::new("/proc"), pid).is_empty() {
+            assert!(Instant::now() < give_up, "sleep never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        hosted.emulator_mut().advance(b"\x1b]133;A\x07$ ");
+        let grid = daemon.terminals[&terminal].terminal.grid().unwrap();
+        daemon
+            .tools
+            .commanded
+            .get_mut(&terminal)
+            .unwrap()
+            .typed(grid);
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        slot.terminal
+            .pty()
+            .unwrap()
+            .emulator_mut()
+            .advance(b"\x1b]133;C\x07");
+        daemon.tools.waiting.push(Waiting {
+            token: mio::Token(usize::MAX),
+            id: serde_json::json!(1),
+            chat,
+            what: Wait::Finish {
+                terminal,
+                lines: 10,
+                due: Instant::now() + Duration::from_mins(5),
+            },
+        });
+        // What it prints resets the terminal, taking every mark.
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        slot.terminal
+            .pty()
+            .unwrap()
+            .emulator_mut()
+            .advance(b"\x1bc");
+        daemon.answer_finished(terminal, false);
+        daemon.maintain_agent_terminals(Instant::now());
+        assert_eq!(daemon.tools.waiting.len(), 1, "the wait goes on");
+        assert!(!daemon.agent_terminal(terminal).unwrap().finished);
+        let read = daemon.describe_terminal(pane, terminal, 10);
+        assert!(read.contains("still running"), "{read}");
     }
 
     #[test]
@@ -2830,6 +2985,10 @@ mod keeping_whose {
         daemon.maintain_agent_terminals(Instant::now());
         assert!(daemon.tools.waiting.is_empty(), "answered");
         assert!(daemon.agent_terminal(terminal).unwrap().finished);
+        // Asked again, with the shell seen back already, it's answered too.
+        wait(&mut daemon, chat, terminal);
+        daemon.maintain_agent_terminals(Instant::now());
+        assert!(daemon.tools.waiting.is_empty(), "answered again");
         // The second starts a program, which prints the end of its block
         // alone.
         typed(&mut daemon, terminal);
