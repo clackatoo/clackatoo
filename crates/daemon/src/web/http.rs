@@ -197,7 +197,7 @@ impl Response {
     }
 
     /// An answer with `status` saying `error`, as JSON.
-    pub(super) fn error(status: u16, error: &str) -> Self {
+    pub(crate) fn error(status: u16, error: &str) -> Self {
         Self::json(status, &serde_json::json!({ "error": error }))
     }
 

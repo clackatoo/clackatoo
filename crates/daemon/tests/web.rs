@@ -1075,6 +1075,32 @@ fn session_over_tls(
     address: SocketAddr,
     trusted: &rustls::pki_types::CertificateDer<'static>,
 ) -> std::io::Result<String> {
+    session_over_tls_from(TcpStream::connect(address)?, address, trusted)
+}
+
+/// `GET /session` over `stream`, to the web app at `address`, over TLS,
+/// trusting only `trusted`.
+fn session_over_tls_from(
+    stream: TcpStream,
+    address: SocketAddr,
+    trusted: &rustls::pki_types::CertificateDer<'static>,
+) -> std::io::Result<String> {
+    let mut tls = tls_to(stream, trusted);
+    let port = address.port();
+    write!(
+        tls,
+        "GET /session HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut answer = String::new();
+    tls.read_to_string(&mut answer)?;
+    Ok(answer)
+}
+
+/// TLS over `stream`, to `localhost`, trusting only `trusted`.
+fn tls_to(
+    stream: TcpStream,
+    trusted: &rustls::pki_types::CertificateDer<'static>,
+) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(trusted.clone()).unwrap();
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
@@ -1086,17 +1112,10 @@ fn session_over_tls(
     let connection =
         rustls::ClientConnection::new(std::sync::Arc::new(config), "localhost".try_into().unwrap())
             .unwrap();
-    let stream = TcpStream::connect(address)?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut tls = rustls::StreamOwned::new(connection, stream);
-    let port = address.port();
-    write!(
-        tls,
-        "GET /session HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut answer = String::new();
-    tls.read_to_string(&mut answer)?;
-    Ok(answer)
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    rustls::StreamOwned::new(connection, stream)
 }
 
 #[test]
@@ -1454,12 +1473,85 @@ fn one_address_opens_only_so_many_connections() {
 /// A connection to `to` from `from`, one of this machine's loopback
 /// addresses: all of 127.0.0.0/8 is this machine's.
 fn connect_from(from: &str, to: SocketAddr) -> Conn {
+    Conn::Tcp(tcp_from(from, to, None))
+}
+
+/// A TCP connection to `to` from `from`, one of this machine's loopback
+/// addresses, taking at most `receives` bytes ahead of reading, if given.
+fn tcp_from(from: &str, to: SocketAddr, receives: Option<usize>) -> TcpStream {
     use rustix::net::{AddressFamily, SocketType};
     let socket = rustix::net::socket(AddressFamily::INET, SocketType::STREAM, None).unwrap();
+    if let Some(size) = receives {
+        rustix::net::sockopt::set_socket_recv_buffer_size(&socket, size).unwrap();
+    }
     let from = SocketAddr::new(from.parse().unwrap(), 0);
     rustix::net::bind(&socket, &from).unwrap();
     rustix::net::connect(&socket, &to).unwrap();
-    Conn::Tcp(TcpStream::from(socket))
+    TcpStream::from(socket)
+}
+
+/// What the daemons in these tests have logged about web connections, as
+/// `LEVEL what`, for tests to look for what concerns them by the address
+/// they connect from.
+fn logged() -> Vec<String> {
+    use std::sync::{Mutex, Once};
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INSTALLED: Once = Once::new();
+    struct Kept;
+    impl log::Log for Kept {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target().starts_with("clackatoo_daemon")
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                let line = record.args().to_string();
+                if line.contains("web connection") || line.contains("handshake") {
+                    let line = format!("{} {line}", record.level());
+                    LOGGED.lock().unwrap().push(line);
+                }
+            }
+        }
+        fn flush(&self) {}
+    }
+    INSTALLED.call_once(|| {
+        log::set_logger(&Kept).expect("no other logger in these tests");
+        log::set_max_level(log::LevelFilter::Debug);
+    });
+    LOGGED.lock().unwrap().clone()
+}
+
+/// The lines logged about web connections that mention `part`.
+fn logged_of(part: &str) -> Vec<String> {
+    (logged().into_iter())
+        .filter(|line| line.contains(part))
+        .collect()
+}
+
+/// A body to serve, of a mebibyte: answers too big to be taken in
+/// whole by a client that doesn't read them.
+fn big_assets() -> &'static [clackatoo_daemon::web::Asset] {
+    let body: &'static [u8] = Box::leak(vec![b'x'; 1 << 20].into_boxed_slice());
+    Box::leak(Box::new([clackatoo_daemon::web::Asset {
+        path: "/big",
+        content_type: "text/plain",
+        body,
+        gzip: None,
+        etag: "\"big\"",
+    }]))
+}
+
+/// A connection from `from` to the public app at `address` that shakes
+/// hands, asks for the big body, and never reads it.
+fn slow_reader(
+    from: &str,
+    address: SocketAddr,
+    trusted: &rustls::pki_types::CertificateDer<'static>,
+) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    let mut tls = tls_to(tcp_from(from, address, Some(4096)), trusted);
+    let port = address.port();
+    write!(tls, "GET /big HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").unwrap();
+    tls.flush().unwrap();
+    tls
 }
 
 /// A daemon reached straight from the network, over TLS, its web app's
@@ -1499,7 +1591,8 @@ fn when_full_the_oldest_connection_idle_makes_room() {
         // In order, oldest first.
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::thread::sleep(Duration::from_millis(100));
+    // Past the while a phone's handshake is spared.
+    std::thread::sleep(Duration::from_millis(1100));
     // The owner's phone still gets in, in place of the oldest.
     let mut phone = connect_from("127.0.0.10", address);
     assert!(
@@ -1530,18 +1623,130 @@ fn one_address_opens_connections_only_so_fast() {
 }
 
 #[test]
+fn when_full_a_connection_whose_answers_wait_unread_makes_room() {
+    // Kept from the start.
+    logged();
+    let (_daemon, address, _pems, trusted) = public_daemon(|web| web.assets = big_assets());
+    // Eight from each of eight addresses, every one asking for an answer
+    // it never reads.
+    let fillers: Vec<_> = (120..128)
+        .flat_map(|host| (0..8).map(move |_| format!("127.0.0.{host}")))
+        .map(|from| {
+            let trusted = trusted.clone();
+            std::thread::spawn(move || slow_reader(&from, address, &trusted))
+        })
+        .collect();
+    let fillers: Vec<_> = (fillers.into_iter())
+        .map(|filler| filler.join().unwrap())
+        .collect();
+    // Each is still writing, or only just stopped: none goes yet.
+    std::thread::sleep(Duration::from_millis(1200));
+    let mut early = connect_from("127.0.0.129", address);
+    assert!(
+        closed_within(&mut early, Duration::from_secs(1)),
+        "one still taking its answer made room"
+    );
+    // Once their answers have waited unread a while, they make room.
+    std::thread::sleep(Duration::from_secs(3));
+    let mut phone = connect_from("127.0.0.130", address);
+    assert!(!closed_within(&mut phone, Duration::from_millis(500)));
+    let closed: Vec<String> = (logged_of("closed to make room").into_iter())
+        .filter(|line| line.contains("from 127.0.0.12"))
+        .collect();
+    assert_eq!(closed.len(), 1, "one, for the phone: {closed:?}");
+    drop(fillers);
+}
+
+#[test]
 fn handshakes_put_off_to_a_later_turn_still_finish() {
+    // Kept from the start.
+    logged();
     let (_daemon, address, _pems, trusted) = public_daemon(|web| web.handshakes_at_once = 1);
     let sessions: Vec<_> = (0..6)
         .map(|_| {
             let trusted = trusted.clone();
-            std::thread::spawn(move || session_over_tls(address, &trusted))
+            std::thread::spawn(move || {
+                let stream = tcp_from("127.0.0.40", address, None);
+                session_over_tls_from(stream, address, &trusted)
+            })
         })
         .collect();
     for session in sessions {
         let answer = session.join().unwrap().expect("the whole answer");
         assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
     }
+    assert!(
+        !logged_of("handshake from 127.0.0.40:").is_empty(),
+        "none was put off"
+    );
+}
+
+#[test]
+fn connections_beyond_a_turns_share_are_taken_the_next_turn() {
+    // Kept from the start.
+    logged();
+    let (_daemon, address, _pems, trusted) = public_daemon(|web| web.accepts_at_once = 1);
+    let sessions: Vec<_> = (41..47)
+        .map(|host| {
+            let trusted = trusted.clone();
+            std::thread::spawn(move || {
+                let stream = tcp_from(&format!("127.0.0.{host}"), address, None);
+                session_over_tls_from(stream, address, &trusted)
+            })
+        })
+        .collect();
+    for session in sessions {
+        let answer = session.join().unwrap().expect("the whole answer");
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    }
+    assert!(
+        !logged_of(&format!("to {address} wait for the next turn")).is_empty(),
+        "none waited for the next turn"
+    );
+}
+
+#[test]
+fn connections_refused_are_logged_once_together() {
+    // Kept from the start.
+    logged();
+    let (_daemon, address, _pems, _) = public_daemon(|_| {});
+    let open: Vec<Conn> = (0..8)
+        .map(|_| connect_from("127.0.0.50", address))
+        .collect();
+    for _ in 0..6 {
+        let mut refused = connect_from("127.0.0.50", address);
+        assert!(closed_within(&mut refused, Duration::from_secs(2)));
+    }
+    let said = logged_of("from 127.0.0.50:");
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("WARN"), "{said:?}");
+    drop(open);
+}
+
+#[test]
+fn a_device_on_the_tailnet_opens_only_so_many_connections() {
+    let daemon = TestDaemon::start_with(|web| web.assets = big_assets());
+    let ask = |from: &str| {
+        let mut conn = Conn::open(&daemon.web);
+        let mut headers = daemon.app();
+        headers.push(("X-Forwarded-For".into(), from.into()));
+        conn.write_all(request_bytes("GET", "/big", &headers, "").as_bytes())
+            .unwrap();
+        conn
+    };
+    // Eight answers waiting unread, from one device.
+    let _open: Vec<Conn> = (0..8).map(|_| ask("100.64.0.7")).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut ninth = ask("100.64.0.7");
+    let mut answer = Vec::new();
+    ninth.read_to_end(&mut answer).unwrap();
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 429"), "{answer}");
+    // Another device isn't held up by it.
+    let mut other = ask("100.64.0.8");
+    let mut head = [0; 12];
+    other.read_exact(&mut head).unwrap();
+    assert_eq!(&head, b"HTTP/1.1 200");
 }
 
 /// Sets where a request says, as `tailscale serve` does, it came from.

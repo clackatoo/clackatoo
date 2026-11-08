@@ -15,24 +15,31 @@ use clackatoo_protocol::{frame, wire};
 use mio::{Interest, Token};
 
 use super::{Broadcast, Client, Daemon, Link, Source, WEB};
-use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web};
+use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web, Who};
 
 /// The most HTTP connections open at once, WebSocket connections apart:
-/// past it, the one open longest of those idle is closed for a new one,
-/// or if none is, the new one is.
+/// past it, one is closed for a new one, from whoever has the most open
+/// (see [`Daemon::room_for_web`]), or if none may be, the new one is.
 const MOST_CONNECTIONS: usize = 64;
 
 /// The most HTTP connections open at once from one address (IPv6 by
-/// /64), TLS handshakes under way among them.
+/// /64), or one device on the tailnet, TLS handshakes under way among
+/// them.
 const MOST_FROM_ONE: usize = 8;
-
-/// The most connections taken from the listener in one turn of the event
-/// loop: the rest wait for the next.
-const MOST_ACCEPTS_AT_ONCE: usize = 64;
 
 /// The most requests a connection has answered in one turn of the event
 /// loop: the rest wait for the next.
 const MOST_REQUESTS_AT_ONCE: usize = 16;
+
+/// The HTTP connections from someone, as room is made for another.
+struct Crowd<'a> {
+    who: &'a Who,
+    /// How many are open.
+    open: usize,
+    /// Of those that may be closed, the one open longest, and when it
+    /// opened.
+    oldest: Option<(Instant, Token)>,
+}
 
 /// Why a connection's requests stopped being answered for now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,13 +131,22 @@ impl Daemon {
         self.web.as_ref()?.address()
     }
 
-    /// Takes the web connections waiting, at most a turn's worth: the
-    /// rest are taken next turn.
+    /// Takes the web connections waiting, at most a turn's worth, however
+    /// often it's called in the turn: the rest are taken next turn.
     pub(super) fn accept_web(&mut self) {
-        for _ in 0..MOST_ACCEPTS_AT_ONCE {
+        loop {
             let Some(web) = self.web.as_mut() else {
                 return;
             };
+            if web.accepted_enough() {
+                log::debug!(
+                    "web connections to {} wait for the next turn",
+                    web.describe()
+                );
+                // More may wait, and the listener won't say so again.
+                self.read_again(WEB);
+                return;
+            }
             let (stream, peer) = match web.listener.accept() {
                 Ok(accepted) => accepted,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -141,22 +157,26 @@ impl Daemon {
                 }
             };
             let now = Instant::now();
-            if let Err(why) = web.may_connect(peer, now) {
-                self.refuse_web(peer, why, now);
-                continue;
-            }
-            match self.room_for_web(peer) {
-                Ok(None) => {}
-                Ok(Some(oldest)) => {
-                    if let Some(Source::Web(conn)) = self.sources.get(oldest.0) {
-                        log::debug!("a web connection from {} closed to make room", conn.peer);
-                    }
-                    self.drop_web(oldest);
-                }
+            // Room first, so one refused for want of it costs its address
+            // nothing.
+            let room = self.room_for_web(peer, now);
+            let Some(web) = self.web.as_mut() else {
+                return;
+            };
+            let made = match room.and_then(|making| web.may_connect(peer, now).map(|()| making)) {
+                Ok(made) => made,
                 Err(why) => {
+                    web.refused += 1;
                     self.refuse_web(peer, why, now);
                     continue;
                 }
+            };
+            web.accepted += 1;
+            if let Some(closing) = made {
+                if let Some(Source::Web(conn)) = self.sources.get(closing.0) {
+                    log::debug!("a web connection from {} closed to make room", conn.peer);
+                }
+                self.drop_web(closing);
             }
             let Some(web) = self.web.as_mut() else {
                 return;
@@ -185,8 +205,6 @@ impl Daemon {
             web.conns.push(token);
             entry.insert(Source::Web(Box::new(conn)));
         }
-        // More may wait, and the listener won't say so again.
-        self.read_again(WEB);
     }
 
     /// Notes that a connection from `peer` was closed at `now` for `why`,
@@ -205,26 +223,43 @@ impl Daemon {
         }
     }
 
-    /// Whether there's room for another HTTP connection, from `peer`: with
-    /// the connection to close to make it, if it's made by closing one.
-    /// Past [`MOST_CONNECTIONS`], the one open longest of those idle goes,
-    /// so connections kept open by someone else can't keep the user's
-    /// phone out. Past [`MOST_FROM_ONE`] from its address, there's none.
-    fn room_for_web(&self, peer: web::Peer) -> Result<Option<Token>, &'static str> {
+    /// Whether there's room at `now` for another HTTP connection, from
+    /// `peer`: with the connection to close to make it, if it's made by
+    /// closing one. Past [`MOST_FROM_ONE`] from its address, there's none.
+    /// Past [`MOST_CONNECTIONS`], one is closed from whoever has the most
+    /// open, never from one with only one: of theirs that may be closed
+    /// ([`HttpConn::evictable`]), the one open longest. So whoever holds
+    /// connections open can't keep out a device that holds few, short of
+    /// holding one each from every one of 64 addresses.
+    fn room_for_web(&self, peer: web::Peer, now: Instant) -> Result<Option<Token>, &'static str> {
         let Some(web) = self.web.as_ref() else {
             return Err("the web app is off");
         };
-        let group = peer.group();
+        let who = peer.group().map(Who::Address);
         let (mut open, mut from_there) = (0, 0);
-        let mut oldest: Option<(Instant, Token)> = None;
+        let mut crowds: Vec<Crowd<'_>> = Vec::new();
         for &token in &web.conns {
             let Some(Source::Web(conn)) = self.sources.get(token.0) else {
                 continue;
             };
             open += 1;
-            from_there += usize::from(group.is_some() && conn.peer.group() == group);
-            if conn.idle() && oldest.is_none_or(|(opened, _)| conn.opened() < opened) {
-                oldest = Some((conn.opened(), token));
+            from_there += usize::from(who.as_ref() == Some(&conn.who));
+            let at = if let Some(at) = crowds.iter().position(|crowd| *crowd.who == conn.who) {
+                at
+            } else {
+                crowds.push(Crowd {
+                    who: &conn.who,
+                    open: 0,
+                    oldest: None,
+                });
+                crowds.len() - 1
+            };
+            let crowd = &mut crowds[at];
+            crowd.open += 1;
+            if conn.evictable(now)
+                && (crowd.oldest).is_none_or(|(opened, _)| conn.opened() < opened)
+            {
+                crowd.oldest = Some((conn.opened(), token));
             }
         }
         if from_there >= MOST_FROM_ONE {
@@ -233,9 +268,26 @@ impl Daemon {
         if open < MOST_CONNECTIONS {
             return Ok(None);
         }
-        oldest
+        crowds.sort_by_key(|crowd| std::cmp::Reverse(crowd.open));
+        (crowds.iter())
+            .filter(|crowd| crowd.open > 1)
+            .find_map(|crowd| crowd.oldest)
             .map(|(_, token)| Some(token))
             .ok_or("too many are open")
+    }
+
+    /// How many HTTP connections but the one at `token` are counted as
+    /// from `who`.
+    fn web_from(&self, who: &Who, token: Token) -> usize {
+        let Some(web) = self.web.as_ref() else {
+            return 0;
+        };
+        (web.conns.iter())
+            .filter(|&&other| other != token)
+            .filter(|other| {
+                matches!(self.sources.get(other.0), Some(Source::Web(conn)) if conn.who == *who)
+            })
+            .count()
     }
 
     /// Reads what an HTTP connection sent, at most a turn's worth, answers
@@ -259,6 +311,10 @@ impl Daemon {
             return;
         };
         if conn.transport.handshaking() && !web.may_shake_hands(token, put_off) {
+            log::debug!(
+                "a TLS handshake from {} was put off to a later turn",
+                conn.peer
+            );
             return;
         }
         match conn.fill(&mut self.buffer, now) {
@@ -283,9 +339,7 @@ impl Daemon {
         let mut answered = 0;
         let mut stopped = Stopped::Done;
         loop {
-            let (Some(Source::Web(conn)), Some(web)) =
-                (self.sources.get_mut(token.0), self.web.as_mut())
-            else {
+            let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
                 return;
             };
             if conn.backed_up() {
@@ -305,6 +359,28 @@ impl Daemon {
                 }
             };
             answered += 1;
+            // Through Tailscale, each request says which device sent it,
+            // and each device may have only so many connections.
+            if let Some(peer) = Web::tailnet_peer(conn, &request) {
+                let who = Who::Peer(peer);
+                let crowded = self.web_from(&who, token) >= MOST_FROM_ONE;
+                let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
+                    return;
+                };
+                if crowded {
+                    let refused = web::Response::error(429, "too many connections are open");
+                    conn.respond_and_close(&refused, now);
+                    let peer = conn.peer;
+                    self.refuse_web(peer, "too many from its device are open", now);
+                    break;
+                }
+                conn.who = who;
+            }
+            let (Some(Source::Web(conn)), Some(web)) =
+                (self.sources.get_mut(token.0), self.web.as_mut())
+            else {
+                return;
+            };
             let head_only = request.method == web::Method::Head;
             match web.handle(conn, token, &request, now) {
                 Handled::Respond(response) => conn.respond(&response, head_only, now),
@@ -624,7 +700,7 @@ impl Daemon {
         let mut settled = Vec::new();
         for token in web.conns.clone() {
             if let Some(Source::Web(conn)) = self.sources.get_mut(token.0)
-                && let Some(response) = web.settle(conn, now)
+                && let Some(response) = web.settle(conn, token, now)
             {
                 conn.respond(&response, false, now);
                 settled.push(token);

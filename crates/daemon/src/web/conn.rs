@@ -30,6 +30,20 @@ use super::socket::{self, Frame, Stream, Transport};
 /// enough that idle connections don't pile up.
 pub(crate) const REQUEST_WAIT: Duration = Duration::from_secs(30);
 
+/// How long a connection is spared from being closed to make room while
+/// it shakes hands, or sends its request, from when it opened or began
+/// to: long enough for a phone's handshake. An address at the steady rate
+/// its bucket allows (`auth::CONNECT_EVERY`, five a second) keeps at most
+/// five that young, of the eight it may have open, so whoever fills every
+/// slot from as few addresses as they'd need always leaves some to close.
+pub(crate) const GRACE: Duration = Duration::from_secs(1);
+
+/// How long answers may wait unread, with nothing of them written, before
+/// the connection may be closed to make room: it reads too slowly to be
+/// worth a slot. Over TLS, what's written is what TLS took, which is ahead
+/// of the socket by at most `socket::TLS_AHEAD`.
+pub(crate) const STALLED: Duration = Duration::from_secs(3);
+
 /// How long a request has to arrive whole, from its first byte, unless
 /// the settings say otherwise: a connection trickling a byte at a time is
 /// closed.
@@ -41,6 +55,10 @@ pub(crate) const HEAD_WAIT: Duration = Duration::from_secs(10);
 /// client nothing to ask for again and again: about 0.1 ms each with an
 /// ECDSA key, and ten times that with RSA.
 pub(crate) const HANDSHAKES_AT_ONCE: usize = 4;
+
+/// The most connections taken from the listener in one turn of the event
+/// loop, unless the settings say otherwise.
+pub(crate) const ACCEPTS_AT_ONCE: usize = 64;
 
 /// The most read from a connection in one turn of the event loop.
 pub(crate) const READ_BUDGET: usize = 64 * 1024;
@@ -68,6 +86,19 @@ pub(super) const SILENT_LIMIT: Duration = Duration::from_secs(70);
 /// How long a device's WebSocket that's closing is kept, to write what
 /// says why, if the device doesn't read it.
 pub(super) const CLOSING_LIMIT: Duration = Duration::from_secs(5);
+
+/// Whom a connection is counted as from, to limit how many each has open
+/// and to choose which to close to make room for another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Who {
+    /// An address on the network, IPv6 by /64.
+    Address(Group),
+    /// A device on the tailnet, as its last request said (`tailscale
+    /// serve` keeps connections and sends anyone's requests over them).
+    Peer(String),
+    /// Through the local socket, before any request has said who.
+    Unknown,
+}
 
 /// Where a connection comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +151,11 @@ pub(crate) enum State {
 pub(crate) struct HttpConn {
     pub(crate) transport: Transport,
     pub(crate) peer: Peer,
+    /// Whom it's counted as from.
+    pub(crate) who: Who,
+    /// When something of its answers was last written, or they began to
+    /// wait.
+    wrote: Instant,
     /// What's been read and not yet taken as a request.
     input: Vec<u8>,
     /// What's waiting to be written.
@@ -174,6 +210,8 @@ impl HttpConn {
         Self {
             transport,
             peer,
+            who: peer.group().map_or(Who::Unknown, Who::Address),
+            wrote: now,
             input: Vec::new(),
             output: Vec::new(),
             state: State::Reading,
@@ -204,12 +242,22 @@ impl HttpConn {
         self.opened
     }
 
-    /// Whether it may be closed to make room for another: nothing it
-    /// asked waits on the daemon, nor any answer on it. It's still shaking
-    /// hands, sitting between requests, or sending one, which it can send
-    /// again.
-    pub(crate) fn idle(&self) -> bool {
-        matches!(self.state, State::Reading) && self.output.is_empty() && !self.closing
+    /// Whether it may be closed at `now` to make room for another: nothing
+    /// it asked waits on the daemon (a password being checked, a window's
+    /// answer), and its answers are written, or have waited unread for
+    /// [`STALLED`]. One that began shaking hands, or sending its request,
+    /// within [`GRACE`] is spared, as a phone's may be.
+    pub(crate) fn evictable(&self, now: Instant) -> bool {
+        if !matches!(self.state, State::Reading) {
+            return false;
+        }
+        let young = |since: Instant| now < since + GRACE;
+        if (self.transport.handshaking() && young(self.opened))
+            || self.head_started.is_some_and(young)
+        {
+            return false;
+        }
+        self.output.is_empty() || now >= self.wrote + STALLED
     }
 
     /// Reads what's arrived, at most [`READ_BUDGET`] of it. A connection
@@ -285,6 +333,9 @@ impl HttpConn {
     /// Queues `response`, leaving out its body if `head_only`, and reads
     /// the next request after it, giving it a while from `now` to come.
     pub(crate) fn respond(&mut self, response: &Response, head_only: bool, now: Instant) {
+        if self.output.is_empty() {
+            self.wrote = now;
+        }
         response.write(&mut self.output, head_only, self.secure);
         self.state = State::Reading;
         self.until = now + REQUEST_WAIT;
@@ -300,9 +351,13 @@ impl HttpConn {
     /// when it can write more. Returns whether the connection is done
     /// with: closing and written, or failed.
     pub(crate) fn flush(&mut self, registry: &Registry, token: Token) -> bool {
-        if let Err(err) = self.transport.write(&mut self.output) {
-            log::debug!("writing to a web connection failed: {err}");
-            return true;
+        match self.transport.write(&mut self.output) {
+            Ok(0) => {}
+            Ok(_) => self.wrote = Instant::now(),
+            Err(err) => {
+                log::debug!("writing to a web connection failed: {err}");
+                return true;
+            }
         }
         // One waiting for an answer closes once it's written, saying so
         // over TLS first.

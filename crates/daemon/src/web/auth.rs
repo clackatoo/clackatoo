@@ -52,11 +52,6 @@ pub(super) const ALL_TRY_EVERY: Duration = Duration::from_secs(3);
 pub(super) const CONNECTS: u32 = 20;
 pub(super) const CONNECT_EVERY: Duration = Duration::from_millis(200);
 
-/// How many connections may be opened in a burst from everywhere at
-/// once, and how often one more may: about 200 a second.
-pub(super) const ALL_CONNECTS: u32 = 200;
-pub(super) const ALL_CONNECT_EVERY: Duration = Duration::from_millis(5);
-
 /// What tries and connections from an address are counted under: the
 /// address itself for IPv4, and its /64 for IPv6, which one subscriber
 /// usually has whole, so hopping between its addresses gains nothing.
@@ -264,9 +259,11 @@ pub(crate) fn origin_allowed(
 }
 
 /// The most addresses whose tries are kept apart: past it, those whose
-/// tries have all come back are forgotten, and if none have, the one
-/// least lately tried.
+/// tries have all come back are forgotten, and if that leaves more than
+/// [`KEPT_KEYS`], those least lately tried, down to it, so the next many
+/// new addresses cost nothing to keep.
 const MOST_KEYS: usize = 4096;
+const KEPT_KEYS: usize = MOST_KEYS * 3 / 4;
 
 /// How many tries of something are allowed now from each address.
 #[derive(Debug)]
@@ -291,13 +288,12 @@ impl Buckets {
     pub(super) fn take(&mut self, key: &str, now: Instant) -> Result<(), Duration> {
         if !self.by_key.contains_key(key) && self.by_key.len() >= MOST_KEYS {
             self.by_key.retain(|_, bucket| !bucket.full(now));
-            // Never everyone locked out: the oldest goes.
-            if self.by_key.len() >= MOST_KEYS
-                && let Some(oldest) = (self.by_key.iter())
-                    .min_by_key(|(_, bucket)| bucket.tried)
-                    .map(|(key, _)| key.clone())
-            {
-                self.by_key.remove(&oldest);
+            // Never everyone locked out: the least lately tried go.
+            if self.by_key.len() > KEPT_KEYS {
+                let mut tried: Vec<Instant> = self.by_key.values().map(|b| b.tried).collect();
+                let going = tried.len() - KEPT_KEYS;
+                let (_, &mut last, _) = tried.select_nth_unstable(going - 1);
+                self.by_key.retain(|_, bucket| bucket.tried > last);
             }
         }
         (self.by_key.entry(key.to_owned()))
@@ -475,9 +471,15 @@ mod tests {
         }
         let later = start + Duration::from_secs(10);
         assert!(buckets.take("newcomer", later).is_ok(), "not locked out");
-        assert_eq!(buckets.by_key.len(), MOST_KEYS);
+        assert_eq!(buckets.by_key.len(), KEPT_KEYS + 1);
         assert!(!buckets.by_key.contains_key("0"), "the oldest went");
-        assert!(buckets.take("1", later).is_err(), "the rest are kept");
+        let newest = (MOST_KEYS - 1).to_string();
+        assert!(buckets.take(&newest, later).is_err(), "the newest are kept");
+        // Room was made for many more at once.
+        for n in 0..MOST_KEYS - KEPT_KEYS - 1 {
+            assert!(buckets.take(&format!("new {n}"), later).is_ok());
+        }
+        assert_eq!(buckets.by_key.len(), MOST_KEYS);
     }
 
     #[test]

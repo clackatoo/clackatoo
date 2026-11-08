@@ -136,8 +136,12 @@ pub struct WebConfig {
     /// until a window unlocks it.
     pub lock_after: u32,
     /// The most TLS handshakes worked on in one turn of the event loop:
-    /// the rest wait for the next.
+    /// the rest wait for the next. At least 1.
     pub handshakes_at_once: usize,
+    /// The most connections taken from the listener in one turn of the
+    /// event loop, and a quarter of the most refused: the rest wait for
+    /// the next. At least 1.
+    pub accepts_at_once: usize,
 }
 
 impl WebConfig {
@@ -163,6 +167,7 @@ impl WebConfig {
             reload_every: Duration::from_mins(1),
             lock_after: LOCK_AFTER,
             handshakes_at_once: super::conn::HANDSHAKES_AT_ONCE,
+            accepts_at_once: super::conn::ACCEPTS_AT_ONCE,
         }
     }
 

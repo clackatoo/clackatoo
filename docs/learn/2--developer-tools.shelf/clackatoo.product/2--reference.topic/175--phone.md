@@ -27,7 +27,7 @@ The daemon listens on a socket only you can open, `~/.local/share/clackatoo/web/
 
     tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
 
-and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that login must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs.
+and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that login must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs. Connections are counted by the device sending each request, as `tailscale serve` says: each may have eight open at once, and when 64 are open, one is closed to make room, as from the network (below).
 
 ### Straight from the network
 
@@ -40,7 +40,7 @@ and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tail
 
 This needs a password and `origin`, and `ask` is off unless you turn it on. Getting certificates by ACME isn't built yet, so you bring your own; it's read again when its files change. Prefer an ECDSA key, as certbot, acme.sh and `tailscale cert` make by default: each new connection's TLS handshake is worked out by the daemon itself, and with an RSA key one costs about ten times as much.
 
-Anyone on the network can open connections, so the daemon limits them: twenty from one address in a burst, then five a second, and about two hundred a second from everywhere together; eight open at once from one address, and 64 in all. IPv6 addresses count by their /64. Once 64 are open, the one open longest that isn't waiting on the daemon is closed to make room, so connections someone else holds open can't keep your phone out. Only a few handshakes are worked on at a time, so a flood of them slows new connections, not your terminals. Connections a device's app keeps open to follow your chats don't count.
+Anyone on the network can open connections, so the daemon limits them. One address may open twenty in a burst, then five a second, and keep eight open at once; IPv6 addresses count by their /64. At most 64 are open in all. Past that, a new one takes the place of one from whoever has the most open, never from someone with only one open: the one open longest of theirs that isn't waiting on the daemon (a password being checked, a window's answer) and is idle, or hasn't read what it was sent for three seconds. One that began its handshake or its request within the last second is spared. So connections others hold open can't keep your phone out, unless 64 different addresses hold one each. Only four handshakes are worked on in each turn of the daemon's loop, the rest waiting, in order, for the next, so a flood of them slows new connections, not your terminals. Connections a device's app keeps open to follow your chats don't count.
 
 ## Pairing a device
 

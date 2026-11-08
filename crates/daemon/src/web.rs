@@ -47,7 +47,7 @@ pub use auth::hash_password;
 pub use config::{WebConfig, WebMode};
 
 pub(crate) use auth::Refused;
-pub(crate) use conn::{Filled, HttpConn, Peer, Read, State, WebLink};
+pub(crate) use conn::{Filled, HttpConn, Peer, Read, State, WebLink, Who};
 pub(crate) use http::{Method, Request, Response};
 pub(crate) use push::payload as push_payload;
 pub(crate) use socket::{Stream, Transport};
@@ -176,6 +176,9 @@ pub(crate) struct Ask {
     until_ms: u64,
     /// Allowed or turned down, once a window has said.
     answer: Option<bool>,
+    /// The connection waiting for the answer: only the last to ask waits,
+    /// so connections waiting can't crowd others out.
+    waiter: Option<mio::Token>,
 }
 
 /// What a password being checked is for.
@@ -280,11 +283,13 @@ pub(crate) struct Web {
     pub(crate) conns: Vec<mio::Token>,
     /// New connections from each address (IPv6 by /64).
     connects: Buckets,
-    /// New connections from everywhere at once.
-    all_connects: Bucket,
     /// How many more connections still shaking hands may be read in this
     /// turn of the event loop.
     handshakes_left: usize,
+    /// How many connections the listener has given this turn, taken and
+    /// refused.
+    pub(crate) accepted: usize,
+    pub(crate) refused: usize,
     /// The connections still shaking hands that were put off to a later
     /// turn, first put off first.
     pub(crate) put_off: VecDeque<mio::Token>,
@@ -305,6 +310,9 @@ impl Web {
     ///
     /// If it can't listen, or its directory or certificate can't be read.
     pub(crate) fn start(config: WebConfig, waker: &Arc<Waker>) -> Result<Self, String> {
+        if config.handshakes_at_once == 0 || config.accepts_at_once == 0 {
+            return Err("a turn of the event loop must take a connection and a handshake".into());
+        }
         let (tls, certificate_changed) = match &config.mode {
             WebMode::Tailscale => (None, None),
             WebMode::Public { certificate, key } => (
@@ -349,8 +357,9 @@ impl Web {
             checks: 0,
             conns: Vec::new(),
             connects: Buckets::new(auth::CONNECTS, auth::CONNECT_EVERY),
-            all_connects: Bucket::new(auth::ALL_CONNECTS, auth::ALL_CONNECT_EVERY, Instant::now()),
             handshakes_left: 0,
+            accepted: 0,
+            refused: 0,
             put_off: VecDeque::new(),
             refusals: Refusals::default(),
             said: Vec::new(),
@@ -359,26 +368,42 @@ impl Web {
     }
 
     /// Whether a new connection from `peer` may be taken at `now`, or why
-    /// not: each address, and everyone at once, may open only so many so
-    /// fast, as each one's handshake costs the event loop more than it
-    /// costs whoever opens it. Through Tailscale, every connection comes
-    /// from this machine, so only the limit for everyone counts.
+    /// not: each address may open only so many so fast, as each one's
+    /// handshake costs the event loop more than it costs whoever opens it.
+    /// Through Tailscale, every connection comes from this machine, with
+    /// no handshake of the daemon's, so nothing is counted.
     pub(crate) fn may_connect(&mut self, peer: Peer, now: Instant) -> Result<(), &'static str> {
         if let Some(ip) = peer.ip()
             && self.connects.take(&auth::address_key(ip), now).is_err()
         {
             return Err("its address opens too many too fast");
         }
-        if self.all_connects.take(now).is_err() {
-            return Err("too many are being opened");
-        }
         Ok(())
     }
 
-    /// A turn of the event loop begins: it may work on its share of TLS
-    /// handshakes.
+    /// Whether the listener has given all it may this turn: as many
+    /// connections taken as the settings say, or four times as many
+    /// refused, so neither those let in nor a flood of those refused hold
+    /// up the loop.
+    pub(crate) fn accepted_enough(&self) -> bool {
+        self.accepted >= self.config.accepts_at_once
+            || self.refused >= self.config.accepts_at_once.saturating_mul(4)
+    }
+
+    /// A turn of the event loop begins: it may take its share of new
+    /// connections, and work on its share of TLS handshakes.
     pub(crate) fn new_turn(&mut self) {
         self.handshakes_left = self.config.handshakes_at_once;
+        self.accepted = 0;
+        self.refused = 0;
+    }
+
+    /// Who the device on the tailnet sending `request` over `conn` is,
+    /// if it came through the local socket: as `tailscale serve` says,
+    /// its address, or else its login.
+    pub(crate) fn tailnet_peer(conn: &HttpConn, request: &Request) -> Option<String> {
+        (conn.peer == Peer::Local)
+            .then(|| Self::who(conn, request, request.header("tailscale-user-login")))
     }
 
     /// Whether the connection at `token`, still shaking hands, may be read
@@ -528,7 +553,7 @@ impl Web {
                 Handled::Respond(refused(Refused::OtherOrigin))
             }
             (Method::Post, "/pair") => self.pair(conn, token, request, login, now),
-            (Method::Post, "/pair/wait") => self.wait_for_answer(conn, request, now),
+            (Method::Post, "/pair/wait") => self.wait_for_answer(conn, token, request, now),
             (Method::Post, "/push") => Handled::Respond(self.subscribe(request, login.as_deref())),
             (Method::Get | Method::Head, path) => Handled::Respond(self.asset(request, path)),
             _ => Handled::Respond(Response::error(405, "the app doesn't do that")),
@@ -947,6 +972,7 @@ impl Web {
             until,
             until_ms,
             answer: None,
+            waiter: None,
         });
         self.asks_changed = true;
         self.due_by(until);
@@ -958,35 +984,59 @@ impl Web {
 
     /// Answers `POST /pair/wait`: waits for a window to answer the ask
     /// the request names.
-    fn wait_for_answer(&mut self, conn: &mut HttpConn, request: &Request, now: Instant) -> Handled {
+    fn wait_for_answer(
+        &mut self,
+        conn: &mut HttpConn,
+        token: mio::Token,
+        request: &Request,
+        now: Instant,
+    ) -> Handled {
         let wait = serde_json::from_slice::<serde_json::Value>(&request.body)
             .ok()
             .and_then(|body| unhex16(body["wait"].as_str()?));
         let Some(wait) = wait else {
             return Handled::Respond(Response::error(400, "waiting names what it waits on"));
         };
-        let found = self.asks.iter().find(|ask| same16(&ask.wait, &wait));
-        let Some(until) = found.map(|ask| ask.until) else {
+        let found = self.asks.iter_mut().find(|ask| same16(&ask.wait, &wait));
+        let Some(ask) = found else {
             return Handled::Respond(Response::error(403, "nobody answered: ask again"));
         };
+        let until = ask.until;
+        // One waiting before is let go, at once.
+        if ask
+            .waiter
+            .replace(token)
+            .is_some_and(|before| before != token)
+        {
+            self.due_by(now);
+        }
         conn.state = State::Pairing(wait);
         conn.until = until;
         self.due_by(until);
-        match self.settle(conn, now) {
+        match self.settle(conn, token, now) {
             Some(response) => Handled::Respond(response),
             None => Handled::Wait,
         }
     }
 
-    /// The answer for `conn`, waiting for a window to answer its ask, if
-    /// one has, or it's waited too long.
-    pub(crate) fn settle(&mut self, conn: &mut HttpConn, now: Instant) -> Option<Response> {
+    /// The answer for `conn`, at `token`, waiting for a window to answer
+    /// its ask, if one has, or it's waited too long, or another connection
+    /// waits for it now.
+    pub(crate) fn settle(
+        &mut self,
+        conn: &mut HttpConn,
+        token: mio::Token,
+        now: Instant,
+    ) -> Option<Response> {
         let State::Pairing(wait) = conn.state else {
             return None;
         };
         let at = self.asks.iter().position(|ask| same16(&ask.wait, &wait));
         let answer = at.and_then(|at| self.asks[at].answer);
         let response = match (at, answer) {
+            (Some(at), _) if self.asks[at].waiter != Some(token) => {
+                Response::error(409, "another connection waits for this answer")
+            }
             (Some(at), Some(true)) => {
                 let ask = self.asks.remove(at);
                 if self.devices.list.len() >= devices::MOST {
@@ -1570,6 +1620,21 @@ mod tests {
             .map(|device| device.id)
             .collect();
         assert_eq!(told, [1]);
+    }
+
+    #[test]
+    fn a_turn_must_take_a_connection_and_a_handshake() {
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let changes: [fn(&mut WebConfig); 2] = [
+            |config| config.handshakes_at_once = 0,
+            |config| config.accepts_at_once = 0,
+        ];
+        for change in changes {
+            let mut config = WebConfig::new(WebMode::Tailscale, PathBuf::from("/nowhere"));
+            change(&mut config);
+            assert!(Web::start(config, &waker).is_err());
+        }
     }
 
     #[test]
