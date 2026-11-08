@@ -1426,10 +1426,10 @@ impl Daemon {
                     return;
                 }
                 // Too many waiting: no, at once, as it can't be shown.
-                if !chat.ask(request.clone(), &tool, &options, &unknown) {
-                    if let Some(slot) = self.agents.running.get_mut(&agent) {
-                        slot.agent.answer_permission(&request, None);
-                    }
+                if !chat.ask(request.clone(), &tool, &options, &unknown)
+                    && let Some(slot) = self.agents.running.get_mut(&agent)
+                {
+                    slot.agent.answer_permission(&request, None);
                 }
                 id
             }
