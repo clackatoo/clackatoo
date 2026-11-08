@@ -711,6 +711,30 @@ fn every_window_is_told_of_each_device_paired() {
 }
 
 #[test]
+fn a_device_paired_while_no_window_is_open_is_told_to_the_next() {
+    let daemon = TestDaemon::start();
+    daemon.pair();
+    // Paired before any window watched: the first to is told.
+    std::thread::sleep(Duration::from_millis(200));
+    let mut window = daemon.window();
+    window.watch_workspaces().unwrap();
+    let said = said_next(&mut window);
+    assert!(
+        said.contains(&format!("phone ({LOGIN}) paired with the password")),
+        "{said}"
+    );
+    // Told once: the next window isn't told again.
+    let mut another = daemon.window();
+    another.watch_workspaces().unwrap();
+    another
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    while let Ok(event) = another.next_event() {
+        assert!(!matches!(event, Event::Said(_)), "{event:?}");
+    }
+}
+
+#[test]
 fn a_device_can_neither_list_nor_unpair_devices() {
     let daemon = TestDaemon::start();
     let cookie = daemon.pair();

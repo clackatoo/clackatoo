@@ -74,6 +74,10 @@ const ASK_EVERY: Duration = Duration::from_mins(2);
 /// a try is turned away to come back in a moment.
 const MOST_CHECKS_WAITING: usize = 8;
 
+/// The most lines kept to tell the next window of devices paired while
+/// none was open: past it, the last says more did.
+const MOST_SAID: usize = 16;
+
 /// The most a device's name may be, in characters.
 const MOST_NAME: usize = 40;
 
@@ -295,8 +299,8 @@ pub(crate) struct Web {
     pub(crate) put_off: VecDeque<mio::Token>,
     /// The connections refused, for the log.
     pub(crate) refusals: Refusals,
-    /// What every window's bar is to say: each device paired since the
-    /// windows were last told.
+    /// What every window's bar is to say: each device paired since a
+    /// window was last told, kept until one is, at most [`MOST_SAID`].
     pub(crate) said: Vec<String>,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
@@ -907,8 +911,13 @@ impl Web {
         let id = self
             .devices
             .add(name, hash, login, password, epoch_millis());
-        self.said
-            .push(format!("{said}: :devices revoke {id} unpairs it"));
+        let said = format!("{said}: :devices revoke {id} unpairs it");
+        if self.said.len() < MOST_SAID {
+            self.said.push(said);
+        } else {
+            "More devices paired while no window was open: :devices lists them"
+                .clone_into(&mut self.said[MOST_SAID - 1]);
+        }
         Response::json(200, &json!({ "paired": true, "device": id }))
             .with("set-cookie", auth::set_cookie(&token))
     }

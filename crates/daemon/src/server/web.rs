@@ -527,10 +527,27 @@ impl Daemon {
             self.web_timers(now);
         }
         self.send_pairing();
-        let said = (self.web.as_mut()).map(|web| std::mem::take(&mut web.said));
-        for said in said.into_iter().flatten() {
-            self.say_to_windows(said);
+        // Kept until a window can be told.
+        let waiting = (self.web.as_ref()).is_some_and(|web| !web.said.is_empty());
+        if waiting && self.window_hears_said() {
+            let said = (self.web.as_mut()).map(|web| std::mem::take(&mut web.said));
+            for said in said.into_iter().flatten() {
+                self.say_to_windows(said);
+            }
         }
+    }
+
+    /// Whether a window watching the workspaces would show what the bar is
+    /// to say.
+    fn window_hears_said(&self) -> bool {
+        (self.sources.iter()).any(|(_, source)| {
+            matches!(source, Source::Client(client)
+                if client.watching_workspaces
+                    && !client.finished
+                    && !matches!(client.link, Link::Web(_))
+                    && client.machine.is_none()
+                    && client.wire >= wire::LEND)
+        })
     }
 
     /// Acts on the web app's timers due by `now`.
@@ -739,8 +756,10 @@ impl Daemon {
     }
 
     /// Queues the devices asking for the client at `token`, if any are and
-    /// it's a window: it has just started watching the workspaces.
+    /// it's a window, and the devices paired while no window was open: it
+    /// has just started watching the workspaces.
     pub(super) fn tell_of_asks(&mut self, token: Token) {
+        self.tell_of_paired(token);
         let Some(pairing) = (self.web.as_ref()).map(Web::pairing) else {
             return;
         };
@@ -753,6 +772,30 @@ impl Daemon {
                 frame::encode(client.wire, &ServerMessage::Event(Event::Pairing(pairing)))
         {
             client.later.extend_from_slice(&bytes);
+        }
+    }
+
+    /// Queues for the client at `token`, if it's a window that shows what
+    /// the bar is to say, the devices paired while no window was, once.
+    fn tell_of_paired(&mut self, token: Token) {
+        let Some(web) = self.web.as_mut() else {
+            return;
+        };
+        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        if web.said.is_empty()
+            || matches!(client.link, Link::Web(_))
+            || client.machine.is_some()
+            || client.wire < wire::LEND
+        {
+            return;
+        }
+        for said in std::mem::take(&mut web.said) {
+            match frame::encode(client.wire, &ServerMessage::Event(Event::Said(said))) {
+                Ok(bytes) => client.later.extend_from_slice(&bytes),
+                Err(err) => log::error!("encoding what's said failed: {err}"),
+            }
         }
     }
 
