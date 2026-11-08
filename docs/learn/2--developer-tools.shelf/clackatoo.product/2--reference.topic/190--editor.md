@@ -31,7 +31,7 @@ A relative path is from the focused pane's directory: for a terminal, the direct
 
 A file a pane stops showing, as after `:e`, closes too, unless another pane shows it, or it has changes that aren't written: then it's kept, unseen, the bottom bar says so, and `:e` it again to go back.
 
-A file that's already open is shown again, not read again: two panes on one file are two views of one buffer, each with its own cursor. A file that doesn't exist yet opens empty, and is made when it's first written. A file that isn't UTF-8 text can't be opened, and the bottom bar says so.
+A file that's already open is shown again, not read again: two panes on one file are two views of one buffer, each with its own cursor. A file that doesn't exist yet opens empty, and is made when it's first written. A file that isn't UTF-8 text can't be opened, and the bottom bar says so. Nor can anything but a regular file of up to 256 MiB, such as a pipe or a device, even one put in a file's place while it's open: it's never waited on or read. A save writes the new text to a new file beside the old one, made with a name no one can guess, and puts it in the old one's place, so nothing put beside the file can make a save write anywhere else.
 
 A file with no name yet, as `:e` alone makes, is called `[No Name]`. Nothing is written until `:w NAME` names it, from the folder it was opened in; `:w` alone asks for the name on the command line. Nothing could open it again once no pane shows it, so while it has changes the daemon refuses to close, or to show anything else in, the last pane showing it, whoever asks: `:w NAME` writes them, `:q!` closes it, `:e!` empties it.
 

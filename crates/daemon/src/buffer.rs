@@ -7,7 +7,7 @@
 //! has changed the file since it was read or last written, unless forced.
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -21,6 +21,7 @@ use clackatoo_text::{
 };
 
 use crate::handover;
+use crate::regular::{self, Links};
 
 /// A file being edited.
 #[derive(Debug)]
@@ -967,9 +968,10 @@ pub(crate) fn lf(text: String) -> String {
 }
 
 /// Whether the file at `path` ends its lines with CRLF, as its first line
-/// says. One that doesn't exist, or has one line, doesn't.
+/// says. One that doesn't exist, or has one line, or isn't a regular file,
+/// doesn't.
 fn crlf(path: &Path) -> bool {
-    let Ok(file) = File::open(path) else {
+    let Ok(file) = regular::open(path, Links::Follow) else {
         return false;
     };
     let mut start = Vec::new();
@@ -987,28 +989,15 @@ fn crlf(path: &Path) -> bool {
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 
 /// Reads the file at `path` as text, and what it was as it was read. Only
-/// a regular file is read: a pipe would hang the daemon as it opened, and
-/// a device could go on for ever.
+/// a regular file is read: a pipe would hang the daemon as it opened, even
+/// one swapped in for the file just before, and a device could go on for
+/// ever.
 pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
-    let regular = |metadata: &fs::Metadata| {
-        if metadata.is_dir() {
-            Err(io::Error::from(io::ErrorKind::IsADirectory))
-        } else if !metadata.is_file() {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "it isn't a regular file",
-            ))
-        } else if metadata.len() > MAX_FILE {
-            Err(io::Error::from(io::ErrorKind::FileTooLarge))
-        } else {
-            Ok(())
-        }
-    };
-    regular(&fs::metadata(path)?)?;
-    let mut file = File::open(path)?;
-    // Again, as what's there may have changed since.
+    let mut file = regular::open(path, Links::Follow)?;
     let metadata = file.metadata()?;
-    regular(&metadata)?;
+    if metadata.len() > MAX_FILE {
+        return Err(io::ErrorKind::FileTooLarge.into());
+    }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     (&mut file).take(MAX_FILE + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_FILE {
@@ -1396,6 +1385,34 @@ mod tests {
         let one = super::stage(&path, &Rope::from_str("a")).unwrap();
         let other = super::stage(&path, &Rope::from_str("b")).unwrap();
         assert_ne!(one.temporary, other.temporary);
+    }
+
+    #[test]
+    fn a_pipe_where_a_file_was_saved_is_never_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from(0o600),
+            0,
+        )
+        .unwrap();
+        // Read for its line ends on every save, as `:w!` saves over
+        // whatever is there.
+        let (send, done) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || send.send(super::crlf(&path)));
+        let crlf = done.recv_timeout(std::time::Duration::from_secs(10));
+        if crlf.is_err() {
+            // A writer that comes and goes lets it on.
+            let flags = rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK;
+            let _ = rustix::fs::open(&fifo, flags, rustix::fs::Mode::empty());
+        }
+        assert_eq!(crlf, Ok(false), "waited on the pipe");
+        let err = super::read(Path::new("/dev/zero")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
