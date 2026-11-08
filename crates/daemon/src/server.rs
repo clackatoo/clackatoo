@@ -3563,8 +3563,8 @@ impl Daemon {
             } => self
                 .fit(token, terminal, size, renew)
                 .map(|()| Response::Done),
-            Request::Devices => Ok(self.devices()),
-            Request::RevokeDevice { device } => self.revoke_device(device),
+            Request::Devices => self.devices(token),
+            Request::RevokeDevice { device } => self.revoke_device(token, device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
             Request::Connect {

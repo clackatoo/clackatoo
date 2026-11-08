@@ -666,6 +666,43 @@ fn a_revoked_device_is_cut_off_and_refused() {
 }
 
 #[test]
+fn a_device_can_neither_list_nor_unpair_devices() {
+    let daemon = TestDaemon::start();
+    let cookie = daemon.pair();
+    let other = format!(r#"{{"name":"other","password":"{PASSWORD}"}}"#);
+    let other = daemon.post("/pair", &other, |_| {}).cookie().unwrap();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    let mut other_phone = daemon.socket(&other, |_| {}).expect("let in");
+    let mut window = daemon.window();
+    let Response::Devices(devices) = window.request(&Request::Devices).unwrap() else {
+        panic!("devices");
+    };
+    assert_eq!(devices.len(), 2);
+    assert!(matches!(
+        phone.request(Request::Devices),
+        Response::Error(Error::Pairing(_))
+    ));
+    let theirs = devices
+        .iter()
+        .find(|device| device.name == "other")
+        .unwrap();
+    assert!(matches!(
+        phone.request(Request::RevokeDevice { device: theirs.id }),
+        Response::Error(Error::Pairing(_))
+    ));
+    // Both still paired, and the other still connected.
+    let Response::Devices(after) = window.request(&Request::Devices).unwrap() else {
+        panic!("devices");
+    };
+    assert_eq!(after.len(), 2);
+    assert!(after.iter().all(|device| device.connected));
+    assert!(matches!(
+        other_phone.request(Request::Version),
+        Response::Text(_)
+    ));
+}
+
+#[test]
 fn a_page_elsewhere_is_refused() {
     let daemon =
         TestDaemon::start_with(|web| web.origin = Some("https://desk.tail1.ts.net".into()));
@@ -1769,7 +1806,7 @@ fn an_unpaired_device_holding_a_fit_has_nothing_more_done_and_the_fit_goes_back(
         }),
         Response::Done
     );
-    let Response::Devices(devices) = phone.request(Request::Devices) else {
+    let Response::Devices(devices) = window.request(&Request::Devices).unwrap() else {
         panic!("devices");
     };
     // Unpaired as it asks, with keys sent in the same breath: what came

@@ -614,10 +614,32 @@ impl Daemon {
         web.unlock().map(Response::Text).map_err(Error::Pairing)
     }
 
-    /// Answers [`Request::Devices`](clackatoo_protocol::Request::Devices).
-    pub(super) fn devices(&self) -> Response {
+    /// Refuses the client at `token` if it's a device, unless what it
+    /// asks about is `own`, itself: devices are listed and unpaired from a
+    /// window, so a phone that's lost can't unpair the others, nor say
+    /// what they are. A device may still unpair itself.
+    fn devices_from_a_window(&self, token: Token, own: Option<u64>) -> Result<(), Error> {
+        let device = match self.sources.get(token.0) {
+            Some(Source::Client(Client {
+                link: Link::Web(link),
+                ..
+            })) => link.device,
+            _ => return Ok(()),
+        };
+        if own != Some(device) {
+            return Err(Error::Pairing(
+                "devices are managed from a window, not from a device".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Answers [`Request::Devices`](clackatoo_protocol::Request::Devices)
+    /// from the client at `token`.
+    pub(super) fn devices(&self, token: Token) -> Result<Response, Error> {
+        self.devices_from_a_window(token, None)?;
         let Some(web) = self.web.as_ref() else {
-            return Response::Devices(Vec::new());
+            return Ok(Response::Devices(Vec::new()));
         };
         let connected: BTreeSet<u64> = (self.sources.iter())
             .filter_map(|(_, source)| match source {
@@ -628,7 +650,7 @@ impl Daemon {
                 _ => None,
             })
             .collect();
-        Response::Devices(
+        Ok(Response::Devices(
             (web.devices.list.iter())
                 .map(|device| Device {
                     id: device.id,
@@ -640,11 +662,13 @@ impl Daemon {
                     connected: connected.contains(&device.id),
                 })
                 .collect(),
-        )
+        ))
     }
 
-    /// Unpairs a device, cutting it off if it's connected.
-    pub(super) fn revoke_device(&mut self, device: u64) -> Result<Response, Error> {
+    /// Unpairs a device, cutting it off if it's connected, as the client
+    /// at `token` asks.
+    pub(super) fn revoke_device(&mut self, token: Token, device: u64) -> Result<Response, Error> {
+        self.devices_from_a_window(token, Some(device))?;
         let web = (self.web.as_mut()).ok_or(Error::NoSuchDevice(device))?;
         if !web.devices.remove(device) {
             return Err(Error::NoSuchDevice(device));
