@@ -111,6 +111,59 @@ fn a_click_on_a_link_in_a_pane_without_the_focus_focuses_it_and_opens_the_link()
 }
 
 #[test]
+fn a_link_that_isnt_a_plain_web_link_shows_its_target_and_opens_only_on_y() {
+    let mut desk = editing("/p/docs/notes.md", "# Notes\n");
+    command(&mut desk, "Markdown");
+    let asked = |desk: &Desk| match desk.status() {
+        Status::Typing { text, .. } => Some(text),
+        Status::Tabs { .. } => None,
+    };
+    // Hidden behind its text, a target an `ssh` handler could take an
+    // option from: shown whole, and not opened unless `y` says so.
+    let target = "ssh://-oProxyCommand=sh\u{202e}x@host/";
+    desk.open_rendered_link(PaneId(1), target);
+    assert!(desk.take_opened().is_empty());
+    assert_eq!(
+        asked(&desk).as_deref(),
+        Some("Open ssh://-oProxyCommand=sh\\u{202e}x@host/? (y/n)")
+    );
+    type_keys(&mut desk, "n");
+    assert!(desk.take_opened().is_empty());
+    assert_eq!(asked(&desk), None);
+    assert_eq!(desk.message.as_deref(), Some("the link wasn't opened"));
+    desk.open_rendered_link(PaneId(1), target);
+    type_keys(&mut desk, "y");
+    assert_eq!(desk.take_opened(), [target]);
+    // A terminal's link the same way: here, one a program printed with a
+    // name (OSC 8), whose target isn't shown.
+    let terminal = desk.focused_terminal().unwrap_or(TerminalId(1));
+    desk.open_link_of(
+        terminal,
+        crate::links::Target::Url("git://-u/x".into()),
+        None,
+    );
+    assert!(desk.take_opened().is_empty());
+    assert!(asked(&desk).is_some());
+    // Esc gives up, as any key but y does.
+    press(
+        &mut desk,
+        Key::Named(NamedKey::Escape),
+        None,
+        Modifiers::default(),
+    );
+    assert!(desk.take_opened().is_empty());
+    // A plain web link or a mail address opens at once.
+    desk.open_link_of(
+        terminal,
+        crate::links::Target::Url("https://x.org/a".into()),
+        None,
+    );
+    desk.open_rendered_link(PaneId(1), "mailto:a@x.org");
+    assert_eq!(desk.take_opened(), ["https://x.org/a", "mailto:a@x.org"]);
+    assert_eq!(asked(&desk), None);
+}
+
+#[test]
 fn links_open_as_links_elsewhere_do_and_files_from_the_markdown_files_folder() {
     let mut desk = editing("/p/docs/notes.md", "# Notes\n");
     command(&mut desk, "Markdown");

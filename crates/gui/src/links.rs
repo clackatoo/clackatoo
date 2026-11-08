@@ -89,6 +89,51 @@ pub(crate) fn target_of_uri(uri: &str) -> Option<Target> {
     (openable && !rest.is_empty()).then(|| Target::Url(uri.to_owned()))
 }
 
+/// Whether `url`, a link's target, is opened as soon as it's clicked: a
+/// plain web link (see [`clackatoo_protocol::plain_web_link`]), or a mail
+/// address alone. Any other is opened only once the bar has shown it whole
+/// and been told to, as a link's text needn't be its target, in rendered
+/// Markdown or in what a program prints, and the desktop hands it to
+/// whatever handles its scheme, which may take a part of it for an option
+/// of a program it runs, as `ssh://-oProxyCommand=…` would be.
+pub(crate) fn opens_unasked(url: &str) -> bool {
+    if clackatoo_protocol::plain_web_link(url) {
+        return true;
+    }
+    let Some(address) = url.get(.."mailto:".len()).and_then(|scheme| {
+        scheme
+            .eq_ignore_ascii_case("mailto:")
+            .then(|| &url["mailto:".len()..])
+    }) else {
+        return false;
+    };
+    // No more than whom to write to: what follows a `?` can fill a mail
+    // in, or, in some mail programs, attach a file to it.
+    !address.is_empty()
+        && address.len() <= clackatoo_protocol::MOST_URL
+        && address
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'?')
+}
+
+/// `url` as the bar shows it to ask whether to open it: whole, with what
+/// wouldn't show as itself, such as a control or a mark that turns text
+/// round, written as its escape.
+pub(crate) fn shown_whole(url: &str) -> String {
+    url.chars()
+        .map(|ch| {
+            let hidden = ch.is_control()
+                || matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}')
+                || matches!(ch, '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}');
+            if hidden {
+                ch.escape_unicode().to_string()
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
+}
+
 /// The link in `text` that covers byte `at`, if any.
 pub(crate) fn find_at(text: &str, at: usize) -> Option<Found> {
     url_at(text, at).or_else(|| path_at(text, at))
@@ -352,6 +397,30 @@ mod tests {
             .into_iter()
             .map(|found| (&text[found.bytes], found.target))
             .collect()
+    }
+
+    #[test]
+    fn only_plain_web_links_and_mail_addresses_open_without_asking() {
+        for unasked in ["https://x.org/a?b#c", "http://x.org", "mailto:a@x.org"] {
+            assert!(opens_unasked(unasked), "{unasked}");
+        }
+        for asked in [
+            "ssh://-oProxyCommand=sh@x/",
+            "git://-u/x",
+            "sftp://x.org",
+            "irc://x.org",
+            "https://user@x.org",
+            "https://x.org%2eevil.com",
+            "mailto:a@x.org?attach=/etc/passwd",
+            "mailto:",
+            "mailto:a b@x.org",
+        ] {
+            assert!(!opens_unasked(asked), "{asked}");
+        }
+        assert_eq!(
+            shown_whole("ssh://a\u{202e}b\n\u{200b}c/é"),
+            "ssh://a\\u{202e}b\\u{a}\\u{200b}c/é"
+        );
     }
 
     #[test]

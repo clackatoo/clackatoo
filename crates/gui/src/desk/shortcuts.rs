@@ -7,6 +7,9 @@ use crate::shortcuts::Context;
 impl Desk {
     #[allow(clippy::too_many_lines, reason = "context-specific key descriptions")]
     pub(crate) fn shortcut_context(&self) -> Context {
+        if let Some(context) = self.link_shortcuts() {
+            return context;
+        }
         if self.offer_asked() {
             return crate::shortcuts::bindings::from_presses(
                 "Install language features",

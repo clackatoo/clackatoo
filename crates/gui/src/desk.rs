@@ -383,6 +383,9 @@ pub(crate) struct Desk {
     /// URLs links asked to open, waiting for the window to hand to the
     /// desktop's opener.
     opened: Vec<String>,
+    /// A link's target the bar asks whether to open, until the next key
+    /// (see [`Desk::open_url`]).
+    link_asked: Option<vim::confirm::Confirm<String>>,
     /// The terminal whose pane a mouse button went down in, and the
     /// button: it gets the drag, wherever the pointer goes.
     dragging: Option<(TerminalId, MouseButton)>,
@@ -574,6 +577,10 @@ impl Desk {
     /// Where typed text goes now, if keys type text rather than being
     /// commands, as they are in normal mode.
     pub(crate) fn text_goes_to(&self) -> Option<TextTarget> {
+        // A link asked about takes keys, not text.
+        if self.link_asked.is_some() {
+            return None;
+        }
         if self.input.is_some() || self.finding() {
             return Some(TextTarget::Bar);
         }
@@ -833,6 +840,9 @@ impl Desk {
 
     /// What the status line shows, but with nothing under what's typed.
     fn status_alone(&self) -> Status {
+        if let Some(status) = self.link_status() {
+            return status;
+        }
         if let Some(input) = &self.input {
             return self.typing_status(input);
         }
@@ -1947,6 +1957,10 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        // A link asked about takes the next key, whatever else is open.
+        if self.link_key(press, self.script.typing || self.key_from_frame()) {
+            return true;
+        }
         if self.chat_modal_key(press) {
             return true;
         }
@@ -2181,6 +2195,11 @@ impl Desk {
 
     /// Pastes `text` into the command line, if it's open, or else the focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
+        // A link asked about isn't opened, as by any key but `y`.
+        if self.link_asked.take().is_some() {
+            self.say("the link wasn't opened".to_owned());
+            return;
+        }
         if self
             .hold_while_waiting(false, || editors::Held::Paste(text.to_owned()))
             .is_some()

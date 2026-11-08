@@ -119,7 +119,7 @@ impl Desk {
         }
         if has_scheme(to) {
             match links::target_of_uri(to) {
-                Some(Target::Url(url)) => self.opened.push(url),
+                Some(Target::Url(url)) => self.open_url(url),
                 Some(Target::File { path, .. }) => {
                     self.open_here(pane, path);
                 }

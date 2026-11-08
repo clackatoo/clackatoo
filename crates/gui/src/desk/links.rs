@@ -4,6 +4,9 @@
 //! The desk doesn't run the opener itself. It collects the URLs, and the
 //! window hands them to the desktop (see [`crate::desktop::open`]), so
 //! nothing here starts a process, and tests see what would have opened.
+//! A URL that isn't a plain web link or a mail address is opened only once
+//! the bar has shown it whole and been answered `y` (see
+//! [`Desk::open_url`]), for every pane's links alike.
 //!
 //! A file opens where it's easiest to read beside the output that named
 //! it:
@@ -24,7 +27,10 @@ use clackatoo_protocol::{
 
 use super::jumps::FilePlace;
 use super::{Asked, Desk};
-use crate::links::Target;
+use crate::chrome::Status;
+use crate::input::KeyPress;
+use crate::links::{self, Target};
+use crate::vim::{self, confirm::Confirm};
 
 /// The fewest columns a terminal needs for a file to open beside it, so
 /// that each half is still as wide as a terminal usually is.
@@ -49,7 +55,7 @@ impl Desk {
     /// finds it from the pane's working directory.
     pub(super) fn open_link_of(&mut self, terminal: TerminalId, target: Target, cwd: Option<&str>) {
         match target {
-            Target::Url(url) => self.opened.push(url),
+            Target::Url(url) => self.open_url(url),
             Target::File { path, line, col } => {
                 self.open_file_at(terminal, &path, cwd, line, col);
             }
@@ -63,6 +69,60 @@ impl Desk {
     /// desktop's opener.
     pub(crate) fn take_opened(&mut self) -> Vec<String> {
         std::mem::take(&mut self.opened)
+    }
+
+    /// Opens `url`, a link's target, with the desktop's opener: at once if
+    /// it's a plain web link or a mail address (see
+    /// [`links::opens_unasked`]), or else once the bar has shown it whole
+    /// and `y` says to. Every link a pane opens comes here: a terminal's,
+    /// a chat's and rendered Markdown's.
+    pub(super) fn open_url(&mut self, url: String) {
+        if links::opens_unasked(&url) {
+            self.opened.push(url);
+            return;
+        }
+        let question = format!("Open {}? (y/n)", links::shown_whole(&url));
+        self.link_asked = Some(Confirm::new(question).choice('y', "Open the link", url));
+    }
+
+    /// Takes `press` as the answer to whether to open a link, if that's
+    /// asked: `y` opens it, and any other key, or one a macro or a binding
+    /// types, which can't have read the question, gives up. Returns
+    /// whether it was asked.
+    pub(super) fn link_key(&mut self, press: &KeyPress<'_>, typed: bool) -> bool {
+        let Some(asked) = self.link_asked.take() else {
+            return false;
+        };
+        let answer = (vim::strokes(press, false).first())
+            .filter(|_| !typed)
+            .and_then(|&stroke| asked.answer(stroke));
+        match answer {
+            Some(url) => self.opened.push(url),
+            None => self.say("the link wasn't opened".to_owned()),
+        }
+        true
+    }
+
+    /// The question asked about a link, for the bar.
+    pub(super) fn link_status(&self) -> Option<Status> {
+        let asked = self.link_asked.as_ref()?;
+        Some(Status::Typing {
+            label: None,
+            text: asked.question().to_owned(),
+            choices: Vec::new(),
+            selected: None,
+            under: None,
+        })
+    }
+
+    /// What Ctrl+? says the keys do while a link's asked about.
+    pub(super) fn link_shortcuts(&self) -> Option<crate::shortcuts::Context> {
+        let asked = self.link_asked.as_ref()?;
+        Some(crate::shortcuts::bindings::list(
+            "Open a link",
+            None,
+            |stroke, _| asked.hint(stroke),
+        ))
     }
 
     /// Opens `path`, which the terminal `terminal` printed, at `line` and
