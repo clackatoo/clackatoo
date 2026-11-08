@@ -1056,11 +1056,29 @@ pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
         ring::rand::SystemRandom::new()
             .fill(&mut random)
             .map_err(|_| io::Error::other("the system's randomness can't be read"))?;
-        let mut temporary = name.to_owned();
-        let random = u64::from_le_bytes(random);
-        temporary.push(format!(".clackatoo-{}-{random:016x}", std::process::id()));
-        Ok(temporary)
+        Ok(temporary_name(name, u64::from_le_bytes(random)))
     })
+}
+
+/// The longest name a file can have, in bytes, as Linux's file systems
+/// have it (`NAME_MAX`).
+const NAME_MAX: usize = 255;
+
+/// What the name of the file a new one is put in the place of ends with
+/// while it's kept (see [`Staged::place`]), after the new one's name.
+const KEPT: &str = "-was";
+
+/// The name of the new file written beside the file called `name`, with
+/// `random` in it: the file's own name first, so it's seen whose it is,
+/// unless that would make it longer than a name can be.
+fn temporary_name(name: &std::ffi::OsStr, random: u64) -> OsString {
+    let ours = format!(".clackatoo-{}-{random:016x}", std::process::id());
+    if name.len() + ours.len() + KEPT.len() > NAME_MAX {
+        return OsString::from(ours);
+    }
+    let mut temporary = name.to_owned();
+    temporary.push(ours);
+    temporary
 }
 
 /// As [`stage`], naming the new file, in `path`'s directory, `named` from
@@ -1152,7 +1170,7 @@ impl Staged {
     /// rename or a link, and so quick, with nothing to sync.
     pub(crate) fn place(mut self) -> io::Result<Placed> {
         let mut kept = self.temporary.clone().into_os_string();
-        kept.push("-was");
+        kept.push(KEPT);
         let kept = PathBuf::from(kept);
         match fs::hard_link(&self.path, &kept) {
             Ok(()) => {
@@ -1395,6 +1413,24 @@ mod tests {
         let one = super::stage(&path, &Rope::from_str("a")).unwrap();
         let other = super::stage(&path, &Rope::from_str("b")).unwrap();
         assert_ne!(one.temporary, other.temporary);
+    }
+
+    #[test]
+    fn a_file_whose_name_is_as_long_as_a_name_can_be_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("n".repeat(super::NAME_MAX));
+        std::fs::write(&path, "old").unwrap();
+        let staged = super::stage(&path, &Rope::from_str("new")).unwrap();
+        staged.commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        // And put in place keeping the old one, as an agent's turn is.
+        let placed = (super::stage(&path, &Rope::from_str("newer")).unwrap())
+            .place()
+            .unwrap();
+        placed.undo().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let short = super::temporary_name(std::ffi::OsStr::new("notes.txt"), 1);
+        assert!(short.to_str().unwrap().starts_with("notes.txt.clackatoo-"));
     }
 
     #[test]
