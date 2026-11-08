@@ -18,7 +18,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clackatoo_daemon::{
-    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, LinkConfig, ShutdownHandle,
+    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, Lies, LinkConfig,
+    ShutdownHandle,
 };
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
@@ -186,6 +187,7 @@ impl World {
                 better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
                 speaks: None,
                 impostor: false,
+                lies: Default::default(),
             }),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
@@ -4376,6 +4378,223 @@ fn a_machine_passed_on_by_a_daemon_in_the_way_is_never_shown() {
     assert!(theirs(&shown, "srv").is_none(), "{shown:?}");
 }
 
+/// Starts the daemon on `host`, telling the daemons connecting to it what
+/// `lies` says, as a modified build could, and `with` configuring it too.
+fn start_lying(
+    world: &World,
+    host: &str,
+    lies: &Lies,
+    with: impl FnOnce(&mut DaemonConfig),
+) -> TestDaemon {
+    let lies = lies.clone();
+    world.start_configured(host, false, move |config| {
+        if let Some(links) = &mut config.links {
+            links.lies = lies;
+        }
+        with(config);
+    })
+}
+
+/// Has the daemon lying as `lies` says say it's `machine` from now on.
+fn say_its(lies: &Lies, machine: clackatoo_protocol::Machine) {
+    *lies.says.lock().unwrap() = Some(machine);
+}
+
+/// Laptop talks at protocol 94 to every machine, as to daemons from
+/// before identity keys, which don't sign their certificates.
+fn at_94(config: &mut DaemonConfig) {
+    if let Some(links) = &mut config.links {
+        links.speaks = Some(94);
+    }
+}
+
+/// The connection to `host` that `client` is shown now, after a moment for
+/// anything already under way to settle.
+fn connection_now(client: &mut Client, host: &str) -> Option<Connection> {
+    std::thread::sleep(Duration::from_millis(500));
+    let list = client.watch_connections(false).unwrap();
+    list.into_iter().find(|link| link.host == host)
+}
+
+#[test]
+fn a_daemon_that_says_its_another_machine_once_connected_is_stopped() {
+    let mut chain = Chain::new();
+    going(&mut chain.window, "server", &["desk"]);
+    let lies = Lies::default();
+    let bad = start_lying(&chain.world, "bad", &lies, |_| {});
+    let own = bad.machine().id;
+    connect(&mut chain.window, "bad");
+    going(&mut chain.window, "bad", &[]);
+    // Proved as itself, it then says it's server.
+    say_its(&lies, chain.server.machine());
+    bad.client()
+        .new_workspace(Some("lure".into()), shell())
+        .unwrap();
+    let stopped = wait_for_state(&mut chain.window, "bad", stopped);
+    assert!(
+        reason(&stopped.state).contains("another machine than it did"),
+        "{stopped:?}"
+    );
+    assert_eq!(stopped.machine.map(|machine| machine.id), Some(own));
+    // Server stays where it was, through desk.
+    let server = connection_now(&mut chain.window, "server").expect("server is still there");
+    assert!(connected(&server.state), "{server:?}");
+    assert_eq!(server.through, ["desk"]);
+    let shown = chain.window.watch_workspaces().unwrap();
+    assert!(theirs(&shown, "lure").is_none(), "{shown:?}");
+}
+
+#[test]
+fn a_daemon_whose_key_disproves_what_it_says_leaves_the_machine_it_named_alone() {
+    let mut chain = Chain::new();
+    going(&mut chain.window, "server", &["desk"]);
+    let lies = Lies::default();
+    let bad = start_lying(&chain.world, "bad", &lies, |_| {});
+    say_its(&lies, chain.server.machine());
+    connect(&mut chain.window, "bad");
+    let why = stopped_for(&mut chain.window, "bad");
+    assert!(why.contains("the one its key proves"), "{why}");
+    // What it said isn't taken: server is still passed on, and reached.
+    let stopped = connection_now(&mut chain.window, "bad").unwrap();
+    assert_eq!(stopped.machine, None, "{stopped:?}");
+    let server = connection_now(&mut chain.window, "server").expect("server is still there");
+    assert!(connected(&server.state), "{server:?}");
+    // Forgetting its key forgets none of server's.
+    let Response::Text(said) = (chain.window)
+        .request(&Request::Forget { host: "bad".into() })
+        .unwrap()
+    else {
+        panic!("not answered");
+    };
+    assert!(said.contains("hasn't been reached"), "{said}");
+    drop(bad);
+}
+
+#[test]
+fn a_daemon_reached_straight_that_doesnt_sign_its_certificate_is_refused() {
+    let world = World::new();
+    let lies = Lies {
+        unsigned: true,
+        ..Lies::default()
+    };
+    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "bad");
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("doesn't prove"), "{why}");
+}
+
+#[test]
+fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_known_by_its_key() {
+    let world = World::new();
+    let server = world.start("server");
+    let machine = server.machine();
+    let laptop = world.start_configured("laptop", false, at_94);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    // Known by its key, but connected to no more.
+    window.disconnect("server").unwrap();
+    let lies = Lies {
+        unsigned: true,
+        ..Lies::default()
+    };
+    say_its(&lies, machine.clone());
+    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    connect(&mut window, "bad");
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("clackatoo forget"), "{why}");
+    // Nor can its key be forgotten by that name.
+    let Response::Text(said) = (window)
+        .request(&Request::Forget { host: "bad".into() })
+        .unwrap()
+    else {
+        panic!("not answered");
+    };
+    assert!(said.contains("hasn't been reached"), "{said}");
+    drop(window);
+    drop(laptop);
+    let known = std::fs::read_to_string(world.host("laptop").join("known_machines")).unwrap();
+    assert!(known.contains(&machine.id.to_string()), "{known}");
+}
+
+#[test]
+fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_asked_for_here() {
+    let world = World::new();
+    let server = world.start("server");
+    let machine = server.machine();
+    {
+        let laptop = world.start_configured("laptop", true, at_94);
+        let mut window = laptop.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "server");
+        going(&mut window, "server", &[]);
+    }
+    // Laptop starts again while server can't be reached, knowing it only
+    // as the machine its connection was to, not by its key.
+    std::fs::remove_file(world.host("laptop").join("known_machines")).unwrap();
+    world.down("server", true);
+    let laptop = world.start_configured("laptop", true, at_94);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    let lies = Lies {
+        unsigned: true,
+        ..Lies::default()
+    };
+    say_its(&lies, machine);
+    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    connect(&mut window, "bad");
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("‘server’"), "{why}");
+    // Server, once it can be reached, is.
+    world.down("server", false);
+    going(&mut window, "server", &[]);
+    drop(server);
+}
+
+#[test]
+fn a_machine_kept_by_two_names_is_connected_to_by_one_after_a_restart() {
+    let world = World::new();
+    let server = world.start("server");
+    let machine = server.machine();
+    std::os::unix::fs::symlink(world.host("server"), world.host("again")).unwrap();
+    {
+        let laptop = world.start_with("laptop", true);
+        let mut window = laptop.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "server");
+        going(&mut window, "server", &[]);
+    }
+    // Both kept as connections to server, as when each reached it once.
+    let saved = world.host("laptop").join("workspaces");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    let mut again = state["connections"][0].clone();
+    assert_eq!(again["machine"], machine.id.to_string());
+    again["host"] = "again".into();
+    state["connections"].as_array_mut().unwrap().push(again);
+    std::fs::write(&saved, state.to_string()).unwrap();
+    let laptop = world.start_with("laptop", true);
+    let mut window = laptop.client();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let list = window.watch_connections(false).unwrap();
+        if list.iter().any(|link| connected(&link.state)) {
+            assert!(
+                list.iter().all(|link| connected(&link.state)
+                    || reason(&link.state).contains("reaches already")),
+                "{list:?}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "neither connected: {list:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
 fn a_machines_key_is_kept_through_restarts_and_a_new_one_taken_once_forgotten() {
     let world = World::new();
@@ -4481,11 +4700,6 @@ fn a_chain_through_a_daemon_of_protocol_94_passes_nothing_on() {
         .new_workspace(Some("srv".into()), shell())
         .unwrap();
     // Desk talks at 94 to server; and laptop to desk, as to a desk of 94.
-    let at_94 = |config: &mut DaemonConfig| {
-        if let Some(links) = &mut config.links {
-            links.speaks = Some(94);
-        }
-    };
     let desk = world.start_configured("desk", false, at_94);
     let mut at_desk = desk.client();
     connect(&mut at_desk, "server");

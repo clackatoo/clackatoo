@@ -1149,21 +1149,22 @@ impl Daemon {
         } = made;
         let host = self.links.list[at].remote.host.clone();
         let machine = (workspaces.machine.as_ref()).map(|machine| shown_machine(machine, &host));
-        let refused = machine
-            .as_ref()
-            .and_then(|machine| self.refused(at, machine))
-            .or_else(|| {
-                // The machine that signed its certificate is the one it says.
-                let (proved, _) = pin?;
-                (machine.as_ref().map(|machine| machine.id) != Some(proved))
-                    .then(|| "it says it's another machine than the one its key proves".to_owned())
-            });
-        self.links.list[at].machine.clone_from(&machine);
-        if let Some(reason) = refused {
+        let proved = pin.map(|(proved, _)| proved);
+        if let Some(reason) = self.claim_refused(at, machine.as_ref(), proved) {
+            // What it said is kept only if it's this daemon itself, to
+            // show: anything else refused would hold the place of the
+            // machine it names (see `refused`).
+            if machine
+                .as_ref()
+                .is_some_and(|machine| self.same_machine(machine).is_some())
+            {
+                self.links.list[at].machine = machine;
+            }
             self.let_carried_go(carried);
             self.link_stopped(at, &reason);
             return;
         }
+        self.links.list[at].machine.clone_from(&machine);
         self.links.list[at].suspected = None;
         // Known by its key from now on.
         if let Some((proved, pin)) = pin {
@@ -1357,16 +1358,29 @@ impl Daemon {
     /// another connection asked for here reaches that machine already,
     /// by another name. A machine is shown once, however many ways reach
     /// it.
+    ///
+    /// A connection that reached what it was to before is compared with
+    /// the machines the others said they reached. One that says it's
+    /// another is compared with those they're to as well, as kept from
+    /// the last run before they've said: a machine asked for here that
+    /// can't be reached yet keeps its place. A claim refused is never
+    /// kept (see [`made`](Self::made)), so no connection holds a place
+    /// for what another said.
     fn refused(&self, at: usize, machine: &Machine) -> Option<String> {
         if let Some(reason) = self.same_machine(machine) {
             return Some(reason.to_owned());
         }
         // One asked for here takes over from one through others, rather.
-        let asked = self.links.list[at].asked;
+        let linked = &self.links.list[at];
+        let asked = linked.asked;
+        let again = linked.machine_id() == Some(machine.id);
         let other = (self.links.list.iter().enumerate()).find(|&(other, linked)| {
-            other != at
-                && (linked.asked || !asked)
-                && (linked.machine.as_ref()).is_some_and(|known| known.id == machine.id)
+            let to = if again {
+                linked.machine.as_ref().map(|known| known.id)
+            } else {
+                linked.machine_id()
+            };
+            other != at && (linked.asked || !asked) && to == Some(machine.id)
         });
         other.map(|(_, linked)| {
             if asked {
@@ -1383,25 +1397,71 @@ impl Daemon {
         })
     }
 
+    /// Why the connection at `at` won't take the daemon it reached, which
+    /// says it's `claim`, and whose key proved it's `proved`, if it proved
+    /// anything: as [`refused`](Self::refused) says, or as its key proves
+    /// it's another machine. Only a proof of a machine's key may put a
+    /// connection in that machine's place, so one too old to prove
+    /// anything may say it's only a machine nothing else here can prove
+    /// is another: not one known by its key, nor one passed on.
+    fn claim_refused(
+        &self,
+        at: usize,
+        claim: Option<&Machine>,
+        proved: Option<MachineId>,
+    ) -> Option<String> {
+        if let Some(reason) = claim.and_then(|machine| self.refused(at, machine)) {
+            return Some(reason);
+        }
+        let said = claim.map(|machine| machine.id);
+        match (proved, said) {
+            (Some(proved), said) if said != Some(proved) => {
+                Some("it says it's another machine than the one its key proves".to_owned())
+            }
+            (None, Some(said)) if self.links.pin(said).is_some() => Some(format!(
+                "it says it's a machine known here by its key, and its clackatoo is too old to \
+                 prove it: update it there, or if it's the machine this connection reached \
+                 before, `clackatoo forget {}` takes it as it is",
+                self.links.list[at].remote.host
+            )),
+            (None, Some(said)) if self.passed_here(at, said) => Some(
+                "it says it's a machine passed on to this one, and its clackatoo is too old to \
+                 prove it"
+                    .to_owned(),
+            ),
+            _ => None,
+        }
+    }
+
     /// The daemon connected to as `host` says it's `machine`, as its
     /// workspaces changed. One that turns out to be this daemon itself is
-    /// let go.
+    /// let go, as is one that says it's another machine than it did, or
+    /// none: a machine's ID never changes while its daemon runs, and its
+    /// key proved only what it said first.
     pub(super) fn reached_says(&mut self, host: &str, machine: Option<Machine>) {
         let Some(at) = self.links.find(host) else {
             return;
         };
         let machine = machine.map(|machine| shown_machine(&machine, host));
-        if self.links.list[at].machine == machine {
+        let linked = &self.links.list[at];
+        if linked.machine == machine {
             return;
         }
-        let refused = machine
-            .as_ref()
-            .and_then(|machine| self.refused(at, machine));
-        self.links.list[at].machine = machine;
+        let id = |machine: &Option<Machine>| machine.as_ref().map(|machine| machine.id);
+        let refused = if linked.connected.is_some() && id(&linked.machine) != id(&machine) {
+            Some("it says it's another machine than it did".to_owned())
+        } else {
+            machine
+                .as_ref()
+                .and_then(|machine| self.refused(at, machine))
+        };
         if let Some(reason) = refused {
+            // What it said is never kept (see `made`).
             self.take_back_asks(host);
             self.end_connection(at);
             self.link_stopped(at, &reason);
+        } else {
+            self.links.list[at].machine = machine;
         }
         self.tell_connections();
         self.sync_chained();
@@ -1716,8 +1776,9 @@ fn try_connecting(
             }
         };
         // Nothing more is asked of it before it proves who it is.
+        let wire = client.wire();
         let checked = (client.certified())
-            .map(|(certificate, signed)| ways.trusts(&through, vouched, certificate, signed));
+            .map(|(certificate, signed)| ways.trusts(&through, vouched, certificate, signed, wire));
         let pin = match checked {
             None => None,
             Some(Ok(pin)) => pin,

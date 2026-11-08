@@ -576,6 +576,10 @@ impl Daemon {
         }
         self.show_held(&mut shown);
         self.others_shown(&mut shown);
+        // As a test's daemon lying about which machine it is.
+        if let Some(said) = (self.config.links.as_ref()).and_then(|config| config.lies.said()) {
+            shown.machine = Some(said);
+        }
         if let Some(active) = self.links.active
             && shown.get(active).is_some()
         {

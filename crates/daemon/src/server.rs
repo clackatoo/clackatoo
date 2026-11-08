@@ -4153,13 +4153,15 @@ impl Daemon {
             key: self.signer.key(),
             signature: self.signer.sign(signer_as, &certificate),
         };
+        // As a test's daemon lying about itself, not signed at all.
+        let unsigned = (self.config.links.as_ref()).is_some_and(|config| config.lies.unsigned);
         Ok(Response::Carrying {
             certificate,
             udp: udp.zip(quic).map(|(address, quic)| Udp {
                 port: address.port(),
                 probe_key: quic.probe_key(),
             }),
-            signed: Some(signed),
+            signed: (!unsigned).then_some(signed),
         })
     }
 

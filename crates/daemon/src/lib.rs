@@ -236,7 +236,42 @@ pub struct LinkConfig {
     /// daemon in the way could. `false` in use.
     #[doc(hidden)]
     pub impostor: bool,
+    /// For tests: what this daemon tells the daemons connecting to it
+    /// about itself that isn't so, as a modified build could. Nothing in
+    /// use.
+    #[doc(hidden)]
+    pub lies: Lies,
 }
+
+/// For tests: what a daemon tells the daemons connecting to it about
+/// itself that isn't so (see [`LinkConfig::lies`]).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct Lies {
+    /// Its QUIC certificate comes unsigned, whatever protocol it speaks.
+    pub unsigned: bool,
+    /// The machine its workspaces say it is, while set: from the next
+    /// time they're told on.
+    pub says: std::sync::Arc<std::sync::Mutex<Option<clackatoo_protocol::Machine>>>,
+}
+
+impl Lies {
+    /// The machine its workspaces say it is, if they lie.
+    pub(crate) fn said(&self) -> Option<clackatoo_protocol::Machine> {
+        (self.says.lock())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Lies are told apart by where they're kept, not by what they say now.
+impl PartialEq for Lies {
+    fn eq(&self, other: &Self) -> bool {
+        self.unsigned == other.unsigned && std::sync::Arc::ptr_eq(&self.says, &other.says)
+    }
+}
+
+impl Eq for Lies {}
 
 /// How often a better way for a connection to go is tried, unless the
 /// configuration says: see [`LinkConfig::better_every`].
@@ -483,6 +518,7 @@ impl DaemonConfig {
                 better_every: DEFAULT_BETTER_EVERY,
                 speaks: None,
                 impostor: false,
+                lies: Default::default(),
             }),
             display: match non_empty("CLACKATOO_DISPLAY") {
                 Some(off) if off == "off" => None,

@@ -578,6 +578,7 @@ impl Machines {
             better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
             speaks: None,
             impostor: false,
+            lies: Default::default(),
         });
         // Its files are read as the window's own daemon reads them.
         config.languages = Some(languages(&dir.join("languages"))?);
@@ -699,6 +700,7 @@ fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Resul
         better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
         speaks: None,
         impostor: false,
+        lies: Default::default(),
     });
     config.workspaces = match kept {
         Some(kept) => {

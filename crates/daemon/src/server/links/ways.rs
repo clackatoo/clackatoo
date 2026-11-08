@@ -57,7 +57,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{MachineId, Signed};
+use clackatoo_protocol::{MachineId, Signed, wire};
 
 use crate::client::{self, ClientError};
 use crate::forward::Forwarder;
@@ -405,8 +405,9 @@ impl Ways {
 
     /// Whether a new connection by the way `through`, which a daemon on
     /// the way `vouched` for, if it did, takes the daemon that presented
-    /// `certificate`, `signed` as it says: see the module docs. Returns
-    /// the machine and the key to keep it by, if it proved itself.
+    /// `certificate`, `signed` as it says, talking at protocol `wire`: see
+    /// the module docs. Returns the machine and the key to keep it by, if
+    /// it proved itself.
     ///
     /// # Errors
     ///
@@ -417,6 +418,7 @@ impl Ways {
         vouched: Option<[u8; 32]>,
         certificate: &[u8],
         signed: Option<&Signed>,
+        wire: u32,
     ) -> Result<Option<(MachineId, Pin)>, Untrusted> {
         let state = self.state();
         let name = &state.name;
@@ -426,13 +428,20 @@ impl Ways {
         };
         let loud = |reason: String| Untrusted { reason, loud: true };
         let Some(signed) = signed else {
-            // A daemon before identity keys, which ssh proves.
-            return if through.is_empty() {
-                Ok(None)
-            } else {
+            // A daemon before identity keys, which ssh proves. One since
+            // always signs, so one that doesn't proves nothing: an old
+            // protocol only claimed buys no fewer checks (see `made`).
+            return if !through.is_empty() {
                 Err(quiet(format!(
                     "‘{name}’ can't prove which machine it is, as its clackatoo is too old"
                 )))
+            } else if wire::daemon_has(wire, wire::CHAIN) {
+                Err(loud(format!(
+                    "‘{name}’ doesn't prove which machine it is, though its clackatoo signs: \
+                     something may be answering in its place"
+                )))
+            } else {
+                Ok(None)
             };
         };
         let machine = signed.machine;
@@ -621,6 +630,8 @@ fn carrier_through(way: &Way, machine: MachineId, name: &str) -> Result<UnixStre
 mod tests {
     use std::sync::mpsc;
 
+    use clackatoo_protocol::PROTOCOL_VERSION;
+
     use super::*;
 
     const DESK: MachineId = MachineId([0xde; 16]);
@@ -730,7 +741,7 @@ mod tests {
         let (machine, _, signed) = signing();
         let ways = Ways::default();
         let proved = ways
-            .trusts(&[], None, b"certificate", Some(&signed))
+            .trusts(&[], None, b"certificate", Some(&signed), PROTOCOL_VERSION)
             .unwrap();
         assert_eq!(
             proved,
@@ -743,10 +754,22 @@ mod tests {
             ))
         );
         // Before keys, ssh is proof enough; through another, nothing is.
-        assert_eq!(ways.trusts(&[], None, b"certificate", None).unwrap(), None);
+        let before = wire::CHAIN - 1;
+        assert_eq!(
+            ways.trusts(&[], None, b"certificate", None, before)
+                .unwrap(),
+            None
+        );
         assert!(
             !ways
-                .trusts(&[DESK], None, b"certificate", None)
+                .trusts(&[DESK], None, b"certificate", None, before)
+                .unwrap_err()
+                .loud
+        );
+        // Since, one that doesn't sign is refused, loudly, as one in its
+        // place could leave it out.
+        assert!(
+            ways.trusts(&[], None, b"certificate", None, PROTOCOL_VERSION)
                 .unwrap_err()
                 .loud
         );
@@ -755,7 +778,7 @@ mod tests {
             let pin = Pin { key: [9; 32], met };
             ways.pins.insert(machine, pin);
             let refused = ways
-                .trusts(&[], None, b"certificate", Some(&signed))
+                .trusts(&[], None, b"certificate", Some(&signed), PROTOCOL_VERSION)
                 .unwrap_err();
             assert!(
                 refused.loud && refused.reason.contains("forget"),
@@ -786,7 +809,13 @@ mod tests {
             ways.pins.insert(machine, pin);
             for through in [&[][..], &[DESK][..]] {
                 let refused = ways
-                    .trusts(through, Some(forged.key), b"certificate", Some(&forged))
+                    .trusts(
+                        through,
+                        Some(forged.key),
+                        b"certificate",
+                        Some(&forged),
+                        PROTOCOL_VERSION,
+                    )
                     .unwrap_err();
                 assert!(refused.loud, "{refused:?}");
                 assert!(
@@ -795,7 +824,7 @@ mod tests {
                 );
             }
             // The real one still is.
-            let taken = ways.trusts(&[DESK], None, b"certificate", Some(&real));
+            let taken = ways.trusts(&[DESK], None, b"certificate", Some(&real), PROTOCOL_VERSION);
             assert!(taken.is_ok(), "{taken:?}");
         }
     }
@@ -824,14 +853,20 @@ mod tests {
         let ways = Ways::default();
         // Another certificate in its place, with the machine's signature.
         let refused = ways
-            .trusts(&[], None, b"certificat3", Some(&signed))
+            .trusts(&[], None, b"certificat3", Some(&signed), PROTOCOL_VERSION)
             .unwrap_err();
         assert!(refused.loud, "{refused:?}");
         // Another key, with the machine's signature.
         signed.key = [3; 32];
         assert!(
-            ways.trusts(&[DESK], Some([3; 32]), b"certificate", Some(&signed))
-                .is_err()
+            ways.trusts(
+                &[DESK],
+                Some([3; 32]),
+                b"certificate",
+                Some(&signed),
+                PROTOCOL_VERSION
+            )
+            .is_err()
         );
     }
 
@@ -842,8 +877,14 @@ mod tests {
         ways.set_through(Some(machine), "server", vec![way(&[DESK])]);
         // Never met: what the daemon passing it on vouches for, kept.
         assert_eq!(
-            ways.trusts(&[DESK], Some(signed.key), b"certificate", Some(&signed))
-                .unwrap(),
+            ways.trusts(
+                &[DESK],
+                Some(signed.key),
+                b"certificate",
+                Some(&signed),
+                PROTOCOL_VERSION
+            )
+            .unwrap(),
             Some((
                 machine,
                 Pin {
@@ -852,11 +893,23 @@ mod tests {
                 }
             ))
         );
-        let lied = ways.trusts(&[DESK], Some([1; 32]), b"certificate", Some(&signed));
+        let lied = ways.trusts(
+            &[DESK],
+            Some([1; 32]),
+            b"certificate",
+            Some(&signed),
+            PROTOCOL_VERSION,
+        );
         assert!(lied.unwrap_err().loud);
         assert!(
             !ways
-                .trusts(&[DESK], None, b"certificate", Some(&signed))
+                .trusts(
+                    &[DESK],
+                    None,
+                    b"certificate",
+                    Some(&signed),
+                    PROTOCOL_VERSION
+                )
                 .unwrap_err()
                 .loud
         );
@@ -867,26 +920,50 @@ mod tests {
         };
         ways.pins.insert(machine, pin);
         assert_eq!(
-            ways.trusts(&[DESK], Some([1; 32]), b"certificate", Some(&signed))
-                .unwrap(),
+            ways.trusts(
+                &[DESK],
+                Some([1; 32]),
+                b"certificate",
+                Some(&signed),
+                PROTOCOL_VERSION
+            )
+            .unwrap(),
             Some((machine, pin))
         );
         // Another machine answering in its place.
         let (_, _, other) = signing();
-        let refused = ways.trusts(&[DESK], Some(other.key), b"certificate", Some(&other));
+        let refused = ways.trusts(
+            &[DESK],
+            Some(other.key),
+            b"certificate",
+            Some(&other),
+            PROTOCOL_VERSION,
+        );
         assert!(refused.unwrap_err().loud);
         // Asked for here and never met: nothing vouched for will do, kept
         // or not.
         ways.pins.remove(machine);
         ways.set_direct(Some(direct()));
-        let refused = ways.trusts(&[DESK], Some(signed.key), b"certificate", Some(&signed));
+        let refused = ways.trusts(
+            &[DESK],
+            Some(signed.key),
+            b"certificate",
+            Some(&signed),
+            PROTOCOL_VERSION,
+        );
         assert!(!refused.unwrap_err().loud);
         let vouched = Pin {
             key: signed.key,
             met: false,
         };
         ways.pins.insert(machine, vouched);
-        let refused = ways.trusts(&[DESK], Some(signed.key), b"certificate", Some(&signed));
+        let refused = ways.trusts(
+            &[DESK],
+            Some(signed.key),
+            b"certificate",
+            Some(&signed),
+            PROTOCOL_VERSION,
+        );
         assert!(!refused.unwrap_err().loud);
     }
 

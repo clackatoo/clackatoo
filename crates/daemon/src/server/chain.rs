@@ -456,9 +456,12 @@ impl Daemon {
     /// Whether a daemon connected to this one passes on the machine of the
     /// connection at `at`.
     pub(super) fn passed_to_here(&self, at: usize) -> bool {
-        let Some(machine) = self.links.list[at].machine_id() else {
-            return false;
-        };
+        (self.links.list[at].machine_id()).is_some_and(|machine| self.passed_here(at, machine))
+    }
+
+    /// Whether a daemon connected to this one, but for that of the
+    /// connection at `at`, passes `machine` on.
+    pub(super) fn passed_here(&self, at: usize, machine: MachineId) -> bool {
         (self.links.list.iter().enumerate()).any(|(other, linked)| {
             other != at && linked.passed.iter().any(|passed| passed.id == machine)
         })
