@@ -249,6 +249,7 @@ impl Default for Links {
 
 /// One connection.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(super) struct Linked {
     /// Its host, as asked for, and the command that runs clackatoo there.
     /// For one to a machine passed on, what the daemon passing it on
