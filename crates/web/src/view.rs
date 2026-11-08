@@ -1605,7 +1605,7 @@ pub fn queue(node: &ChatNode, online: Online) -> Element {
     for message in &node.delivery.queued {
         let steering =
             node.delivery.native_steering && message.images == 0 && message.target.is_none();
-        let busy = matches!(node.state, ChatState::Answering | ChatState::Starting);
+        let busy = crate::state::busy(node);
         let label = if !busy {
             "Send now"
         } else if steering && clackatoo_protocol::may_mention_files(&message.text) {

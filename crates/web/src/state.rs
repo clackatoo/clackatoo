@@ -45,6 +45,17 @@ pub enum Online {
     Lost(u32),
 }
 
+/// Whether chat `node`'s agent is busy, starting or answering: a message
+/// sent now queues, or steers, rather than starts a turn. One rule for the
+/// send button, Ctrl+Enter and the queue's buttons.
+#[must_use]
+pub fn busy(node: &ChatNode) -> bool {
+    matches!(
+        node.state,
+        clackatoo_protocol::ChatState::Starting | clackatoo_protocol::ChatState::Answering
+    )
+}
+
 /// The dashboard's explicit scopes. Search applies within the chosen scope.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HomeFilter {
@@ -1419,6 +1430,17 @@ mod tests {
         assert_eq!(shown(&state), "");
         // So a draft it told late can't leave the message in the daemon's.
         assert_eq!(told(&mut state), [""]);
+    }
+
+    #[test]
+    fn an_agent_starting_is_as_busy_as_one_answering() {
+        let node = |state| ChatNode {
+            state,
+            ..ChatNode::default()
+        };
+        assert!(busy(&node(ChatState::Starting)));
+        assert!(busy(&node(ChatState::Answering)));
+        assert!(!busy(&node(ChatState::Ready)));
     }
 
     #[test]

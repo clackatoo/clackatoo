@@ -176,12 +176,7 @@ impl ChatPage {
             self.textarea.set_value(&draft);
             grow(&self.textarea);
         }
-        let busy = node.is_some_and(|n| {
-            matches!(
-                n.state,
-                clackatoo_protocol::ChatState::Answering | clackatoo_protocol::ChatState::Starting
-            )
-        });
+        let busy = node.is_some_and(crate::state::busy);
         let sending = state.submitting.contains(&open.id);
         let empty = draft.trim().is_empty() && state.images.get(&open.id).is_none_or(Vec::is_empty);
         let disabled = empty
@@ -518,7 +513,7 @@ fn listen_for_chat_input(root: &DomElement) {
                     .open
                     .as_ref()
                     .and_then(|o| o.view.as_ref()?.chat())
-                    .is_some_and(|n| n.state == clackatoo_protocol::ChatState::Answering);
+                    .is_some_and(crate::state::busy);
                 app.act(if busy { Action::Steer } else { Action::Send });
             });
         }
