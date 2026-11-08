@@ -281,6 +281,32 @@ pub(super) struct Settled {
     read_as: Option<DiskStamp>,
 }
 
+/// A file not open that an agent's tools say they changed, to be read and
+/// checked against what they say: off the loop, if it's big (see
+/// [`super::settling`]).
+#[derive(Debug)]
+pub(super) struct Reading {
+    chat: TerminalId,
+    pub(super) path: PathBuf,
+    maker: Maker,
+    /// Its text before the tools, or `None` if there was no file.
+    before: Option<String>,
+    /// The tools' reports taken in, by serial, with their changes, in the
+    /// order they were made.
+    reports: Vec<(u64, Vec<RawDiff>)>,
+    /// Whether the agent's turn is ending, so nothing more will be said.
+    last: bool,
+    /// How big the file was found to be, in bytes, as it was given the
+    /// worker.
+    pub(super) size: usize,
+}
+
+impl Reading {
+    pub(super) fn chat(&self) -> TerminalId {
+        self.chat
+    }
+}
+
 /// A change an agent made to a file open in a buffer, found to be what made
 /// the file, to be merged into the buffer's text as it was at `version`.
 #[derive(Debug)]
@@ -782,6 +808,7 @@ impl Daemon {
         let (chat, path) = match &worked {
             Worked::Closed(settled, _) => (settled.chat, settled.path.clone()),
             Worked::Open(checking, _) => (checking.chat, checking.path.clone()),
+            Worked::Read(reading, _) => (reading.chat(), reading.path.clone()),
         };
         let files = &mut self.agent_files;
         let Some(at) = (files.diffing.iter())
@@ -810,6 +837,12 @@ impl Daemon {
                 self.after_diffing(diffing);
             }
             Worked::Open(checking, checked) => self.checked_later(&checking, checked, diffing),
+            // Read: checked now, and what it's found to be may be given
+            // the worker in turn, which what waited then waits for.
+            Worked::Read(reading, read) => {
+                self.settle_read(reading, read);
+                self.carry_on(diffing);
+            }
         }
         self.pending_ended(&path);
     }
@@ -1339,8 +1372,76 @@ impl Daemon {
                 Seen::Absent => Some(None),
                 Seen::Unreadable => None,
             });
+        // With nothing known of it before, the file needn't be read: what
+        // was done to it isn't known either way.
+        let Some(before) = before else {
+            if last {
+                (self.agent_files.reports)
+                    .retain(|report| report.chat != chat || report.path != path);
+                self.agent_files.log.note_unknown(&maker, path);
+                self.refresh_files(chat, [maker.turn]);
+            }
+            return;
+        };
+        let reports = (reports.iter())
+            .map(|report| (report.serial, report.diffs.clone()))
+            .collect();
+        let mut reading = Reading {
+            chat,
+            path: path.to_owned(),
+            maker,
+            before,
+            reports,
+            last,
+            size: 0,
+        };
+        // A big file is read off the loop, as a file system that hangs
+        // would hang the daemon (CLACKA-220), and checked once it's read.
+        let size = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+        reading.size = usize::try_from(size).unwrap_or(usize::MAX);
+        if reading.size > ON_LOOP {
+            let maker = reading.maker.clone();
+            match (self.agent_files.settler).submit(Job::Read(reading), &self.waker) {
+                None => {
+                    self.agent_files.diffing.push(Diffing {
+                        path: path.to_owned(),
+                        maker,
+                        again: false,
+                        last: false,
+                        open: None,
+                    });
+                    return;
+                }
+                Some(job) => {
+                    if self.agent_files.settler.lost() {
+                        self.settler_lost();
+                    }
+                    let Job::Read(given_back) = job else {
+                        unreachable!("the worker gives back the job it was given");
+                    };
+                    reading = given_back;
+                }
+            }
+        }
+        self.settle_read(reading, buffer::read(path));
+    }
+
+    /// Goes on with checking a file not open, as [`Self::settle_closed`]
+    /// does, once it's been `read`.
+    fn settle_read(&mut self, reading: Reading, read: std::io::Result<(String, DiskStamp)>) {
+        let Reading {
+            chat,
+            path,
+            maker,
+            before,
+            reports,
+            last,
+            ..
+        } = reading;
+        let path = path.as_path();
+        let serials: Vec<u64> = reports.iter().map(|&(serial, _)| serial).collect();
         let mut read_as = None;
-        let disk = match buffer::read(path) {
+        let disk = match read {
             Ok((text, stamp)) => {
                 read_as = Some(stamp);
                 Some(buffer::lf(text))
@@ -1351,8 +1452,7 @@ impl Daemon {
             Err(err) => {
                 log::warn!("{}: {err}", path.display());
                 if last {
-                    (self.agent_files.reports)
-                        .retain(|report| report.chat != chat || report.path != path);
+                    self.agent_files.forget_reports(&serials);
                     self.agent_files.log.note_unknown(&maker, path);
                     self.refresh_files(chat, [maker.turn]);
                 }
@@ -1361,21 +1461,18 @@ impl Daemon {
         };
         // What the tools' changes make of the text before: a file deleted
         // by tools that show no changes is gone.
-        let made = before.as_ref().and_then(|before| {
-            if disk.is_none() && before.is_some() && reports.iter().all(|r| r.diffs.is_empty()) {
-                return Some(None);
-            }
-            let mut text = before.clone().unwrap_or_default();
-            for report in &reports {
-                text = apply(&text, &report.diffs)?;
-            }
-            Some(Some(text))
-        });
-        let forget = |files: &mut AgentFiles| {
-            (files.reports).retain(|report| report.chat != chat || report.path != path);
-        };
-        match (before, made) {
-            (Some(before), Some(made)) if made == disk => {
+        let made =
+            if disk.is_none() && before.is_some() && reports.iter().all(|(_, d)| d.is_empty()) {
+                Some(None)
+            } else {
+                let text = before.clone().unwrap_or_default();
+                (reports.iter())
+                    .try_fold(text, |text, (_, diffs)| apply(&text, diffs))
+                    .map(Some)
+            };
+        let forget = |files: &mut AgentFiles| files.forget_reports(&serials);
+        match made {
+            Some(made) if made == disk => {
                 forget(&mut self.agent_files);
                 let settled = Settled {
                     chat,

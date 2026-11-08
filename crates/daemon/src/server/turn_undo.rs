@@ -1396,6 +1396,44 @@ pub(in crate::server) mod tests {
         assert_eq!(world.text(id), first);
     }
 
+    /// A big file a tool says it changed is read off the loop, as a file
+    /// system that hangs would hang the daemon, and checked once it's read,
+    /// what the chat's tools do next waiting for it (CLACKA-220).
+    #[test]
+    fn a_big_file_a_tool_changed_is_read_off_the_loop() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let chat = world.chat;
+        let path = world.path("big.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, "t1");
+        let uid = world.first();
+        let said = |done, diffs| Wrote {
+            done,
+            turn: uid,
+            tool: "t1".into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs,
+        };
+        world.daemon.take_written(chat, &said(false, vec![]));
+        // Not what it says: read on the loop, that's seen at once, and
+        // nothing waits; read off it, the check waits for the read.
+        std::fs::write(world.path("big.txt"), first.replacen("line 7\n", "", 1)).unwrap();
+        let diff = RawDiff {
+            path: path.clone(),
+            old: Some("line 2\n".into()),
+            new: "line #2\n".into(),
+        };
+        world.daemon.take_written(chat, &said(true, vec![diff]));
+        assert!(world.daemon.agent_files.diffing(chat), "being read");
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(chat));
+        // Its turn ends: what it did isn't known.
+        world.end_turn();
+        let said = world.undo(0, false, false);
+        assert!(said.contains("big.txt"), "{said}");
+    }
+
     #[test]
     fn a_big_change_the_worker_fails_at_is_noted_unknown() {
         use crate::server::settling::{CAUGHT, GONE};
@@ -1458,9 +1496,11 @@ pub(in crate::server) mod tests {
             old: Some("line 2\n".into()),
             new: "line #2\n".into(),
         };
-        // Worked out now, and the first, which the worker had, is failed
-        // at once rather than left waiting.
+        // Read on the loop, as the worker's found gone, and worked out by a
+        // new one; the first, which the worker had, is failed at once
+        // rather than left waiting.
         world.daemon.take_written(chat, &said(true, vec![diff]));
+        world.daemon.settle_all_pending();
         assert!(!world.daemon.agent_files.diffing(chat));
         world.end_turn();
         let notice = world.undo(0, false, false);

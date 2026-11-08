@@ -46,8 +46,9 @@ use clackatoo_protocol::TerminalId;
 use clackatoo_protocol::BufferId;
 use clackatoo_text::Rope;
 
-use super::agent_files::{Checked, Checking, Settled};
+use super::agent_files::{Checked, Checking, Reading, Settled};
 use super::edit_log::{Diffed, Maker};
+use crate::buffer::DiskStamp;
 
 /// The most bytes of text, before and after together, worked out on the
 /// loop. A change to a bigger file is worked out on the worker.
@@ -114,22 +115,26 @@ pub(super) enum Job {
     /// To a file open in a buffer: to check against the file, and merge
     /// into the buffer.
     Open(Checking),
+    /// To a big file not open: to read, for the loop to check.
+    Read(Reading),
 }
 
 /// A change the worker has done with: worked out, or `None` if it
-/// couldn't be.
+/// couldn't be; or read.
 #[derive(Debug)]
 pub(super) enum Worked {
     Closed(Settled, Option<Diffed>),
     Open(Checking, Option<Checked>),
+    Read(Reading, std::io::Result<(String, DiskStamp)>),
 }
 
 impl Job {
-    /// The text it holds, in bytes.
+    /// The text it holds, or will, in bytes.
     fn bytes(&self) -> usize {
         match self {
             Self::Closed(settled) => bytes(settled),
             Self::Open(checking) => checking.bytes(),
+            Self::Read(reading) => reading.size,
         }
     }
 
@@ -160,6 +165,15 @@ impl Job {
                 }
                 Worked::Open(checking, checked.ok())
             }
+            // A test's panic is for what's worked out, not for reading.
+            Self::Read(reading) => {
+                let read = catch_unwind(AssertUnwindSafe(|| crate::buffer::read(&reading.path)));
+                let read = read.unwrap_or_else(|panic| {
+                    log::warn!("settling: reading a file panicked: {panic:?}");
+                    Err(std::io::Error::other("reading it failed"))
+                });
+                Worked::Read(reading, read)
+            }
         }
     }
 }
@@ -170,6 +184,7 @@ impl Worked {
         match self {
             Self::Closed(settled, _) => bytes(settled),
             Self::Open(checking, _) => checking.bytes(),
+            Self::Read(reading, _) => reading.size,
         }
     }
 }
