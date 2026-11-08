@@ -380,7 +380,7 @@ Clicking a pane focuses it. What else the mouse does depends on the program in t
 - A triple click selects whole lines.
 - With Alt held, or Ctrl and Alt, dragging selects a block of columns. Over a program that takes the mouse, add Shift.
 
-Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. Middle-click also focuses and pastes into editors and into searches or names already being typed in explorers, boards and reviews. Only there: as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. Ctrl+Shift+C copies it to the clipboard, and `"+`, as shown: by characters, with no newline after a last line, even of lines a triple click selected. And `y` in normal mode yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying); a count or a register typed first, as `"a`, waits with the selection, as in Vim's visual mode, so `"ay` keeps it in `"a`. Meanwhile the bar says VISUAL (or VISUAL LINE, or VISUAL BLOCK). Any other key forgets it. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
+Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. It goes only there, as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. A middle click also focuses and pastes into editors and chats, and into searches or names already being typed in explorers, boards and reviews. Ctrl+Shift+C copies it to the clipboard, and `"+`, as shown: by characters, with no newline after a last line, even of lines a triple click selected. And `y` in normal mode yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying); a count or a register typed first, as `"a`, waits with the selection, as in Vim's visual mode, so `"ay` keeps it in `"a`. Meanwhile the bar says VISUAL (or V-LINE, or V-BLOCK). Any other key forgets it. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
 
 **Programs that take the mouse.** Programs such as Neovim, htop and less can ask for clicks, drags and the wheel, and get them while their pane is in insert mode on the live screen. The pointer is then an arrow rather than a text cursor. Hold Shift to select text anyway. A drag stays with the pane it started in, even when the pointer leaves it.
 
@@ -409,7 +409,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `%` `{` `}` | The bracket that pairs with the one under the cursor, or with a count, the line that far through, `50%` half way; the blank line before or after the paragraph. |
 | `(` `)` | The start of this sentence or the one before, or of the next, as Vim's go: a sentence ends at `.`, `!` or `?` before a blank or a line's end, and at an empty line. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
-| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |
+| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but after `y` they go on past it, as far as history goes, as Vim's do: `y99L` takes up to the 99th line from the view's bottom. |
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |
 | Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay where they fit, and the cursor to its top line, or its bottom line going up, as Vim's does. At the live screen, or history's start, nothing moves. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, or as many as a count says, with the cursor kept in it. |
@@ -417,7 +417,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ap` or `ma`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `p` or `"ap`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
 
 ### Selecting and copying
 
@@ -426,8 +426,10 @@ The keys are read as an editor reads them, so a command half typed, as `y3` or `
 | `v` | Selects characters, from the cursor to wherever it moves. |
 | `V` | Selects whole lines. |
 | Ctrl+V | Selects a block of columns. `$` takes every line to its end, and `O` goes to the other corner on the same line. |
-| `o` | Moves the other end of the selection. |
+| `o` | Goes to the other end of the selection, so that end moves instead. |
+| `gv` | Selects the last selection again, as it was; in visual mode, swaps the two. |
 | `y`, Ctrl+Shift+C | Yanks the selection into the registers, or with Ctrl+Shift+C onto the clipboard and into `"+` as shown, by characters, and returns to normal mode. |
+| `Y`, in visual mode | Yanks the lines selected, whole, or a block as it is. |
 | `yy`, `Y` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
 | `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top, `yH` up to the view's top. |
 | `y` and a [text object](#text-objects) | Copies the object around the cursor: `yiw` the word, `yi"` what's in the quotes, `yib` a command's output. |
