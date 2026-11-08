@@ -1589,7 +1589,7 @@ mod tests {
         }
         let due = start + SAY_REFUSED_EVERY;
         assert_eq!(refusals.next(), Some(due));
-        assert_eq!(refusals.due(due - Duration::from_millis(1)), None);
+        assert_eq!(refusals.due(start + Duration::from_millis(59_999)), None);
         assert_eq!(
             refusals.due(due).as_deref(),
             Some(

@@ -72,13 +72,13 @@ impl Group {
     pub(crate) fn of(ip: IpAddr) -> Self {
         match ip {
             IpAddr::V4(ip) => Self::V4(ip),
-            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-                Some(ip) => Self::V4(ip),
-                None => {
-                    let [a, b, c, d, ..] = ip.segments();
-                    Self::V6([a, b, c, d])
+            IpAddr::V6(ip) => {
+                if let Some(ip) = ip.to_ipv4_mapped() {
+                    return Self::V4(ip);
                 }
-            },
+                let [a, b, c, d, ..] = ip.segments();
+                Self::V6([a, b, c, d])
+            }
         }
     }
 }
