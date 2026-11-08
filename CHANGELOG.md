@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.10 (2026-11-08)
+
+### Features
+
+- **agents:** per-chat Subagents setting and configurable subagent limits (ccb1cc9a)
+
+### Fixes
+
+- **agents:** hold every chat's Subagents setting to what it may have (911242b6)
+- **agents:** wake orphaned subagents by their family's budget (2376593d)
+
 ## 2026.11.9 (2026-11-04)
 
 ### Fixes
