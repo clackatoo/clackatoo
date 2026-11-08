@@ -222,7 +222,12 @@ impl Desk {
         }
         for files in new {
             self.explorers.attached.insert(files);
-            self.request(Request::AttachFiles { files }, Asked::Quiet);
+            // A folder listed again comes as what changed in it.
+            let attach = Request::AttachFiles {
+                files,
+                changes: true,
+            };
+            self.request(attach, Asked::Quiet);
         }
     }
 

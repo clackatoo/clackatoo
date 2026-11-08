@@ -421,7 +421,12 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     for files in folders {
-        let attached = client.request(&Request::AttachFiles { files }).unwrap();
+        let attached = client
+            .request(&Request::AttachFiles {
+                files,
+                changes: false,
+            })
+            .unwrap();
         assert_eq!(attached, Response::Done);
         loop {
             if let Event::Files {

@@ -37,6 +37,9 @@ use crate::server::{Daemon, Source};
 pub(in crate::server) struct FollowedFiles {
     /// The clients following it, and the folders each has open in it.
     viewers: BTreeMap<Token, BTreeSet<String>>,
+    /// Those of them that asked for folders listed again as what changed
+    /// in them.
+    changes: BTreeSet<Token>,
     /// It's attached there.
     upstream: bool,
 }
@@ -45,6 +48,14 @@ impl FollowedFiles {
     /// Whether any client has `dir` open.
     fn open(&self, dir: &str) -> bool {
         self.viewers.values().any(|open| open.contains(dir))
+    }
+
+    /// Whether every client following it asked for folders listed again
+    /// as what changed in them, which are passed on as they come: they're
+    /// asked for there only then, and it's attached there again asking
+    /// for whole listings as a client that didn't follows it.
+    fn takes_changes(&self) -> bool {
+        (self.viewers.keys()).all(|token| self.changes.contains(token))
     }
 }
 
@@ -64,16 +75,32 @@ impl Daemon {
     }
 
     /// Has the client at `token` follow this daemon's explorer `local`, if
-    /// it's another daemon's, as [`Request::AttachFiles`] asks.
-    pub(super) fn route_attach_files(&mut self, token: Token, local: FilesId) -> Option<Routed> {
+    /// it's another daemon's, as [`Request::AttachFiles`] asks, sent
+    /// folders listed again as what changed in them if it asks for
+    /// `changes`.
+    pub(super) fn route_attach_files(
+        &mut self,
+        token: Token,
+        local: FilesId,
+        changes: bool,
+    ) -> Option<Routed> {
         let (at, remote) = self.relayed_files(local)?;
         let followed = self.links.list[at].relayed.files.entry(local).or_default();
         followed.viewers.entry(token).or_default();
+        if changes {
+            followed.changes.insert(token);
+        } else {
+            followed.changes.remove(&token);
+        }
+        let changes = followed.takes_changes();
         if !self.is_linked(at) {
             // Attached there once the connection's made again.
             return Some(Routed::Answered(Response::Done));
         }
-        let attach = Request::AttachFiles { files: remote };
+        let attach = Request::AttachFiles {
+            files: remote,
+            changes,
+        };
         let routed = self.wait_for(token, at, attach, Then::Pass);
         if matches!(routed, Routed::Waiting)
             && let Some(followed) = self.links.list[at].relayed.files.get_mut(&local)
@@ -103,6 +130,7 @@ impl Daemon {
         let Some(open) = followed.viewers.remove(&token) else {
             return;
         };
+        followed.changes.remove(&token);
         if followed.viewers.is_empty() {
             let upstream = followed.upstream;
             relayed.files.remove(&local);
@@ -312,7 +340,10 @@ impl Daemon {
                 continue;
             };
             let files = FilesId(remote);
-            messages.push(ClientMessage::Request(Request::AttachFiles { files }));
+            messages.push(ClientMessage::Request(Request::AttachFiles {
+                files,
+                changes: followed.takes_changes(),
+            }));
             let open: BTreeSet<&String> = followed.viewers.values().flatten().collect();
             messages.extend(open.into_iter().map(|dir| ClientMessage::Files {
                 files,

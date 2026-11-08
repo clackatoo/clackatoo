@@ -387,10 +387,10 @@ fn optional(bytes: &[u8]) -> Option<(Option<u64>, &[u8])> {
 
 /// The folder a change to a file explorer is about, if `payload`, a
 /// frame's, holds one (`ServerMessage::Event(Event::Files { files, update
-/// })` with `FilesUpdate::Listed` or `FilesUpdate::Unlisted`, whose first
-/// field is the folder): read where it lies, as a daemon passing another's
-/// on sends it only to the clients that opened that folder, never decoding
-/// the listing.
+/// })` with `FilesUpdate::Listed`, `FilesUpdate::Unlisted` or
+/// `FilesUpdate::Changed`, whose first field is the folder): read where it
+/// lies, as a daemon passing another's on sends it only to the clients
+/// that opened that folder, never decoding the listing.
 #[must_use]
 pub fn files_dir(payload: &[u8]) -> Option<&str> {
     let (3, rest) = varint(payload)? else {
@@ -400,7 +400,7 @@ pub fn files_dir(payload: &[u8]) -> Option<&str> {
         return None;
     };
     let (_, rest) = varint(rest)?;
-    let (1 | 2, rest) = varint(rest)? else {
+    let (1 | 2 | 5, rest) = varint(rest)? else {
         return None;
     };
     let (len, rest) = varint64(rest)?;
@@ -1595,6 +1595,15 @@ mod tests {
             },
         });
         assert_eq!(files_dir(&payload(&unlisted)), Some("/root"));
+        let changed = ServerMessage::Event(Event::Files {
+            files: FilesId(3),
+            update: FilesUpdate::Changed {
+                dir: "/srv".into(),
+                was: 2,
+                changes: crate::ListingChanges::default(),
+            },
+        });
+        assert_eq!(files_dir(&payload(&changed)), Some("/srv"));
         let git = ServerMessage::Event(Event::Files {
             files: FilesId(3),
             update: FilesUpdate::NoGit("not a repository".into()),

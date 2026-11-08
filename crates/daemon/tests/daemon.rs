@@ -11128,7 +11128,12 @@ fn a_folder_opened_as_a_file_shows_its_listing_and_files_show_in_its_place() {
     // As `clackatoo edit app` asks, or `:Editor app`.
     let pane = (client.new_workspace(None, open_file(dir, "app"))).unwrap();
     let files = folder_in(&mut client, pane);
-    client.request(&Request::AttachFiles { files }).unwrap();
+    client
+        .request(&Request::AttachFiles {
+            files,
+            changes: false,
+        })
+        .unwrap();
     assert!(matches!(
         next_files_update(&mut client),
         FilesUpdate::Root { path, .. } if Path::new(&path) == app
@@ -11162,7 +11167,12 @@ fn a_folder_opened_as_a_file_shows_its_listing_and_files_show_in_its_place() {
     assert_eq!(open_here(&mut client, "b.txt").unwrap(), Response::Done);
     let b = buffer_in(&mut client, pane);
     assert_eq!(attach_buffer(&mut client, b).text, "b\n");
-    let gone = client.request(&Request::AttachFiles { files }).unwrap();
+    let gone = client
+        .request(&Request::AttachFiles {
+            files,
+            changes: false,
+        })
+        .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchFiles(files)));
 
     // And a folder in place of the file, as `-` asks, which closes, having
@@ -12215,7 +12225,10 @@ fn explore(client: &mut Client, root: &Path) -> (FilesId, String) {
             break pane.content.files().expect("an explorer");
         }
     };
-    let attached = client.request(&Request::AttachFiles { files });
+    let attached = client.request(&Request::AttachFiles {
+        files,
+        changes: false,
+    });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     match next_files_update(client) {
         FilesUpdate::Root { path, name } => {
@@ -12324,7 +12337,10 @@ fn an_explorer_lists_what_is_expanded_and_shows_files_made_and_deleted_there() {
 
     // A second client expanding it gets what's known at once.
     let mut other = daemon.client();
-    let attached = other.request(&Request::AttachFiles { files });
+    let attached = other.request(&Request::AttachFiles {
+        files,
+        changes: false,
+    });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     files_action(&mut other, files, expand(&dir));
     assert_eq!(names(&next_listing(&mut other, &dir)), ["d.txt"]);
@@ -12352,6 +12368,105 @@ fn an_explorer_lists_what_is_expanded_and_shows_files_made_and_deleted_there() {
             }
             FilesUpdate::Listed { .. } => {}
             update => panic!("expected the directory gone, got {update:?}"),
+        }
+    }
+}
+
+/// The next listing of `dir`, whole or as what changed in `had`, skipping
+/// the rest, and whether it came whole.
+fn next_listing_from(
+    client: &mut Client,
+    dir: &Path,
+    had: &[clackatoo_protocol::Entry],
+) -> (Vec<clackatoo_protocol::Entry>, bool) {
+    let dir = dir.display().to_string();
+    loop {
+        match next_files_update(client) {
+            FilesUpdate::Listed {
+                dir: listed,
+                entries,
+                ..
+            } if listed == dir => return (entries, true),
+            FilesUpdate::Changed {
+                dir: listed,
+                was,
+                changes,
+            } if listed == dir => {
+                assert_eq!(was as usize, had.len(), "changes to what was sent");
+                return (changes.apply(had).expect("changes to it"), false);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_folder_listed_again_goes_as_what_changed_to_a_client_that_asks() {
+    let daemon = TestDaemon::start();
+    let root = project(daemon.dir.path());
+    for name in ["g.txt", "h.txt", "i.txt", "j.txt"] {
+        std::fs::write(root.join(name), "").unwrap();
+    }
+    let mut old = daemon.client();
+    let (files, _) = explore(&mut old, &root);
+    let mut new = daemon.client();
+    let attach = Request::AttachFiles {
+        files,
+        changes: true,
+    };
+    assert!(matches!(new.request(&attach), Ok(Response::Done)));
+    let expand = FilesAction::Expand(root.display().to_string());
+    files_action(&mut old, files, expand.clone());
+    files_action(&mut new, files, expand.clone());
+    // Whole, the first time.
+    let (listing, whole) = next_listing_from(&mut new, &root, &[]);
+    assert!(whole);
+    let (_, whole) = next_listing_from(&mut old, &root, &[]);
+    assert!(whole);
+    let names = |entries: &[clackatoo_protocol::Entry]| -> Vec<String> {
+        entries.iter().map(|entry| entry.name.clone()).collect()
+    };
+
+    // A file made: what changed, to the client that asked; whole to the
+    // other, as before.
+    std::fs::write(root.join("e.txt"), "").unwrap();
+    let (listing, whole) = next_listing_from(&mut new, &root, &listing);
+    assert!(!whole, "what changed");
+    let (sent, whole) = next_listing_from(&mut old, &root, &[]);
+    assert!(whole, "whole to a client that didn't ask");
+    assert_eq!(listing, sent, "the same either way");
+    assert_eq!(
+        names(&listing),
+        [
+            "b", ".hidden", "a.txt", "e.txt", "g.txt", "h.txt", "i.txt", "j.txt"
+        ]
+    );
+
+    // Made a program, it's sent changed.
+    let program = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(root.join("g.txt"), program).unwrap();
+    let (listing, whole) = next_listing_from(&mut new, &root, &listing);
+    assert!(!whole);
+    assert_eq!(listing, next_listing_from(&mut old, &root, &[]).0);
+
+    // Expanded again, it's sent whole again.
+    files_action(&mut new, files, expand);
+    let (listing, whole) = next_listing_from(&mut new, &root, &listing);
+    assert!(whole);
+
+    // Changes more than it holds after are sent whole.
+    for name in [
+        "a.txt", "e.txt", "g.txt", "h.txt", "i.txt", "j.txt", ".hidden",
+    ] {
+        std::fs::remove_file(root.join(name)).unwrap();
+    }
+    let mut listing = listing;
+    loop {
+        let (now, whole) = next_listing_from(&mut new, &root, &listing);
+        listing = now;
+        if names(&listing) == ["b"] {
+            assert!(whole, "seven gone from eight is sent whole");
+            break;
         }
     }
 }
@@ -12398,7 +12513,10 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
         (explorer, explorer)
     );
     let files = tab.layout.panes()[0].content.files().unwrap();
-    let attached = client.request(&Request::AttachFiles { files });
+    let attached = client.request(&Request::AttachFiles {
+        files,
+        changes: false,
+    });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     match next_files_update(&mut client) {
         FilesUpdate::Root { path, name } => {
@@ -12409,7 +12527,10 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
     }
     let closed = client.request(&Request::ClosePane { pane: explorer });
     assert!(matches!(closed, Ok(Response::Done)), "{closed:?}");
-    let again = client.request(&Request::AttachFiles { files });
+    let again = client.request(&Request::AttachFiles {
+        files,
+        changes: false,
+    });
     assert!(
         matches!(again, Ok(Response::Error(Error::NoSuchFiles(_)))),
         "{again:?}"

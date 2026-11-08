@@ -117,7 +117,7 @@ pub use corpus::corpus;
 pub use devices::{Device, PairingAsk, PairingState};
 pub use files::{
     Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
-    GitMark, OpenFiles,
+    GitMark, ListingChanges, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
 pub use form::{
@@ -145,7 +145,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 126;
+pub const PROTOCOL_VERSION: u32 = 128;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1012,10 +1012,18 @@ pub enum Request {
     },
     /// Starts sending a file explorer: its [`FilesUpdate::Root`], then what
     /// the client asks for with [`ClientMessage::Files`]. Attaching twice
-    /// sends the root again.
+    /// sends the root again, and takes `changes` as said again.
     AttachFiles {
         /// The explorer.
         files: FilesId,
+        /// Send a folder listed again as what changed in it since it was
+        /// last sent ([`FilesUpdate::Changed`]), not whole. New in protocol
+        /// 128: `false`, an older peer's, has every listing sent whole.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::FILES_CHANGES }, _>",
+            deserialize_with = "wire::since::<{ wire::FILES_CHANGES }, _, _>"
+        )]
+        changes: bool,
     },
     /// Stops sending a file explorer, collapsing everything the client
     /// expanded in it.

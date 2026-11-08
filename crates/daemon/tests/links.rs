@@ -2225,7 +2225,12 @@ fn an_explorer_on_another_machine_lists_its_folders_and_renames_its_files() {
     let mut other = pair.desk.client();
     for client in [&mut pair.window, &mut other] {
         assert_eq!(
-            client.request(&Request::AttachFiles { files }).unwrap(),
+            client
+                .request(&Request::AttachFiles {
+                    files,
+                    changes: false,
+                })
+                .unwrap(),
             Response::Done
         );
         let FilesUpdate::Root { path, .. } = files_update(client, files) else {
@@ -2281,6 +2286,99 @@ fn an_explorer_on_another_machine_lists_its_folders_and_renames_its_files() {
     assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
     // The other has the root open too, so it hears of it.
     assert_eq!(listed(&mut other, files, &root), ["src", "b.txt"]);
+}
+
+/// The next listing `client` is sent of folder `dir` of explorer `files`,
+/// whole or as what changed in `had`, and whether it came whole.
+fn listed_from(
+    client: &mut Client,
+    files: FilesId,
+    dir: &str,
+    had: &[clackatoo_protocol::Entry],
+) -> (Vec<clackatoo_protocol::Entry>, bool) {
+    loop {
+        match files_update(client, files) {
+            FilesUpdate::Listed {
+                dir: of, entries, ..
+            } if of == dir => return (entries, true),
+            FilesUpdate::Changed {
+                dir: of,
+                was,
+                changes,
+            } if of == dir => {
+                assert_eq!(was as usize, had.len(), "changes to what was sent");
+                return (changes.apply(had).expect("changes to it"), false);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn another_machines_folder_goes_as_what_changed_only_while_every_window_asks() {
+    let mut pair = Pair::new();
+    let project = pair.world.host("laptop").join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(project.join(name), "").unwrap();
+    }
+    let root = project.display().to_string();
+    let first = pair.work.tabs[0].layout.panes()[0].id;
+    let explorer = PaneTerminal::Files(OpenFiles {
+        dir: Some(root.clone()),
+    });
+    let pane = pair.window.split_pane(first, Side::Left, explorer).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.files().is_some())
+    });
+    let files = shown.find_pane(pane).unwrap().2.content.files().unwrap();
+    let attach = |client: &mut Client, changes| {
+        let attach = Request::AttachFiles { files, changes };
+        assert_eq!(client.request(&attach).unwrap(), Response::Done);
+        assert!(matches!(
+            files_update(client, files),
+            FilesUpdate::Root { .. }
+        ));
+    };
+    let names = |entries: &[clackatoo_protocol::Entry]| -> Vec<String> {
+        entries.iter().map(|entry| entry.name.clone()).collect()
+    };
+    attach(&mut pair.window, true);
+    pair.window
+        .files(files, FilesAction::Expand(root.clone()))
+        .unwrap();
+    let (listing, whole) = listed_from(&mut pair.window, files, &root, &[]);
+    assert!(whole);
+    std::fs::write(project.join("e.txt"), "").unwrap();
+    let (listing, whole) = listed_from(&mut pair.window, files, &root, &listing);
+    assert!(!whole, "passed on as what changed");
+    assert_eq!(
+        names(&listing),
+        ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]
+    );
+
+    // A window that doesn't ask for changes, as an older one can't, has
+    // every window sent the folder whole from then on.
+    let mut other = pair.desk.client();
+    attach(&mut other, false);
+    other
+        .files(files, FilesAction::Expand(root.clone()))
+        .unwrap();
+    let (_, whole) = listed_from(&mut other, files, &root, &[]);
+    assert!(whole);
+    std::fs::write(project.join("f.txt"), "").unwrap();
+    let (sent, whole) = listed_from(&mut other, files, &root, &[]);
+    assert!(whole);
+    assert_eq!(names(&sent).last().map(String::as_str), Some("f.txt"));
+    let mut listing = listing;
+    loop {
+        let (now, whole) = listed_from(&mut pair.window, files, &root, &listing);
+        assert!(whole, "never changes the other can't read");
+        listing = now;
+        if listing == sent {
+            break;
+        }
+    }
 }
 
 #[test]

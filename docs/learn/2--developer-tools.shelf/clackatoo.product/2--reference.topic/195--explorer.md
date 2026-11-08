@@ -8,7 +8,7 @@ related:
   - clackatoo/reference/config
 ---
 
-A file explorer is a pane showing a folder, its root, as a tree. The daemon lists each folder when you open it in the tree, and watches it while it's open, so a file made in a terminal, or by an agent, shows straight away. Nothing is read until it's shown: a project with a hundred thousand files costs only what you open.
+A file explorer is a pane showing a folder, its root, as a tree. The daemon lists each folder when you open it in the tree, and watches it while it's open, so a file made in a terminal, or by an agent, shows straight away. Nothing is read until it's shown: a project with a hundred thousand files costs only what you open. When an open folder changes, the window is sent only what changed in it, not the whole folder again, so a build writing into a folder of thousands of files costs little to show.
 
 ## Opening it
 

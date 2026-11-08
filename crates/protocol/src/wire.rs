@@ -330,6 +330,10 @@ gates! {
     /// it may work at once (CLACKA-209): `SettingKind::Subagents`. An older
     /// peer is sent the chat's settings without it.
     SUBAGENTS = 126,
+    /// A folder listed again sent as what changed in it, to a client that
+    /// asks for that (CLACKA-59): `Request::AttachFiles`' `changes`, and
+    /// `FilesUpdate::Changed`, which nothing older asks for or is sent.
+    FILES_CHANGES = 128,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -594,6 +598,7 @@ impl Since for FilesUpdate {
             | Self::Unlisted { .. }
             | Self::Git(_)
             | Self::NoGit(_) => EARLIER,
+            Self::Changed { .. } => FILES_CHANGES,
         }
     }
 }
@@ -1440,7 +1445,10 @@ impl Downgrade for ServerMessage {
     /// attached again so, which an older peer isn't shown; and so is
     /// `Event::Said`, which is only ever about a pane lent, which an
     /// older peer is never shown; and `Event::Listening`, which goes only
-    /// to a client that asked for it, which an older one never does.
+    /// to a client that asked for it, which an older one never does; and
+    /// `FilesUpdate::Changed`, likewise, as a daemon passing another's
+    /// explorer on asks for changes only while every client it passes
+    /// them to reads them.
     /// `BufferUpdate::Reversed` only answers a newer window's undo or redo,
     /// and becomes the `Edited` an older one's is answered with.
     /// A new answer, or a new kind of thing found, only ever answers what
@@ -1540,6 +1548,10 @@ impl Downgrade for ServerMessage {
                 | Event::Forwarded(_)
                 | Event::Said(_)
                 | Event::Listening(_)
+                | Event::Files {
+                    update: FilesUpdate::Changed { .. },
+                    ..
+                }
                 | Event::Buffer {
                     update:
                         BufferUpdate::Coloured { .. }
@@ -2362,11 +2374,15 @@ mod tests {
         // that asked for them is sent; and what the bar is told of panes
         // lent, which an older peer is never shown; and the ports
         // background tabs listen on, which only a client that asked is
-        // sent.
+        // sent; and what changed in a folder, which only a client that
+        // asked for changes is sent.
         matches!(
             message,
             ServerMessage::Event(
-                Event::NativeRequest { .. }
+                Event::Files {
+                    update: FilesUpdate::Changed { .. },
+                    ..
+                } | Event::NativeRequest { .. }
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }
                     | Event::Coloured { .. }

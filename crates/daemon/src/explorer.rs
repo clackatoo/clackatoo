@@ -27,7 +27,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
-use clackatoo_protocol::{Entry, EntryKind, FileOp, FileOpError, GitMark};
+use clackatoo_protocol::{Entry, EntryKind, FileOp, FileOpError, GitMark, ListingChanges};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::buffer::{DiskStamp, Restamp};
@@ -51,10 +51,12 @@ type Job = Box<dyn FnOnce() -> Done + Send>;
 /// What a thread has done.
 #[derive(Debug)]
 pub(crate) enum Done {
-    /// The directory at `dir` listed, or why it couldn't be.
+    /// The directory at `dir` listed, or why it couldn't be, and what
+    /// changed in it since the listing it was listed against, if it was.
     Listed {
         dir: PathBuf,
         listing: Result<Listing, String>,
+        changes: Option<(Arc<Listing>, ListingChanges)>,
     },
     /// The work tree the directory `root` is in, if any: its top, and its
     /// repository's git directory. Or why git can't be run at all.
@@ -186,11 +188,25 @@ impl Workers {
         });
     }
 
-    /// Lists the directory at `dir`.
-    pub(crate) fn list(&self, dir: PathBuf) {
+    /// Lists the directory at `dir`, and works out what changed in it
+    /// since `before`, its last listing, if there was one: here, not on
+    /// the loop, as a big directory's are long.
+    pub(crate) fn list(&self, dir: PathBuf, before: Option<Arc<Listing>>) {
         send(&self.listing, move || {
             let listing = list(&dir);
-            Done::Listed { dir, listing }
+            let changes = before.and_then(|before| {
+                let now = listing.as_ref().ok()?;
+                if now.cut_short != before.cut_short {
+                    return None;
+                }
+                let changes = ListingChanges::between(&before.entries, &now.entries, order)?;
+                Some((before, changes))
+            });
+            Done::Listed {
+                dir,
+                listing,
+                changes,
+            }
         });
     }
 
@@ -317,7 +333,7 @@ pub(crate) fn list(dir: &Path) -> Result<Listing, String> {
             stamp,
         });
     }
-    entries.sort_by_cached_key(|entry| (!entry.kind.expands(), name_order(&entry.name)));
+    entries.sort_by_cached_key(order);
     Ok(Listing { entries, cut_short })
 }
 
@@ -379,6 +395,12 @@ fn walk(dir: &Path, made: bool, most: usize) -> Walk {
         }
     }
     found
+}
+
+/// What orders a listing: directories first, then the rest, each by
+/// [`name_order`].
+fn order(entry: &Entry) -> (bool, (String, Reverse<String>)) {
+    (!entry.kind.expands(), name_order(&entry.name))
 }
 
 /// What orders names: their letters, ignoring case, then their case, so

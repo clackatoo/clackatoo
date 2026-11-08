@@ -810,6 +810,32 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ]))]),
         })),
     ));
+    // An explorer attached asking for changes, and a folder sent as what
+    // changed in it.
+    let files = FilesId(4);
+    samples.extend([
+        (
+            crate::wire::FILES_CHANGES,
+            Client(ClientMessage::Request(Request::AttachFiles {
+                files,
+                changes: true,
+            })),
+        ),
+        (
+            crate::wire::FILES_CHANGES,
+            Server(ServerMessage::Event(Event::Files {
+                files,
+                update: FilesUpdate::Changed {
+                    dir: "/src".into(),
+                    was: 3,
+                    changes: crate::ListingChanges {
+                        removed: vec![1],
+                        added: vec![(2, entry(EntryKind::File { executable: false }))],
+                    },
+                },
+            })),
+        ),
+    ]);
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
@@ -3201,7 +3227,10 @@ fn more() -> Vec<Sample> {
         }),
         Client(ClientMessage::Present { here: true }),
         // File explorers, and changing files.
-        request(Request::AttachFiles { files }),
+        request(Request::AttachFiles {
+            files,
+            changes: false,
+        }),
         Client(ClientMessage::Files {
             files,
             action: FilesAction::Refresh,

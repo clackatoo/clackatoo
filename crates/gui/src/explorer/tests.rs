@@ -1,6 +1,8 @@
 use std::time::Instant;
 
 use super::*;
+use clackatoo_protocol::ListingChanges;
+
 use crate::vim::list::Searching;
 
 fn explorer(rows: u16) -> Explorer {
@@ -149,6 +151,63 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
     explorer.take_outbox();
     listed(&mut explorer, "/p/src", vec![file("late.rs")]);
     assert_eq!(shown(&mut explorer).len(), 5);
+}
+
+/// What changed in `dir`, `was` entries long.
+fn changed(explorer: &mut Explorer, dir: &str, was: u32, changes: ListingChanges) {
+    explorer.update(FilesUpdate::Changed {
+        dir: dir.into(),
+        was,
+        changes,
+    });
+}
+
+#[test]
+fn what_changed_in_a_directory_is_made_to_its_listing_and_any_other_asks_for_it_whole() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, vec![dir("src"), file("a"), file("c")]);
+    let made_b = ListingChanges {
+        removed: Vec::new(),
+        added: vec![(2, file("b"))],
+    };
+    changed(&mut explorer, "/p", 3, made_b.clone());
+    assert_eq!(
+        shown(&mut explorer),
+        ["~/p", "    ..", "  ▸ src", "    a", "    b", "    c"]
+    );
+    assert_eq!(explorer.take_outbox(), []);
+
+    // Changes to a listing it hasn't, as one of another length: listed
+    // whole again, and nothing changed meanwhile.
+    changed(&mut explorer, "/p", 3, made_b.clone());
+    assert_eq!(explorer.take_outbox(), [FilesAction::Expand("/p".into())]);
+    assert_eq!(shown(&mut explorer).len(), 6);
+    // Nor are later ones, until it's come whole.
+    let gone_a = ListingChanges {
+        removed: vec![1],
+        added: Vec::new(),
+    };
+    changed(&mut explorer, "/p", 4, gone_a.clone());
+    assert_eq!(shown(&mut explorer).len(), 6);
+    assert_eq!(explorer.take_outbox(), []);
+    listed(
+        &mut explorer,
+        "/p",
+        vec![dir("src"), file("a"), file("b"), file("c")],
+    );
+    changed(&mut explorer, "/p", 4, gone_a);
+    assert_eq!(
+        shown(&mut explorer),
+        ["~/p", "    ..", "  ▸ src", "    b", "    c"]
+    );
+
+    // Nothing's made to a directory not expanded, or one listed on a
+    // connection gone.
+    changed(&mut explorer, "/p/src", 0, made_b.clone());
+    assert_eq!(explorer.take_outbox(), []);
+    explorer.reconnected();
+    changed(&mut explorer, "/p", 3, made_b);
+    assert_eq!(shown(&mut explorer).len(), 5, "shown as it was till listed");
 }
 
 #[test]

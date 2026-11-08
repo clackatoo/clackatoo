@@ -201,6 +201,9 @@ pub(crate) struct Explorer {
     /// The directories the daemon has been asked to list, and send as they
     /// change.
     asked: HashSet<String>,
+    /// Those of them it has sent whole since they were asked for, on this
+    /// connection: what changed in one is made to its listing only then.
+    current: HashSet<String>,
     /// What git says of the files, by path.
     marks: BTreeMap<String, GitMark>,
     /// The tree, as shown, and whether it needs flattening again.
@@ -288,6 +291,7 @@ impl Explorer {
                 ..View::default()
             },
             asked: HashSet::new(),
+            current: HashSet::new(),
             marks: BTreeMap::new(),
             lines: Vec::new(),
             stale: true,
@@ -586,12 +590,34 @@ impl Explorer {
                     dir: dir.clone(),
                     entries,
                 });
+                self.current.insert(dir.clone());
+                self.listings.insert(dir, listing);
+                self.stale = true;
+            }
+            FilesUpdate::Changed { dir, was, changes } => {
+                if !self.current.contains(&dir) {
+                    return;
+                }
+                let entries = (self.listings.get(&dir))
+                    .filter(|listing| listing.entries.len() == was as usize)
+                    .and_then(|listing| changes.apply(&listing.entries));
+                let Some(entries) = entries else {
+                    // Not changes to what's here: listed whole again.
+                    self.current.remove(&dir);
+                    self.outbox.push(FilesAction::Expand(dir));
+                    return;
+                };
+                let listing = Rc::new(Listing {
+                    dir: dir.clone(),
+                    entries,
+                });
                 self.listings.insert(dir, listing);
                 self.stale = true;
             }
             FilesUpdate::Unlisted { dir, reason } => {
                 self.edit_unlisted(&dir);
                 self.listings.remove(&dir);
+                self.current.remove(&dir);
                 self.asked.remove(&dir);
                 self.view.expanded.remove(&dir);
                 if self.root.as_ref() == Some(&dir) {
@@ -610,6 +636,7 @@ impl Explorer {
     /// stays until it is again.
     pub(crate) fn reconnected(&mut self) {
         self.asked.clear();
+        self.current.clear();
         self.unlisted = false;
         self.plan_cut_off();
     }
@@ -749,6 +776,7 @@ impl Explorer {
         // What isn't wanted is forgotten: it's listed afresh if it is
         // again.
         self.listings.retain(|dir, _| wanted.contains(dir));
+        self.current.retain(|dir| wanted.contains(dir));
         self.asked = wanted;
         self.stale = true;
     }

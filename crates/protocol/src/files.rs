@@ -9,8 +9,10 @@
 //! [`FilesUpdate::Root`]; then it expands directories with
 //! [`FilesAction::Expand`], and is sent each one's
 //! [`FilesUpdate::Listed`] as it's listed, and again whenever it changes,
-//! until it's collapsed. The daemon watches the directories expanded, so
-//! files a terminal or an agent makes show at once. Nothing is ever walked
+//! until it's collapsed: as what changed in it ([`FilesUpdate::Changed`]),
+//! if the client asked for that and it's less to send. The daemon watches
+//! the directories expanded, so files a terminal or an agent makes show at
+//! once. Nothing is ever walked
 //! whole: a tree with a hundred thousand files costs what's expanded.
 //!
 //! Which directories are expanded, where the cursor is and what's scrolled
@@ -115,6 +117,115 @@ pub enum FilesUpdate {
     /// [`FilesUpdate::Git`]: it isn't installed, or is too old to run
     /// safely.
     NoGit(String),
+    /// What's changed in a directory the client expanded since it was last
+    /// sent it, whole or as changes: sent in place of
+    /// [`Listed`](Self::Listed) to a client that attached asking for
+    /// changes, when they're less to send. Only ever sent once the client
+    /// has been sent the directory whole since it last expanded it, so a
+    /// client holding no listing of `dir`, or one from before it last
+    /// expanded it, drops it. New in protocol 128.
+    Changed {
+        /// The directory's absolute path, as the client expanded it.
+        dir: String,
+        /// How many entries the listing it changes holds, for a client to
+        /// tell it isn't the one it has.
+        was: u32,
+        /// What changed.
+        changes: ListingChanges,
+    },
+}
+
+/// What changed from one listing of a directory to the next: the entries
+/// gone and the entries new, a changed entry being both. Whether it's
+/// still cut short isn't said: a listing that changes that is sent whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListingChanges {
+    /// Where the entries gone, or changed, were in the listing before, in
+    /// order.
+    pub removed: Vec<u32>,
+    /// The entries new, or changed, each with where it is in the listing
+    /// after, in order.
+    pub added: Vec<(u32, Entry)>,
+}
+
+impl ListingChanges {
+    /// What changed from `old` to `new`, each in the order `key` gives:
+    /// both are walked once, side by side, keeping what's the same in
+    /// each. Whatever their order, applying what's returned to `old` makes
+    /// `new`; out of order, it's only more than it need be. `None` if
+    /// either is too long for its places to be numbered.
+    pub fn between<K: Ord>(
+        old: &[Entry],
+        new: &[Entry],
+        key: impl Fn(&Entry) -> K,
+    ) -> Option<Self> {
+        u32::try_from(old.len().max(new.len())).ok()?;
+        #[allow(clippy::cast_possible_truncation, reason = "checked above")]
+        let at = |index: usize| index as u32;
+        let mut changes = Self::default();
+        let (mut i, mut j) = (0, 0);
+        while let (Some(before), Some(after)) = (old.get(i), new.get(j)) {
+            if before == after {
+                i += 1;
+                j += 1;
+                continue;
+            }
+            // The same name changed is gone and new.
+            let order = key(before).cmp(&key(after));
+            if order.is_le() {
+                changes.removed.push(at(i));
+                i += 1;
+            }
+            if order.is_ge() {
+                changes.added.push((at(j), after.clone()));
+                j += 1;
+            }
+        }
+        changes.removed.extend((i..old.len()).map(at));
+        changes
+            .added
+            .extend((j..new.len()).map(|j| (at(j), new[j].clone())));
+        Some(changes)
+    }
+
+    /// Whether nothing changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.added.is_empty()
+    }
+
+    /// How many entries changed, gone and new: what it costs to send,
+    /// against a whole listing's length.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.removed.len() + self.added.len()
+    }
+
+    /// `entries` with these changes made, or `None` if they aren't changes
+    /// to it: a place past its end, or out of order.
+    #[must_use]
+    pub fn apply(&self, entries: &[Entry]) -> Option<Vec<Entry>> {
+        let kept = entries.len().checked_sub(self.removed.len())?;
+        let mut out = Vec::with_capacity(kept + self.added.len());
+        let mut removed = self.removed.iter().map(|&at| at as usize).peekable();
+        let mut added = self.added.iter().peekable();
+        let mut entries = entries.iter().enumerate();
+        loop {
+            // What's new here goes before what's kept.
+            if let Some((_, entry)) = added.next_if(|(at, _)| *at as usize == out.len()) {
+                out.push(entry.clone());
+                continue;
+            }
+            let Some((index, entry)) = entries.next() else {
+                break;
+            };
+            if removed.next_if_eq(&index).is_none() {
+                out.push(entry.clone());
+            }
+        }
+        // Anything left was out of order, or past the end.
+        (removed.next().is_none() && added.next().is_none()).then_some(out)
+    }
 }
 
 /// One thing in a directory.
@@ -286,4 +397,112 @@ pub enum FileOpError {
     /// It failed, as this says.
     #[error("{0}")]
     Failed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str, kind: EntryKind) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            kind,
+            ignored: false,
+            stamp: None,
+        }
+    }
+
+    fn file(name: &str) -> Entry {
+        named(name, EntryKind::File { executable: false })
+    }
+
+    /// Folders first, then by name, as the daemon lists.
+    fn key(entry: &Entry) -> (bool, String) {
+        (!entry.kind.expands(), entry.name.clone())
+    }
+
+    #[test]
+    fn changes_are_what_differs_and_make_the_new_listing() {
+        let old = [named("d", EntryKind::Dir), file("a"), file("b"), file("c")];
+        let mut ignored_c = file("c");
+        ignored_c.ignored = true;
+        let new = [
+            named("d", EntryKind::Dir),
+            named("e", EntryKind::Dir),
+            file("a"),
+            ignored_c.clone(),
+        ];
+        let changes = ListingChanges::between(&old, &new, key).unwrap();
+        assert_eq!(changes.removed, [2, 3], "b gone, and c changed");
+        assert_eq!(
+            changes.added,
+            [(1, named("e", EntryKind::Dir)), (3, ignored_c)]
+        );
+        assert_eq!(changes.apply(&old).unwrap(), new);
+        let same = ListingChanges::between(&new, &new, key).unwrap();
+        assert!(same.is_empty());
+        assert_eq!(same.apply(&new).unwrap(), new);
+    }
+
+    #[test]
+    fn any_two_listings_are_changes_apart_in_any_order() {
+        // A small generator, so a failure comes again.
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move |most: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % most
+        };
+        for round in 0..2000 {
+            let mut listing = || -> Vec<Entry> {
+                let len = next(8);
+                let mut entries: Vec<Entry> = (0..len)
+                    .map(|_| {
+                        let letter = b'a' + u8::try_from(next(6)).unwrap();
+                        let name = char::from(letter).to_string();
+                        match next(3) {
+                            0 => named(&name, EntryKind::Dir),
+                            1 => named(&name, EntryKind::File { executable: true }),
+                            _ => file(&name),
+                        }
+                    })
+                    .collect();
+                // Mostly in order, with names twice, as names a disk can't
+                // say in UTF-8 can be; now and then in none.
+                if round % 7 != 0 {
+                    entries.sort_by_key(key);
+                }
+                entries
+            };
+            let old = listing();
+            let new = listing();
+            let changes = ListingChanges::between(&old, &new, key).unwrap();
+            assert_eq!(
+                changes.apply(&old).as_ref(),
+                Some(&new),
+                "{old:?} to {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn changes_to_another_listing_are_refused() {
+        let old = [file("a"), file("b")];
+        let refused = |removed: Vec<u32>, added: Vec<(u32, Entry)>| {
+            ListingChanges { removed, added }.apply(&old).is_none()
+        };
+        assert!(refused(vec![2], Vec::new()), "gone past the end");
+        assert!(refused(vec![1, 0], Vec::new()), "out of order");
+        assert!(refused(vec![1, 1], Vec::new()), "gone twice");
+        assert!(refused(vec![0, 1, 2], Vec::new()), "more gone than there");
+        assert!(
+            refused(Vec::new(), vec![(5, file("c"))]),
+            "put past the end"
+        );
+        assert!(
+            refused(Vec::new(), vec![(1, file("c")), (0, file("d"))]),
+            "put out of order"
+        );
+    }
 }

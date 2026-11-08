@@ -11328,7 +11328,10 @@ mod tests {
         desk.answered(Response::PaneCreated(PaneId(2)));
         assert_eq!(shown_pane(&desk), PaneId(2));
         assert!(
-            answer_all(&mut desk).contains(&Request::AttachFiles { files: FilesId(1) }),
+            answer_all(&mut desk).contains(&Request::AttachFiles {
+                files: FilesId(1),
+                changes: true
+            }),
             "attached"
         );
         explore_p(&mut desk);

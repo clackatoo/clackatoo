@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     BufferId, Error, Event, FileOp, FileOpError, FilesAction, FilesId, FilesUpdate, GitMark,
-    OpenFiles, PaneId, Response,
+    ListingChanges, OpenFiles, PaneId, Response,
 };
 use mio::Token;
 use rustix::fs::inotify;
@@ -185,6 +185,9 @@ struct Explorer {
     root: PathBuf,
     /// The clients following it.
     viewers: Vec<Token>,
+    /// Those of them that asked for a folder listed again to be sent as
+    /// what changed in it.
+    changes: Vec<Token>,
     /// The top of the work tree its root is in, once found, if it's in one.
     repo: Option<PathBuf>,
     /// The tops of the repositories found inside folders expanded in it,
@@ -301,6 +304,7 @@ impl Daemon {
         let explorer = Explorer {
             root: root.clone(),
             viewers: Vec::new(),
+            changes: Vec::new(),
             repo: None,
             nested: Vec::new(),
         };
@@ -329,11 +333,21 @@ impl Daemon {
 
     /// Answers [`Request::AttachFiles`](clackatoo_protocol::Request::AttachFiles):
     /// starts sending explorer `files` to the client at `token`, with its
-    /// root and what git says, if it's known.
-    pub(super) fn attach_files(&mut self, token: Token, files: FilesId) -> Result<Response, Error> {
+    /// root and what git says, if it's known; and folders listed again as
+    /// what changed in them, if it asks for `changes`.
+    pub(super) fn attach_files(
+        &mut self,
+        token: Token,
+        files: FilesId,
+        changes: bool,
+    ) -> Result<Response, Error> {
         let explorer = (self.explorers.list.get_mut(&files)).ok_or(Error::NoSuchFiles(files))?;
         if !explorer.viewers.contains(&token) {
             explorer.viewers.push(token);
+        }
+        explorer.changes.retain(|&viewer| viewer != token);
+        if changes {
+            explorer.changes.push(token);
         }
         let root = root_update(&explorer.root, &self.config.home);
         let marks = self.explorers.marks_of(files);
@@ -353,6 +367,7 @@ impl Daemon {
     pub(super) fn detach_files(&mut self, token: Token, files: FilesId) -> Response {
         if let Some(explorer) = self.explorers.list.get_mut(&files) {
             explorer.viewers.retain(|&viewer| viewer != token);
+            explorer.changes.retain(|&viewer| viewer != token);
         }
         self.collapse_where(|viewer| viewer == (token, files));
         Response::Done
@@ -363,6 +378,7 @@ impl Daemon {
     pub(super) fn forget_files_viewer(&mut self, token: Token) {
         for explorer in self.explorers.list.values_mut() {
             explorer.viewers.retain(|&viewer| viewer != token);
+            explorer.changes.retain(|&viewer| viewer != token);
         }
         self.collapse_where(|(viewer, _)| viewer == token);
         // What it asked is done all the same, but not answered.
@@ -999,7 +1015,11 @@ impl Daemon {
         let done: Vec<Done> = workers.take().collect();
         for done in done {
             match done {
-                Done::Listed { dir, listing } => self.listed(&dir, listing),
+                Done::Listed {
+                    dir,
+                    listing,
+                    changes,
+                } => self.listed(&dir, listing, changes),
                 Done::Repository { root, tree, no_git } => {
                     self.found_repository(&root, tree, no_git);
                 }
@@ -1025,7 +1045,7 @@ impl Daemon {
                 dir.listing = true;
                 dir.due = None;
                 dir.last = Some(now);
-                workers.list(path.clone());
+                workers.list(path.clone(), dir.listed.clone());
             }
         }
         for (top, repo) in &mut explorers.repos {
@@ -1040,8 +1060,15 @@ impl Daemon {
     }
 
     /// Sends what `dir` holds, or why it can't be listed, to every client
-    /// that has it expanded.
-    fn listed(&mut self, dir: &Path, listing: Result<Listing, String>) {
+    /// that has it expanded: to one that was sent its last listing and
+    /// asked for changes, as what `changes` says changed since, if that's
+    /// the listing they're from and they're less to send than it whole.
+    fn listed(
+        &mut self,
+        dir: &Path,
+        listing: Result<Listing, String>,
+        changes: Option<(Arc<Listing>, ListingChanges)>,
+    ) {
         let Some(entry) = self.explorers.dirs.get_mut(dir) else {
             // Collapsed meanwhile.
             return;
@@ -1057,14 +1084,44 @@ impl Daemon {
         let update = match listing {
             Ok(listing) => {
                 let listing = Arc::new(listing);
-                let same = (entry.listed.as_ref()).is_some_and(|listed| same(listed, &listing));
+                // From the listing last sent, or from one forgotten since.
+                let changes = changes.filter(|(before, _)| {
+                    (entry.listed.as_ref()).is_some_and(|listed| Arc::ptr_eq(listed, before))
+                });
+                let same = match &changes {
+                    Some((_, changes)) => changes.is_empty(),
+                    None => (entry.listed.as_ref()).is_some_and(|listed| same(listed, &listing)),
+                };
+                // Those sent the last listing, who have what it changes.
+                let had = std::mem::take(&mut entry.sent);
                 if same {
                     // Only those who haven't had it.
-                    viewers.retain(|viewer| !entry.sent.contains(viewer));
+                    viewers.retain(|viewer| !had.contains(viewer));
                 } else {
                     entry.listed = Some(Arc::clone(&listing));
                 }
                 entry.sent.clone_from(&entry.viewers);
+                let as_changes = changes
+                    .filter(|(_, changes)| !same && changes.len() < listing.entries.len())
+                    .and_then(|(before, changes)| {
+                        Some(FilesUpdate::Changed {
+                            dir: dir.display().to_string(),
+                            was: u32::try_from(before.entries.len()).ok()?,
+                            changes,
+                        })
+                    });
+                if let Some(as_changes) = as_changes {
+                    let takes = |&(token, files): &(Token, FilesId)| {
+                        had.contains(&(token, files))
+                            && (self.explorers.list.get(&files))
+                                .is_some_and(|explorer| explorer.changes.contains(&token))
+                    };
+                    let (changes, whole): (Vec<_>, Vec<_>) = viewers.into_iter().partition(takes);
+                    for (viewer, files) in changes {
+                        self.tell_files(viewer, files, as_changes.clone());
+                    }
+                    viewers = whole;
+                }
                 listed_update(dir, &listing)
             }
             Err(reason) => {
@@ -1691,7 +1748,7 @@ mod tests {
         let (token, files) = (Token(1000), FilesId(1));
         daemon.expand(token, files, &gone);
         let tried = Instant::now();
-        daemon.listed(&gone, Err("No such file or directory".into()));
+        daemon.listed(&gone, Err("No such file or directory".into()), None);
         assert!(!daemon.explorers.dirs.contains_key(&gone), "collapsed");
         // Asked for again at once, as a window might: it waits its gap,
         // from when it was tried.

@@ -751,7 +751,9 @@ impl Daemon {
     /// or chats' pages goes, if it's one, from the client at `token`.
     fn route_shown(&mut self, token: Token, request: &Request) -> Option<Routed> {
         let routed = match *request {
-            Request::AttachFiles { files } => return self.route_attach_files(token, files),
+            Request::AttachFiles { files, changes } => {
+                return self.route_attach_files(token, files, changes);
+            }
             Request::DetachFiles { files } => return self.route_detach_files(token, files),
             Request::AttachBoard { board: local } => {
                 let (at, board) = self.relayed_board(local)?;
