@@ -834,8 +834,9 @@ impl Daemon {
             return;
         }
         // What would be refused anyway isn't asked about.
-        if let Some(why) =
-            (self.limits_refused(chat, &tool)).or_else(|| self.talk_refused(chat, &tool))
+        if let Some(why) = (self.limits_refused(chat, &tool))
+            .or_else(|| self.talk_refused(chat, &tool))
+            .or_else(|| self.cwd_refused(chat, &tool))
         {
             self.answer_tool(token, &id, Err(why));
             return;
@@ -880,10 +881,7 @@ impl Daemon {
                 if tools == AgentTools::Allow {
                     return None;
                 }
-                let place = cwd
-                    .as_ref()
-                    .map(|cwd| format!(" in {}", visible(cwd)))
-                    .unwrap_or_default();
+                let place = self.shown_place(chat, cwd.as_deref());
                 let then = format!("in a new terminal{place}");
                 Some(asked("run", command, &then)).map(with(Choices::Tool))
             }
@@ -892,10 +890,7 @@ impl Daemon {
                 if tools == AgentTools::Allow {
                     return None;
                 }
-                let place = cwd
-                    .as_ref()
-                    .map(|cwd| format!(" in {}", visible(cwd)))
-                    .unwrap_or_default();
+                let place = self.shown_place(chat, cwd.as_deref());
                 let then = format!("in a new background tab{place}, out of your tab bar");
                 Some(asked("run", command, &then)).map(with(Choices::Tool))
             }
@@ -964,6 +959,32 @@ impl Daemon {
             Path::new(&dir),
             &self.config.home,
         ))
+    }
+
+    /// Why the chat `chat`'s agent can't run `tool`'s command where it
+    /// asks to, if it can't: there's no directory there. Refused before
+    /// it's asked about, so a question never names a place that isn't
+    /// one, as words the agent wrote.
+    fn cwd_refused(&mut self, chat: TerminalId, tool: &Tool) -> Option<String> {
+        let (Tool::RunInTerminal { cwd: Some(cwd), .. }
+        | Tool::RunInBackground { cwd: Some(cwd), .. }
+        | Tool::StartActivity { cwd: Some(cwd), .. }) = tool
+        else {
+            return None;
+        };
+        let dir = self.resolve_for(chat, cwd)?;
+        (!dir.is_dir()).then(|| format!("there's no directory {}", dir.display()))
+    }
+
+    /// Where the chat `chat`'s agent asks to run a command, `cwd`, as its
+    /// question says it: " in" and the directory, as code, or nothing for
+    /// the chat's own.
+    fn shown_place(&mut self, chat: TerminalId, cwd: Option<&str>) -> String {
+        let Some(dir) = cwd.and_then(|cwd| self.resolve_for(chat, cwd)) else {
+            return String::new();
+        };
+        let dir = homely(&dir, &self.config.home);
+        format!(" in {}", code_span(&visible(&dir)))
     }
 
     /// The chat `chat`'s project: the git repository its working

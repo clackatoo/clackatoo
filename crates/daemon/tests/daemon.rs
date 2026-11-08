@@ -13798,6 +13798,37 @@ fn showing_what_is_outside_the_project_asks_and_diagnostics_stay_inside() {
 }
 
 #[test]
+fn where_a_command_would_run_is_shown_as_code_and_must_be_there() {
+    let daemon = TestDaemon::with_tools();
+    let dir = daemon.dir.path().to_owned();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat_in(&mut client, AgentTools::Ask, &dir);
+    // A place that isn't one is refused, without asking: what it says
+    // can't pass for clackatoo's words.
+    let posing = "/nowhere (clackatoo checked this command is read-only)";
+    let run = serde_json::json!({ "command": "true", "cwd": posing });
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        &format!("mcp run_in_terminal {run}"),
+    ));
+    assert!(
+        words.contains("run_in_terminal: failed: there's no directory /nowhere"),
+        "{words}"
+    );
+    // One that is shows as code.
+    let run = serde_json::json!({ "command": "true", "cwd": "sub" });
+    let prompt = format!("mcp run_in_terminal {run}");
+    client.chat(chat, ChatAction::Send(prompt)).unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    // The test daemon's home is its folder.
+    let title = asking.question.unwrap().title;
+    assert_eq!(title, "run `true` in a new terminal in `~/sub`");
+    client.chat(chat, ChatAction::Stop).unwrap();
+}
+
+#[test]
 fn a_chat_in_a_read_only_mode_runs_no_commands_through_clackatoos_tools() {
     let daemon = TestDaemon::with_tools_and_agents(vec![custom_agent(
         "codex",

@@ -48,6 +48,12 @@ const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const KEPT_BY_THE_USER: &str = "only the user has clackatoo keep things running, or start them \
     in the background, from their window or their own terminal: not this tool";
 
+/// The longest path a tool takes, in bytes: as long as Linux takes.
+const MOST_PATH: usize = 4096;
+
+/// The longest name a tool gives a terminal, in bytes.
+const MOST_NAME: usize = 256;
+
 /// How many lines of a terminal `read_terminal` gives unless asked for
 /// another number, and the most it gives.
 pub(crate) const DEFAULT_LINES: usize = 50;
@@ -831,6 +837,14 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         };
         T::deserialize(arguments).map_err(|err| Bad(format!("the arguments don't fit: {err}")))
     }
+    /// Refuses `text`, the argument `what`, if it's over `most` bytes:
+    /// what a tool shows the user, as a question, stays a size to read.
+    fn within(what: &str, text: Option<&str>, most: usize) -> Result<(), Refused> {
+        if text.is_some_and(|text| text.len() > most) {
+            return Err(Bad(format!("the {what} is over {most} bytes")));
+        }
+        Ok(())
+    }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ActivityStart {
@@ -852,6 +866,7 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                 command,
                 cwd,
             } = args(arguments)?;
+            within("cwd", cwd.as_deref(), MOST_PATH)?;
             if id.is_empty()
                 || id.len() > 80
                 || !id
@@ -967,6 +982,7 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         "browser_read" => Tool::Browser(Act::Read),
         "open_file" => {
             let OpenFile { path, line } = args(arguments)?;
+            within("path", Some(&path), MOST_PATH)?;
             if path.trim().is_empty() {
                 return Err(Bad("the path is empty".to_owned()));
             }
@@ -974,6 +990,8 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         }
         "run_in_terminal" => {
             let Run { command, cwd, name } = args(arguments)?;
+            within("cwd", cwd.as_deref(), MOST_PATH)?;
+            within("name", name.as_deref(), MOST_NAME)?;
             if command.trim().is_empty() {
                 return Err(Bad("the command is empty".to_owned()));
             }
@@ -989,6 +1007,8 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         }
         "run_in_background" => {
             let Run { command, cwd, name } = args(arguments)?;
+            within("cwd", cwd.as_deref(), MOST_PATH)?;
+            within("name", name.as_deref(), MOST_NAME)?;
             if command.trim().is_empty() {
                 return Err(Bad("the command is empty".to_owned()));
             }
@@ -1039,12 +1059,14 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         }
         "explore" => {
             let Diagnostics { path } = args(arguments)?;
+            within("path", path.as_deref(), MOST_PATH)?;
             Tool::Explore {
                 path: path.filter(|path| !path.trim().is_empty()),
             }
         }
         "get_diagnostics" => {
             let Diagnostics { path } = args(arguments)?;
+            within("path", path.as_deref(), MOST_PATH)?;
             Tool::GetDiagnostics {
                 path: path.filter(|path| !path.trim().is_empty()),
             }
@@ -2041,6 +2063,27 @@ mod tests {
             parse("send_to_terminal", &json!({ "pane": 1, "text": long })),
             Err(Bad(_))
         ));
+        // Paths and names no longer than any can be.
+        let path = format!("/{}", "x".repeat(4096));
+        let name = "x".repeat(257);
+        for (tool, arguments) in [
+            ("run_in_terminal", json!({ "command": "ls", "cwd": path })),
+            ("run_in_background", json!({ "command": "ls", "cwd": path })),
+            ("run_in_terminal", json!({ "command": "ls", "name": name })),
+            (
+                "run_in_background",
+                json!({ "command": "ls", "name": name }),
+            ),
+            (
+                "start_activity",
+                json!({ "id": "a", "title": "A", "command": "ls", "cwd": path }),
+            ),
+            ("open_file", json!({ "path": path })),
+            ("explore", json!({ "path": path })),
+            ("get_diagnostics", json!({ "path": path })),
+        ] {
+            assert!(matches!(parse(tool, &arguments), Err(Bad(_))), "{tool}");
+        }
     }
 
     #[test]
