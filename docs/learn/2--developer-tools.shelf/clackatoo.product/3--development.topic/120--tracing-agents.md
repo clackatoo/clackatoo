@@ -32,7 +32,7 @@ A trace is meant to be shareable, so obvious secrets are replaced by `[redacted]
 - the string values of fields named for keys, tokens, passwords, secrets, cookies and credentials, told by the words in their names (`api_key`, `refreshToken`); a token to go on from, as `nextPageToken`, stays, as do `tokenizer` and counts like `inputTokens`;
 - every value of an MCP server's environment and headers (their names stay);
 - bearer tokens, and API keys by their prefixes, such as `sk-`, `ghp_` and `xoxb-`, wherever they start a word, as in `OPENAI_API_KEY=sk-…`;
-- the values of names for secrets given one in text: `GITHUB_TOKEN=…`, `?token=…`, `api_key: …`, `"password": "…"`, and `Authorization: Basic …`, whose scheme stays.
+- the values of names for secrets given one in text: `GITHUB_TOKEN=…`, `?token=…`, `api_key: …`, `"password": "…"`, and `Authorization: Basic …`, whose scheme, `Basic`, `Bearer`, `Digest`, `Token` or `Negotiate`, stays.
 
 API keys known by their prefixes are Anthropic's and OpenAI's (`sk-`), GitHub's (`ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`), GitLab's (`glpat-`), Slack's (`xoxb-`, `xoxp-`), AWS's access keys (`AKIA`) and Google's API keys (`AIza`).
 

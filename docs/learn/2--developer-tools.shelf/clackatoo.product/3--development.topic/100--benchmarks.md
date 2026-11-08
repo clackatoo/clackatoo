@@ -96,7 +96,7 @@ What each group measures:
 | | Keypress to view update, through the bridge, while a followed terminal floods | The same while a second terminal the client follows prints without end, so its updates share the connection with the echoes. The harness acknowledges each of the flood's updates at once, so this median also carries one flood update per key; a window acknowledges once a frame. |
 | `throughput` | Each workload | A script prints 16 MiB of the workload into a terminal. Timed from starting it until the daemon has processed everything. |
 | | Bare PTY | The same script, read straight from a PTY and thrown away. This is the most any terminal could manage on this machine. |
-| `cpu` | Daemon CPU per MiB | For each throughput workload, the CPU time the daemon spent per MiB of output, read to the nanosecond from `/proc`. Throughput stops at the PTY's limit, so this is where the daemon's own speed shows. |
+| `cpu` | Daemon CPU per MiB | For each throughput workload, the CPU time the daemon spent per MiB of output, read to the nanosecond from `/proc`, in the same runs as `throughput`, which is the group to name for it. Throughput stops at the PTY's limit, so this is where the daemon's own speed shows. |
 | | Bare PTY reader per MiB | The CPU time the bare PTY reader spends per MiB: the floor, nearly all of it in the kernel's TTY layer. |
 | `memory` | Daemon at rest | The daemon's resident memory with no terminals. |
 | | Per terminal | The growth from opening 20 empty terminals, divided by 20. The programs running in them aren't counted. |
