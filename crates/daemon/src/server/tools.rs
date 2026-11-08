@@ -2453,16 +2453,7 @@ pub(super) fn homely(path: &Path, home: &Path) -> String {
     }
 }
 
-/// Whether `ch` shows nothing itself but changes how what's around it
-/// shows: zero-width characters, and the marks that reorder text.
-pub(super) fn invisible(ch: char) -> bool {
-    matches!(
-        u32::from(ch),
-        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
-            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
-            | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0xE0000..=0xE0FFF
-    )
-}
+pub(super) use clackatoo_term::invisible;
 
 /// How a background tab getting on as `state` says is, for an agent.
 fn background_said(state: clackatoo_protocol::BackgroundState) -> String {

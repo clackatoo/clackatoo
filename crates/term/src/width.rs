@@ -20,6 +20,23 @@ const NO_WIDTH: u8 = 3;
 /// and the Supplementary Multilingual Plane, home of the emoji.
 static PLANES: [OnceLock<Box<[u8]>>; 2] = [OnceLock::new(), OnceLock::new()];
 
+/// Whether `ch` shows nothing itself but changes how what's around it
+/// shows: zero-width characters, the marks that turn text round (U+061C,
+/// U+200E and U+200F, the embeddings, overrides and isolates), and the
+/// line and paragraph separators, U+2028 and U+2029, which break a line
+/// where no control character shows it. Text a program or an agent wrote,
+/// shown as clackatoo's own or beside it, goes without them, so it can't
+/// hide or turn round what's around it.
+#[must_use]
+pub fn invisible(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+            | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+            | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0xE0000..=0xE0FFF
+    )
+}
+
 /// The columns `ch` takes: 0 for combining characters, 2 for wide ones, and
 /// `None` for controls.
 ///

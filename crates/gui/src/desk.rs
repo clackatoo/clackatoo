@@ -2904,12 +2904,11 @@ fn mode_name(mode: Mode) -> ModeName {
 }
 
 /// Whether `ch` may show in a tab's name: not a control character, nor
-/// one that changes which way text runs (the marks U+200E and U+200F, the
-/// embeddings and overrides U+202A to U+202E, and the isolates U+2066 to
-/// U+2069), which a title or a folder's name could hold.
+/// one that shows nothing itself but changes how what's around it shows,
+/// as one that turns text round does (see [`clackatoo_term::invisible`]),
+/// which a title or a folder's name could hold.
 pub(crate) fn shown_in_names(ch: char) -> bool {
-    !ch.is_control()
-        && !matches!(ch, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    !ch.is_control() && !clackatoo_term::invisible(ch)
 }
 
 #[cfg(test)]

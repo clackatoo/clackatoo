@@ -1253,16 +1253,9 @@ impl App {
     /// Titles the window after the focused pane, and the daemon's machine.
     fn update_title(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let title = (self.desk.title().map(shown_title))
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "clackatoo".to_owned());
-        let title = match self.session.host() {
-            Some(host) => format!("{title} — {host}"),
-            None => title,
-        };
-        let title = self.native.grant.map_or(title.clone(), |(chat, access)| {
-            format!("[{access:?} access · chat {chat}] {title}")
-        });
+        let grant =
+            (self.native.grant).map(|(chat, access)| format!("[{access:?} access · chat {chat}]"));
+        let title = window_title(self.desk.title(), self.session.host(), grant.as_deref());
         if title != self.title {
             if let Some(window) = frame.window() {
                 window.set_title(&title);
@@ -3939,6 +3932,24 @@ fn shown_title(title: &str) -> String {
         .collect()
 }
 
+/// The window's title: the focused pane's, `title`, as [`shown_title`]
+/// shows it, set apart (FSI … PDI) so that it can't turn round what
+/// follows, then the daemon's machine, `host`, if it's another, after any
+/// native access a chat holds, `grant`.
+fn window_title(title: Option<&str>, host: Option<&str>, grant: Option<&str>) -> String {
+    let mut window = match title.map(shown_title).filter(|title| !title.is_empty()) {
+        Some(title) => format!("\u{2068}{title}\u{2069}"),
+        None => "clackatoo".to_owned(),
+    };
+    if let Some(host) = host {
+        window = format!("{window} — {host}");
+    }
+    match grant {
+        Some(grant) => format!("{grant} {window}"),
+        None => window,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3953,6 +3964,22 @@ mod tests {
         );
         assert_eq!(shown_title(&"x".repeat(1000)).chars().count(), MOST_TITLE);
         assert_eq!(shown_title("\u{2066}\x1b"), "");
+        // Nor with the Arabic letter mark, or separators that break a line.
+        assert_eq!(shown_title("a\u{061C}b\u{2028}c\u{2029}d\u{200B}"), "abcd");
+    }
+
+    #[test]
+    fn the_window_title_sets_the_programs_apart_from_what_clackatoo_adds() {
+        assert_eq!(
+            window_title(Some("htop"), None, None),
+            "\u{2068}htop\u{2069}"
+        );
+        assert_eq!(window_title(Some("\x1b"), None, None), "clackatoo");
+        assert_eq!(window_title(None, None, None), "clackatoo");
+        assert_eq!(
+            window_title(Some("vim"), Some("desk"), Some("[Full access · chat 3]")),
+            "[Full access · chat 3] \u{2068}vim\u{2069} — desk"
+        );
     }
 
     #[test]
