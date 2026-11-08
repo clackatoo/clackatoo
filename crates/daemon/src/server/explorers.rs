@@ -1045,7 +1045,12 @@ impl Daemon {
                 dir.listing = true;
                 dir.due = None;
                 dir.last = Some(now);
-                workers.list(path.clone(), dir.listed.clone());
+                // What changed is worked out only for those who asked.
+                let list = &explorers.list;
+                let asked = (dir.sent.iter()).any(|(token, files)| {
+                    (list.get(files)).is_some_and(|explorer| explorer.changes.contains(token))
+                });
+                workers.list(path.clone(), dir.listed.clone().filter(|_| asked));
             }
         }
         for (top, repo) in &mut explorers.repos {

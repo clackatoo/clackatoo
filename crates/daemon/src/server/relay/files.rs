@@ -127,10 +127,27 @@ impl Daemon {
         let Some(followed) = relayed.files.get_mut(&local) else {
             return;
         };
+        let took = followed.takes_changes();
         let Some(open) = followed.viewers.remove(&token) else {
             return;
         };
         followed.changes.remove(&token);
+        // The last that didn't ask for changes gone, they're asked for.
+        let ask = !took && followed.takes_changes() && followed.upstream;
+        if ask
+            && !followed.viewers.is_empty()
+            && let Some(remote) = relayed.mirror.files_numbers.remote(local.0)
+        {
+            let attach = Request::AttachFiles {
+                files: FilesId(remote),
+                changes: true,
+            };
+            let _ = self.send_upstream(at, &ClientMessage::Request(attach), Expect::Nothing);
+        }
+        let relayed = &mut self.links.list[at].relayed;
+        let Some(followed) = relayed.files.get_mut(&local) else {
+            return;
+        };
         if followed.viewers.is_empty() {
             let upstream = followed.upstream;
             relayed.files.remove(&local);

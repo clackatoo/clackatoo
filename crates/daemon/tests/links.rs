@@ -2379,6 +2379,19 @@ fn another_machines_folder_goes_as_what_changed_only_while_every_window_asks() {
             break;
         }
     }
+
+    // Once it's gone, changes are asked for again.
+    let detach = Request::DetachFiles { files };
+    assert_eq!(other.request(&detach).unwrap(), Response::Done);
+    // Asked again: the root comes again, then a change goes as changes.
+    assert!(matches!(
+        files_update(&mut pair.window, files),
+        FilesUpdate::Root { .. }
+    ));
+    std::fs::write(project.join("g.txt"), "").unwrap();
+    let (listing, whole) = listed_from(&mut pair.window, files, &root, &listing);
+    assert!(!whole, "changes again");
+    assert_eq!(names(&listing).last().map(String::as_str), Some("g.txt"));
 }
 
 #[test]
