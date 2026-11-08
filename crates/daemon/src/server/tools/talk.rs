@@ -542,6 +542,12 @@ impl Daemon {
             };
             cap = cap.min(own.subagents());
             at = own.relations().parent;
+            // Past a chat above that has closed, what it and those above
+            // it let, as it closed.
+            if at.is_some_and(|parent| self.chat_ref(parent).is_none()) {
+                cap = cap.min(own.subagents_above().unwrap_or(cap));
+                break;
+            }
         }
         let root = self.chat_ref(chat).and_then(|own| own.relations().root);
         if let Some(root) = root.and_then(|root| self.chat_ref(root)) {
@@ -601,20 +607,35 @@ impl Daemon {
     /// Holds the Subagents setting of each chat the chat `id` started to
     /// what it may have now, as `id` closes: what's above it then can't
     /// let it have more.
+    /// Each keeps, too, what `id` and those above it let its family work,
+    /// which waking it is held to from then on.
     pub(in crate::server) fn pin_subagents_under(&mut self, id: TerminalId) {
+        let above = self.subagents_cap(id);
         let under: Vec<(TerminalId, u8)> = (self.terminals.iter())
             .filter_map(|(&child, slot)| {
                 let chat = slot.terminal.chat_ref()?;
-                (chat.relations().parent == Some(id))
-                    .then(|| (child, self.subagents_cap(child)))
-                    .filter(|&(_, cap)| chat.subagents() > cap)
+                (chat.relations().parent == Some(id)).then(|| (child, self.subagents_cap(child)))
             })
             .collect();
         for (child, cap) in under {
             if let Some(chat) = self.chat(child) {
-                chat.set_subagents(cap);
+                chat.set_subagents_above(above);
+                if chat.subagents() > cap {
+                    chat.set_subagents(cap);
+                }
             }
             self.collect_damage(child);
+        }
+    }
+
+    /// Holds the Subagents setting of the chat `id`, just added, to what
+    /// the chats above it, and `working`, let it have.
+    pub(in crate::server) fn hold_subagents_of(&mut self, id: TerminalId) {
+        let cap = self.subagents_cap(id);
+        if let Some(chat) = self.chat(id)
+            && chat.subagents() > cap
+        {
+            chat.set_subagents(cap);
         }
     }
 
@@ -622,8 +643,10 @@ impl Daemon {
     /// a chat starts, and has every chat's Subagents setting offer what
     /// they allow, if they've changed: none more than `working`. What's
     /// wrong in the table is logged only as it changes, not at each start.
-    pub(in crate::server) fn refresh_subagent_limits(&mut self) {
+    /// Returns whether it logged anything.
+    pub(in crate::server) fn refresh_subagent_limits(&mut self) -> bool {
         let (limits, wrong) = self.config.agents.subagent_limits();
+        let logged = wrong != self.tools.talk.limits_wrong && !wrong.is_empty();
         if wrong != self.tools.talk.limits_wrong {
             for why in &wrong {
                 log::warn!("agents.toml: {why}");
@@ -631,7 +654,7 @@ impl Daemon {
             self.tools.talk.limits_wrong = wrong;
         }
         if limits == self.tools.talk.limits {
-            return;
+            return logged;
         }
         self.tools.talk.limits = limits;
         self.hold_subagents();
@@ -645,6 +668,7 @@ impl Daemon {
             }
             self.collect_damage(id);
         }
+        logged
     }
 
     /// Forgets the counts of chats started under the user's chats that
@@ -752,10 +776,13 @@ impl Daemon {
             return None;
         }
         let root = target.relations().root.unwrap_or(parent);
+        // With the chat that started it gone, what that one and those
+        // above it let its family, as it closed: its own setting is for
+        // the chats it starts.
         let cap = if self.chat_ref(parent).is_some() {
             self.subagents_cap(parent)
         } else {
-            self.subagents_cap(to)
+            (target.subagents_above()).unwrap_or_else(|| self.subagents_cap(to))
         };
         self.too_many_working((parent, cap), root, 1)
             .map(|why| format!("{why}; a message would set chat {to} working again"))
@@ -2177,6 +2204,61 @@ mod tests {
         );
     }
 
+    /// With the chat that started it closed, waking a chat is held to what
+    /// that chat and those above it let its family as it closed, not to the
+    /// chat's own setting, which is for the chats it starts (review of
+    /// CLACKA-209).
+    #[test]
+    fn waking_a_chat_whose_parent_closed_is_held_to_its_familys_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let c = answered_chat(&mut daemon, 2, (a, a, 1));
+        let d = answered_chat(&mut daemon, 3, (a, a, 1));
+        let e = working_chat(&mut daemon, 4, (a, a, 1));
+        daemon.set_subagents(a, "2");
+        for kid in [c, d, e] {
+            show(&mut daemon, kid);
+        }
+        daemon.close_terminal(a).unwrap();
+        assert_eq!(daemon.chat_ref(c).unwrap().subagents_above(), Some(2));
+        // Off is for the chats c starts, not for c.
+        daemon.set_subagents(c, "off");
+        assert_eq!(daemon.talk_refused(d, &send(c)), None);
+        // But a's family still works two at most.
+        working_chat(&mut daemon, 5, (e, a, 2));
+        let refused = daemon.talk_refused(d, &send(c)).unwrap();
+        assert!(
+            refused.contains("its Subagents setting lets 2 work at once"),
+            "{refused}"
+        );
+    }
+
+    /// A chat started just as `working` is lowered gets no more than the
+    /// new `working` (review of CLACKA-209).
+    #[test]
+    fn a_chat_started_as_working_is_lowered_has_no_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = Size::new(40, 10).unwrap();
+        let mut kid = HostedChat::new(
+            TerminalId(7),
+            size,
+            "/".into(),
+            &agent,
+            AgentTools::Ask,
+            true,
+            false,
+        );
+        kid.started_by(a, a, 1, None);
+        kid.set_subagents(daemon.subagents_cap(a));
+        let file = dir.path().join("agents.toml");
+        daemon.config.agents.file = Some(file.clone());
+        std::fs::write(&file, "[subagents]\nworking = 2\n").unwrap();
+        daemon.start_hosted_chat(kid);
+        assert_eq!(daemon.chat_ref(TerminalId(7)).unwrap().subagents(), 2);
+    }
+
     /// A lowered `working` holds the chats already open too: none has, or
     /// offers, more (review of CLACKA-209).
     #[test]
@@ -2187,7 +2269,8 @@ mod tests {
         let file = dir.path().join("agents.toml");
         daemon.config.agents.file = Some(file.clone());
         std::fs::write(&file, "[subagents]\nworking = 4\nwide = 1\n").unwrap();
-        daemon.refresh_subagent_limits();
+        assert!(daemon.refresh_subagent_limits(), "what's wrong is logged");
+        assert!(!daemon.refresh_subagent_limits(), "once, not at each start");
         let chat = daemon.chat_ref(a).unwrap();
         assert_eq!(chat.subagents(), 4);
         let setting = (chat.node().settings.iter())
@@ -2218,6 +2301,8 @@ mod tests {
         working_chat(&mut daemon, 3, (other, other, 1));
         working_chat(&mut daemon, 4, (a, a, 1));
         let idle = answered_chat(&mut daemon, 5, (a, a, 1));
+        // More of its own than `working`, as nothing has held it to it yet.
+        daemon.chat(a).unwrap().set_subagents(6);
         assert_eq!(daemon.subagents_cap(a), 3);
         let refused = daemon.talk_refused(a, &send(idle)).unwrap();
         assert!(

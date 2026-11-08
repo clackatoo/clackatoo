@@ -437,6 +437,8 @@ impl Daemon {
         // on chats agents start: never as an agent calls a tool.
         self.refresh_subagent_limits();
         self.add_chat(chat);
+        // Its own value was worked out before the limits were read again.
+        self.hold_subagents_of(id);
         self.offer_providers(Some(id));
         self.connect(id);
     }

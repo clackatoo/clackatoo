@@ -168,6 +168,12 @@ const BROWSING_SETTING: &str = "clackatoo.browsing";
 /// `Daemon::set_subagents`).
 pub(crate) const SUBAGENTS_SETTING: &str = "clackatoo.subagents";
 
+/// The ID a chat an agent started keeps, with the values chosen, how many
+/// of its family the chats above it let work at once, as the chat that
+/// started it closed: what waking it is held to then. Never shown, nor
+/// sent to the agent.
+const SUBAGENTS_ABOVE_SETTING: &str = "clackatoo.subagents.above";
+
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
@@ -180,6 +186,7 @@ fn chat_wide(id: &str) -> bool {
         BROWSER_SETTING,
         BROWSING_SETTING,
         SUBAGENTS_SETTING,
+        SUBAGENTS_ABOVE_SETTING,
     ]
     .contains(&id)
 }
@@ -1004,6 +1011,21 @@ impl HostedChat {
     pub(crate) fn subagents(&self) -> u8 {
         self.subagents_chosen()
             .unwrap_or(SubagentLimits::default().default)
+    }
+
+    /// How many of its family the chats above it let work at once, as the
+    /// chat that started it closed, if it has.
+    pub(crate) fn subagents_above(&self) -> Option<u8> {
+        (self.chosen.iter())
+            .find(|(id, _)| id == SUBAGENTS_ABOVE_SETTING)
+            .and_then(|(_, value)| subagents_of(value))
+    }
+
+    /// Keeps `count` as how many of its family the chats above it let
+    /// work at once, as the chat that started it closes.
+    pub(crate) fn set_subagents_above(&mut self, count: u8) {
+        self.chosen.retain(|(id, _)| id != SUBAGENTS_ABOVE_SETTING);
+        (self.chosen).push((SUBAGENTS_ABOVE_SETTING.to_owned(), subagents_value(count)));
     }
 
     /// Its Subagents setting, if it has been given one, to keep.

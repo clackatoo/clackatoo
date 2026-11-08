@@ -663,8 +663,9 @@ impl Daemon {
         self.workspaces.refresh_background();
         self.restate_backgrounds();
         self.restate_lent_backgrounds();
-        self.restore_standing(&state, &chats);
+        let alone = self.restore_standing(&state, &chats);
         self.hold_subagents();
+        self.hold_alone(&alone);
         self.restore_cold_activities(state.operations, &chats);
         self.keep_restored();
         self.restore_borrowers(&state.borrowers);
@@ -1011,10 +1012,20 @@ impl Daemon {
     /// with what it may do as it was, and says so. A
     /// chain of parents that loops, or goes further up than chats go deep,
     /// as only a file mended by hand could have, is cut.
-    fn restore_standing(&mut self, state: &State, chats: &HashMap<u32, (TerminalId, bool)>) {
+    ///
+    /// Returns each chat made to stand alone whose parent was made again,
+    /// elsewhere, with that parent: its Subagents setting is held to that
+    /// one's once every chat's is held (see [`Self::hold_alone`]).
+    #[allow(clippy::too_many_lines, reason = "each part of where a chat stood")]
+    fn restore_standing(
+        &mut self,
+        state: &State,
+        chats: &HashMap<u32, (TerminalId, bool)>,
+    ) -> Vec<(TerminalId, TerminalId)> {
+        let mut alone_under = Vec::new();
         let kept = kept_standings(state, chats);
         if kept.is_empty() {
-            return;
+            return alone_under;
         }
         // Each one's parent, by the file's IDs, if it was made again in
         // the same workspace: a chat's family reaches across workspaces,
@@ -1084,8 +1095,10 @@ impl Daemon {
             let alone = started.parent.is_some() && parent.is_none();
             // Never more of its own working than its parent allows, even
             // one made again but not as its parent, in another workspace.
-            let above = (parent.or_else(|| Some(chats.get(&started.parent?)?.0)))
-                .map(|parent| self.subagents_cap(parent));
+            let above = parent.map(|parent| self.subagents_cap(parent));
+            if alone && let Some(&(of, _)) = started.parent.and_then(|of| chats.get(&of)) {
+                alone_under.push((chat, of));
+            }
             let Some(hosted) = self.chat(chat) else {
                 continue;
             };
@@ -1124,6 +1137,22 @@ impl Daemon {
                 self.collect_damage(parent);
             }
         }
+        alone_under
+    }
+
+    /// Holds the Subagents setting of each chat of `alone`, made again on
+    /// its own, to what the chat that started it, made again elsewhere,
+    /// may have, once that one's is held, and then those under it.
+    fn hold_alone(&mut self, alone: &[(TerminalId, TerminalId)]) {
+        for &(chat, of) in alone {
+            let above = self.subagents_cap(of);
+            if let Some(hosted) = self.chat(chat)
+                && hosted.subagents() > above
+            {
+                hosted.set_subagents(above);
+            }
+        }
+        self.hold_subagents();
     }
 
     /// Makes `tab` again: its name, layout and focused pane, or `None` if
