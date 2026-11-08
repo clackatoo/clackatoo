@@ -25,7 +25,7 @@ mod snapshot;
 use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -56,6 +56,14 @@ const MAX_TEXT: usize = 32 * 1024;
 
 /// How deep in a page's accessibility tree the browser is asked to go.
 const MAX_TREE_DEPTH: usize = 512;
+
+/// The most notes of dialogs turned down kept for a page until its agent
+/// next hears: past it, only how many more is.
+const MAX_NOTES: usize = 8;
+
+/// The most bytes of a page's address or title kept, shown or sent: a
+/// page can make its address 2 MB long, many times a second.
+pub(crate) const MAX_URL: usize = 2048;
 
 /// How long the browser has to stop when told, as the daemon stops,
 /// before it's killed.
@@ -197,6 +205,11 @@ pub(crate) struct Browser {
 struct Running {
     process: Mutex<Option<OwnedFd>>,
     stopping: AtomicBool,
+    /// The dialogs the pipe's reader has passed the thread and it hasn't
+    /// taken in yet: past [`MAX_NOTES`], the reader still turns them down,
+    /// but passes on no more, so a page opening thousands a second while
+    /// the thread waits fills nothing.
+    dialogs: AtomicUsize,
 }
 
 impl Running {
@@ -317,7 +330,7 @@ impl Browser {
 pub fn check_browser(config: &BrowserConfig) -> Result<(), String> {
     let (program, profile) = locate(config)?;
     let (inputs, _heard) = mpsc::channel();
-    let running = Running::default();
+    let running = Arc::new(Running::default());
     let mut cdp = Cdp::launch(&program, &profile, (0, inputs), &running)?;
     cdp.stop();
     Ok(())
@@ -345,11 +358,40 @@ struct Page {
     ack: Option<(Instant, Value)>,
     /// When the last picture was acknowledged.
     acked: Option<Instant>,
-    /// Dialogs turned down since the agent last heard, said as it's told.
+    /// Dialogs turned down since the agent last heard, said as it's told:
+    /// [`MAX_NOTES`] at most, and how many more there were.
     notes: Vec<String>,
+    more_notes: usize,
     /// It, or a frame in it, went to a `file:` address, and was sent to
     /// `about:blank`: nothing of it is read until it's clear it's gone.
     blocked: bool,
+}
+
+impl Page {
+    /// Keeps `note` for the agent to hear, unless it has as many as it
+    /// keeps: then only that there was one more.
+    fn note(&mut self, note: String) {
+        if self.notes.len() < MAX_NOTES {
+            self.notes.push(note);
+        } else {
+            self.more_notes = self.more_notes.saturating_add(1);
+        }
+    }
+}
+
+/// The event that says a page opened a dialog.
+const DIALOG: &str = "Page.javascriptDialogOpening";
+
+/// `text`, cut to [`MAX_URL`] bytes, with `…` for what was cut.
+pub(crate) fn cut(text: &str) -> String {
+    if text.len() <= MAX_URL {
+        return text.to_owned();
+    }
+    let mut end = MAX_URL - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// The browser's thread.
@@ -481,11 +523,16 @@ impl Worker {
         chat: TerminalId,
         answer: Result<Answer, String>,
     ) -> Result<Answer, String> {
-        let notes = (self.pages.get_mut(&chat))
-            .map(|page| std::mem::take(&mut page.notes))
-            .unwrap_or_default();
+        let Some(page) = self.pages.get_mut(&chat) else {
+            return answer;
+        };
+        let mut notes = std::mem::take(&mut page.notes);
+        let more = std::mem::take(&mut page.more_notes);
         if notes.is_empty() {
             return answer;
+        }
+        if more > 0 {
+            notes.push(format!("...and at least {more} more like these."));
         }
         let notes = notes.join("\n");
         Ok(match answer? {
@@ -944,6 +991,7 @@ impl Worker {
                 ack: None,
                 acked: None,
                 notes: Vec::new(),
+                more_notes: 0,
                 blocked: false,
             },
         );
@@ -1052,17 +1100,11 @@ impl Worker {
         let mut status = page.status.clone();
         if let Ok(info) = info {
             let info = &info["targetInfo"];
-            info["url"]
-                .as_str()
-                .unwrap_or_default()
-                .clone_into(&mut status.url);
-            info["title"]
-                .as_str()
-                .unwrap_or_default()
-                .clone_into(&mut status.title);
+            status.url = cut(info["url"].as_str().unwrap_or_default());
+            status.title = cut(info["title"].as_str().unwrap_or_default());
         }
-        if action.is_some() {
-            status.action = action;
+        if let Some(action) = action {
+            status.action = Some(cut(&action));
         }
         if status != page.status {
             page.status = status.clone();
@@ -1128,6 +1170,9 @@ impl Worker {
     // --- Events -----------------------------------------------------------
 
     fn event(&mut self, method: &str, params: &Value, session: Option<&str>) {
+        if method == DIALOG {
+            self.running.dialogs.fetch_sub(1, Ordering::AcqRel);
+        }
         let Some(session) = session else {
             return;
         };
@@ -1150,7 +1195,7 @@ impl Worker {
             }
             // Whatever got a frame to a file, it's sent away at once.
             "Page.frameNavigated" if is_file(params["frame"]["url"].as_str().unwrap_or("")) => {
-                page.notes.push(
+                page.note(
                     "The page went to a file: address, which clackatoo's browser doesn't open: \
                      it was sent to about:blank."
                         .to_owned(),
@@ -1158,21 +1203,21 @@ impl Worker {
                 self.blank(chat);
             }
             "Page.frameNavigated" if params["frame"].get("parentId").is_none() => {
-                let url = params["frame"]["url"].as_str().unwrap_or_default();
+                let url = cut(params["frame"]["url"].as_str().unwrap_or_default());
                 if page.status.url != url {
-                    url.clone_into(&mut page.status.url);
+                    page.status.url = url;
                     let status = page.status.clone();
                     locked(&self.outbox).statuses.insert(chat, status);
                     (self.wake)();
                 }
             }
             "Page.loadEventFired" => self.refresh(chat, None),
-            "Page.javascriptDialogOpening" => {
+            DIALOG => {
                 let kind = params["type"].as_str().unwrap_or("a");
                 let message: String = (params["message"].as_str().unwrap_or_default().chars())
                     .take(200)
                     .collect();
-                page.notes.push(format!(
+                page.note(format!(
                     "The page opened {kind} dialog, which was turned down: \"{message}\""
                 ));
             }
@@ -1560,6 +1605,76 @@ fn snap_name(program: &Path) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread with no browser, holding a page for chat 1 whose session
+    /// is `s`, as if it had opened one.
+    fn worker_with_a_page() -> Worker {
+        let (inputs, heard) = mpsc::channel();
+        let mut worker = Worker {
+            config: BrowserConfig {
+                program: None,
+                profile: None,
+                data: None,
+                home: PathBuf::from("/"),
+                idle: Duration::from_secs(1),
+            },
+            running: Arc::new(Running::default()),
+            heard,
+            inputs,
+            outbox: Arc::new(Mutex::new(Outbox::default())),
+            wake: Box::new(|| {}),
+            cdp: None,
+            launches: 0,
+            pages: BTreeMap::new(),
+            watching: BTreeMap::new(),
+            deferred: VecDeque::new(),
+            idle_since: None,
+            refused: None,
+        };
+        let page = Page {
+            context: "c".to_owned(),
+            target: "t".to_owned(),
+            session: "s".to_owned(),
+            status: BrowserStatus::default(),
+            casting: None,
+            ack: None,
+            acked: None,
+            notes: Vec::new(),
+            more_notes: 0,
+            blocked: false,
+        };
+        worker.pages.insert(TerminalId(1), page);
+        worker
+    }
+
+    /// A page opening dialogs, or making its address megabytes long, many
+    /// times a second while its agent is idle, fills nothing: notes are
+    /// kept to a few and a count, and an address is cut to what's shown
+    /// (CLACKA-220).
+    #[test]
+    fn what_a_page_floods_the_thread_with_stays_small() {
+        let mut worker = worker_with_a_page();
+        let chat = TerminalId(1);
+        for n in 0..10_000 {
+            worker.running.dialogs.fetch_add(1, Ordering::AcqRel);
+            let alert = json!({ "type": "alert", "message": format!("{n}{}", "x".repeat(300)) });
+            worker.event(DIALOG, &alert, Some("s"));
+        }
+        assert_eq!(worker.running.dialogs.load(Ordering::Acquire), 0);
+        let long = format!("https://a.example/#{}", "é".repeat(1_000_000));
+        let navigated = json!({ "frame": { "id": "t", "url": long } });
+        worker.event("Page.frameNavigated", &navigated, Some("s"));
+        let status = worker.lock().statuses.remove(&chat).unwrap();
+        assert!(status.url.len() <= MAX_URL, "{}", status.url.len());
+        assert!(status.url.starts_with("https://a.example/#é") && status.url.ends_with('…'));
+        let Ok(Answer::Text(said)) = worker.with_notes(chat, Ok(Answer::Text("Done.".into())))
+        else {
+            panic!("no words");
+        };
+        assert!(said.len() < 4 * 1024, "{}", said.len());
+        assert!(said.ends_with(&format!("at least {} more like these.", 10_000 - MAX_NOTES)));
+        assert_eq!(cut("https://a/"), "https://a/");
+    }
 
     #[test]
     fn only_pages_files_and_data_are_opened() {

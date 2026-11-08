@@ -94,7 +94,7 @@ impl Cdp {
         program: &Path,
         profile: &Path,
         (launch, inputs): (u64, mpsc::Sender<Input>),
-        running: &Running,
+        running: &Arc<Running>,
     ) -> Result<Self, String> {
         fs::create_dir_all(profile)
             .map_err(|err| format!("{} couldn't be made: {err}", profile.display()))?;
@@ -119,6 +119,7 @@ impl Cdp {
             next_id: Arc::clone(&cdp.next_id),
             waiting: Arc::clone(&cdp.waiting),
             inputs,
+            running: Arc::clone(running),
         };
         std::thread::Builder::new()
             .name("browser pipe".to_owned())
@@ -333,6 +334,8 @@ struct Reader {
     next_id: Arc<AtomicU64>,
     waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Answer>>>>,
     inputs: mpsc::Sender<Input>,
+    /// What the thread has yet to take in of the dialogs passed it.
+    running: Arc<Running>,
 }
 
 impl Reader {
@@ -430,8 +433,23 @@ impl Reader {
             if let Err(err) = send(&self.writer, &answer) {
                 log::debug!("answering a dialog failed: {err}");
             }
+            // The thread is told of as many as it keeps notes of: a page
+            // opening thousands a second, while the thread waits on a
+            // command, fills nothing.
+            if self.running.dialogs.fetch_add(1, Ordering::AcqRel) >= super::MAX_NOTES {
+                self.running.dialogs.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
         }
-        let params = message["params"].take();
+        let mut params = message["params"].take();
+        // Nothing of a page's address, which it can make megabytes long,
+        // is kept past what's shown.
+        if method == "Page.frameNavigated"
+            && let Some(url) = params["frame"]["url"].as_str()
+            && url.len() > super::MAX_URL
+        {
+            params["frame"]["url"] = Value::String(super::cut(url));
+        }
         let _ = self.inputs.send(Input::Event {
             method,
             params,
@@ -471,5 +489,53 @@ mod tests {
         assert!(uses(dir.path(), 4242));
         assert!(!uses(dir.path(), 424), "another browser's");
         assert!(!uses(dir.path(), 42_420));
+    }
+
+    /// Every dialog is turned down at once, but the thread is told of no
+    /// more than it keeps notes of until it takes them in, and a page's
+    /// address reaches it cut (CLACKA-220).
+    #[test]
+    fn a_flood_of_dialogs_and_long_addresses_is_kept_from_the_thread() {
+        let (read, write) = io::pipe().unwrap();
+        let (inputs, heard) = mpsc::channel();
+        let reader = Reader {
+            launch: 1,
+            writer: Arc::new(Mutex::new(write)),
+            next_id: Arc::new(AtomicU64::new(1)),
+            waiting: Arc::new(Mutex::new(HashMap::new())),
+            inputs,
+            running: Arc::new(Running::default()),
+        };
+        let answered = std::thread::spawn(move || {
+            // Each message ends in a NUL, as the browser reads them.
+            (BufReader::new(read).split(0).take(100))
+                .filter(|message| {
+                    String::from_utf8_lossy(message.as_ref().unwrap())
+                        .contains("handleJavaScriptDialog")
+                })
+                .count()
+        });
+        for _ in 0..100 {
+            let dialog = json!({
+                "method": "Page.javascriptDialogOpening",
+                "sessionId": "s",
+                "params": { "type": "alert", "message": "hi" },
+            });
+            reader.receive(dialog);
+        }
+        let long = format!("https://a.example/#{}", "x".repeat(2_000_000));
+        reader.receive(json!({
+            "method": "Page.frameNavigated",
+            "sessionId": "s",
+            "params": { "frame": { "id": "t", "url": long } },
+        }));
+        assert_eq!(answered.join().unwrap(), 100, "every one turned down");
+        let events: Vec<Input> = heard.try_iter().collect();
+        assert_eq!(events.len(), super::super::MAX_NOTES + 1);
+        let Some(Input::Event { params, .. }) = events.last() else {
+            panic!("no address");
+        };
+        let url = params["frame"]["url"].as_str().unwrap();
+        assert!(url.len() <= super::super::MAX_URL, "{}", url.len());
     }
 }

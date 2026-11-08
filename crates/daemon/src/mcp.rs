@@ -96,6 +96,11 @@ const MAX_ENTRIES: usize = 200;
 /// ends.
 const MAX_OUTGOING: usize = 8 * 1024 * 1024;
 
+/// The most bytes of one answer's text and picture: a bigger one is
+/// refused before it's encoded, rather than encoded on the loop and then
+/// ending the connection.
+const MAX_ANSWER: usize = MAX_OUTGOING / 2;
+
 /// What the agent is told about the tools when it connects, before what
 /// the server adds about its chat (see [`Connection::new`]).
 pub(crate) const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the user is \
@@ -584,7 +589,9 @@ impl Connection {
     /// what went wrong, which the agent is shown as the tool's failure.
     pub(crate) fn answer(&mut self, id: &Value, result: Result<String, String>) {
         let (text, failed) = match result {
+            Ok(text) if text.len() > MAX_ANSWER => (too_big(), true),
             Ok(text) => (text, false),
+            Err(why) if why.len() > MAX_ANSWER => (too_big(), true),
             Err(why) => (why, true),
         };
         self.reply(
@@ -596,6 +603,10 @@ impl Connection {
     /// Answers the call with ID `id` with words and a picture, a PNG as
     /// base64.
     pub(crate) fn answer_picture(&mut self, id: &Value, text: &str, png: &str) {
+        if text.len().saturating_add(png.len()) > MAX_ANSWER {
+            self.answer(id, Err(too_big()));
+            return;
+        }
         self.reply(
             id,
             &json!({
@@ -633,6 +644,11 @@ impl Connection {
             json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": why } });
         self.queue(&message);
     }
+}
+
+/// What an agent is told in place of an answer too big to send.
+fn too_big() -> String {
+    format!("the answer was more than {MAX_ANSWER} bytes, too big to send")
 }
 
 /// Why a call can't be made.
@@ -2227,6 +2243,34 @@ mod tests {
             parse("start_chats", &json!({ "chats": chats })),
             Ok(Tool::StartChats(started)) if started.len() == MAX_FAN_OUT
         ));
+    }
+
+    /// An answer too big to send is refused before it's encoded, and the
+    /// connection goes on (CLACKA-220).
+    #[test]
+    fn an_answer_too_big_to_send_says_so() {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let ours = UnixStream::from_std(ours);
+        let parser = rpc::Parser::idle();
+        let info = (String::new(), false);
+        let mut connection = Connection::new(ours, TerminalId(1), Vec::new(), info, &parser);
+        connection.answer(&json!(1), Ok("x".repeat(MAX_ANSWER + 1)));
+        connection.answer_picture(&json!(2), "x", &"A".repeat(MAX_ANSWER));
+        assert!(
+            connection.outgoing.len() < 1024,
+            "{}",
+            connection.outgoing.len()
+        );
+        assert!(!connection.finished);
+        for line in connection.outgoing.split(|&byte| byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let answer: Value = serde_json::from_slice(line).unwrap();
+            assert_eq!(answer["result"]["isError"], true);
+            let why = answer["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(why.contains("too big to send"), "{why}");
+        }
     }
 
     #[test]
