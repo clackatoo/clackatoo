@@ -238,6 +238,13 @@ fn ssh_command(
     }
     ssh.args([
         "-T",
+        // Nothing forwarded, whatever ~/.ssh/config says: a daemon the
+        // bridge starts would hand the forwarded ssh agent, or X display,
+        // to every program it runs. What it forwards goes over QUIC.
+        "-a",
+        "-x",
+        "-o",
+        "ClearAllForwardings=yes",
         "-o",
         "ConnectTimeout=10",
         // A dead connection is noticed within 15 seconds.
@@ -727,6 +734,29 @@ impl Drop for Ssh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_forwards_nothing_over_ssh() {
+        // A daemon the bridge starts would otherwise give the ssh agent
+        // forwarded for it, or an X display, to every program it runs.
+        let remote = Remote {
+            host: "desk".to_owned(),
+            command: "clackatoo".to_owned(),
+        };
+        let ssh = ssh_command(&remote, OsStr::new("ssh"), false, None, false);
+        let args: Vec<&OsStr> = ssh.get_args().collect();
+        let options = &args[..args.iter().position(|&arg| arg == "--").unwrap()];
+        for wanted in [
+            ["-a"].as_slice(),
+            &["-x"],
+            &["-o", "ClearAllForwardings=yes"],
+        ] {
+            assert!(
+                options.windows(wanted.len()).any(|found| found == wanted),
+                "{wanted:?} in {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_address_comes_from_the_line_before_the_announcement() {

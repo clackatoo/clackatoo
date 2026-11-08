@@ -156,6 +156,7 @@ A daemon `--remote` starts on your desktop starts before you've logged in to the
 clackatoo passes ssh a few options of its own:
 
 - `-T`: no terminal on the other end; the bridge doesn't want one.
+- `-a`, `-x` and `ClearAllForwardings=yes`: nothing forwarded, whatever your ssh config says. A daemon the bridge starts on the other machine would otherwise hand your ssh agent, or your X display, to every terminal, agent and language server it runs there, for as long as the connection lasts. What clackatoo forwards goes over its own connection.
 - `ConnectTimeout=10`: an unreachable host fails after 10 seconds.
 - `ServerAliveInterval=5` and `ServerAliveCountMax=3`: a connection that has died, such as when the laptop sleeps or changes network, is noticed within 15 seconds. A connection that has moved onto UDP carries on without it.
 
