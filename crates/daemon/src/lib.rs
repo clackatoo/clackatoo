@@ -250,15 +250,17 @@ pub struct LinkConfig {
 pub struct Lies {
     /// Its QUIC certificate comes unsigned, whatever protocol it speaks.
     pub unsigned: bool,
-    /// The machine its workspaces say it is, while set: from the next
-    /// time they're told on.
-    pub says: std::sync::Arc<std::sync::Mutex<Option<clackatoo_protocol::Machine>>>,
+    /// Where a test sets the machine its workspaces say it is, from the
+    /// next time they're told on, while that's set. `None` in use, so
+    /// nothing is looked at as they're told.
+    pub says: Option<std::sync::Arc<std::sync::Mutex<Option<clackatoo_protocol::Machine>>>>,
 }
 
 impl Lies {
     /// The machine its workspaces say it is, if they lie.
     pub(crate) fn said(&self) -> Option<clackatoo_protocol::Machine> {
-        (self.says.lock())
+        let says = self.says.as_ref()?;
+        (says.lock())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
@@ -267,7 +269,11 @@ impl Lies {
 /// Lies are told apart by where they're kept, not by what they say now.
 impl PartialEq for Lies {
     fn eq(&self, other: &Self) -> bool {
-        self.unsigned == other.unsigned && std::sync::Arc::ptr_eq(&self.says, &other.says)
+        let says = match (&self.says, &other.says) {
+            (Some(one), Some(other)) => std::sync::Arc::ptr_eq(one, other),
+            (one, other) => one.is_none() && other.is_none(),
+        };
+        self.unsigned == other.unsigned && says
     }
 }
 
@@ -518,7 +524,7 @@ impl DaemonConfig {
                 better_every: DEFAULT_BETTER_EVERY,
                 speaks: None,
                 impostor: false,
-                lies: Default::default(),
+                lies: Lies::default(),
             }),
             display: match non_empty("CLACKATOO_DISPLAY") {
                 Some(off) if off == "off" => None,

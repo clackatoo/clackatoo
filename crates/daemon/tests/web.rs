@@ -1849,7 +1849,7 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
                 better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
                 speaks: None,
                 impostor: false,
-                lies: Default::default(),
+                lies: clackatoo_daemon::Lies::default(),
             });
         },
     );

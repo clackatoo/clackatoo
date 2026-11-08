@@ -187,7 +187,7 @@ impl World {
                 better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
                 speaks: None,
                 impostor: false,
-                lies: Default::default(),
+                lies: Lies::default(),
             }),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
@@ -4378,26 +4378,31 @@ fn a_machine_passed_on_by_a_daemon_in_the_way_is_never_shown() {
     assert!(theirs(&shown, "srv").is_none(), "{shown:?}");
 }
 
+/// What a daemon tells the daemons connecting to it that isn't so, for a
+/// test to set: its certificate unsigned if `unsigned`, and whatever
+/// [`say_its`] says.
+fn lying(unsigned: bool) -> Lies {
+    Lies {
+        unsigned,
+        says: Some(std::sync::Arc::default()),
+    }
+}
+
 /// Starts the daemon on `host`, telling the daemons connecting to it what
-/// `lies` says, as a modified build could, and `with` configuring it too.
-fn start_lying(
-    world: &World,
-    host: &str,
-    lies: &Lies,
-    with: impl FnOnce(&mut DaemonConfig),
-) -> TestDaemon {
+/// `lies` says, as a modified build could.
+fn start_lying(world: &World, host: &str, lies: &Lies) -> TestDaemon {
     let lies = lies.clone();
     world.start_configured(host, false, move |config| {
         if let Some(links) = &mut config.links {
             links.lies = lies;
         }
-        with(config);
     })
 }
 
 /// Has the daemon lying as `lies` says say it's `machine` from now on.
 fn say_its(lies: &Lies, machine: clackatoo_protocol::Machine) {
-    *lies.says.lock().unwrap() = Some(machine);
+    let says = lies.says.as_ref().expect("lies a test sets");
+    *says.lock().unwrap() = Some(machine);
 }
 
 /// Laptop talks at protocol 94 to every machine, as to daemons from
@@ -4420,8 +4425,8 @@ fn connection_now(client: &mut Client, host: &str) -> Option<Connection> {
 fn a_daemon_that_says_its_another_machine_once_connected_is_stopped() {
     let mut chain = Chain::new();
     going(&mut chain.window, "server", &["desk"]);
-    let lies = Lies::default();
-    let bad = start_lying(&chain.world, "bad", &lies, |_| {});
+    let lies = lying(false);
+    let bad = start_lying(&chain.world, "bad", &lies);
     let own = bad.machine().id;
     connect(&mut chain.window, "bad");
     going(&mut chain.window, "bad", &[]);
@@ -4448,8 +4453,8 @@ fn a_daemon_that_says_its_another_machine_once_connected_is_stopped() {
 fn a_daemon_whose_key_disproves_what_it_says_leaves_the_machine_it_named_alone() {
     let mut chain = Chain::new();
     going(&mut chain.window, "server", &["desk"]);
-    let lies = Lies::default();
-    let bad = start_lying(&chain.world, "bad", &lies, |_| {});
+    let lies = lying(false);
+    let bad = start_lying(&chain.world, "bad", &lies);
     say_its(&lies, chain.server.machine());
     connect(&mut chain.window, "bad");
     let why = stopped_for(&mut chain.window, "bad");
@@ -4473,11 +4478,8 @@ fn a_daemon_whose_key_disproves_what_it_says_leaves_the_machine_it_named_alone()
 #[test]
 fn a_daemon_reached_straight_that_doesnt_sign_its_certificate_is_refused() {
     let world = World::new();
-    let lies = Lies {
-        unsigned: true,
-        ..Lies::default()
-    };
-    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    let lies = lying(true);
+    let _bad = start_lying(&world, "bad", &lies);
     let laptop = world.start("laptop");
     let mut window = laptop.client();
     window.watch_connections(false).unwrap();
@@ -4498,12 +4500,9 @@ fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_known_by_
     going(&mut window, "server", &[]);
     // Known by its key, but connected to no more.
     window.disconnect("server").unwrap();
-    let lies = Lies {
-        unsigned: true,
-        ..Lies::default()
-    };
+    let lies = lying(true);
     say_its(&lies, machine.clone());
-    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    let _bad = start_lying(&world, "bad", &lies);
     connect(&mut window, "bad");
     let why = stopped_for(&mut window, "bad");
     assert!(why.contains("clackatoo forget"), "{why}");
@@ -4540,12 +4539,9 @@ fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_asked_for
     let laptop = world.start_configured("laptop", true, at_94);
     let mut window = laptop.client();
     window.watch_connections(false).unwrap();
-    let lies = Lies {
-        unsigned: true,
-        ..Lies::default()
-    };
+    let lies = lying(true);
     say_its(&lies, machine);
-    let _bad = start_lying(&world, "bad", &lies, |_| {});
+    let _bad = start_lying(&world, "bad", &lies);
     connect(&mut window, "bad");
     let why = stopped_for(&mut window, "bad");
     assert!(why.contains("‘server’"), "{why}");
