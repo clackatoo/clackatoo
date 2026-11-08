@@ -730,3 +730,41 @@ fn grid_after_three(keys: &str) -> String {
     assert_eq!(setup.editor.mode, Mode::Normal, "after {keys}");
     setup.text()
 }
+
+#[test]
+fn visual_a_types_after_the_selections_end_as_vims_does() {
+    let typed = |text: &str, keys: &str| {
+        let mut setup = Setup::new(text);
+        setup.keys(keys);
+        setup.keys("AZ<Esc>");
+        setup.text()
+    };
+    let two = "abc\ndef\n";
+    // After the cursor's character, as on its line from the other end's
+    // line's start.
+    assert_eq!(typed(two, "vl"), "abZc\ndef\n");
+    assert_eq!(typed(two, "llvjh"), "abc\ndeZf\n");
+    assert_eq!(typed(two, "llvj"), "abc\ndefZ\n");
+    assert_eq!(typed(two, "lVj"), "abc\ndeZf\n");
+    // But not past a character only in the first cell.
+    assert_eq!(typed(two, "v"), "Zabc\ndef\n");
+    assert_eq!(typed(two, "vj"), "abc\nZdef\n");
+    assert_eq!(typed(two, "llvjhh"), "abc\nZdef\n");
+    // Nor after `$`, which types before the last.
+    assert_eq!(typed(two, "v$"), "abZc\ndef\n");
+    assert_eq!(typed(two, "vj$"), "abc\ndeZf\n");
+    // From the end back, at the start of the other end's line.
+    assert_eq!(typed(two, "jlvk"), "abc\nZdef\n");
+    assert_eq!(typed(two, "jlVk"), "abc\nZdef\n");
+    let six = "abcdef\nghijkl\n";
+    assert_eq!(typed(six, "j3lvh"), "abcdef\nghiZjkl\n");
+    assert_eq!(typed(six, "j3lv"), "abcdef\nghijZkl\n");
+    assert_eq!(typed(six, "3lvll"), "abcdefZ\nghijkl\n");
+    assert_eq!(typed(six, "3lv$h"), "abcdefZ\nghijkl\n");
+    // A tab in the first cell is wider than it.
+    assert_eq!(typed("xy\n\tabc\n", "vj"), "xy\n\tZabc\n");
+    assert_eq!(typed("xy\n\tabc\n", "jlvk"), "xy\n\tZabc\n");
+    // And an empty line has nothing to type past.
+    assert_eq!(typed("xy\n\nabc\n", "lvj"), "xy\nZ\nabc\n");
+    assert_eq!(typed("xy\n\nabc\n", "jjlvk"), "xy\n\nZabc\n");
+}

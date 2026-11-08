@@ -3186,6 +3186,40 @@ impl Editor {
 
     // --- Insert mode --------------------------------------------------------
 
+    /// Where `A` types in a selection by characters or lines whose other
+    /// end is `anchor`, as Vim's: it makes the selection one by lines
+    /// first, from the start of the other end's line, so it types after
+    /// the cursor's character if the cursor is past that, or else at that
+    /// line's start; but not past a character that's only in the line's
+    /// first cell, nor after `$`, where it types before the last.
+    fn append_at(&self, anchor: Point, copy: &BufferCopy) -> Point {
+        let start = Point {
+            line: anchor.line,
+            col: 0,
+        };
+        let end = self.cursor.at.max(start);
+        let text = self.text(copy);
+        let Some(laid) = text.laid(end.line).filter(|laid| laid.cells() > 0) else {
+            return Point {
+                line: end.line,
+                col: 0,
+            };
+        };
+        // On the last character, if past the end.
+        let byte = laid.byte_at(end.col.min(laid.cells() - 1));
+        let after = laid.col_of(laid.char_end(byte));
+        let to_end = self.cursor.wanted() == Some(usize::MAX);
+        let col = if to_end || after == 1 {
+            laid.col_of(byte)
+        } else {
+            after
+        };
+        Point {
+            line: end.line,
+            col,
+        }
+    }
+
     fn insert(&mut self, entry: Entry, times: usize, copy: &mut BufferCopy) {
         // `I` and `A` in a block type on every line of it.
         if let (Entry::LineStart | Entry::LineEnd, Some(block)) = (entry, self.selected_block(copy))
@@ -3206,6 +3240,10 @@ impl Editor {
                 }
             };
             self.cursor = Cursor::new(at);
+            return self.enter_insert(times);
+        }
+        if let (Entry::LineEnd, Mode::Visual(_), Some(anchor)) = (entry, self.mode, self.anchor) {
+            self.cursor = Cursor::new(self.append_at(anchor, copy));
             return self.enter_insert(times);
         }
         let text = self.text(copy);
