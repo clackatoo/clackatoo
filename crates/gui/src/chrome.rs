@@ -2987,6 +2987,30 @@ mod tests {
     }
 
     #[test]
+    fn a_links_target_asked_about_is_drawn_whole() {
+        // As the desk asks: in at most 8 rows of at most 32 columns.
+        let rows: Vec<String> = (0..8).map(|row| format!("{row}").repeat(32)).collect();
+        let chrome = chrome(
+            Status::Typing {
+                label: None,
+                text: "Open this link? (y/n)".into(),
+                choices: (rows.iter())
+                    .map(|row| PaletteChoice::from((row.clone(), false)))
+                    .collect(),
+                selected: None,
+                under: None,
+            },
+            &ButtonLayout::default(),
+        );
+        let Status::Typing { choices, .. } = &chrome.status else {
+            panic!("palette")
+        };
+        let drawn: Vec<&str> = choices.iter().map(|choice| choice.text.as_str()).collect();
+        assert_eq!(drawn, rows);
+        assert_eq!(chrome.choices.len(), rows.len());
+    }
+
+    #[test]
     fn described_palette_rows_fit_and_keep_the_selection_visible() {
         let chrome = chrome(
             Status::Typing {

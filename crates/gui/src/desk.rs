@@ -385,7 +385,7 @@ pub(crate) struct Desk {
     opened: Vec<String>,
     /// A link's target the bar asks whether to open, until the next key
     /// (see [`Desk::open_url`]).
-    link_asked: Option<vim::confirm::Confirm<String>>,
+    link_asked: Option<links::LinkAsked>,
     /// The terminal whose pane a mouse button went down in, and the
     /// button: it gets the drag, wherever the pointer goes.
     dragging: Option<(TerminalId, MouseButton)>,
@@ -1958,7 +1958,7 @@ impl Desk {
             return false;
         }
         // A link asked about takes the next key, whatever else is open.
-        if self.link_key(press, self.script.typing || self.key_from_frame()) {
+        if self.link_key(press, !self.script.typing && self.key_pressed_now()) {
             return true;
         }
         if self.chat_modal_key(press) {
@@ -8957,6 +8957,63 @@ mod tests {
         normal_mode(&mut desk);
         type_keys(&mut desk, "kgx");
         assert_eq!(desk.take_opened(), ["https://x.example/b"]);
+    }
+
+    #[test]
+    fn only_a_key_pressed_for_it_answers_whether_to_open_a_link() {
+        use crate::keymap::{KeyMode, parse_keys};
+        let mut desk = desk(one_tab(pane(1)));
+        // Named, so where it goes isn't shown in the text.
+        let target = "ssh://-oProxyCommand=x@h/";
+        screen_showing(
+            &mut desk,
+            1,
+            40,
+            &format!("\x1b]8;;{target}\x07there\x1b]8;;\x07\r\n"),
+        );
+        answer_all(&mut desk);
+        normal_mode(&mut desk);
+        // Asked, and answered by a key pressed: recorded as a macro.
+        type_keys(&mut desk, "qagggx");
+        assert!(desk.take_opened().is_empty());
+        assert!(matches!(desk.status(), Status::Typing { choices, .. }
+            if choices.iter().map(|row| row.text.as_str()).collect::<String>() == target));
+        type_keys(&mut desk, "yq");
+        assert_eq!(desk.take_opened(), [target]);
+        // The macro's own `y` doesn't answer it.
+        type_keys(&mut desk, "@a");
+        assert!(desk.take_opened().is_empty());
+        assert_eq!(desk.message.as_deref(), Some("the link wasn't opened"));
+        // Nor a binding's.
+        desk.keymap.bind(
+            &[KeyMode::Normal],
+            &parse_keys("Z").unwrap(),
+            bindings::Binding::Keys(parse_keys("gggxy").unwrap()),
+            None,
+        );
+        type_keys(&mut desk, "Z");
+        assert!(desk.take_opened().is_empty());
+        // Nor one held while something was waited for, had after.
+        type_keys(&mut desk, "gggx");
+        desk.hold_key(&KeyPress {
+            key: &Key::Character("y".into()),
+            text: Some("y"),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        });
+        desk.type_macros();
+        assert!(desk.take_opened().is_empty());
+        // A paste gives up too, and isn't pasted.
+        type_keys(&mut desk, "gggx");
+        desk.paste("y");
+        assert!(desk.take_opened().is_empty());
+        assert!(matches!(desk.status(), Status::Tabs { .. }));
+        assert!(
+            !answer_all(&mut desk).iter().any(
+                |request| matches!(request, Request::SendInput { bytes, .. } if bytes == b"y")
+            )
+        );
     }
 
     #[test]

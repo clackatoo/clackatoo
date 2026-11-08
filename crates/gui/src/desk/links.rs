@@ -27,7 +27,7 @@ use clackatoo_protocol::{
 
 use super::jumps::FilePlace;
 use super::{Asked, Desk};
-use crate::chrome::Status;
+use crate::chrome::{PaletteChoice, Status};
 use crate::input::KeyPress;
 use crate::links::{self, Target};
 use crate::vim::{self, confirm::Confirm};
@@ -35,6 +35,41 @@ use crate::vim::{self, confirm::Confirm};
 /// The fewest columns a terminal needs for a file to open beside it, so
 /// that each half is still as wide as a terminal usually is.
 const SPLIT_COLS: u16 = 160;
+
+/// A link's target asked about: the question, answered by the key that
+/// opens it, and where it goes, as the palette shows it under the
+/// question, a row at a time.
+#[derive(Debug)]
+pub(super) struct LinkAsked {
+    confirm: Confirm<String>,
+    rows: Vec<String>,
+}
+
+/// The most columns of a link's target a row of the palette shows: few
+/// enough to fit the palette of a window of half a usual screen's width,
+/// so none is ever cut short.
+const ROW_COLUMNS: usize = 32;
+
+/// The most rows a link's target is shown in: a longer target isn't
+/// asked about, as all of it couldn't be seen.
+const MOST_ROWS: usize = 8;
+
+/// `shown`, a link's target as it's shown, in rows of at most
+/// [`ROW_COLUMNS`] columns, if it fits in [`MOST_ROWS`] of them.
+fn target_rows(shown: &str) -> Option<Vec<String>> {
+    let mut rows = vec![String::new()];
+    let mut columns = 0;
+    for ch in shown.chars() {
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        if columns + width > ROW_COLUMNS {
+            rows.push(String::new());
+            columns = 0;
+        }
+        rows.last_mut()?.push(ch);
+        columns += width;
+    }
+    (rows.len() <= MOST_ROWS).then_some(rows)
+}
 
 impl Desk {
     /// Opens what the pane showing `terminal` was asked to open, if
@@ -81,21 +116,30 @@ impl Desk {
             self.opened.push(url);
             return;
         }
-        let question = format!("Open {}? (y/n)", links::shown_whole(&url));
-        self.link_asked = Some(Confirm::new(question).choice('y', "Open the link", url));
+        let shown = links::shown_whole(&url);
+        let Some(rows) = target_rows(&shown) else {
+            let length = shown.chars().count();
+            self.say(format!(
+                "the link wasn't opened: where it goes is too long to show whole ({length} characters)"
+            ));
+            return;
+        };
+        let confirm = Confirm::new("Open this link? (y/n)").choice('y', "Open the link", url);
+        self.link_asked = Some(LinkAsked { confirm, rows });
     }
 
     /// Takes `press` as the answer to whether to open a link, if that's
-    /// asked: `y` opens it, and any other key, or one a macro or a binding
-    /// types, which can't have read the question, gives up. Returns
-    /// whether it was asked.
-    pub(super) fn link_key(&mut self, press: &KeyPress<'_>, typed: bool) -> bool {
+    /// asked: `y` opens it, and any other key gives up, as does a key not
+    /// pressed just now, which can't have been pressed for the question:
+    /// one held while something was waited for, or one a macro or a
+    /// binding types (`pressed` is false). Returns whether it was asked.
+    pub(super) fn link_key(&mut self, press: &KeyPress<'_>, pressed: bool) -> bool {
         let Some(asked) = self.link_asked.take() else {
             return false;
         };
         let answer = (vim::strokes(press, false).first())
-            .filter(|_| !typed)
-            .and_then(|&stroke| asked.answer(stroke));
+            .filter(|_| pressed)
+            .and_then(|&stroke| asked.confirm.answer(stroke));
         match answer {
             Some(url) => self.opened.push(url),
             None => self.say("the link wasn't opened".to_owned()),
@@ -103,13 +147,16 @@ impl Desk {
         true
     }
 
-    /// The question asked about a link, for the bar.
+    /// The question asked about a link, for the bar, with where it goes
+    /// under it.
     pub(super) fn link_status(&self) -> Option<Status> {
         let asked = self.link_asked.as_ref()?;
         Some(Status::Typing {
             label: None,
-            text: asked.question().to_owned(),
-            choices: Vec::new(),
+            text: asked.confirm.question().to_owned(),
+            choices: (asked.rows.iter())
+                .map(|row| PaletteChoice::from((row.clone(), false)))
+                .collect(),
             selected: None,
             under: None,
         })
@@ -121,7 +168,7 @@ impl Desk {
         Some(crate::shortcuts::bindings::list(
             "Open a link",
             None,
-            |stroke, _| asked.hint(stroke),
+            |stroke, _| asked.confirm.hint(stroke),
         ))
     }
 

@@ -490,6 +490,13 @@ impl Desk {
         matches!(self.macros.handing, Some(Handing::Binding | Handing::Macro))
     }
 
+    /// Whether the key being handled was pressed just now: not one held
+    /// while something was waited for, nor one a macro or a binding types.
+    /// Only such a key answers a question asked since it was pressed.
+    pub(super) fn key_pressed_now(&self) -> bool {
+        self.macros.handing.is_none()
+    }
+
     /// Stops a macro that has waited too long, by `now`, saying what for,
     /// with the keys held behind it. Returns whether it did.
     pub(super) fn macro_patience(&mut self, now: Instant) -> bool {

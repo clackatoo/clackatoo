@@ -1152,6 +1152,18 @@ impl Desk {
         }
     }
 
+    /// Holds `press` as a key pressed while something waited is held, to
+    /// be had later by [`type_macros`](Self::type_macros).
+    #[cfg(test)]
+    pub(super) fn hold_key(&mut self, press: &KeyPress<'_>) {
+        self.editors.held.push_back(Held::Key {
+            press: KeptPress::of(press),
+            handlers: true,
+            typing: false,
+            recorded: None,
+        });
+    }
+
     /// Has the oldest key or paste held while an editor's command, or a
     /// macro, waited, if there is one. Returns whether there was.
     ///

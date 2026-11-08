@@ -114,8 +114,12 @@ fn a_click_on_a_link_in_a_pane_without_the_focus_focuses_it_and_opens_the_link()
 fn a_link_that_isnt_a_plain_web_link_shows_its_target_and_opens_only_on_y() {
     let mut desk = editing("/p/docs/notes.md", "# Notes\n");
     command(&mut desk, "Markdown");
+    // The question, and where the link goes, in rows under it.
     let asked = |desk: &Desk| match desk.status() {
-        Status::Typing { text, .. } => Some(text),
+        Status::Typing { text, choices, .. } => Some((
+            text,
+            choices.into_iter().map(|row| row.text).collect::<Vec<_>>(),
+        )),
         Status::Tabs { .. } => None,
     };
     // Hidden behind its text, a target an `ssh` handler could take an
@@ -123,10 +127,23 @@ fn a_link_that_isnt_a_plain_web_link_shows_its_target_and_opens_only_on_y() {
     let target = "ssh://-oProxyCommand=sh\u{202e}x@host/";
     desk.open_rendered_link(PaneId(1), target);
     assert!(desk.take_opened().is_empty());
-    assert_eq!(
-        asked(&desk).as_deref(),
-        Some("Open ssh://-oProxyCommand=sh\\u{202e}x@host/? (y/n)")
-    );
+    let (question, rows) = asked(&desk).unwrap();
+    assert_eq!(question, "Open this link? (y/n)");
+    assert_eq!(rows, ["ssh://-oProxyCommand=sh<U+202E>x", "@host/"]);
+    // A longer one, in as many rows as it takes, each short enough for
+    // the palette to show whole.
+    let long = format!("ssh://{}", "a".repeat(200));
+    desk.open_rendered_link(PaneId(1), &long);
+    let (_, rows) = asked(&desk).unwrap();
+    assert_eq!(rows.concat(), long);
+    assert!(rows.iter().all(|row| row.chars().count() <= 32));
+    type_keys(&mut desk, "n");
+    // One too long to show whole isn't asked about, nor opened.
+    desk.open_rendered_link(PaneId(1), &format!("ssh://{}", "a".repeat(300)));
+    assert_eq!(asked(&desk), None);
+    assert!(desk.take_opened().is_empty());
+    assert!((desk.message.as_deref()).is_some_and(|said| said.contains("too long to show whole")));
+    desk.open_rendered_link(PaneId(1), target);
     type_keys(&mut desk, "n");
     assert!(desk.take_opened().is_empty());
     assert_eq!(asked(&desk), None);
