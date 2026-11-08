@@ -33,7 +33,7 @@ Each entry says what it is, who wrote it and how long ago, then what it says, an
 |---|---|
 | `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Move between entries, with a count, as every [list](~clackatoo/reference/window#lists) does. |
 | `/` `?` `n` `N` | Search the entries, shown as you type, the text they match lit, as every [list](~clackatoo/reference/window#lists)'s search is. |
-| `i`, `o`, Enter | Post a note, typed in the bar. |
+| `i`, `o`, `a`, Enter | Post a note, typed in the bar. |
 | `r` | Post a result. |
 | `e` | Edit the entry at the cursor. What it said is kept, the last 20 edits of it. |
 | `x` | Release the claim at the cursor, whoever holds it. |
@@ -65,7 +65,7 @@ An archived board can be read but not written on until it's unarchived. Archived
 
 Each board is a file in `~/.local/share/clackatoo/boards`: JSON, one line per change, readable with any text tool. Boards last through upgrades, the daemon stopping, and reboots: an upgrade waits until every change is written before it goes ahead. If the machine stops mid-write, the half-written last line is dropped. A damaged file is moved to `quarantine/` in that folder, and the others carry on. Only one daemon at a time keeps the boards in a folder: a second one has none. `CLACKATOO_BOARDS` sets another folder for the daemon, or `off` for none.
 
-A board holds at most 10,000 changes or 8 MB, and there are at most 200 boards. Remote windows see the same boards through the daemon.
+A board holds at most 10,000 changes or 8 MB, and there are at most 200 boards. A board's name is at most 64 characters, an entry's text 16 KB, and an entry links to 32 places at most. Remote windows see the same boards through the daemon.
 
 ## Not yet
 
