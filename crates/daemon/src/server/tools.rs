@@ -415,6 +415,14 @@ impl Daemon {
         Ok(Response::Done)
     }
 
+    /// Whether clackatoo's MCP server serves the chat `chat`'s tools now,
+    /// on a connection its agent started.
+    pub(super) fn serves_tools(&self, chat: TerminalId) -> bool {
+        (self.sources.iter()).any(|(_, source)| {
+            matches!(source, Source::Tools(connection) if connection.chat == chat && !connection.finished)
+        })
+    }
+
     /// The MCP server that gives the chat `chat`'s agent its tools, as
     /// ACP's `mcpServers` lists it, unless it gets none.
     pub(super) fn tools_server(&mut self, chat: TerminalId) -> Option<Value> {

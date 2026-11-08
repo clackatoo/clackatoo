@@ -1393,6 +1393,9 @@ impl Daemon {
             } => {
                 // One asked as a conversation is told again was asked long
                 // ago: no one's there to answer it.
+                let serving = (self.chat_in(name, &session))
+                    .map(|(id, _)| id)
+                    .is_some_and(|id| self.serves_tools(id));
                 let Some((id, chat)) =
                     (self.chat_in(name, &session)).filter(|(_, chat)| !chat.told_again())
                 else {
@@ -1416,7 +1419,7 @@ impl Daemon {
                     None
                 } else {
                     (chat.turned_down(&tool, &known))
-                        .or_else(|| chat.about_own_tools(&tool, &known))
+                        .or_else(|| chat.about_own_tools(&tool, &known, serving))
                 };
                 if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {

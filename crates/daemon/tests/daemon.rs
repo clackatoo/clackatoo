@@ -3018,25 +3018,36 @@ fn a_question_about_another_servers_tool_is_the_users_whatever_its_input_says() 
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    // One of clackatoo's own, as the adapter names it: answered at once,
-    // as it asks the user itself when it must.
-    let node = ask(&mut client, chat, "mcp-ask clackatoo");
+    // One of clackatoo's own, as the adapter names it, served as the
+    // client gave it: answered at once, as it asks the user itself when it
+    // must.
+    let node = ask(&mut client, chat, "mcp-ask clackatoo dynamic");
     assert_eq!(last_words(&node), "picked allow\n");
     // Another server's, though the model wrote clackatoo's server's name
-    // into its input: the user is asked.
-    client
-        .chat(chat, ChatAction::Send("mcp-ask toy".to_owned()))
-        .unwrap();
-    let node = wait_for_chat(&mut client, chat, |node| {
-        node.question.is_some() || node.turns.len() == 2 && last_outcome(node).is_some()
-    });
-    let question = node.question.as_ref().expect("asked");
-    assert_eq!(question.title, "mcp__toy__note");
-    answer(&mut client, chat, Some("reject".to_owned()));
-    let node = wait_for_chat(&mut client, chat, |node| {
-        node.turns.len() == 2 && last_outcome(node).is_some()
-    });
-    assert_eq!(last_words(&node), "picked reject\n");
+    // into its input; and a server of the same name the project set up,
+    // whose tools are named as clackatoo's: the user is asked.
+    for (turns, (asked, title)) in [
+        ("mcp-ask toy project", "mcp__toy__note"),
+        ("mcp-ask clackatoo project", "mcp__clackatoo__list_panes"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let turns = turns + 2;
+        client
+            .chat(chat, ChatAction::Send(asked.to_owned()))
+            .unwrap();
+        let node = wait_for_chat(&mut client, chat, |node| {
+            node.question.is_some() || node.turns.len() == turns && last_outcome(node).is_some()
+        });
+        let question = node.question.as_ref().expect(asked);
+        assert_eq!(question.title, title);
+        answer(&mut client, chat, Some("reject".to_owned()));
+        let node = wait_for_chat(&mut client, chat, |node| {
+            node.turns.len() == turns && last_outcome(node).is_some()
+        });
+        assert_eq!(last_words(&node), "picked reject\n");
+    }
 }
 
 #[test]

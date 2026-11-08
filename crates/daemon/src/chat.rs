@@ -541,11 +541,15 @@ pub(crate) struct HostedChat {
     /// The session the chat's tasks were started in: a stop goes to that
     /// session only.
     tasks_session: Option<String>,
-    /// The tool calls whose input named clackatoo's MCP server as they
-    /// began, the latest few: a question about one is about our own tool,
-    /// whatever it's titled, and the agent can't make a command's input
-    /// say so.
+    /// The tool calls the adapter said were of clackatoo's own tools as
+    /// they began, the latest few (see [`own_call`]): a question about one
+    /// is about our own tool, unless the question says otherwise.
     own_tools: VecDeque<String>,
+    /// Whether Codex's adapter said clackatoo's MCP server didn't start
+    /// for the session, as when the Codex config names a server
+    /// `clackatoo` of its own, which it starts instead: no tool of that
+    /// name is ours then.
+    own_server_lost: bool,
     /// Its agent's account's limits, as the daemon last heard them from
     /// any of that agent's chats, shown with the context it fills. Not
     /// handed over: after an upgrade they come again with the next that
@@ -794,6 +798,7 @@ impl HostedChat {
             idle_taken: None,
             tasks_session: None,
             own_tools: VecDeque::new(),
+            own_server_lost: false,
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
@@ -2440,12 +2445,21 @@ impl HostedChat {
     ) {
         /// How many are kept: more than run at once.
         const KEPT: usize = 64;
+        // Codex's adapter reports a server that didn't start, or that it
+        // skipped for one its config names alike, as a failed call of this
+        // id, as a session opens or loads.
+        if self.agent == "codex" && id.starts_with("mcp_startup.clackatoo.") {
+            self.own_server_lost = true;
+            self.own_tools.clear();
+            return;
+        }
         // A tool told again was called long ago: no question now is
         // about it.
         if self.told_again() {
             return;
         }
-        if own_call(&self.agent, title, input, meta) && !self.own_tools.iter().any(|own| own == id)
+        if own_call(&self.agent, title, input, meta) == Some(true)
+            && !self.own_tools.iter().any(|own| own == id)
         {
             if self.own_tools.len() == KEPT {
                 self.own_tools.pop_front();
@@ -2461,19 +2475,25 @@ impl HostedChat {
     /// MCP tool call; Claude Code is told not to ask. Whether it's ours is
     /// what the adapter says of it (see [`own_call`]), never what the
     /// model wrote.
+    /// `serving` says whether clackatoo's MCP server serves the chat now:
+    /// Codex's adapter starts a server its config names `clackatoo`
+    /// instead of clackatoo's, so for Codex a tool is ours only while
+    /// clackatoo's own serves it.
     pub(crate) fn about_own_tools(
         &self,
         tool: &ToolCallUpdate,
         options: &[PermissionOption],
+        serving: bool,
     ) -> Option<String> {
         let id = tool.tool_call_id.0.to_string();
-        let ours = self.own_tools.iter().any(|own| *own == id)
-            || own_call(
-                &self.agent,
-                tool.fields.title.as_deref(),
-                tool.fields.raw_input.as_ref(),
-                tool.meta.as_ref(),
-            );
+        let said = own_call(
+            &self.agent,
+            tool.fields.title.as_deref(),
+            tool.fields.raw_input.as_ref(),
+            tool.meta.as_ref(),
+        );
+        let ours = said.unwrap_or_else(|| self.own_tools.iter().any(|own| *own == id))
+            && (self.agent != "codex" || serving && !self.own_server_lost);
         if !ours || self.tools() == AgentTools::Off {
             return None;
         }
@@ -4161,37 +4181,47 @@ fn writes_files(kind: ToolKind) -> bool {
     )
 }
 
-/// Whether a tool's `input` names clackatoo's MCP server, as an MCP tool
-/// call's does.
 /// Whether a tool call `agent`'s adapter reported, or asked about, titled
-/// `title` with `input` and `meta`, is one of clackatoo's own tools: by
-/// what the adapter sets, never by what the model wrote. Claude Code's
+/// `title` with `input` and `meta`, is one of clackatoo's own tools, by
+/// what the adapter sets, never by what the model wrote: `Some(true)` if
+/// it says so, `Some(false)` if it says it's another's, whatever was
+/// noted of the call before, and `None` if it says neither. Claude Code's
 /// adapter passes the input on as the model wrote it, so a field there
 /// naming clackatoo's server says nothing, and the model words some
 /// titles, as a subagent's. Instead:
 /// - Claude Code's adapter names the tool in `_meta.claudeCode.toolName`,
-///   and asks about one naming its server in
-///   `_meta.claudeCode.mcpServer.name`.
+///   and asks about one with the server serving it in
+///   `_meta.claudeCode.mcpServer`: clackatoo's is the one named
+///   `clackatoo` that the client gave (`source` `dynamic`); one of that
+///   name from the user's or a project's configuration isn't.
 /// - Codex's adapter titles an MCP tool call `mcp.SERVER.TOOL`, and puts
 ///   the server and tool in its input itself. Asking about one it saw no
 ///   call of, it titles the question "MCP tool call approval" and names
 ///   only the server.
 /// - Any other agent's are never taken for clackatoo's.
-fn own_call(agent: &str, title: Option<&str>, input: Option<&Value>, meta: Option<&Meta>) -> bool {
+fn own_call(
+    agent: &str,
+    title: Option<&str>,
+    input: Option<&Value>,
+    meta: Option<&Meta>,
+) -> Option<bool> {
     let server = crate::mcp::SERVER_NAME;
     match agent {
         "claude" => {
             let said = meta.and_then(|meta| meta.get("claudeCode"));
-            let named = (said.and_then(|said| said.get("toolName")?.as_str()))
+            if let Some(serving) = said.and_then(|said| said.get("mcpServer")) {
+                let field = |name: &str| serving.get(name).and_then(Value::as_str);
+                return Some(field("name") == Some(server) && field("source") == Some("dynamic"));
+            }
+            (said.and_then(|said| said.get("toolName")?.as_str()))
                 .and_then(|name| name.strip_prefix("mcp__")?.strip_prefix(server))
                 .and_then(|name| name.strip_prefix("__"))
-                .is_some_and(crate::mcp::is_tool);
-            let serving = said.and_then(|said| said.get("mcpServer")?.get("name")?.as_str());
-            named || serving == Some(server)
+                .is_some_and(crate::mcp::is_tool)
+                .then_some(true)
         }
         "codex" => {
             let field = |name: &str| input.and_then(|input| input.get(name)?.as_str());
-            match title {
+            let ours = match title {
                 Some("MCP tool call approval") => field("serverName") == Some(server),
                 Some(title) => (title.strip_prefix("mcp."))
                     .and_then(|title| title.strip_prefix(server)?.strip_prefix('.'))
@@ -4201,9 +4231,10 @@ fn own_call(agent: &str, title: Option<&str>, input: Option<&Value>, meta: Optio
                             && field("tool") == Some(tool)
                     }),
                 None => false,
-            }
+            };
+            ours.then_some(true)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -5789,8 +5820,14 @@ mod tests {
                 "rawInput":{"server":"clackatoo","tool":"run_in_terminal","arguments":{"command":"ls"}}}"#,
         );
         let request = asked_about(r#"{"toolCallId":"m","kind":"execute","status":"pending"}"#);
-        let allowed = chat.about_own_tools(&request.tool_call, &request.options);
+        let allowed = chat.about_own_tools(&request.tool_call, &request.options, true);
         assert_eq!(allowed.as_deref(), Some("approved"));
+        // Not while clackatoo's server serves none of the chat's tools:
+        // Codex started another of its name, from its config.
+        assert_eq!(
+            chat.about_own_tools(&request.tool_call, &request.options, false),
+            None
+        );
         // Asked with no call seen first, by the server Codex names.
         let standalone = asked_about(
             r#"{"toolCallId":"elicitation:s:clackatoo:1","kind":"execute","status":"pending",
@@ -5798,7 +5835,7 @@ mod tests {
                 "rawInput":{"serverName":"clackatoo","description":"Allow?","schema":null}}"#,
         );
         assert_eq!(
-            chat.about_own_tools(&standalone.tool_call, &standalone.options),
+            chat.about_own_tools(&standalone.tool_call, &standalone.options, true),
             Some("approved".to_owned())
         );
         // Another server's tool, or a command, is the user's to answer.
@@ -5807,7 +5844,7 @@ mod tests {
                 "rawInput":{"server":"other","tool":"run","arguments":{}}}"#,
         );
         assert_eq!(
-            chat.about_own_tools(&theirs.tool_call, &theirs.options),
+            chat.about_own_tools(&theirs.tool_call, &theirs.options, true),
             None
         );
         // A command titled as one of ours, as Codex titles a command with
@@ -5844,11 +5881,33 @@ mod tests {
             );
             let posing = asked_about(&format!(r#"{{"toolCallId":"{id}","kind":"execute"}}"#));
             assert_eq!(
-                chat.about_own_tools(&posing.tool_call, &posing.options),
+                chat.about_own_tools(&posing.tool_call, &posing.options, true),
                 None,
                 "{title}"
             );
         }
+        // Codex's adapter says clackatoo's server wasn't started, as its
+        // config names one of its own: from then on, none is ours.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"mcp_startup.clackatoo.9f1c",
+                "title":"mcp__clackatoo__startup","kind":"other","status":"failed"}"#,
+        );
+        assert_eq!(
+            chat.about_own_tools(&request.tool_call, &request.options, true),
+            None
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"n","title":"mcp.clackatoo.list_panes",
+                "kind":"execute","status":"pending",
+                "rawInput":{"server":"clackatoo","tool":"list_panes","arguments":{}}}"#,
+        );
+        let later = asked_about(r#"{"toolCallId":"n","kind":"execute"}"#);
+        assert_eq!(
+            chat.about_own_tools(&later.tool_call, &later.options, true),
+            None
+        );
     }
 
     #[test]
@@ -5870,7 +5929,7 @@ mod tests {
                 "_meta":{"claudeCode":{"mcpServer":{"name":"toy","source":"project"}}}}"#,
         );
         assert_eq!(
-            chat.about_own_tools(&forged.tool_call, &forged.options),
+            chat.about_own_tools(&forged.tool_call, &forged.options, true),
             None
         );
         // A server whose name only starts as clackatoo's does, and a
@@ -5889,7 +5948,7 @@ mod tests {
             );
             let posing = asked_about(&format!(r#"{{"toolCallId":"{id}","title":"{title}"}}"#));
             assert_eq!(
-                chat.about_own_tools(&posing.tool_call, &posing.options),
+                chat.about_own_tools(&posing.tool_call, &posing.options, true),
                 None,
                 "{title}"
             );
@@ -5903,8 +5962,18 @@ mod tests {
         );
         let ours = asked_about(r#"{"toolCallId":"toolu_4","title":"mcp__clackatoo__open_file"}"#);
         assert_eq!(
-            chat.about_own_tools(&ours.tool_call, &ours.options),
+            chat.about_own_tools(&ours.tool_call, &ours.options, true),
             Some("approved".to_owned())
+        );
+        // A server of clackatoo's name that the project set up isn't
+        // clackatoo's, though its tools are named as clackatoo's are.
+        let configured = asked_about(
+            r#"{"toolCallId":"toolu_4","title":"mcp__clackatoo__open_file",
+                "_meta":{"claudeCode":{"mcpServer":{"name":"clackatoo","source":"project"}}}}"#,
+        );
+        assert_eq!(
+            chat.about_own_tools(&configured.tool_call, &configured.options, true),
+            None
         );
         // Asked about before it's reported, by the server serving it.
         let served = asked_about(
@@ -5912,7 +5981,7 @@ mod tests {
                 "_meta":{"claudeCode":{"mcpServer":{"name":"clackatoo","source":"dynamic"}}}}"#,
         );
         assert_eq!(
-            chat.about_own_tools(&served.tool_call, &served.options),
+            chat.about_own_tools(&served.tool_call, &served.options, true),
             Some("approved".to_owned())
         );
     }

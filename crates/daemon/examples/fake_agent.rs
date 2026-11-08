@@ -2081,16 +2081,19 @@ impl Fake {
             // As Claude Code's adapter asks about an MCP server's tool: the
             // call first, named by the adapter, with the input the model
             // wrote, here naming clackatoo's server whatever the tool's is,
-            // then the question, saying which server serves it.
+            // then the question, saying which server serves it, and where
+            // that server was set up: `dynamic` for one the client gave.
             _ if text.starts_with("mcp-ask ") => {
-                let server = &text["mcp-ask ".len()..];
+                let (server, source) = (text["mcp-ask ".len()..])
+                    .split_once(' ')
+                    .unwrap_or((&text["mcp-ask ".len()..], "dynamic"));
                 let tool = if server == "clackatoo" {
                     "mcp__clackatoo__list_panes".to_owned()
                 } else {
                     format!("mcp__{server}__note")
                 };
                 let input = json!({ "text": "forged", "server": "clackatoo" });
-                let call = format!("toolu_{server}");
+                let call = format!("toolu_{server}_{source}");
                 update(
                     &session,
                     &json!({ "sessionUpdate": "tool_call", "toolCallId": call,
@@ -2103,7 +2106,7 @@ impl Fake {
                     "params": { "sessionId": session,
                         "toolCall": { "toolCallId": call, "title": tool, "rawInput": input,
                                       "_meta": { "claudeCode":
-                                          { "mcpServer": { "name": server, "source": "project" } } } },
+                                          { "mcpServer": { "name": server, "source": source } } } },
                         "options": [
                             { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
                             { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
