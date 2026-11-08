@@ -102,4 +102,4 @@ If a chat stays on **Opening** while the connection keeps retrying, inspect the 
 
 ## Building it
 
-The web app is built into the program when it's compiled, which needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129. A build without them serves a page saying the app is missing; `CLACKATOO_WEB_APP=off` leaves it out on purpose. Releases always include it.
+The web app is built into the program when it's compiled, which needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129. A build without them serves a page saying the app is missing; `CLACKATOO_WEB_APP=off` leaves it out on purpose, and `CLACKATOO_WEB_APP=required` makes a build without them fail, as releases' builds do, so releases always include it. `CLACKATOO_WASM_BINDGEN` names the wasm-bindgen program, if it isn't `wasm-bindgen` on `PATH`.
