@@ -189,6 +189,7 @@ mod messages;
 mod mode;
 mod notices;
 mod offers;
+mod pasting;
 mod places;
 mod restored;
 mod scrolling;
@@ -205,6 +206,7 @@ mod typing;
 mod updating;
 
 pub(crate) use mode::WindowMode;
+pub(crate) use pasting::PasteTo;
 pub(crate) use script::LuaStart;
 
 /// Something being typed in the palette.
@@ -499,6 +501,9 @@ pub(crate) struct Desk {
     /// Whether `:connect` asked for the picker of a machine, waiting for
     /// the window to open it.
     connect_asked: bool,
+    /// Where the clipboard's image is to be pasted, waiting for the
+    /// window to read it (see [`pasting`]).
+    image_paste: Option<pasting::PasteTo>,
     /// The machine `@host` named, while the command after it is carried
     /// out: new panes and workspaces go there (see [`elsewhere`]).
     opening_on: Option<clackatoo_protocol::MachineId>,
@@ -2986,6 +2991,7 @@ mod tests {
     mod mode;
     mod mouse;
     mod notices;
+    mod pasting;
     mod places;
     mod restored;
     mod scrolling;

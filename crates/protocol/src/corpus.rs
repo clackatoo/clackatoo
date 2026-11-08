@@ -933,6 +933,42 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })]),
         })),
     ));
+    // An image pasted into a terminal, each way, and what the bar says.
+    let image = crate::ChatImage {
+        data: "cG5n".into(),
+        width: 1,
+        height: 1,
+        preview: Some(crate::ChatPreview {
+            original: 0,
+            width: 1,
+            height: 1,
+            rgba: vec![25, 50, 75, 255].into(),
+        }),
+    };
+    samples.extend([
+        (
+            crate::wire::PASTE_IMAGE,
+            Client(ClientMessage::Request(Request::PasteImage {
+                terminal,
+                image: image.clone(),
+                how: crate::ImagePaste::Path,
+            })),
+        ),
+        (
+            crate::wire::PASTE_IMAGE,
+            Client(ClientMessage::Request(Request::PasteImage {
+                terminal,
+                image,
+                how: crate::ImagePaste::Clipboard,
+            })),
+        ),
+        (
+            crate::wire::PASTE_IMAGE,
+            Server(ServerMessage::Response(Response::Text(
+                "no desktop session on ‘desk’: pasted the image's path".into(),
+            ))),
+        ),
+    ]);
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,

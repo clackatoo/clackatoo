@@ -148,7 +148,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 132;
+pub const PROTOCOL_VERSION: u32 = 133;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1564,6 +1564,21 @@ pub enum Request {
         /// which says on which machine.
         buffer: Option<BufferId>,
     },
+    /// Pastes `image`, from the clipboard of the window asking, into the
+    /// program in `terminal`, as `how` says: the daemon whose terminal it
+    /// is keeps it in a file of its own, and types its path, or puts it on
+    /// its own machine's clipboard and types Ctrl+V. Answered once that's
+    /// done, with [`Response::Text`]: what the bar says, if anything. Only
+    /// to a daemon of protocol 133 or later (`wire::PASTE_IMAGE`).
+    PasteImage {
+        /// The terminal, not a chat's.
+        terminal: TerminalId,
+        /// The image, within [`ChatImage`]'s limits. Its preview isn't
+        /// used.
+        image: ChatImage,
+        /// How it reaches the program.
+        how: ImagePaste,
+    },
 }
 
 /// What [`Request::Trust`] does.
@@ -1576,6 +1591,21 @@ pub enum TrustAction {
     Untrust,
     /// Lists the folders trusted, and those not, one a line.
     List,
+}
+
+/// How [`Request::PasteImage`] gives a program an image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImagePaste {
+    /// Kept in a file on the terminal's machine, whose path is pasted, as
+    /// a file dropped on a terminal is: Claude Code and Codex take a
+    /// pasted image's path as the image.
+    #[default]
+    Path,
+    /// Put on the clipboard of the terminal's machine, as the program
+    /// would read it there, then Ctrl+V typed. Needs a desktop session
+    /// there; without one, it's pasted as [`ImagePaste::Path`] is, and the
+    /// answer says so. Never from a web device.
+    Clipboard,
 }
 
 /// How to start a terminal.

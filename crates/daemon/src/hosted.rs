@@ -350,6 +350,14 @@ impl HostedTerminal {
         }
     }
 
+    /// Whether its program is the user's shell, one whose integration
+    /// signs its marks (bash, zsh or fish), with the terminal to itself
+    /// (see [`shell_has_terminal`](Self::shell_has_terminal)): what's typed
+    /// goes to its prompt, and is read as it reads a command line.
+    pub(crate) fn shell_at_prompt(&self) -> bool {
+        self.secret.is_some() && self.shell_has_terminal().is_ok()
+    }
+
     /// The device and inode of the program it was started as, for the next
     /// build to know.
     pub(crate) fn exe(&self) -> Option<(u64, u64)> {

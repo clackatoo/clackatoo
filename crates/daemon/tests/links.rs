@@ -203,6 +203,7 @@ impl World {
             machine: Some(dir.join("machine")),
             machine_name: Some(host.to_owned()),
             display: None,
+            pastes: Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes"))),
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),
@@ -8637,4 +8638,80 @@ fn a_local_upgrade_keeps_federated_panes_and_edit_receipts() {
     let snapshot = attach_to_buffer(&mut again, buffer, 71);
     assert_eq!(snapshot.text, "yxnotes\n");
     assert_eq!(snapshot.applied, Some(43));
+}
+
+/// An image pasted into another machine's terminal goes to that machine's
+/// daemon, which keeps it and types its path there; a link too old to
+/// pass it on says so, and nothing's kept.
+#[test]
+fn an_image_pasted_into_another_machines_terminal_is_kept_there() {
+    use base64::Engine as _;
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    let mut at_desk = desk.client();
+    at_desk.new_workspace(Some("work".into()), shell()).unwrap();
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let terminal = first_terminal(theirs(&shown, "work").unwrap());
+    attach_to(&mut window, terminal);
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let paste = Request::PasteImage {
+        terminal,
+        image: clackatoo_protocol::ChatImage {
+            data: base64::engine::general_purpose::STANDARD.encode(&png),
+            width: 2,
+            height: 2,
+            preview: None,
+        },
+        how: clackatoo_protocol::ImagePaste::Path,
+    };
+    assert_eq!(
+        window.request(&paste).unwrap(),
+        Response::Text(String::new())
+    );
+    let kept: Vec<PathBuf> = std::fs::read_dir(world.host("desk").join("pastes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), png);
+    assert!(!world.host("laptop").join("pastes").exists());
+    let name = kept[0].file_name().unwrap().to_str().unwrap().to_owned();
+    wait_for_view(&mut window, terminal, &name);
+    drop(window);
+
+    // Through a link at an older protocol, it's refused here.
+    let old = world.start_configured("old", false, |config| {
+        if let Some(links) = &mut config.links {
+            links.speaks = Some(clackatoo_protocol::wire::PASTE_IMAGE - 1);
+        }
+    });
+    let mut window = old.client();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let terminal = first_terminal(theirs(&shown, "work").unwrap());
+    let Request::PasteImage { image, how, .. } = paste else {
+        panic!("{paste:?}")
+    };
+    let paste = Request::PasteImage {
+        terminal,
+        image,
+        how,
+    };
+    let answer = window.request(&paste).unwrap();
+    assert!(
+        matches!(&answer, Response::Error(Error::Other(why)) if why.contains("needs a newer clackatoo")),
+        "{answer:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(world.host("desk").join("pastes"))
+            .unwrap()
+            .count(),
+        1
+    );
 }

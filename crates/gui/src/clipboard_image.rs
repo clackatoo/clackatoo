@@ -1,4 +1,5 @@
-//! Explicit chat pastes: read and encode on a worker, never during a frame.
+//! Explicit image pastes, into chats and terminals: read and encode on a
+//! worker, never during a frame.
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clackatoo_protocol::{ChatImage, ChatPreview};
@@ -16,6 +17,11 @@ pub(crate) fn read() -> anyhow::Result<Pasted> {
         Err(arboard::Error::ContentNotAvailable) => Ok(Pasted::Text(clipboard.get_text()?)),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether the clipboard holds an image.
+pub(crate) fn holds_image() -> bool {
+    arboard::Clipboard::new().is_ok_and(|mut clipboard| clipboard.get_image().is_ok())
 }
 
 pub(crate) fn encode(image: &arboard::ImageData<'_>) -> anyhow::Result<ChatImage> {

@@ -48,6 +48,16 @@ In the terminal, run `false`, which only fails.
 exited 1
 ```
 
+## Paste an image
+
+Ctrl+Shift+Alt+V pastes the image on your clipboard, as a screenshot, into a terminal: it's kept in a file only you can read, in `~/.cache/clackatoo/pastes/` on the terminal's machine, and its path is pasted, quoted for the shell if it needs to be. Claude Code, Codex and other programs read a pasted image path as the image, so a screenshot taken on your laptop goes into Claude Code running in a terminal on your desktop. `:set pasteimage=clipboard` puts it on that machine's clipboard instead, and types Ctrl+V, for programs that read the clipboard. Ctrl+Shift+V pastes text alone, and says which keys paste an image when that's all the clipboard holds. In a chat, either attaches the image.
+
+Copy a screenshot or any image. In the terminal, in insert mode, type `ls -l ` (with the space), press Ctrl+Shift+Alt+V, then Enter.
+
+```check
+exited 0
+```
+
 ## Marking every command
 
 `:set blockmarks=all` marks the commands that worked too, with a faint `✓`; `none` marks none, and `failed`, as it starts, marks only those that failed. The tab's name is the shell's folder, while the program sets no title.

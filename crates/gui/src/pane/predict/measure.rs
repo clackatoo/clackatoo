@@ -180,6 +180,7 @@ impl TestDaemon {
             machine: None,
             machine_name: None,
             display: None,
+            pastes: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();

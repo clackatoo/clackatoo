@@ -352,6 +352,10 @@ gates! {
     /// `notice` (`TurnNotice`, `FinishedChat`). An older client shows the
     /// notice's text, as the agent was told it.
     CHAT_NOTICES = 132,
+    /// Pasting an image into a terminal (CLACKA-227): `Request::PasteImage`
+    /// (`ImagePaste`), answered with `Response::Text`. An older daemon is
+    /// never asked: it would read nothing it could act on.
+    PASTE_IMAGE = 133,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1115,6 +1119,9 @@ impl Downgrade for ClientMessage {
         if let Self::Request(crate::Request::Chat { action, .. }) = self
             && wire < chat_action_since(action)
         {
+            return Downgraded::Refused;
+        }
+        if wire < PASTE_IMAGE && matches!(self, Self::Request(crate::Request::PasteImage { .. })) {
             return Downgraded::Refused;
         }
         if wire < CHAT_ORIGINALS
@@ -2977,6 +2984,28 @@ mod lend_background_tests {
             action: crate::LentBackgroundAction::Seen,
         });
         assert_eq!(seen.downgrade(ELSEWHERE - 1), Downgraded::Refused);
+    }
+}
+
+#[cfg(test)]
+mod paste_image_tests {
+    use super::*;
+
+    /// An older daemon has no way to paste an image: it's never asked.
+    #[test]
+    fn an_image_is_never_pasted_through_an_older_daemon() {
+        let paste = ClientMessage::Request(crate::Request::PasteImage {
+            terminal: crate::TerminalId(1),
+            image: crate::ChatImage {
+                data: "cG5n".into(),
+                width: 1,
+                height: 1,
+                preview: None,
+            },
+            how: crate::ImagePaste::Path,
+        });
+        assert_eq!(paste.downgrade(PASTE_IMAGE - 1), Downgraded::Refused);
+        assert_eq!(paste.downgrade(PASTE_IMAGE), Downgraded::AsIs);
     }
 }
 

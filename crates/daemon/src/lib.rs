@@ -215,6 +215,36 @@ pub struct DaemonConfig {
     /// you log in and out (see [`display`]). `None` leaves them the
     /// daemon's own environment.
     pub display: Option<DisplayConfig>,
+    /// Where images pasted into terminals are kept, and how one is put on
+    /// the desktop's clipboard (see `Request::PasteImage`). `None` keeps
+    /// none: pasting an image is refused.
+    pub pastes: Option<PasteConfig>,
+}
+
+/// Where images pasted into terminals are kept, and the programs that put
+/// one on the desktop's clipboard, each reading it from its input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasteConfig {
+    /// The folder they're kept in, which only the user may open: made so
+    /// if it isn't there, and refused if it's anyone else's, or a link.
+    pub dir: PathBuf,
+    /// On a Wayland desktop: `wl-copy`.
+    pub wayland: OsString,
+    /// On an X desktop: `xclip`, which is given
+    /// `-selection clipboard -t image/png`.
+    pub x: OsString,
+}
+
+impl PasteConfig {
+    /// Kept in `dir`, put on the clipboard by `wl-copy` or `xclip`.
+    #[must_use]
+    pub fn in_dir(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            wayland: "wl-copy".into(),
+            x: "xclip".into(),
+        }
+    }
 }
 
 /// How the daemon connects to the daemons on other machines.
@@ -412,7 +442,10 @@ impl DaemonConfig {
     /// messages to (or else none), `$CLACKATOO_ACP_TRACE`: a directory to
     /// trace agents' messages to, a file each (or else none), and `$CLACKATOO_DISPLAY`: `off` to
     /// leave the programs the daemon starts its own display, rather than
-    /// follow the desktop's login (see [`display`]).
+    /// follow the desktop's login (see [`display`]), and
+    /// `$CLACKATOO_PASTES`, the folder images pasted into terminals are
+    /// kept in, or `off` for none (or else `clackatoo/pastes` in
+    /// [`cache_dir`]).
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
     pub fn from_env() -> Self {
@@ -549,6 +582,21 @@ impl DaemonConfig {
                     Some(DisplayConfig::from_env(Some(shell.join("display"))))
                 }
             },
+            pastes: match non_empty("CLACKATOO_PASTES") {
+                Some(off) if off == "off" => None,
+                // Only from somewhere in particular, as for recovery.
+                Some(dir) if Path::new(&dir).is_absolute() => {
+                    Some(PasteConfig::in_dir(PathBuf::from(dir)))
+                }
+                Some(dir) => {
+                    log::warn!(
+                        "CLACKATOO_PASTES isn't an absolute path or `off`: {}",
+                        dir.display()
+                    );
+                    cache_dir().map(|dir| PasteConfig::in_dir(dir.join("clackatoo/pastes")))
+                }
+                None => cache_dir().map(|dir| PasteConfig::in_dir(dir.join("clackatoo/pastes"))),
+            },
         }
     }
 }
@@ -559,6 +607,18 @@ impl DaemonConfig {
 #[must_use]
 pub fn languages_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("clackatoo/languages"))
+}
+
+/// Where programs keep files they can do without: `$XDG_CACHE_HOME`, or
+/// else `~/.cache`. A relative path in either is ignored.
+#[must_use]
+pub fn cache_dir() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
 }
 
 /// Where programs keep their data: `$XDG_DATA_HOME`, or else

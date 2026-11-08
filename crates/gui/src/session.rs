@@ -134,6 +134,14 @@ pub(crate) enum SessionEvent {
         chat: TerminalId,
         result: Result<crate::clipboard_image::Pasted, String>,
     },
+    /// The clipboard's image, read and encoded off the UI thread, for a
+    /// terminal's program.
+    TerminalImage {
+        terminal: TerminalId,
+        result: Result<crate::clipboard_image::Pasted, String>,
+    },
+    /// The clipboard, which held no text for Ctrl+Shift+V, holds an image.
+    ClipboardImage,
     /// Time to look for a new release, if the options say to. Sent a while
     /// after the window opens (see [`crate::updates`]).
     UpdateDue,

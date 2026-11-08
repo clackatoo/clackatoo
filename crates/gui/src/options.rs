@@ -607,6 +607,15 @@ options! {
     /// unless asked for, since the clipboard may hold a password, and
     /// whatever runs in a terminal would get it.
     osc52("osc52", "Clipboard access allowed to terminal programs"): Osc52 = Osc52::Copy;
+    /// How the clipboard's image reaches the program in a terminal, as
+    /// Ctrl+Shift+Alt+V pastes it: `path`, kept in a file on the
+    /// terminal's machine, in `~/.cache/clackatoo/pastes`, whose path is
+    /// pasted, which Claude Code, Codex and other programs take as the
+    /// image; or `clipboard`, put on that machine's own clipboard, then
+    /// Ctrl+V typed, for a program that reads the clipboard itself. That
+    /// needs a desktop session there; without one, the path is pasted, and
+    /// the bar says so. A chat takes the image either way.
+    pasteimage("pi", "How an image is pasted into a terminal"): PasteImage = PasteImage::Path;
     /// The agent `:Agent` and Ctrl+B `a` open a chat with, by its name:
     /// `claude`, `codex`, `gemini`, or one the daemon's `agents.toml`
     /// adds. Empty is the daemon's default, Claude Code.
@@ -708,6 +717,26 @@ choice! {
         Questions = "questions",
         /// None.
         Off = "off",
+    }
+}
+
+choice! {
+    /// How `pasteimage` pastes an image into a terminal.
+    PasteImage {
+        /// Its path, in a file on the terminal's machine.
+        Path = "path",
+        /// By that machine's clipboard, and Ctrl+V.
+        Clipboard = "clipboard",
+    }
+}
+
+impl PasteImage {
+    /// The protocol's word for it.
+    pub(crate) fn how(self) -> clackatoo_protocol::ImagePaste {
+        match self {
+            Self::Path => clackatoo_protocol::ImagePaste::Path,
+            Self::Clipboard => clackatoo_protocol::ImagePaste::Clipboard,
+        }
     }
 }
 

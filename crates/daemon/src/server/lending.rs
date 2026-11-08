@@ -361,6 +361,7 @@ impl Daemon {
             | Request::Text { terminal: id, .. }
             | Request::BlockText { terminal: id, .. }
             | Request::Search { terminal: id, .. }
+            | Request::PasteImage { terminal: id, .. }
             | Request::Block { terminal: id, .. }
             | Request::Fit { terminal: id, .. }
             | Request::Chat { terminal: id, .. }

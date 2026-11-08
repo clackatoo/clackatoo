@@ -126,6 +126,7 @@ impl TestDaemon {
             machine: None,
             machine_name: None,
             display: None,
+            pastes: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         change(dir.path(), &mut config);
@@ -25284,4 +25285,222 @@ fn a_relaying_daemon_is_told_to_have_its_window_attach_again_for_an_edit_too_far
             _ => {}
         }
     }
+}
+
+/// A PNG `width` by `height`, as a window's clipboard sends it.
+fn pasted_png(width: u32, height: u32) -> (Vec<u8>, clackatoo_protocol::ChatImage) {
+    use base64::Engine as _;
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 30, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let image = clackatoo_protocol::ChatImage {
+        data: base64::engine::general_purpose::STANDARD.encode(&png),
+        width,
+        height,
+        preview: None,
+    };
+    (png, image)
+}
+
+/// Pastes `image` into `terminal` as `how` says, answered once it's done.
+fn paste_image(
+    client: &mut Client,
+    terminal: TerminalId,
+    image: clackatoo_protocol::ChatImage,
+    how: clackatoo_protocol::ImagePaste,
+) -> Response {
+    client
+        .request(&Request::PasteImage {
+            terminal,
+            image,
+            how,
+        })
+        .unwrap()
+}
+
+/// The pasted images in `dir`, by name.
+fn pasted_images(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = (std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .collect();
+    found.sort();
+    found
+}
+
+/// Writes `script` as a program at `path`, through a child, so no
+/// thread of the tests holds it open as another runs it.
+fn write_program(path: &Path, script: &str) {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+/// An image pasted into a program is kept, for the user alone, and its
+/// path typed as it is, answered once it's typed; one that isn't a PNG
+/// of the size it says isn't, and nothing is typed.
+#[test]
+fn a_pasted_image_is_kept_and_its_path_typed() {
+    use std::os::unix::fs::PermissionsExt;
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.pastes = Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes")));
+    });
+    let pastes = daemon.dir.path().join("pastes");
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    let (png, image) = pasted_png(3, 2);
+    let answer = paste_image(
+        &mut client,
+        terminal,
+        image,
+        clackatoo_protocol::ImagePaste::Path,
+    );
+    assert_eq!(answer, Response::Text(String::new()));
+    let kept = pasted_images(&pastes);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), png);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!((mode(&pastes), mode(&kept[0])), (0o700, 0o600));
+    // `cat` is no shell: the path as it is, with nothing after it.
+    let path = kept[0].to_str().unwrap().to_owned();
+    let screen = wait_for_screen(&mut client, terminal, |text| {
+        text.replace('\n', "").contains(&path)
+    });
+    assert!(
+        !screen.replace('\n', "").contains(&format!("{path} ")),
+        "{screen}"
+    );
+
+    let (_, mut wrong) = pasted_png(3, 2);
+    wrong.width = 4;
+    let answer = paste_image(
+        &mut client,
+        terminal,
+        wrong,
+        clackatoo_protocol::ImagePaste::Path,
+    );
+    assert_eq!(
+        answer,
+        Response::Error(Error::Other("the image isn't the size it says".into()))
+    );
+    assert_eq!(pasted_images(&pastes).len(), 1);
+}
+
+/// At a shell's prompt, the path is quoted for it, with a space after, as
+/// a file dropped on it is.
+#[test]
+fn a_pasted_images_path_is_quoted_for_a_shell() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.pastes = Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("my pastes")));
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        // Called zsh, so it's the user's shell, whose marks are signed.
+        let shell = bin.join("zsh");
+        write_program(&shell, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n");
+        config.shell = shell.into();
+        let integration = dir.join("integration");
+        std::fs::create_dir(&integration).unwrap();
+        config.shell_integration = Some(integration);
+    });
+    let mut client = daemon.client();
+    let terminal = client
+        .new_terminal(NewTerminal {
+            size: Size::new(100, 10).unwrap(),
+            command: None,
+            cwd: None,
+            record_to: None,
+        })
+        .unwrap();
+    let (_, image) = pasted_png(2, 2);
+    let answer = paste_image(
+        &mut client,
+        terminal,
+        image,
+        clackatoo_protocol::ImagePaste::Path,
+    );
+    assert_eq!(answer, Response::Text(String::new()));
+    let kept = pasted_images(&daemon.dir.path().join("my pastes"));
+    // A line's text ends at its last character: the space after isn't seen.
+    let quoted = format!("'{}'", kept[0].to_str().unwrap());
+    wait_for_screen(&mut client, terminal, |text| text.contains(&quoted));
+}
+
+/// Asked to go by the clipboard, an image is put on the desktop's, with
+/// its display alone, and Ctrl+V typed; with no desktop, its path is
+/// typed instead, and the answer says why.
+#[test]
+fn a_pasted_image_goes_by_the_desktops_clipboard_or_else_by_its_path() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let run = dir.join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::write(run.join("wayland-test"), "").unwrap();
+        let mut pastes = clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes"));
+        let copy = dir.join("wl-copy");
+        // What it read, and the display it was given.
+        write_program(
+            &copy,
+            "#!/bin/sh\ncat > \"$0.in\"\n\
+             printf '%s|%s' \"$WAYLAND_DISPLAY\" \"${DISPLAY-unset}\" > \"$0.env\"\n",
+        );
+        pastes.wayland = copy.into();
+        config.pastes = Some(pastes);
+        config.display = Some(clackatoo_daemon::DisplayConfig {
+            source: vec!["false".into()],
+            runtime_dir: Some(run),
+            x11_dir: Some(dir.join("x11")),
+            inherited: vec![("WAYLAND_DISPLAY".into(), "wayland-test".into())],
+            file: None,
+            again_after: Vec::new(),
+        });
+    });
+    let dir = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    // Shows the first byte it reads.
+    let shows = "stty raw -echo; printf ready; head -c1 | od -An -tx1";
+    let terminal = spawn(&mut client, &["sh", "-c", shows]);
+    wait_for_screen(&mut client, terminal, |text| text.contains("ready"));
+    let (png, image) = pasted_png(2, 3);
+    let how = clackatoo_protocol::ImagePaste::Clipboard;
+    let answer = paste_image(&mut client, terminal, image, how);
+    assert_eq!(answer, Response::Text(String::new()));
+    wait_for_screen(&mut client, terminal, |text| text.contains("16"));
+    assert_eq!(std::fs::read(dir.join("wl-copy.in")).unwrap(), png);
+    let env = std::fs::read_to_string(dir.join("wl-copy.env")).unwrap();
+    assert_eq!(env, "wayland-test|unset");
+    drop(daemon);
+
+    // With no desktop: its X display's socket isn't there.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.pastes = Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes")));
+        config.machine_name = Some("desk".into());
+        config.display = Some(clackatoo_daemon::DisplayConfig {
+            source: vec!["false".into()],
+            runtime_dir: Some(dir.join("run")),
+            x11_dir: Some(dir.join("x11")),
+            inherited: vec![("DISPLAY".into(), ":5".into())],
+            file: None,
+            again_after: Vec::new(),
+        });
+    });
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    let (_, image) = pasted_png(2, 3);
+    let answer = paste_image(&mut client, terminal, image, how);
+    let said = "there's no desktop session on ‘desk’: pasted the image's path instead";
+    assert_eq!(answer, Response::Text(said.into()));
+    let kept = pasted_images(&daemon.dir.path().join("pastes"));
+    let path = kept[0].to_str().unwrap().to_owned();
+    wait_for_screen(&mut client, terminal, |text| {
+        text.replace('\n', "").contains(&path)
+    });
 }

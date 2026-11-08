@@ -238,6 +238,30 @@ impl Env {
         }
     }
 
+    /// The desktop programs started now open their windows on, if
+    /// there's one: Wayland's, if it's there, as toolkits prefer it, else
+    /// X's.
+    pub(crate) fn desktop(&self) -> Option<Desktop> {
+        if self.values[WAYLAND].is_some() {
+            Some(Desktop::Wayland)
+        } else if self.values[X].is_some() {
+            Some(Desktop::X)
+        } else {
+            None
+        }
+    }
+
+    /// The daemon's own values, as it was started with them, whether or
+    /// not their displays are there: for a daemon that doesn't follow the
+    /// desktop's (`CLACKATOO_DISPLAY=off`).
+    pub(crate) fn own() -> Self {
+        let values = VARIABLES.map(|name| std::env::var(name).ok().filter(|value| valid(value)));
+        Self {
+            origin: Origin::Inherited,
+            values,
+        }
+    }
+
     /// The file's text: where they came from, on a line starting `#`,
     /// then a `NAME=VALUE` line for each there is. Values have no line
     /// breaks ([`valid`]).
@@ -270,6 +294,15 @@ impl Env {
             format!("{origin}: {}", set.join(" "))
         }
     }
+}
+
+/// Which kind of desktop a display is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Desktop {
+    /// Wayland's: `WAYLAND_DISPLAY`.
+    Wayland,
+    /// X's: `DISPLAY`.
+    X,
 }
 
 /// What the file the daemon writes for shells says (see

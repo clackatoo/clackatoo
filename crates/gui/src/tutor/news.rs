@@ -1247,6 +1247,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "New windows open at once: every window shares one process, and only the first sets up the GPU",
     },
+    News {
+        id: "paste-image",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Ctrl+Shift+Alt+V pastes the clipboard's image into a terminal, on any machine, as a path Claude Code takes",
+    },
 ];
 
 impl News {

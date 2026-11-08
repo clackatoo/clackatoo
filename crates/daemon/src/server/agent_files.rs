@@ -1455,7 +1455,7 @@ impl Daemon {
 /// directories, looks for its worktree no higher than inside the cache,
 /// so it never takes in a repository the cache happens to be in.
 pub(super) fn agent_root(cwd: &Path) -> PathBuf {
-    root_below(cwd, cache_dir().as_deref())
+    root_below(cwd, crate::cache_dir().as_deref())
 }
 
 /// The directory `path` is in, below `root`, which it starts with, open
@@ -1501,17 +1501,6 @@ fn root_below(cwd: &Path, stop: Option<&Path>) -> PathBuf {
         .take_while(|dir| stop.as_deref() != Some(*dir))
         .find(|dir| dir.join(".git").exists())
         .map_or_else(|| cwd.clone(), Path::to_path_buf)
-}
-
-/// Where programs keep files they can do without: `$XDG_CACHE_HOME`, or
-/// else `~/.cache`. A relative path in either is ignored.
-fn cache_dir() -> Option<PathBuf> {
-    let absolute = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
 }
 
 /// `text` with the changes a tool said it made, in order: each `old`
@@ -1679,6 +1668,7 @@ pub(super) mod tests {
             machine: None,
             machine_name: None,
             display: None,
+            pastes: None,
             keep_wait: crate::DEFAULT_KEEP_WAIT,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();

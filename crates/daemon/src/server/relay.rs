@@ -840,6 +840,28 @@ impl Daemon {
     pub(super) fn route_request(&mut self, token: Token, request: Request) -> Routed {
         let request = self.held_request(request);
         match request {
+            Request::PasteImage {
+                terminal,
+                image,
+                how,
+            } => {
+                let Some((at, remote)) = self.relayed_terminal(terminal) else {
+                    return match self.paste_image(token, terminal, image, how) {
+                        Ok(()) => Routed::Waiting,
+                        Err(err) => Routed::Answered(Response::Error(err)),
+                    };
+                };
+                if self.link_wire(at) < wire::PASTE_IMAGE {
+                    let error = self.too_old(at, "pasting an image into a terminal");
+                    return Routed::Answered(Response::Error(error));
+                }
+                let paste = Request::PasteImage {
+                    terminal: remote,
+                    image,
+                    how,
+                };
+                self.wait_for(token, at, paste, Then::Pass)
+            }
             Request::SendInput { terminal, bytes } => {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
                     return Routed::Here(Request::SendInput { terminal, bytes });
@@ -2044,7 +2066,7 @@ impl Daemon {
 
     /// Hands the client at `token` its answer numbered `ticket`,
     /// `response`, encoded as it speaks.
-    fn hand_answer_with(&mut self, token: Token, ticket: u64, response: Response) {
+    pub(super) fn hand_answer_with(&mut self, token: Token, ticket: u64, response: Response) {
         let Some(Source::Client(client)) = self.sources.get(token.0) else {
             return;
         };

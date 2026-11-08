@@ -1593,12 +1593,20 @@ impl App {
             } else if is_paste(press.key, self.modifiers) {
                 match paste_text(&mut self.clipboard, Copy::Clipboard) {
                     Ok(text) => self.desk.paste(&text),
-                    Err(err) => log::warn!("pasting failed: {err:#}"),
+                    Err(err) => {
+                        log::warn!("pasting failed: {err:#}");
+                        self.look_for_image();
+                    }
                 }
                 true
             } else {
                 self.desk.key(press)
             };
+        match self.desk.take_image_paste() {
+            Some(crate::desk::PasteTo::Chat(chat)) => self.paste_into_chat(chat),
+            Some(crate::desk::PasteTo::Terminal(terminal)) => self.paste_image_into(terminal),
+            None => {}
+        }
         self.open_links();
         self.update();
         self.forward_ports();
@@ -1656,6 +1664,36 @@ impl App {
                     .finish_image_paste(chat, Err(format!("Could not read the clipboard: {err}")));
             }
         }
+    }
+
+    /// Reads the clipboard's image on a thread of its own, for
+    /// `terminal`'s program (see [`crate::desk::PasteTo`]).
+    fn paste_image_into(&mut self, terminal: TerminalId) {
+        let proxy = self.session.proxy();
+        let spawned = std::thread::Builder::new()
+            .name("paste-image".into())
+            .spawn(move || {
+                let result = crate::clipboard_image::read()
+                    .map_err(|err| format!("the image couldn't be read: {err:#}"));
+                let _ = proxy.send_event(SessionEvent::TerminalImage { terminal, result });
+            });
+        if let Err(err) = spawned {
+            let why = format!("the clipboard couldn't be read: {err}");
+            self.desk.finish_terminal_image(terminal, Err(why));
+        }
+    }
+
+    /// Looks, on a thread of its own, for an image on the clipboard, which
+    /// held no text for Ctrl+Shift+V: the bar says which keys paste it.
+    fn look_for_image(&self) {
+        let proxy = self.session.proxy();
+        let _ = std::thread::Builder::new()
+            .name("paste-look".into())
+            .spawn(move || {
+                if crate::clipboard_image::holds_image() {
+                    let _ = proxy.send_event(SessionEvent::ClipboardImage);
+                }
+            });
     }
 
     /// Opens the picker of a machine to connect to, for `purpose`, saying
@@ -3187,10 +3225,12 @@ fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
     true
 }
 
-/// Whether a key pastes: Ctrl+Shift+V.
+/// Whether a key pastes: Ctrl+Shift+V. With Alt too, it's a key of its
+/// own, which pastes the clipboard's image unless bound elsewhere.
 pub(crate) fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
     modifiers.ctrl
         && modifiers.shift
+        && !modifiers.alt
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
 }
 
@@ -4112,6 +4152,15 @@ impl App {
             ) => {}
             SessionEvent::ChatPaste { chat, result } => {
                 self.desk.finish_image_paste(chat, result);
+                self.request_redraw();
+            }
+            SessionEvent::TerminalImage { terminal, result } => {
+                self.desk.finish_terminal_image(terminal, result);
+                self.send_outbox();
+                self.request_redraw();
+            }
+            SessionEvent::ClipboardImage => {
+                self.desk.clipboard_holds_an_image();
                 self.request_redraw();
             }
             SessionEvent::Clipboard(heard) => {

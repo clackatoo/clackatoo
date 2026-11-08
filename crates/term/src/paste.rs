@@ -19,6 +19,10 @@
 //! as xterm drops them: text a program put on the clipboard could
 //! otherwise act as keys, an escape as an arrow or ^C as a signal, in a
 //! program that takes keys.
+//!
+//! A path typed for a shell, as a file dropped on a terminal or an image
+//! pasted into one is, is quoted so bash, zsh and fish each read it as one
+//! word ([`shell_quoted`]).
 
 use crate::InputModes;
 
@@ -70,6 +74,36 @@ pub fn unbracketed(text: &str) -> String {
 /// than tab, carriage return and newline.
 fn pasted(ch: char) -> bool {
     !ch.is_control() || matches!(ch, '\t' | '\r' | '\n')
+}
+
+/// `path` as bash, zsh and fish each read it, as one word and nothing
+/// more: as it is if nothing in it means anything to them, or else in
+/// single quotes, but for each `'` and `\`, which go between them, each
+/// after a `\`. Inside single quotes fish reads `\'` and `\\` as escapes,
+/// which the others don't, so neither is ever put there.
+#[must_use]
+pub fn shell_quoted(path: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c);
+    if !path.is_empty() && path.chars().all(plain) {
+        return path.to_owned();
+    }
+    let mut quoted = String::with_capacity(path.len() + 2);
+    let mut open = false;
+    for c in path.chars() {
+        let escaped = c == '\'' || c == '\\';
+        if escaped == open {
+            quoted.push('\'');
+            open = !open;
+        }
+        if escaped {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    if open {
+        quoted.push('\'');
+    }
+    quoted
 }
 
 #[cfg(test)]
@@ -145,5 +179,88 @@ mod tests {
     #[test]
     fn bracketed_the_last_newline_stays_as_the_program_takes_it_as_text() {
         assert_eq!(paste("ls\n", bracketed()), b"\x1b[200~ls\n\x1b[201~");
+    }
+}
+
+#[cfg(test)]
+mod quoting {
+    use std::process::{Command, Stdio};
+
+    use super::shell_quoted;
+
+    /// Names a shell would make something else of, given the chance.
+    const HOSTILE: &[&str] = &[
+        "/p/my notes.txt",
+        "/p/it's",
+        r"/p/a\'; rm -rf ~ #",
+        r"/p/back\slash",
+        r"/p/two\\slashes\\",
+        r"/p/ends\",
+        r"/p/'\''",
+        "/p/$HOME and $(echo hi) and `echo hi`",
+        "/p/*.rs ~ {a,b} [ab] ?",
+        "/p/\"double\" ; & | > < !",
+        "/p/%self",
+        "/p/line\nbreak\ttab",
+        "~/not home",
+        "'",
+        "\\",
+    ];
+
+    #[test]
+    fn a_path_is_quoted_only_if_a_shell_would_read_it_otherwise() {
+        assert_eq!(shell_quoted("/p/src/main.rs"), "/p/src/main.rs");
+        assert_eq!(shell_quoted("/p/my notes.txt"), "'/p/my notes.txt'");
+        assert_eq!(shell_quoted("/p/it's"), r"'/p/it'\''s'");
+        assert_eq!(shell_quoted("/p/$HOME*"), "'/p/$HOME*'");
+        // Never a `\` inside the quotes, which fish reads as an escape.
+        assert_eq!(shell_quoted(r"/p/a\'b"), r"'/p/a'\\\''b'");
+        for path in HOSTILE {
+            let quoted = shell_quoted(path);
+            if quoted == *path {
+                continue;
+            }
+            let (mut inside, mut chars) = (false, quoted.chars());
+            while let Some(c) = chars.next() {
+                match (inside, c) {
+                    (true, '\\') => panic!("a \\ inside quotes: {quoted}"),
+                    (false, '\\') => assert!(chars.next().is_some(), "{quoted}"),
+                    (_, '\'') => inside = !inside,
+                    _ => assert!(inside, "{c:?} outside quotes: {quoted}"),
+                }
+            }
+            assert!(!inside, "{quoted}");
+        }
+    }
+
+    /// Each shell installed reads each hostile name back as it is: bash,
+    /// zsh and fish, those that are here, with no config read.
+    #[test]
+    fn bash_zsh_and_fish_each_read_a_quoted_path_as_it_is() {
+        let shells: [(&str, &[&str]); 3] = [
+            ("bash", &["--norc", "--noprofile", "-c"]),
+            ("zsh", &["-f", "-c"]),
+            ("fish", &["--no-config", "-c"]),
+        ];
+        let mut ran = 0;
+        for (shell, flags) in shells {
+            for path in HOSTILE {
+                let script = format!("printf '%s|' {}", shell_quoted(path));
+                let Ok(out) = Command::new(shell)
+                    .args(flags)
+                    .arg(&script)
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                else {
+                    break;
+                };
+                ran += 1;
+                let read = String::from_utf8_lossy(&out.stdout);
+                assert_eq!(read, format!("{path}|"), "{shell} read {script}");
+            }
+        }
+        // bash, at least, is everywhere this is built.
+        assert!(ran >= HOSTILE.len(), "no shell ran");
     }
 }

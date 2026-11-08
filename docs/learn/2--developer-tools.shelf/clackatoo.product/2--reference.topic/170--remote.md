@@ -144,6 +144,10 @@ Through a jump host (`ProxyJump`), ssh reached the other machine at an address o
 
 A daemon `--remote` starts on your desktop starts before you've logged in to the desktop itself, over ssh, with no `WAYLAND_DISPLAY` of its own. Programs it starts still open their windows on the desktop once you log in there: the daemon follows the display your desktop tells systemd as you log in, and gives it to the terminals, agents and language servers it starts from then on, and shells already open take it before the next command they run (bash at its next prompt). Once you log out and the desktop's socket has gone, what starts no longer gets its display. `ssh desk clackatoo display` says what programs on desk get now. See [the desktop's display](~clackatoo/reference/terminal-emulation#the-display).
 
+## An image from this machine's clipboard
+
+Ctrl+Shift+Alt+V in a terminal on another machine pastes the image on this machine's clipboard there: it goes to that machine's daemon, through any machine between, which keeps it in its own `~/.cache/clackatoo/pastes/` and pastes its path, there, for a program such as Claude Code to read. So a screenshot taken on your laptop goes into Claude Code running on your desktop. With `pasteimage=clipboard`, it's put on the desktop's own clipboard instead, which needs you logged in there (see [the other machine's desktop](#the-other-machine-s-desktop)). Each machine on the way needs a clackatoo that knows how; the bottom bar says which to update if one doesn't. See [pasting an image](~clackatoo/reference/window#pasting-an-image).
+
 ## Options
 
 | Option | Environment variable | |
@@ -252,4 +256,4 @@ A program on the other machine that listens on `localhost`, such as a dev server
 
 ## From your phone
 
-From a phone, use the web app the daemon serves instead: see [Your phone](~clackatoo/reference/phone).
+From a phone, use the web app the daemon serves instead: see [Your phone](~clackatoo/reference/phone). The daemon would take an image pasted into a terminal from a phone as its path, within the limits of the photos it sends chats, but never onto the desktop's clipboard, which isn't the phone's; the web app doesn't offer it yet.

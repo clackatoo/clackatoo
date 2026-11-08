@@ -74,6 +74,9 @@ enum Pending {
     /// Where a search being typed would go, asked as it's typed, for
     /// what was typed then (see [`search`]).
     Preview(String),
+    /// The clipboard's image, pasted: answered once it's typed, with
+    /// what the bar says.
+    Image,
     /// Anything answered with just "done" or an error.
     Other,
 }
@@ -468,6 +471,17 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
+            (Some(Pending::Image), Response::Error(err)) => {
+                self.status = Some(format!("the image wasn't pasted: {err}"));
+                true
+            }
+            (Some(Pending::Image), Response::Text(said)) => {
+                let redraw = !said.is_empty();
+                if redraw {
+                    self.status = Some(said);
+                }
+                redraw
+            }
             (_, Response::Error(err)) => {
                 log::warn!("the daemon refused a request: {err}");
                 false
@@ -621,6 +635,25 @@ impl Pane {
             _ => self.normal_key(press),
         };
         redraw || forgot_selection
+    }
+
+    /// Asks the daemon whose terminal this is to paste `image` into the
+    /// program, as `how` says: its path, or by its clipboard and Ctrl+V.
+    pub(crate) fn paste_image(
+        &mut self,
+        image: clackatoo_protocol::ChatImage,
+        how: clackatoo_protocol::ImagePaste,
+    ) {
+        let terminal = self.terminal();
+        self.request(
+            Request::PasteImage {
+                terminal,
+                image,
+                how,
+            },
+            Pending::Image,
+        );
+        self.scroll = 0;
     }
 
     /// Sends pasted text, marked as a paste if the program asked for that.

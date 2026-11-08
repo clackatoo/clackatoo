@@ -20,6 +20,9 @@
 //! | `b` `l` | Lists the background tabs, as `:Background` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
 //!
+//! Ctrl+Shift+Alt+V, in any mode, pastes the clipboard's image into the
+//! focused terminal or chat (see [`super::pasting`]).
+//!
 //! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar
 //! marks it `^B` by the mode, and a panel above the bar lists the keys it
 //! takes and what each does, as which-key.nvim does. The panel is made from
@@ -136,6 +139,9 @@ pub(crate) enum Action {
     /// The focused editor's selection, or file, to the chat beside it, as
     /// `:Ask` does.
     AskChat,
+    /// The clipboard's image, into the focused terminal or chat (see
+    /// [`super::pasting`]).
+    PasteImage,
 }
 
 /// What a key does in reviewing what agents changed.
@@ -225,6 +231,14 @@ fn defaults() -> Keymap<Binding> {
         bind("niv", keys, Action::Background(command), Some(label));
     }
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, Some("send Ctrl+B"));
+    // Beside Ctrl+Shift+V, which pastes text: the terminal's own, as
+    // Ctrl+Shift+letters are.
+    bind(
+        "niv",
+        "<C-A-V>",
+        Action::PasteImage,
+        Some("Paste the clipboard's image"),
+    );
 
     bind("nv", ":", Action::CommandLine, Some("Open command prompt"));
     for (keys, kind, label) in FINDER_KEYS {
@@ -493,6 +507,7 @@ impl Desk {
             Action::Hunk(action) => self.editor_hunk(action),
             Action::Explore => self.toggle_explorer(),
             Action::AskChat => self.ask_chat(None),
+            Action::PasteImage => self.ask_image_paste(),
             Action::Review(key) => match key {
                 ReviewKey::Open => self.toggle_review(),
                 ReviewKey::Keep => self.review_act(true, false, ReviewWhich::Here),

@@ -79,6 +79,7 @@ mod lent_background;
 mod links;
 mod mentions;
 mod offers;
+mod pastes;
 mod pieces;
 mod recovery;
 mod relay;
@@ -265,6 +266,15 @@ impl Hosted {
         match self {
             Self::Pty(terminal) => terminal.shell_has_terminal(),
             Self::Chat(_) => Err(crate::hosted::Taken::Ended),
+        }
+    }
+
+    /// Whether its program is the user's shell at its prompt (see
+    /// [`HostedTerminal::shell_at_prompt`]). Never a chat.
+    fn shell_at_prompt(&self) -> bool {
+        match self {
+            Self::Pty(terminal) => terminal.shell_at_prompt(),
+            Self::Chat(_) => false,
         }
     }
 
@@ -938,6 +948,8 @@ pub struct Daemon {
     trust: trust::Asking,
     /// Renames whose files are being written.
     renames: rename::Renames,
+    /// Images being pasted into terminals.
+    pastes: pastes::Pastes,
     /// The finder's searches going on.
     finds: Finds,
     /// What agents' tools are waiting for, and the panes and terminals
@@ -1158,6 +1170,7 @@ impl Daemon {
             installs: Installs::new(config.declined.as_deref()),
             trust: trust::Asking::new(&config.trusted),
             renames: rename::Renames::default(),
+            pastes: pastes::Pastes::default(),
             finds,
             tools: Tools::with_limits(config.agents.subagent_limits()),
             background: background::Backgrounds::default(),
@@ -1866,6 +1879,7 @@ impl Daemon {
                     .chain(self.next_lent_due())
                     .chain(self.next_restart_due())
                     .chain(self.next_restate_due())
+                    .chain(self.next_paste_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1901,6 +1915,7 @@ impl Daemon {
             self.take_installs();
             self.agent_chores();
             self.take_renames();
+            self.take_pastes();
             if self.take_boards() {
                 self.boards_read();
                 self.close_missing_boards();
@@ -1925,6 +1940,7 @@ impl Daemon {
             self.time_out_clipboard_asks();
             self.lapse_fits();
             self.time_out_tools();
+            self.time_out_pastes();
             self.take_lookups();
             self.time_out_forwards();
             self.take_link_news();
@@ -3604,6 +3620,8 @@ impl Daemon {
                 self.is_window(token);
                 Ok(Response::Done)
             }
+            // Answered once it's done, by `route_request`, never here.
+            Request::PasteImage { terminal, .. } => Err(Error::NoSuchTerminal(terminal)),
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),
