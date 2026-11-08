@@ -171,6 +171,7 @@ mod clipboard;
 mod colours;
 mod connecting;
 mod devices;
+mod dragging;
 mod editors;
 mod elsewhere;
 mod explorers;
@@ -388,6 +389,8 @@ pub(crate) struct Desk {
     /// The editor whose pane the left button went down in: it gets the
     /// drag, wherever the pointer goes, until the button comes up.
     editor_drag: Option<PaneId>,
+    /// What's pressed on in an explorer, to drag with the mouse.
+    file_drag: Option<dragging::FileDrag>,
     /// The cell the mouse was last over, so motion is passed on once per
     /// cell, not once per pixel.
     mouse_cell: Option<(TerminalId, [i64; 2])>,
@@ -1897,6 +1900,10 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        // Esc lets go of a file dragged.
+        if self.file_drag_key(press) {
+            return true;
+        }
         self.stop_scrolling();
         self.user_active();
         self.key_coming();
@@ -2237,6 +2244,11 @@ impl Desk {
             outcome.redraw = redraw;
             return outcome;
         }
+        // So is one from an explorer, until it's dropped.
+        if let Some(redraw) = self.file_drag_mouse(point, action, modifiers) {
+            outcome.redraw = redraw;
+            return outcome;
+        }
         if self.dragging.is_none()
             && let Some(pane) = self.placement().and_then(|p| p.pane_at(point))
             && let Some(view) = self.pane_view(pane).map(view::PaneView::focus)
@@ -2362,12 +2374,13 @@ impl Desk {
     /// Shift, Ctrl or Alt went down or up: holding Ctrl underlines the
     /// link under the mouse. Returns whether the window must be redrawn.
     pub(crate) fn modifiers_changed(&mut self, modifiers: Modifiers) -> bool {
+        let dragged = self.file_drag_modifiers(modifiers);
         let Some((terminal, [line, col])) = self.mouse_cell else {
-            return false;
+            return dragged;
         };
-        self.panes
-            .get_mut(&terminal)
-            .is_some_and(|pane| pane.hover(Some((line, col, modifiers))))
+        let hovered = (self.panes.get_mut(&terminal))
+            .is_some_and(|pane| pane.hover(Some((line, col, modifiers))));
+        dragged || hovered
     }
 
     /// Whether a click at `point` with `modifiers` held would open a link.
@@ -2532,6 +2545,7 @@ impl Desk {
         }
         if !focused {
             self.editor_drag_lost();
+            self.end_file_drag();
             // An answer armed in a chat waits for no one away.
             self.disarm_focused_chat();
         }
@@ -2902,6 +2916,7 @@ pub(super) fn shown_in_names(ch: char) -> bool {
 mod tests {
     mod background;
     mod blank;
+    mod dragging;
     mod folders;
     mod lessons;
     mod machines;
@@ -11604,7 +11619,7 @@ mod tests {
         explore_p(&mut desk);
         desk.take_outbox();
         // A double click on `..`, the first line under the root's.
-        assert!(desk.explorer_click(PaneId(2), [1, 6], 2));
+        assert!(desk.explorer_click(PaneId(2), [0.0; 2], [1, 6], 2));
         assert!(
             desk.take_outbox().contains(&ClientMessage::Files {
                 files: FilesId(1),

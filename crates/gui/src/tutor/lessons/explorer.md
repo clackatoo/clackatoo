@@ -188,6 +188,17 @@ file "later.txt"
 listed "later.txt"
 ```
 
+## Drag it with the mouse
+
+Press on a file or a folder in the explorer and move the mouse, holding the button, to drag it. The bar says what letting go would do, and the folder it would go into is lit. Let go on a folder to move it there, or hold Ctrl as you let go to copy it. On a file it goes into that file's folder. On an editor it opens there, and on a terminal its path is typed at the prompt, quoted, with nothing run. Esc stops the drag. As with `p`, nothing is written over without asking. With the keys, `x` on it and `p` on the folder does the same move.
+
+Drag `later.txt` onto `drafts`, or move it there with `x` and `p`.
+
+```check
+listed "drafts/later.txt"
+not listed "later.txt"
+```
+
 ## More
 
 The wheel scrolls the pane under the pointer. Over a window bar, it scrolls the focused pane instead, including explorers and editors. A middle click pastes the primary selection into an editor, or into a search or name already being typed in a list pane. In a board, double-click an entry to edit its text; Escape keeps it unchanged.

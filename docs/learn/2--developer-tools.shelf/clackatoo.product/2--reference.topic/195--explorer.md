@@ -53,6 +53,22 @@ Which folders are open, where the cursor is and what's scrolled to belong to the
 
 A click puts the cursor on a line, a double click opens it, or goes up from `..`, and the wheel scrolls.
 
+## Dragging with the mouse
+
+Press on a file or folder and move the mouse half a line away, holding the button, to drag it. Until then it's a click. While you drag, the bar says what letting go would do, and the folder it would go into is lit. Esc stops the drag without doing anything.
+
+| Let go on | Does |
+|---|---|
+| A folder, in this explorer or another | Moves it into that folder. Hold Ctrl as you let go to copy it instead. |
+| A file | Moves it into the folder that file is in. |
+| `..` | Moves it into the folder above the root. |
+| The explorer's heading, or below the tree | Moves it into the root. |
+| An editor | Opens it there, as `:e` would. |
+| A terminal | Types its path at the prompt, quoted for the shell, with a space after. Nothing runs. |
+| A chat | Types its path in the message box. |
+
+A move or copy works like `x` or `y` then `p`: nothing is written over unless you say so, and the bar asks first if something's already there. Nothing can be dropped into itself, or into the folder it's already in. A path belongs to its machine, so a file can't be dropped on a pane of another machine. Every drop but a move or copy focuses the pane you let go on.
+
 ## Opening files
 
 Enter or `l` opens a file in the editor of the tab you were last in, in place of its file, as `:e` would, and moves the focus there. With no editor in the tab, the file opens in a new one beside the explorer. Ctrl+V and Ctrl+S open it in a split beside or below that editor, and Ctrl+T in a new tab.
@@ -104,6 +120,6 @@ Each line starts with a hidden mark naming its entry, so what it named is known 
 
 ## Not yet
 
-- You can't drag files with the mouse.
+- You can't drag files in from other programs, or out to them.
 - Only 4096 folders are watched at once; past that, `R` shows what's changed.
 - Names that aren't UTF-8 are shown as near as they can be, and can't be renamed, moved or deleted here.

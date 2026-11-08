@@ -1498,14 +1498,68 @@ fn the_explorer_lessons_e_alone_opens_the_explorer_beside_a_blank_file_which_w_n
         BufferId(10),
         BufferUpdate::Moved(format!("{dir}/later.txt")),
     );
-    let listed = FilesUpdate::Listed {
-        dir: dir.clone(),
-        entries: vec![entry("later.txt", false), entry("notes.txt", false)],
+    let listed = |dir: &str, entries| FilesUpdate::Listed {
+        dir: dir.to_owned(),
+        entries,
         cut_short: false,
     };
-    desk.files_changed(FilesId(5), listed);
+    let root = vec![
+        entry("drafts", true),
+        entry("later.txt", false),
+        entry("notes.txt", false),
+    ];
+    desk.files_changed(FilesId(5), listed(&dir, root));
     desk.settle_lesson();
     assert_eq!(step(&desk), start + 2);
+
+    // Dragged onto `drafts`, the line above it: no `..` in a lesson's
+    // explorer, kept in the lesson's folder.
+    let to = drag_row(&mut desk, PaneId(4), 2, 1);
+    assert_eq!(to.1, format!("{dir}/drafts/later.txt"));
+    desk.file_op_done(to.0, Ok(()));
+    desk.files_changed(
+        FilesId(5),
+        listed(&dir, vec![entry("drafts", true), entry("notes.txt", false)]),
+    );
+    let drafts = format!("{dir}/drafts");
+    desk.files_changed(FilesId(5), listed(&drafts, vec![entry("later.txt", false)]));
+    desk.settle_lesson();
+    assert_eq!(step(&desk), start + 3);
+}
+
+/// Drags what's on row `from` of the explorer `pane` onto row `to`, and
+/// returns the move asked for: its number, and where to.
+fn drag_row(desk: &mut Desk, pane: PaneId, from: u16, to: u16) -> (u64, String) {
+    desk.take_outbox();
+    let tile = (desk.placement().unwrap().panes.into_iter())
+        .find(|(id, _)| *id == pane)
+        .unwrap()
+        .1;
+    let row = |row: u16| {
+        [
+            tile.origin[0] + 25.0,
+            tile.origin[1] + f32::from(row) * 20.0 + 10.0,
+        ]
+    };
+    let left = MouseButton::Left;
+    let none = Modifiers::default();
+    desk.mouse(row(from), MouseAction::Press(left), 1, none);
+    desk.mouse(row(to), MouseAction::Motion(Some(left)), 1, none);
+    desk.mouse(row(to), MouseAction::Release(left), 1, none);
+    let moves: Vec<(u64, String)> = (desk.take_outbox().into_iter())
+        .filter_map(|message| match message {
+            ClientMessage::FileOp {
+                id,
+                op: clackatoo_protocol::FileOp::Move { to, .. },
+                ..
+            } => Some((id, to)),
+            _ => None,
+        })
+        .collect();
+    let [asked] = &moves[..] else {
+        panic!("one move: {moves:?}");
+    };
+    asked.clone()
 }
 
 #[test]

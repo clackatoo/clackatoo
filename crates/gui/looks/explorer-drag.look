@@ -1,0 +1,16 @@
+# Dragging from the explorer: onto a folder moves, onto a terminal types
+# the path.
+size 1400x860
+file README.md
+file notes.txt
+file src/main.rs
+keys <C-;><Space>e
+wait-for README.md
+# notes.txt onto src.
+drag 80 119 60 100
+wait-for main.rs
+shot moved
+# README.md onto the terminal.
+drag 80 157 700 300
+sleep 500
+shot typed

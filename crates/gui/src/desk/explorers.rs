@@ -397,10 +397,18 @@ impl Desk {
         redraw
     }
 
-    /// A click at `cell` of the explorer `pane`, a double one if `clicks`
-    /// is 2: the cursor goes to the line clicked, which a double click
-    /// opens, as Enter does. Returns whether the window must be redrawn.
-    pub(super) fn explorer_click(&mut self, pane: PaneId, cell: [i64; 2], clicks: u8) -> bool {
+    /// A click at `cell` of the explorer `pane`, at `point`, a double one
+    /// if `clicks` is 2: the cursor goes to the line clicked, which a
+    /// double click opens, as Enter does, and a single one may go on to
+    /// drag what's there (see [`dragging`](super::dragging)). Returns
+    /// whether the window must be redrawn.
+    pub(super) fn explorer_click(
+        &mut self,
+        pane: PaneId,
+        point: [f32; 2],
+        cell: [i64; 2],
+        clicks: u8,
+    ) -> bool {
         let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
             return false;
         };
@@ -411,6 +419,9 @@ impl Desk {
         let asks = explorer.take_asks();
         for ask in asks {
             self.explorer_asked(pane, ask);
+        }
+        if clicks == 1 {
+            self.press_in_explorer(pane, point, row);
         }
         redraw
     }

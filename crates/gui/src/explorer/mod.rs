@@ -40,6 +40,11 @@
 //! | `Q` | Closes the explorer |
 //! | `g?` | Lists these keys at the explorer's foot, or stops |
 //!
+//! A click puts the cursor on a line, and a double click opens it. What's
+//! on a line can be dragged with the mouse, which the desk does (its
+//! `dragging`), asking the explorer only what path a row names and which
+//! folder a row drops into, and having it light that folder.
+//!
 //! The heading is the root, cut short from its start to fit, or for a
 //! lesson's explorer at the lesson's folder, the lesson's name.
 //!
@@ -252,6 +257,12 @@ pub(crate) struct Explorer {
     fence_name: Option<String>,
     /// Its keys are listed at its foot (`g?`).
     help: bool,
+    /// The folder lit as where what's dragged with the mouse would go, if
+    /// it's dropped here.
+    drop: Option<String>,
+    /// What the bar says while something's dragged from it: what letting
+    /// go would do.
+    dragging: Option<String>,
     /// Its pane has the focus, so keys come to it: a question it asks in
     /// the pane names the keys that answer only then.
     focused: bool,
@@ -317,6 +328,8 @@ impl Explorer {
             fence: None,
             fence_name: None,
             help: false,
+            drop: None,
+            dragging: None,
             focused: false,
             editing: None,
             pending_edit: None,
@@ -496,6 +509,9 @@ impl Explorer {
     /// What the bar says: what's being typed, a message, or the root and
     /// the path at the cursor, from it, and that `g?` lists the keys.
     pub(crate) fn label(&self) -> String {
+        if let Some(label) = &self.dragging {
+            return label.clone();
+        }
         if let Some(label) = self.plan_label() {
             return label;
         }
@@ -553,7 +569,7 @@ impl Explorer {
     }
 
     /// `path` as the bar writes it: from the root's name.
-    fn shown(&self, path: &str) -> String {
+    pub(crate) fn shown(&self, path: &str) -> String {
         match self.relative(path) {
             "" => self.name.clone(),
             rest if rest != path => format!("{}/{rest}", self.name),
@@ -1369,14 +1385,10 @@ impl Explorer {
     /// Returns whether it should be drawn again.
     pub(crate) fn click(&mut self, row: usize, double: bool) -> bool {
         self.flatten_if_stale();
-        // Not the heading, nor the keys at the foot.
-        let Some(row) = (row.checked_sub(1))
-            .filter(|&row| row < self.list_height() + self.scroll_extra)
-            .map(|row| self.top + row)
-        else {
+        let Some(row) = self.tree_row(row) else {
             return false;
         };
-        if row >= self.rows_len() || self.prompting() || self.editing.is_some() {
+        if self.prompting() || self.editing.is_some() {
             return false;
         }
         self.go_to_row(row);
@@ -1387,6 +1399,71 @@ impl Explorer {
             self.flatten_if_stale();
         }
         true
+    }
+
+    /// The row of the tree on row `row` of the pane, counting `..`'s as
+    /// the first if it shows: none on the heading, the keys at the foot,
+    /// or past the tree's end.
+    fn tree_row(&self, row: usize) -> Option<usize> {
+        (row.checked_sub(1))
+            .filter(|&row| row < self.list_height() + self.scroll_extra)
+            .map(|row| self.top + row)
+            .filter(|&row| row < self.rows_len())
+    }
+
+    /// Whether something can be dragged from it, or dropped on it, with
+    /// the mouse: not while a name or an answer is typed, nor while
+    /// folders are edited as text, nor in an editor's folder.
+    fn takes_drags(&self) -> bool {
+        !self.prompting() && self.editing.is_none() && !self.folder
+    }
+
+    /// The path of the file or folder on row `row` of the pane, to drag
+    /// with the mouse: none on `..`, which names nothing, or on a row
+    /// with no line.
+    pub(crate) fn path_at_row(&mut self, row: usize) -> Option<String> {
+        self.flatten_if_stale();
+        if !self.takes_drags() {
+            return None;
+        }
+        self.line_at(self.tree_row(row)?).map(Line::path)
+    }
+
+    /// The folder what's dragged goes into if it's dropped on row `row` of
+    /// the pane: a folder's own; the folder a file's in; on `..`, the
+    /// folder above the root; on the heading, or past the tree's end, the
+    /// root.
+    pub(crate) fn folder_at_row(&mut self, row: usize) -> Option<String> {
+        self.flatten_if_stale();
+        if !self.takes_drags() {
+            return None;
+        }
+        let root = self.root.clone()?;
+        let Some(row) = self.tree_row(row) else {
+            return Some(root);
+        };
+        Some(match self.line_at(row) {
+            Some(line) if line.entry().kind.expands() => line.path(),
+            Some(line) => line.listing.dir.clone(),
+            None => parent_of(&root).to_owned(),
+        })
+    }
+
+    /// Lights the folder `dir`'s line, the heading for the root's, as
+    /// where what's dragged would go if dropped here; or none. Returns
+    /// whether that changed.
+    pub(crate) fn light_drop(&mut self, dir: Option<String>) -> bool {
+        let changed = self.drop != dir;
+        self.drop = dir;
+        changed
+    }
+
+    /// Has the bar say `label` while something's dragged from it, or no
+    /// more. Returns whether that changed.
+    pub(crate) fn show_drag(&mut self, label: Option<String>) -> bool {
+        let changed = self.dragging != label;
+        self.dragging = label;
+        changed
     }
 
     /// Scrolls `lines` down, or up if it's negative, as the wheel does,
@@ -1613,10 +1690,18 @@ impl Explorer {
         (self.rows.iter().collect(), cursor)
     }
 
-    /// What's highlighted in view: the cursor's line, and the names the
-    /// last search matches.
+    /// What's highlighted in view: the cursor's line, the folder what's
+    /// dragged would be dropped into, and the names the last search
+    /// matches.
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
         let mut highlights = Vec::new();
+        if let Some(line) = self.drop_line() {
+            highlights.push(Highlight {
+                line,
+                cols: 0..self.width,
+                kind: HighlightKind::Selection,
+            });
+        }
         if self.cursorline
             && let Some((line, _)) = self.cursor_cell
         {
@@ -1651,6 +1736,24 @@ impl Explorer {
             }
         }
         highlights
+    }
+}
+
+impl Explorer {
+    /// The row of the pane showing the folder lit as where what's dragged
+    /// would go: the heading for the root, `..` for the folder above.
+    fn drop_line(&self) -> Option<usize> {
+        let dir = self.drop.as_deref()?;
+        if self.root.as_deref() == Some(dir) {
+            return Some(0);
+        }
+        let shown = self.rows.len().saturating_sub(1).min(self.name_cols.len());
+        (0..shown)
+            .find(|&index| match self.line_at(self.top + index) {
+                Some(line) => line.path() == dir,
+                None => self.root.as_deref().map(parent_of) == Some(dir),
+            })
+            .map(|index| index + 1)
     }
 }
 

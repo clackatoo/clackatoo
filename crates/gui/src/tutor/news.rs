@@ -1187,6 +1187,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat's Subagents setting says how many may work at once; [subagents] in agents.toml sets the rest",
     },
+    News {
+        id: "explorer-drag",
+        date: "2026-11-08",
+        lesson: "explorer",
+        what: "Drag files from the explorer: onto a folder to move (Ctrl copies), an editor to open, a terminal for the path",
+    },
 ];
 
 impl News {

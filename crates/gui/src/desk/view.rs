@@ -358,7 +358,7 @@ impl Focus {
                 desk.rendered_click(point) || desk.editor_press(id, cell, clicks, modifiers.alt)
             }
             Self::Explorer(id) => {
-                desk.acting_from_list(|desk| desk.explorer_click(id, cell, clicks))
+                desk.acting_from_list(|desk| desk.explorer_click(id, point, cell, clicks))
             }
             Self::Board(id) => desk.acting_from_list(|desk| desk.board_click(id, cell, clicks)),
             Self::Review(id) => desk.acting_from_list(|desk| desk.review_click(id, cell, clicks)),
