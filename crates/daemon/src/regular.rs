@@ -2,18 +2,23 @@
 //! whole is: a pipe would have the open wait for a writer, for ever if
 //! none comes, and a device such as `/dev/zero` could be read for ever.
 //!
-//! What's at the path is looked at first, and only a regular file opened:
-//! opening a device can do something by itself, as opening a serial port
-//! raises its DTR line. It's then opened without waiting and asked again
-//! what it is, so what's read is what was checked: a pipe swapped in
-//! between would otherwise be waited on. A regular file reads the same
-//! either way.
+//! What's at the path is first opened only to be looked at (`O_PATH`),
+//! which does nothing to what it is, and only if that's a regular file is
+//! that very file opened to read, through `/proc/self/fd`: opening a
+//! device can do something by itself, as opening a serial port raises its
+//! DTR line, and a device or pipe swapped in for the file between a look
+//! and an open would otherwise be opened. Where `/proc` isn't there, it's
+//! opened by its path again, without waiting, and looked at again, so a
+//! pipe swapped in is still never waited on.
 
 use std::fs::File;
 use std::io::{self, Read as _};
+use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
+use rustix::io::Errno;
 
 /// Whether a link at a file's path is followed to the file it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,33 +34,106 @@ pub(crate) enum Links {
 /// a device or a directory (which fails `IsADirectory`), nor, unless
 /// `links` follows them, a link.
 pub(crate) fn open(path: &Path, links: Links) -> io::Result<File> {
-    let regular = |meta: &std::fs::Metadata| {
-        if meta.is_dir() {
-            Err(io::Error::from(io::ErrorKind::IsADirectory))
-        } else if meta.is_file() {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "it isn't a regular file",
-            ))
-        }
+    open_at(rustix::fs::CWD, path, links)
+}
+
+/// As [`open`], `path` from the directory open as `dir`.
+pub(crate) fn open_at(dir: impl AsFd, path: &Path, links: Links) -> io::Result<File> {
+    let refuse = |why: &str| Err(io::Error::new(io::ErrorKind::InvalidInput, why.to_owned()));
+    let nofollow = if links == Links::Refuse {
+        OFlags::NOFOLLOW
+    } else {
+        OFlags::empty()
     };
-    let mut flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    match links {
-        Links::Follow => regular(&std::fs::metadata(path)?)?,
-        Links::Refuse => {
-            flags |= OFlags::NOFOLLOW;
-            let meta = std::fs::symlink_metadata(path)?;
-            if meta.is_symlink() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "it's a link"));
+    let looked = rustix::fs::openat(
+        &dir,
+        path,
+        OFlags::PATH | OFlags::CLOEXEC | nofollow,
+        Mode::empty(),
+    )?;
+    let stat = rustix::fs::fstat(&looked)?;
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::RegularFile => {}
+        FileType::Directory => return Err(io::ErrorKind::IsADirectory.into()),
+        FileType::Symlink => return refuse("it's a link"),
+        _ => return refuse("it isn't a regular file"),
+    }
+    let to_read = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let that = format!("/proc/self/fd/{}", looked.as_raw_fd());
+    let file = match rustix::fs::open(&that, to_read, Mode::empty()) {
+        Ok(file) => File::from(file),
+        // No `/proc`: by its path again.
+        Err(_) => File::from(rustix::fs::openat(
+            &dir,
+            path,
+            to_read | nofollow,
+            Mode::empty(),
+        )?),
+    };
+    let meta = file.metadata()?;
+    let same = u64::try_from(stat.st_dev).is_ok_and(|dev| dev == meta.dev())
+        && u64::try_from(stat.st_ino).is_ok_and(|ino| ino == meta.ino());
+    if !meta.is_file() || !same {
+        return refuse("it changed as it was opened");
+    }
+    Ok(file)
+}
+
+/// The directory `below` the directory at `root`, opened from it a part
+/// at a time without following a link or going up out of it, and made,
+/// each folder that isn't there, if `make`: so a link put in the way, even
+/// between a check of the path and its use, can never lead elsewhere.
+/// Linux's `openat2` does it in one step where it can.
+pub(crate) fn dir_below(root: &Path, below: &Path, make: bool) -> io::Result<OwnedFd> {
+    use std::path::Component;
+    let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let root = rustix::fs::open(root, flags, Mode::empty())?;
+    let mut parts = Vec::new();
+    for part in below.components() {
+        match part {
+            Component::Normal(name) => parts.push(name),
+            Component::CurDir => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} leads out of the folder it's in", below.display()),
+                ));
             }
-            regular(&meta)?;
         }
     }
-    let file = File::from(rustix::fs::open(path, flags, Mode::empty())?);
-    regular(&file.metadata()?)?;
-    Ok(file)
+    if parts.is_empty() {
+        return Ok(root);
+    }
+    let how = ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+    match rustix::fs::openat2(&root, below, flags, Mode::empty(), how) {
+        Ok(dir) => return Ok(dir),
+        // Not there, and to be made, or no `openat2`: a part at a time.
+        Err(Errno::NOENT) if make => {}
+        Err(Errno::NOSYS | Errno::PERM | Errno::INVAL | Errno::AGAIN) => {}
+        Err(err) => return Err(err.into()),
+    }
+    let mut at = root;
+    for part in parts {
+        // Never a link: with `O_NOFOLLOW`, one isn't a directory.
+        let next = match rustix::fs::openat(&at, part, flags | OFlags::NOFOLLOW, Mode::empty()) {
+            Err(Errno::NOENT) if make => {
+                match rustix::fs::mkdirat(&at, part, Mode::from_raw_mode(0o777)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(err) => return Err(err.into()),
+                }
+                rustix::fs::openat(&at, part, flags | OFlags::NOFOLLOW, Mode::empty())?
+            }
+            opened => opened?,
+        };
+        if FileType::from_raw_mode(rustix::fs::fstat(&next)?.st_mode) != FileType::Directory {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a part of the path is a link",
+            ));
+        }
+        at = next;
+    }
+    Ok(at)
 }
 
 /// The text of the small file at `path`, if it's a regular file, not a
@@ -72,8 +150,9 @@ pub(crate) fn read_small(path: &Path, most: u64) -> Option<String> {
 }
 
 /// The whole lines in the first `most` bytes of the file at `path`, as
-/// [`open`] opens it with `links`, if it's a regular file: a line cut
-/// short by `most` is left out, and bytes that aren't UTF-8 are read as
+/// [`open`] opens it with `links`, if it's a regular file: a line whose
+/// text runs past `most` is left out (one whose text ends there, its line
+/// break just after, isn't), and bytes that aren't UTF-8 are read as
 /// U+FFFD, so the rest of the file still counts. For files of lines a
 /// folder from anyone may hold, such as ignore files, which git reads as
 /// bytes.
@@ -85,10 +164,7 @@ pub(crate) fn read_lines(path: &Path, links: Links, most: u64) -> Option<String>
         .ok()?;
     if bytes.len() as u64 > most {
         // More than `most`: up to its last whole line.
-        let end = bytes[..bytes.len() - 1]
-            .iter()
-            .rposition(|&byte| byte == b'\n')
-            .map_or(0, |at| at + 1);
+        let end = (bytes.iter().rposition(|&byte| byte == b'\n')).map_or(0, |at| at + 1);
         bytes.truncate(end);
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -131,6 +207,38 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_below_is_reached_only_without_links_and_made_if_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.join("out")).unwrap();
+        std::os::unix::fs::symlink(root.join("a"), root.join("in")).unwrap();
+        assert!(dir_below(&root, Path::new("a/b"), false).is_ok());
+        assert!(dir_below(&root, Path::new(""), false).is_ok());
+        // A link, even to a folder within, or up and out: never.
+        for below in ["out", "out/x", "in/b", "a/../out", "../root/a"] {
+            assert!(dir_below(&root, Path::new(below), true).is_err(), "{below}");
+        }
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+        // Made, a part at a time, where it isn't there.
+        assert_eq!(
+            dir_below(&root, Path::new("a/new/deeper"), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let made = dir_below(&root, Path::new("a/new/deeper"), true).unwrap();
+        assert!(root.join("a/new/deeper").is_dir());
+        // What's open is that folder, wherever its name goes after.
+        std::fs::rename(root.join("a"), root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.join("a")).unwrap();
+        rustix::fs::mkdirat(&made, "here", Mode::from_raw_mode(0o700)).unwrap();
+        assert!(root.join("moved/new/deeper/here").is_dir());
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn a_device_is_never_opened() {
         // Refused for what it is, before it's opened: opened, the
         // terminal would fail with no controlling one, or be one.
@@ -152,6 +260,11 @@ mod tests {
         );
         // Cut short within `three`: up to the line before.
         assert_eq!(read(12).as_deref(), Some("one\n\u{fffd}\u{fffd} two\n"));
+        // Its text just within, its line break just past the most.
+        assert_eq!(
+            read(16).as_deref(),
+            Some("one\n\u{fffd}\u{fffd} two\nthree\n")
+        );
         // Just after it.
         assert_eq!(
             read(17).as_deref(),

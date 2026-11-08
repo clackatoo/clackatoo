@@ -7,11 +7,12 @@
 //! has changed the file since it was read or last written, unless forced.
 
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Range;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
@@ -286,11 +287,21 @@ impl Buffer {
     /// Opens the file at `path`, which is absolute, or a buffer for a new
     /// one there if there's none. Paths opened beside it are from `dir`.
     pub(crate) fn open(path: PathBuf, dir: PathBuf) -> Result<Self, Error> {
+        let read = read(&path);
+        Self::opened(path, dir, read)
+    }
+
+    /// As [`open`](Self::open), its file `read` already.
+    pub(crate) fn opened(
+        path: PathBuf,
+        dir: PathBuf,
+        read: io::Result<(String, DiskStamp)>,
+    ) -> Result<Self, Error> {
         let failed = |reason: String| Error::OpenFailed {
             path: path.display().to_string(),
             reason,
         };
-        let (text, disk) = match read(&path) {
+        let (text, disk) = match read {
             Ok((text, disk)) => (text, Some(disk)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => (String::new(), None),
             Err(err) if err.kind() == io::ErrorKind::IsADirectory => {
@@ -597,6 +608,47 @@ impl Buffer {
         Ok(())
     }
 
+    /// As [`write_out`](Self::write_out) unforced, the file reached as its
+    /// name in the directory open as `dir`, which links in its path can't
+    /// lead elsewhere, nor one at its name: an agent's write through the
+    /// daemon (see [`regular::dir_below`]).
+    pub(crate) fn write_out_at(&mut self, dir: &OwnedFd, text: Rope) -> Result<(), Error> {
+        let failed = |err: io::Error| Error::SaveFailed {
+            path: self.path.display().to_string(),
+            reason: err.to_string(),
+        };
+        let name = self.path.file_name().map(Path::new).ok_or_else(|| {
+            failed(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "that's no file's path",
+            ))
+        })?;
+        let stamp_now = || -> io::Result<Option<DiskStamp>> {
+            match regular::open_at(dir, name, Links::Refuse) {
+                Ok(file) => Ok(Some(DiskStamp::of(&file.metadata()?))),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err),
+            }
+        };
+        if stamp_now().map_err(failed)? != self.disk {
+            return Err(Error::ChangedOnDisk(self.path.display().to_string()));
+        }
+        let crlf = regular::open_at(dir, name, Links::Refuse).is_ok_and(crlf_in);
+        let written = if crlf {
+            Rope::from_str(&text.to_string().replace('\n', "\r\n"))
+        } else {
+            text.clone()
+        };
+        let staged =
+            stage_at(dir.try_clone().map_err(failed)?, &self.path, &written).map_err(failed)?;
+        if stamp_now().map_err(failed)? != self.disk {
+            return Err(Error::ChangedOnDisk(self.path.display().to_string()));
+        }
+        let stamp = staged.commit().map_err(failed)?;
+        self.written(text, Some(stamp));
+        Ok(())
+    }
+
     /// Writes `text` beside the file, to be put in its place, unless
     /// something else has changed the file since it was read or last
     /// written and not `force`. Once it is, [`written`](Self::written)
@@ -774,6 +826,21 @@ impl Buffer {
         author: Author,
         step: bool,
     ) -> Result<Option<Made>, Refused> {
+        self.write_merged_with(base, content, author, step, |buffer, text| {
+            buffer.write_out(text, false)
+        })
+    }
+
+    /// As [`write_merged`](Self::write_merged), the file's new text written
+    /// by `write`.
+    pub(crate) fn write_merged_with(
+        &mut self,
+        base: &str,
+        content: &str,
+        author: Author,
+        step: bool,
+        write: impl FnOnce(&mut Self, Rope) -> Result<(), Error>,
+    ) -> Result<Option<Made>, Refused> {
         let path = self.path.display().to_string();
         let failed = |reason: String| {
             Refused::Failed(Error::SaveFailed {
@@ -800,8 +867,7 @@ impl Buffer {
             let written = to_file
                 .apply_to(&saved)
                 .map_err(|err| failed(err.to_string()))?;
-            self.write_out(Rope::from_str(&written), false)
-                .map_err(Refused::Failed)?;
+            write(self, Rope::from_str(&written)).map_err(Refused::Failed)?;
         }
         if edit.is_noop() {
             return Ok(None);
@@ -971,9 +1037,12 @@ pub(crate) fn lf(text: String) -> String {
 /// says. One that doesn't exist, or has one line, or isn't a regular file,
 /// doesn't.
 fn crlf(path: &Path) -> bool {
-    let Ok(file) = regular::open(path, Links::Follow) else {
-        return false;
-    };
+    regular::open(path, Links::Follow).is_ok_and(crlf_in)
+}
+
+/// Whether the file open as `file` ends its lines with CRLF, as [`crlf`]
+/// tells.
+fn crlf_in(file: File) -> bool {
     let mut start = Vec::new();
     if file.take(64 * 1024).read_to_end(&mut start).is_err() {
         return false;
@@ -998,7 +1067,11 @@ const MAX_SAID_EMPTY: u64 = 4 * 1024 * 1024;
 /// one swapped in for the file just before, and a device could go on for
 /// ever.
 pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
-    let mut file = regular::open(path, Links::Follow)?;
+    read_file(regular::open(path, Links::Follow)?)
+}
+
+/// Reads the regular file open as `file`, as [`read`] reads one.
+pub(crate) fn read_file(mut file: File) -> io::Result<(String, DiskStamp)> {
     let metadata = file.metadata()?;
     if metadata.len() > MAX_FILE {
         return Err(io::ErrorKind::FileTooLarge.into());
@@ -1023,10 +1096,14 @@ pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
 /// removed, so a thread that panics leaves none behind.
 #[derive(Debug)]
 pub(crate) struct Staged {
+    /// The new file: its path, or with `dir`, its name there.
     temporary: PathBuf,
     path: PathBuf,
     /// The new file as written, which renaming it doesn't change.
     stamp: DiskStamp,
+    /// The directory open that both files are named in, if they're
+    /// reached so (see [`stage_at`]).
+    dir: Option<OwnedFd>,
 }
 
 /// A file's new text put in its place, with the old kept under another
@@ -1050,19 +1127,12 @@ const MOST_NAMES: usize = 16;
 /// is the file's with a random part after it, which no one else can make
 /// ahead of it, and another is tried if it's taken all the same.
 pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
-    stage_as(path, text, |name| {
-        use ring::rand::SecureRandom as _;
-        let mut random = [0; 8];
-        ring::rand::SystemRandom::new()
-            .fill(&mut random)
-            .map_err(|_| io::Error::other("the system's randomness can't be read"))?;
-        Ok(temporary_name(name, u64::from_le_bytes(random)))
-    })
+    stage_as(path, text, random_name)
 }
 
 /// The longest name a file can have, in bytes, as Linux's file systems
 /// have it (`NAME_MAX`).
-const NAME_MAX: usize = 255;
+pub(crate) const NAME_MAX: usize = 255;
 
 /// What the name of the file a new one is put in the place of ends with
 /// while it's kept (see [`Staged::place`]), after the new one's name.
@@ -1086,31 +1156,91 @@ fn temporary_name(name: &std::ffi::OsStr, random: u64) -> OsString {
 fn stage_as(
     path: &Path,
     text: &Rope,
+    named: impl FnMut(&std::ffi::OsStr) -> io::Result<OsString>,
+) -> io::Result<Staged> {
+    stage_in(None, path, text, named)
+}
+
+/// As [`stage`], the file reached as its name, `path`'s, in the directory
+/// open as `dir`, which links in its path can't lead elsewhere: an agent's
+/// write through the daemon (see [`regular::dir_below`]).
+pub(crate) fn stage_at(dir: OwnedFd, path: &Path, text: &Rope) -> io::Result<Staged> {
+    stage_in(Some(dir), path, text, random_name)
+}
+
+/// The name of the new file written beside the file called `name`, with a
+/// random part no one else can make ahead of it (see [`stage`]).
+fn random_name(name: &std::ffi::OsStr) -> io::Result<OsString> {
+    use ring::rand::SecureRandom as _;
+    let mut random = [0; 8];
+    ring::rand::SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| io::Error::other("the system's randomness can't be read"))?;
+    Ok(temporary_name(name, u64::from_le_bytes(random)))
+}
+
+/// As [`stage_as`], the files named in `dir` if it's given, or else by
+/// their paths.
+fn stage_in(
+    dir: Option<OwnedFd>,
+    path: &Path,
+    text: &Rope,
     mut named: impl FnMut(&std::ffi::OsStr) -> io::Result<OsString>,
 ) -> io::Result<Staged> {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+    let (Some(beside), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "that's no file's path",
         ));
     };
-    let permissions = match fs::metadata(path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err),
+    let permissions = match &dir {
+        None => match fs::metadata(path) {
+            Ok(metadata) => Some(metadata.permissions()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        },
+        // Only a regular file's, never followed.
+        Some(dir) => match rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat)
+                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::RegularFile =>
+            {
+                Some(fs::Permissions::from_mode(stat.st_mode & 0o7777))
+            }
+            Ok(_) => None,
+            Err(err) if err == rustix::io::Errno::NOENT => None,
+            Err(err) => return Err(err.into()),
+        },
     };
     // Only its owner's until it has the file's permissions; a new file's
     // are as any file made has them.
     let mode = if permissions.is_some() { 0o600 } else { 0o666 };
     let mut created = None;
     for _ in 0..MOST_NAMES {
-        let temporary = dir.join(named(name)?);
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .mode(mode)
-            .open(&temporary);
+        let temporary = named(name)?;
+        let opened = match &dir {
+            None => OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .mode(mode)
+                .open(beside.join(&temporary)),
+            Some(dir) => {
+                use rustix::fs::{Mode, OFlags};
+                let flags = OFlags::WRONLY
+                    | OFlags::CREATE
+                    | OFlags::EXCL
+                    | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC;
+                rustix::fs::openat(dir, &temporary, flags, Mode::from_raw_mode(mode))
+                    .map(File::from)
+                    .map_err(io::Error::from)
+            }
+        };
+        let temporary = match &dir {
+            None => beside.join(temporary),
+            Some(_) => PathBuf::from(temporary),
+        };
         match opened {
             Ok(file) => {
                 created = Some((temporary, file));
@@ -1126,7 +1256,7 @@ fn stage_as(
             "every name tried for the new file beside it was taken",
         ));
     };
-    let written = (|| {
+    let written = (|| -> io::Result<DiskStamp> {
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
@@ -1136,18 +1266,21 @@ fn stage_as(
         file.sync_all()?;
         Ok(DiskStamp::of(&file.metadata()?))
     })();
-    match written {
-        Ok(stamp) => Ok(Staged {
-            temporary,
-            path: path.to_owned(),
-            stamp,
-        }),
-        Err(err) => {
-            // It's the one just made.
-            let _ = fs::remove_file(&temporary);
-            Err(err)
-        }
-    }
+    // Dropped, it's the one just made that's removed.
+    let mut staged = Staged {
+        temporary,
+        path: path.to_owned(),
+        stamp: DiskStamp {
+            seconds: 0,
+            nanoseconds: 0,
+            len: 0,
+            inode: 0,
+            device: 0,
+        },
+        dir,
+    };
+    staged.stamp = written?;
+    Ok(staged)
 }
 
 impl Staged {
@@ -1159,7 +1292,13 @@ impl Staged {
     /// Puts the new file in the old one's place. Returns the file as it is
     /// then: as it was written, as renaming changes nothing of it.
     pub(crate) fn commit(mut self) -> io::Result<DiskStamp> {
-        fs::rename(&self.temporary, &self.path)?;
+        match &self.dir {
+            None => fs::rename(&self.temporary, &self.path)?,
+            Some(dir) => {
+                let name = self.path.file_name().unwrap_or_default();
+                rustix::fs::renameat(dir, &self.temporary, dir, name)?;
+            }
+        }
         self.temporary.clear();
         Ok(self.stamp)
     }
@@ -1169,6 +1308,12 @@ impl Staged {
     /// or, where links can't be made, by moving it aside. Each step is a
     /// rename or a link, and so quick, with nothing to sync.
     pub(crate) fn place(mut self) -> io::Result<Placed> {
+        if self.dir.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a file staged in a folder open is only committed",
+            ));
+        }
         let mut kept = self.temporary.clone().into_os_string();
         kept.push(KEPT);
         let kept = PathBuf::from(kept);
@@ -1204,8 +1349,16 @@ impl Staged {
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        if !self.temporary.as_os_str().is_empty() {
-            let _ = fs::remove_file(&self.temporary);
+        if self.temporary.as_os_str().is_empty() {
+            return;
+        }
+        match &self.dir {
+            None => {
+                let _ = fs::remove_file(&self.temporary);
+            }
+            Some(dir) => {
+                let _ = rustix::fs::unlinkat(dir, &self.temporary, rustix::fs::AtFlags::empty());
+            }
         }
     }
 }
@@ -1354,6 +1507,37 @@ mod tests {
         assert!(!super::links_refused(&io::Error::from(
             io::ErrorKind::StorageFull
         )));
+    }
+
+    #[test]
+    fn a_file_reached_by_its_folder_open_is_written_there_whatever_its_path_becomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.txt"), "old\r\n").unwrap();
+        let path = root.join("sub/a.txt");
+        let at = crate::regular::dir_below(root, Path::new("sub"), false).unwrap();
+        let read = crate::regular::open_at(&at, Path::new("a.txt"), Links::Refuse)
+            .and_then(super::read_file);
+        let mut buffer = Buffer::opened(path, root.join("sub"), read).unwrap();
+        // The folder's path now leads elsewhere.
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::rename(root.join("sub"), root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.join("sub")).unwrap();
+        buffer.write_out_at(&at, Rope::from_str("new\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("moved/a.txt")).unwrap(),
+            "new\r\n",
+            "with its line ends"
+        );
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(root.join("moved")).unwrap().count(), 1);
+        // Changed meanwhile, it isn't written over.
+        std::fs::write(root.join("moved/a.txt"), "someone's\n").unwrap();
+        let err = buffer
+            .write_out_at(&at, Rope::from_str("newer\n"))
+            .unwrap_err();
+        assert!(matches!(err, Error::ChangedOnDisk(_)), "{err:?}");
     }
 
     #[test]

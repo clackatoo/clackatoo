@@ -43,6 +43,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::os::fd::OwnedFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +59,7 @@ use super::settling::{Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, DiskStamp, Made, Prepared, PreparedStep, Refused, Unprepared};
 use crate::chat::{RawDiff, TurnUid, Wrote};
+use crate::regular::{self, Links};
 
 /// How many files' text, as agents last read them, are kept, to merge
 /// their writes against. A write to a file whose read has been forgotten
@@ -372,14 +374,17 @@ impl Daemon {
         session: &str,
         path: &Path,
     ) -> Result<(TerminalId, PathBuf, Rope), (i64, String)> {
-        let (chat, path) = self.agent_path(name, session, path)?;
+        let (chat, path, root) = self.agent_path(name, session, path)?;
         // As the agent's changes before have left it.
         self.settle_pending(&path);
         if let Some(id) = self.buffer_of(&path) {
             let text = self.buffers[&id].buffer.text().clone();
             return Ok((chat, path, text));
         }
-        match buffer::read(&path) {
+        let read = within(&root, &path, false).and_then(|(dir, name)| {
+            buffer::read_file(regular::open_at(&dir, &name, Links::Refuse)?)
+        });
+        match read {
             Ok((text, _)) => Ok((chat, path, Rope::from_str(&buffer::lf(text)))),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Err((NOT_FOUND, format!("{} doesn't exist", path.display())))
@@ -408,7 +413,7 @@ impl Daemon {
         path: &Path,
         content: &str,
     ) -> Result<(), (i64, String)> {
-        let (chat, path) = self.agent_path(name, session, path)?;
+        let (chat, path, root) = self.agent_path(name, session, path)?;
         // What was done to it before is taken in first.
         self.settle_pending(&path);
         if self
@@ -456,20 +461,23 @@ impl Daemon {
             self.saved_in_server(id);
         } else {
             // A file not open is changed as a buffer opened for the moment,
-            // so it's written as saving writes, safely.
-            if let Some(dir) = path.parent()
-                && !dir.exists()
-            {
-                std::fs::create_dir_all(dir)
-                    .map_err(|err| (FAILED, format!("{}: {err}", dir.display())))?;
-            }
+            // so it's written as saving writes, safely: reached from the
+            // project's root, its folders made, never through a link.
+            let failed = |err: std::io::Error| (FAILED, format!("{}: {err}", path.display()));
+            let (at, name) = within(&root, &path, true).map_err(failed)?;
+            let opened = match regular::open_at(&at, &name, Links::Refuse) {
+                Ok(opened) => buffer::read_file(opened),
+                Err(err) => Err(err),
+            };
             let dir = path.parent().unwrap_or(&path).to_owned();
-            let mut file =
-                Buffer::open(path.clone(), dir).map_err(|err| (FAILED, err.to_string()))?;
+            let mut file = Buffer::opened(path.clone(), dir, opened)
+                .map_err(|err| (FAILED, err.to_string()))?;
             let base = read.unwrap_or_else(|| file.saved().to_string());
             let before = file.disk().is_some().then(|| file.saved().to_string());
-            file.write_merged(&base, &content, author, true)
-                .map_err(|err| refused(err, &base))?;
+            file.write_merged_with(&base, &content, author, true, |file, text| {
+                file.write_out_at(&at, text)
+            })
+            .map_err(|err| refused(err, &base))?;
             let after = file.saved().to_string();
             let dropped =
                 (self.agent_files.log).note_text(&maker, &path, before.as_deref(), Some(&after));
@@ -1390,13 +1398,14 @@ impl Daemon {
 
     /// The chat with `session`, and `path` as a buffer's path would be,
     /// if the chat's agent may read and write it: it's under the chat's
-    /// working directory, or the git worktree that's in.
+    /// working directory, or the git worktree that's in, which is given
+    /// too.
     fn agent_path(
         &mut self,
         name: &str,
         session: &str,
         path: &Path,
-    ) -> Result<(TerminalId, PathBuf), (i64, String)> {
+    ) -> Result<(TerminalId, PathBuf, PathBuf), (i64, String)> {
         let Some((chat, hosted)) = self.chat_in(name, session) else {
             return Err((FAILED, format!("there's no session {session}")));
         };
@@ -1426,7 +1435,7 @@ impl Daemon {
                 ),
             ));
         }
-        Ok((chat, path))
+        Ok((chat, path, root))
     }
 
     /// Sends the agent the answer to its request about a file.
@@ -1447,6 +1456,19 @@ impl Daemon {
 /// so it never takes in a repository the cache happens to be in.
 pub(super) fn agent_root(cwd: &Path) -> PathBuf {
     root_below(cwd, cache_dir().as_deref())
+}
+
+/// The directory `path` is in, below `root`, which it starts with, open
+/// as [`regular::dir_below`] opens it, made if `make` and it isn't there,
+/// and the file's name in it.
+fn within(root: &Path, path: &Path, make: bool) -> std::io::Result<(OwnedFd, PathBuf)> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    Ok((regular::dir_below(root, below, make)?, PathBuf::from(name)))
 }
 
 /// `path`, an absolute one, as it really is: the deepest part of it that's

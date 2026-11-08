@@ -468,6 +468,28 @@ fn a_copy_never_takes_away_what_had_the_name_it_tried() {
 }
 
 #[test]
+fn a_file_whose_name_is_as_long_as_a_name_can_be_is_copied() {
+    let (_held, dir) = temp();
+    let long = "n".repeat(crate::buffer::NAME_MAX);
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    op(copying(&dir, "a.txt", &long, false)).unwrap();
+    assert_eq!(fs::read_to_string(dir.join(&long)).unwrap(), "a");
+    let beside = beside(&dir.join(&long), 0);
+    assert!(beside.file_name().unwrap().len() <= crate::buffer::NAME_MAX);
+    let short = beside_name(&dir.join("a.txt"));
+    assert!(short.starts_with(".a.txt.clackatoo-"), "{short}");
+}
+
+/// The name [`beside`] gives a copy on its way to `to`.
+fn beside_name(to: &Path) -> String {
+    beside(to, 0)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
 fn a_file_is_written_over_only_as_it_was_when_it_was_described() {
     let (_held, dir) = temp();
     let dir = &dir;

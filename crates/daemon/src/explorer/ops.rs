@@ -475,18 +475,22 @@ fn copy_in_place_named(
     )))
 }
 
-/// The `attempt`th name beside `to`, for a copy on its way there.
+/// The `attempt`th name beside `to`, for a copy on its way there: its own
+/// name in it, as it is, unless that would make it longer than a name can
+/// be (see [`crate::buffer::NAME_MAX`]).
 fn beside(to: &Path, attempt: u32) -> PathBuf {
-    let name = to
-        .file_name()
-        .map_or_else(Default::default, |name| name.to_string_lossy());
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
-    to.with_file_name(format!(
-        ".{name}.clackatoo-{}-{nanos}-{attempt}",
-        std::process::id()
-    ))
+    let ours = format!(".clackatoo-{}-{nanos}-{attempt}", std::process::id());
+    let name = to.file_name().unwrap_or_default();
+    let mut beside = OsString::new();
+    if 1 + name.len() + ours.len() <= crate::buffer::NAME_MAX {
+        beside.push(".");
+        beside.push(name);
+    }
+    beside.push(ours);
+    to.with_file_name(beside)
 }
 
 /// Something to copy: what's called `name` in the directory `dir`, which
