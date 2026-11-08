@@ -250,6 +250,9 @@ pub struct LinkConfig {
 pub struct Lies {
     /// Its QUIC certificate comes unsigned, whatever protocol it speaks.
     pub unsigned: bool,
+    /// It signs its QUIC certificate, with its own key, as the machine its
+    /// workspaces say it is, while they lie.
+    pub forges: bool,
     /// Where a test sets the machine its workspaces say it is, from the
     /// next time they're told on, while that's set. `None` in use, so
     /// nothing is looked at as they're told.
@@ -273,7 +276,7 @@ impl PartialEq for Lies {
             (Some(one), Some(other)) => std::sync::Arc::ptr_eq(one, other),
             (one, other) => one.is_none() && other.is_none(),
         };
-        self.unsigned == other.unsigned && says
+        self.unsigned == other.unsigned && self.forges == other.forges && says
     }
 }
 

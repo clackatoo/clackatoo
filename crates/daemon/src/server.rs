@@ -4140,7 +4140,14 @@ impl Daemon {
             });
         }
         client.carrying = true;
-        let signer_as = client.carrier_as.unwrap_or(self.machine.id);
+        let mut signer_as = client.carrier_as.unwrap_or(self.machine.id);
+        // As a test's daemon lying about which machine it is.
+        if let Some(lies) = (self.config.links.as_ref()).map(|config| &config.lies)
+            && lies.forges
+            && let Some(said) = lies.said()
+        {
+            signer_as = said.id;
+        }
         let quic = self.quic.as_ref();
         let udp = self.udp.as_ref().and_then(|udp| udp.local_addr().ok());
         let certificate = quic

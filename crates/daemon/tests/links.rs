@@ -4379,12 +4379,19 @@ fn a_machine_passed_on_by_a_daemon_in_the_way_is_never_shown() {
 }
 
 /// What a daemon tells the daemons connecting to it that isn't so, for a
-/// test to set: its certificate unsigned if `unsigned`, and whatever
-/// [`say_its`] says.
-fn lying(unsigned: bool) -> Lies {
+/// test to set: what [`say_its`] says, and nothing else unless set.
+fn lying() -> Lies {
     Lies {
-        unsigned,
         says: Some(std::sync::Arc::default()),
+        ..Lies::default()
+    }
+}
+
+/// As [`lying`], its certificate unsigned too.
+fn unsigned() -> Lies {
+    Lies {
+        unsigned: true,
+        ..lying()
     }
 }
 
@@ -4425,7 +4432,7 @@ fn connection_now(client: &mut Client, host: &str) -> Option<Connection> {
 fn a_daemon_that_says_its_another_machine_once_connected_is_stopped() {
     let mut chain = Chain::new();
     going(&mut chain.window, "server", &["desk"]);
-    let lies = lying(false);
+    let lies = lying();
     let bad = start_lying(&chain.world, "bad", &lies);
     let own = bad.machine().id;
     connect(&mut chain.window, "bad");
@@ -4453,7 +4460,7 @@ fn a_daemon_that_says_its_another_machine_once_connected_is_stopped() {
 fn a_daemon_whose_key_disproves_what_it_says_leaves_the_machine_it_named_alone() {
     let mut chain = Chain::new();
     going(&mut chain.window, "server", &["desk"]);
-    let lies = lying(false);
+    let lies = lying();
     let bad = start_lying(&chain.world, "bad", &lies);
     say_its(&lies, chain.server.machine());
     connect(&mut chain.window, "bad");
@@ -4478,7 +4485,7 @@ fn a_daemon_whose_key_disproves_what_it_says_leaves_the_machine_it_named_alone()
 #[test]
 fn a_daemon_reached_straight_that_doesnt_sign_its_certificate_is_refused() {
     let world = World::new();
-    let lies = lying(true);
+    let lies = unsigned();
     let _bad = start_lying(&world, "bad", &lies);
     let laptop = world.start("laptop");
     let mut window = laptop.client();
@@ -4500,7 +4507,7 @@ fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_known_by_
     going(&mut window, "server", &[]);
     // Known by its key, but connected to no more.
     window.disconnect("server").unwrap();
-    let lies = lying(true);
+    let lies = unsigned();
     say_its(&lies, machine.clone());
     let _bad = start_lying(&world, "bad", &lies);
     connect(&mut window, "bad");
@@ -4539,16 +4546,152 @@ fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_asked_for
     let laptop = world.start_configured("laptop", true, at_94);
     let mut window = laptop.client();
     window.watch_connections(false).unwrap();
-    let lies = lying(true);
+    let lies = unsigned();
+    let id = machine.id.to_string();
     say_its(&lies, machine);
     let _bad = start_lying(&world, "bad", &lies);
+    let known = std::fs::read_to_string(world.host("laptop").join("known_machines"));
+    assert!(!known.unwrap_or_default().contains(&id), "known by its key");
     connect(&mut window, "bad");
     let why = stopped_for(&mut window, "bad");
-    assert!(why.contains("‘server’"), "{why}");
+    assert!(
+        why.contains("it's the machine ‘server’ reaches already"),
+        "{why}"
+    );
     // Server, once it can be reached, is.
     world.down("server", false);
     going(&mut window, "server", &[]);
     drop(server);
+}
+
+#[test]
+fn a_daemon_signing_as_a_machine_passed_on_with_another_key_never_takes_its_place() {
+    let world = World::new();
+    let server = world.start("server");
+    let machine = server.machine();
+    let desk = world.start("desk");
+    let mut at_desk = desk.client();
+    at_desk.watch_connections(false).unwrap();
+    connect(&mut at_desk, "server");
+    going(&mut at_desk, "server", &[]);
+    // Desk passes server on still, vouching for its key, but can't reach
+    // it now: laptop never learns server's key itself.
+    world.down("server", true);
+    drop(server);
+    wait_for_state(&mut at_desk, "server", |state| !connected(state));
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    going(&mut window, "desk", &[]);
+    wait_for_state(&mut window, "server", |state| !connected(state));
+    // Bad signs as server, with its own key.
+    let lies = Lies {
+        forges: true,
+        ..lying()
+    };
+    say_its(&lies, machine);
+    let _bad = start_lying(&world, "bad", &lies);
+    connect(&mut window, "bad");
+    let why = stopped_for(&mut window, "bad");
+    assert!(
+        why.contains("the machines passing it on know it by"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_daemon_that_comes_back_as_another_machine_is_taken_only_once_asked_for_again() {
+    let world = World::new();
+    let lies = Lies {
+        forges: true,
+        ..lying()
+    };
+    let bad = start_lying(&world, "bad", &lies);
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "bad");
+    going(&mut window, "bad", &[]);
+    // It comes back as a machine never met, signing as it.
+    let other = clackatoo_protocol::Machine {
+        id: MachineId([0x0b; 16]),
+        name: "other".into(),
+        run: 7,
+    };
+    say_its(&lies, other.clone());
+    drop(bad);
+    let bad = start_lying(&world, "bad", &lies);
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("reached before"), "{why}");
+    // Nor is its key kept as that machine's.
+    let forget = Request::Forget {
+        host: other.id.to_string(),
+    };
+    let Response::Text(said) = window.request(&forget).unwrap() else {
+        panic!("not answered");
+    };
+    assert!(said.contains("no key was known"), "{said}");
+    // Asked for again, it's taken, and known by its key, which is
+    // forgotten by the machine's ID.
+    connect(&mut window, "bad");
+    let link = going(&mut window, "bad", &[]);
+    assert_eq!(link.machine.map(|machine| machine.id), Some(other.id));
+    let Response::Text(said) = window.request(&forget).unwrap() else {
+        panic!("not answered");
+    };
+    assert!(said.contains("forgot"), "{said}");
+    drop(bad);
+}
+
+#[test]
+fn a_machine_that_proves_itself_takes_the_place_of_one_that_only_said_it_was_it() {
+    let world = World::new();
+    let server = world.start("server");
+    let machine = server.machine();
+    let laptop = world.start_configured("laptop", false, at_94);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    let lies = unsigned();
+    say_its(&lies, machine.clone());
+    let _bad = start_lying(&world, "bad", &lies);
+    // Said first, while nothing here knows server, it's taken.
+    connect(&mut window, "bad");
+    let taken = going(&mut window, "bad", &[]);
+    assert_eq!(taken.machine.map(|machine| machine.id), Some(machine.id));
+    // Server, proving it's that machine, takes its place.
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("proved"), "{why}");
+    let stopped = connection_now(&mut window, "bad").unwrap();
+    assert_eq!(stopped.machine, None, "{stopped:?}");
+    drop(server);
+}
+
+#[test]
+fn a_daemon_too_old_to_prove_itself_never_takes_the_place_of_a_machine_connected_to_this_one() {
+    let world = World::new();
+    let laptop = world.start_configured("laptop", false, at_94);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    // A daemon relaying for clients of its own, connected to laptop.
+    let mut relaying = remote_client(&world, "laptop");
+    let id = MachineId([0x7e; 16]);
+    relay_as(&mut relaying, id);
+    let lies = unsigned();
+    say_its(
+        &lies,
+        clackatoo_protocol::Machine {
+            id,
+            name: "probe".into(),
+            run: 1,
+        },
+    );
+    let _bad = start_lying(&world, "bad", &lies);
+    connect(&mut window, "bad");
+    let why = stopped_for(&mut window, "bad");
+    assert!(why.contains("connected to this one"), "{why}");
 }
 
 #[test]

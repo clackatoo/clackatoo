@@ -22,13 +22,17 @@
 //! A machine passing others on vouches for their keys, so a daemon that
 //! isn't what it should be could have this one learn a key for machine
 //! after machine. At most [`MOST_KEYS`] are known: past it, a new key
-//! takes the place of the oldest only vouched for, and one met straight
-//! is never forgotten to make room. So the file never grows past
+//! takes the place of the one only vouched for that was learned or used
+//! longest ago, but for the keys of the machines the daemon is connected
+//! to, is passed on or keeps a connection to (see
+//! [`in_use`](Known::in_use)), and one met straight is never forgotten to
+//! make room. (How many keys one daemon may vouch for in a while is the
+//! daemon's to limit, as it knows which vouched.) So the file never grows past
 //! [`MAX_FILE`]; one bigger, as an older build without the cap could
 //! write, is read all the same, its keys met kept and the newest vouched
 //! for, never set aside for its size.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -78,24 +82,30 @@ pub(crate) struct Known {
     unwritten: Arc<AtomicBool>,
 }
 
-/// The keys known, each with when it was learned, counted.
+/// The keys known, each with when it was learned or last used, counted.
 #[derive(Debug, Default)]
 struct Keys {
     pins: BTreeMap<MachineId, (Pin, u64)>,
-    /// What the next key learned is counted as.
+    /// What the next key learned or used is counted as.
     learned: u64,
+    /// The machines whose keys aren't forgotten to make room, as they're
+    /// in use.
+    in_use: BTreeSet<MachineId>,
 }
 
 impl Keys {
     /// Knows `machine` by `pin`, unless it knows it already and not
     /// `replace`, making room for it if it must: returns whether that
-    /// changed what's known.
+    /// changed what's known. Replacing counts as using it.
     fn learn(&mut self, machine: MachineId, pin: Pin, replace: bool) -> bool {
-        if let Some((known, _)) = self.pins.get_mut(&machine) {
-            let changed = replace && *known != pin;
-            if changed {
-                *known = pin;
+        if let Some((known, learned)) = self.pins.get_mut(&machine) {
+            if !replace {
+                return false;
             }
+            *learned = self.learned;
+            self.learned += 1;
+            let changed = *known != pin;
+            *known = pin;
             return changed;
         }
         if self.pins.len() >= MOST_KEYS && !self.make_room() {
@@ -110,11 +120,11 @@ impl Keys {
         true
     }
 
-    /// Forgets the oldest key only vouched for, returning whether there
-    /// was one.
+    /// Forgets the key only vouched for, and not in use, that was learned
+    /// or used longest ago, returning whether there was one.
     fn make_room(&mut self) -> bool {
         let oldest = (self.pins.iter())
-            .filter(|(_, (pin, _))| !pin.met)
+            .filter(|(machine, (pin, _))| !pin.met && !self.in_use.contains(machine))
             .min_by_key(|(_, (_, learned))| *learned)
             .map(|(&machine, _)| machine);
         let Some(oldest) = oldest else {
@@ -190,9 +200,10 @@ impl Known {
         self.keys().all()
     }
 
-    /// Knows `machine` by `pin` from now on, keeping it, and returns
-    /// whether that's new: past [`MOST_KEYS`], in place of the oldest
-    /// only vouched for, or not at all if every one known was met.
+    /// Knows `machine` by `pin` from now on, keeping it, as just used, and
+    /// returns whether that's new: past [`MOST_KEYS`], in place of one
+    /// only vouched for (see the module docs), or not at all if every one
+    /// known was met or is in use.
     pub(crate) fn insert(&self, machine: MachineId, pin: Pin) -> bool {
         let new = self.keys().learn(machine, pin, true);
         if new {
@@ -216,6 +227,13 @@ impl Known {
         if new {
             self.keep();
         }
+    }
+
+    /// Notes that the keys of `machines` are in use, as the machines the
+    /// daemon is connected to, passes on or keeps connections to: none of
+    /// them is forgotten to make room.
+    pub(crate) fn in_use(&self, machines: BTreeSet<MachineId>) {
+        self.keys().in_use = machines;
     }
 
     /// Forgets the key `machine` is known by, and returns whether it was.
@@ -495,6 +513,33 @@ mod tests {
         handed.learn((0..MOST_KEYS * 2).map(|n| nth(n, n == 0)));
         assert_eq!(handed.all().len(), MOST_KEYS);
         assert!(handed.get(nth(0, true).0).is_some());
+    }
+
+    #[test]
+    fn keys_in_use_or_used_lately_are_never_forgotten_for_room() {
+        let known = Known::load(None);
+        for n in 0..MOST_KEYS {
+            let (machine, pin) = nth(n, false);
+            assert!(known.insert(machine, pin));
+        }
+        // The oldest two: one passed on now, one just used again.
+        let (passed, used) = (nth(0, false), nth(1, false));
+        known.in_use(BTreeSet::from([passed.0]));
+        assert!(!known.insert(used.0, used.1), "nothing new");
+        // Vouched for, one machine after another, as many again.
+        for n in MOST_KEYS..MOST_KEYS * 2 {
+            let (machine, pin) = nth(n, false);
+            assert!(known.insert(machine, pin));
+        }
+        assert_eq!(known.get(passed.0), Some(passed.1));
+        assert_eq!(known.get(nth(2, false).0), None);
+        // Used again, it went after every one learned before that, and
+        // before those learned since.
+        assert_eq!(known.get(nth(MOST_KEYS - 1, false).0), None);
+        assert_eq!(known.get(used.0), None);
+        assert_eq!(known.get(nth(MOST_KEYS, false).0), None);
+        assert!(known.get(nth(MOST_KEYS + 1, false).0).is_some());
+        assert_eq!(known.all().len(), MOST_KEYS);
     }
 
     #[test]

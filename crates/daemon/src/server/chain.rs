@@ -119,7 +119,10 @@ impl Daemon {
     /// Answers [`Request::Forget`](clackatoo_protocol::Request::Forget)
     /// from the client at `token`: forgets the identity key the machine of
     /// the connection to `host` is known by, and tries that connection
-    /// again at once if it was stopped, as by a key it didn't know.
+    /// again at once if it was stopped, as by a key it didn't know. That's
+    /// the machine it last proved it was, or was expected to be, never one
+    /// it only said it was. With no connection by that name, `host` may be
+    /// the machine's ID.
     pub(super) fn serve_forget(&mut self, token: Token, host: &str) -> Result<Response, Error> {
         // Only this machine's own clients: a device on the web app, or a
         // daemon relaying, never.
@@ -133,12 +136,24 @@ impl Daemon {
             ));
         }
         let Some(at) = self.links.find(host) else {
+            // A machine known by its key, by its ID, with no connection.
+            if let Ok(machine) = host.parse::<MachineId>() {
+                let forgot = self.links.forget_pin(machine);
+                if forgot {
+                    log::info!("{machine}'s identity key is forgotten, as asked");
+                }
+                return Ok(Response::Text(if forgot {
+                    format!("forgot {machine}'s identity key")
+                } else {
+                    format!("no key was known for {machine}")
+                }));
+            }
             return Err(Error::Other(format!(
                 "there's no connection to ‘{}’",
                 host.escape_debug()
             )));
         };
-        let Some(machine) = self.links.list[at].machine_id() else {
+        let Some(machine) = self.links.list[at].proved_id() else {
             return Ok(Response::Text(format!(
                 "‘{host}’ hasn't been reached yet: no key is known for it"
             )));
@@ -228,6 +243,7 @@ impl Daemon {
         }
         let own = self.machine.id;
         let offered = self.offered();
+        self.pins_in_use();
         // Those passed on no more, or reached another way, are ended at the
         // end of the turn, once nothing holds places in the list.
         let unpassed = self.unpassed(&offered);
@@ -236,7 +252,9 @@ impl Daemon {
         }
         // Those newly passed on.
         for (&machine, offers) in &offered {
-            if machine == own || self.links.to(machine).is_some() {
+            // One that only said it's that machine gives way to it, once
+            // it proves it is (see `displace_unproved`).
+            if machine == own || self.links.proved_to(machine).is_some() {
                 continue;
             }
             let host = self.unique_host(&offers[0].1.name);
@@ -308,10 +326,12 @@ impl Daemon {
                 let Some(machine) = linked.machine_id() else {
                     return true;
                 };
+                // Never for one that only said it's that machine.
                 let other = (list.iter().enumerate()).any(|(other, linked)| {
                     other != at
                         && linked.machine_id() == Some(machine)
                         && (linked.asked || other < at)
+                        && !linked.unproved
                 });
                 machine == own || other || !offered.contains_key(&machine)
             })
@@ -457,6 +477,17 @@ impl Daemon {
     /// connection at `at`.
     pub(super) fn passed_to_here(&self, at: usize) -> bool {
         (self.links.list[at].machine_id()).is_some_and(|machine| self.passed_here(at, machine))
+    }
+
+    /// Whether a daemon connected to this one, but for that of the
+    /// connection at `at`, passes `machine` on, vouching for `key` as the
+    /// key it knows it by.
+    pub(super) fn vouched_here(&self, at: usize, machine: MachineId, key: [u8; 32]) -> bool {
+        (self.links.list.iter().enumerate()).any(|(other, linked)| {
+            other != at
+                && (linked.passed.iter())
+                    .any(|passed| passed.id == machine && passed.key == Some(key))
+        })
     }
 
     /// Whether a daemon connected to this one, but for that of the
