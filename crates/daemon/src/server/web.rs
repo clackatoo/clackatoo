@@ -18,11 +18,12 @@ use super::{Broadcast, Client, Daemon, Link, Source, WEB};
 use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web};
 
 /// The most HTTP connections open at once, WebSocket connections apart:
-/// past it, a new one is closed at once.
+/// past it, the one open longest of those idle is closed for a new one,
+/// or if none is, the new one is.
 const MOST_CONNECTIONS: usize = 64;
 
-/// The most HTTP connections open at once from one address, TLS
-/// handshakes under way among them.
+/// The most HTTP connections open at once from one address (IPv6 by
+/// /64), TLS handshakes under way among them.
 const MOST_FROM_ONE: usize = 8;
 
 /// The most requests a connection has answered in one turn of the event
@@ -121,10 +122,10 @@ impl Daemon {
 
     /// Takes the web connections waiting.
     pub(super) fn accept_web(&mut self) {
-        let Some(web) = self.web.as_mut() else {
-            return;
-        };
         loop {
+            let Some(web) = self.web.as_mut() else {
+                return;
+            };
             let (stream, peer) = match web.listener.accept() {
                 Ok(accepted) => accepted,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -134,17 +135,22 @@ impl Daemon {
                     return;
                 }
             };
-            let (mut open, mut from_there) = (0, 0);
-            for token in &web.conns {
-                if let Some(Source::Web(conn)) = self.sources.get(token.0) {
-                    open += 1;
-                    from_there += usize::from(peer.ip().is_some() && conn.peer.ip() == peer.ip());
+            match self.room_for_web(peer) {
+                Ok(None) => {}
+                Ok(Some(oldest)) => {
+                    if let Some(Source::Web(conn)) = self.sources.get(oldest.0) {
+                        log::debug!("a web connection from {} closed to make room", conn.peer);
+                    }
+                    self.drop_web(oldest);
+                }
+                Err(why) => {
+                    log::warn!("a web connection from {peer} closed: {why}");
+                    continue;
                 }
             }
-            if open >= MOST_CONNECTIONS || from_there >= MOST_FROM_ONE {
-                log::warn!("a web connection from {peer} closed: too many are open");
-                continue;
-            }
+            let Some(web) = self.web.as_mut() else {
+                return;
+            };
             let transport = match web::Transport::new(stream, web.tls.as_ref()) {
                 Ok(transport) => transport,
                 Err(err) => {
@@ -169,6 +175,39 @@ impl Daemon {
             web.conns.push(token);
             entry.insert(Source::Web(Box::new(conn)));
         }
+    }
+
+    /// Whether there's room for another HTTP connection, from `peer`: with
+    /// the connection to close to make it, if it's made by closing one.
+    /// Past [`MOST_CONNECTIONS`], the one open longest of those idle goes,
+    /// so connections kept open by someone else can't keep the user's
+    /// phone out. Past [`MOST_FROM_ONE`] from its address, there's none.
+    fn room_for_web(&self, peer: web::Peer) -> Result<Option<Token>, &'static str> {
+        let Some(web) = self.web.as_ref() else {
+            return Err("the web app is off");
+        };
+        let group = peer.group();
+        let (mut open, mut from_there) = (0, 0);
+        let mut oldest: Option<(Instant, Token)> = None;
+        for &token in &web.conns {
+            let Some(Source::Web(conn)) = self.sources.get(token.0) else {
+                continue;
+            };
+            open += 1;
+            from_there += usize::from(group.is_some() && conn.peer.group() == group);
+            if conn.idle() && oldest.is_none_or(|(opened, _)| conn.opened() < opened) {
+                oldest = Some((conn.opened(), token));
+            }
+        }
+        if from_there >= MOST_FROM_ONE {
+            return Err("too many from its address are open");
+        }
+        if open < MOST_CONNECTIONS {
+            return Ok(None);
+        }
+        oldest
+            .map(|(_, token)| Some(token))
+            .ok_or("too many are open")
     }
 
     /// Reads what an HTTP connection sent, at most a turn's worth, answers

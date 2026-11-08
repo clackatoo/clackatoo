@@ -21,6 +21,7 @@ use clackatoo_protocol::TerminalId;
 use clackatoo_protocol::frame::FrameDecoder;
 use mio::{Interest, Registry, Token};
 
+use super::auth::Group;
 use super::http::{self, Parsed, Request, Response};
 use super::socket::{self, Frame, Stream, Transport};
 
@@ -78,6 +79,12 @@ impl Peer {
             Self::Tcp(address) => Some(address.ip()),
             Self::Local => None,
         }
+    }
+
+    /// What connections from it are counted under, if it's from the
+    /// network: IPv6 by /64.
+    pub(crate) fn group(self) -> Option<Group> {
+        self.ip().map(Group::of)
     }
 }
 
@@ -183,6 +190,19 @@ impl HttpConn {
             (Some(started), State::Reading) => self.until.min(started + self.head_wait),
             _ => self.until,
         }
+    }
+
+    /// When it opened.
+    pub(crate) fn opened(&self) -> Instant {
+        self.opened
+    }
+
+    /// Whether it may be closed to make room for another: nothing it
+    /// asked waits on the daemon, nor any answer on it. It's still shaking
+    /// hands, sitting between requests, or sending one, which it can send
+    /// again.
+    pub(crate) fn idle(&self) -> bool {
+        matches!(self.state, State::Reading) && self.output.is_empty() && !self.closing
     }
 
     /// Reads what's arrived, at most [`READ_BUDGET`] of it. A connection

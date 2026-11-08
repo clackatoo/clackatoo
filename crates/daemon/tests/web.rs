@@ -1406,6 +1406,65 @@ fn one_address_opens_only_so_many_connections() {
     assert!(!closed_within(&mut another, Duration::from_millis(300)));
 }
 
+/// A connection to `to` from `from`, one of this machine's loopback
+/// addresses: all of 127.0.0.0/8 is this machine's.
+fn connect_from(from: &str, to: SocketAddr) -> Conn {
+    use rustix::net::{AddressFamily, SocketType};
+    let socket = rustix::net::socket(AddressFamily::INET, SocketType::STREAM, None).unwrap();
+    let from = SocketAddr::new(from.parse().unwrap(), 0);
+    rustix::net::bind(&socket, &from).unwrap();
+    rustix::net::connect(&socket, &to).unwrap();
+    Conn::Tcp(TcpStream::from(socket))
+}
+
+/// A daemon reached straight from the network, over TLS, its web app's
+/// settings changed by `change`: with where it listens, the directory its
+/// certificate is in, to keep while it runs, and the certificate, to
+/// trust.
+fn public_daemon(
+    change: impl FnOnce(&mut WebConfig),
+) -> (
+    TestDaemon,
+    SocketAddr,
+    tempfile::TempDir,
+    rustls::pki_types::CertificateDer<'static>,
+) {
+    let pems = tempfile::tempdir().unwrap();
+    let (certificate, key, trusted) = make_certificate(pems.path());
+    let daemon = TestDaemon::start_with(|web| {
+        web.mode = WebMode::Public { certificate, key };
+        change(web);
+    });
+    let Target::Tcp(address) = daemon.web else {
+        panic!("public listens on the network");
+    };
+    (daemon, address, pems, trusted)
+}
+
+#[test]
+fn when_full_the_oldest_connection_idle_makes_room() {
+    let (_daemon, address, _pems, _) = public_daemon(|_| {});
+    // Eight from each of eight addresses, as many as may be open, each
+    // starting TLS's handshake and going no further.
+    let mut open: Vec<Conn> = Vec::new();
+    for host in 2..10 {
+        for _ in 0..8 {
+            open.push(connect_from(&format!("127.0.0.{host}"), address));
+        }
+        // In order, oldest first.
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    // The owner's phone still gets in, in place of the oldest.
+    let mut phone = connect_from("127.0.0.10", address);
+    assert!(
+        closed_within(&mut open[0], Duration::from_secs(2)),
+        "the oldest idle one made room"
+    );
+    assert!(!closed_within(&mut phone, Duration::from_millis(300)));
+    assert!(!closed_within(&mut open[63], Duration::from_millis(100)));
+}
+
 /// Sets where a request says, as `tailscale serve` does, it came from.
 fn forwarded_for(address: &str) -> impl FnOnce(&mut Vec<(String, String)>) + use<> {
     let address = address.to_owned();

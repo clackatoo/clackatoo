@@ -25,7 +25,7 @@
 //!   client can't use up everyone's.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use super::conn::Peer;
@@ -46,19 +46,37 @@ pub(super) const TRY_EVERY: Duration = Duration::from_mins(1);
 pub(super) const ALL_TRIES: u32 = 20;
 pub(super) const ALL_TRY_EVERY: Duration = Duration::from_secs(3);
 
-/// What tries from `ip` are counted under: the address itself for IPv4,
-/// and its /64 for IPv6, which one subscriber usually has whole, so
-/// hopping between its addresses gains nothing.
-pub(super) fn address_key(ip: IpAddr) -> String {
-    match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => {
-            if let Some(ip) = ip.to_ipv4_mapped() {
-                return ip.to_string();
-            }
-            let [a, b, c, d, ..] = ip.segments();
-            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+/// What tries and connections from an address are counted under: the
+/// address itself for IPv4, and its /64 for IPv6, which one subscriber
+/// usually has whole, so hopping between its addresses gains nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Group {
+    V4(Ipv4Addr),
+    /// The first four segments.
+    V6([u16; 4]),
+}
+
+impl Group {
+    /// What `ip` is counted under.
+    pub(crate) fn of(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(ip) => Self::V4(ip),
+            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+                Some(ip) => Self::V4(ip),
+                None => {
+                    let [a, b, c, d, ..] = ip.segments();
+                    Self::V6([a, b, c, d])
+                }
+            },
         }
+    }
+}
+
+/// What tries from `ip` are counted under, as a key (see [`Group`]).
+pub(super) fn address_key(ip: IpAddr) -> String {
+    match Group::of(ip) {
+        Group::V4(ip) => ip.to_string(),
+        Group::V6([a, b, c, d]) => format!("{a:x}:{b:x}:{c:x}:{d:x}::/64"),
     }
 }
 
@@ -422,6 +440,18 @@ mod tests {
         assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
         assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
         assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+    }
+
+    #[test]
+    fn connections_are_counted_by_address_and_ipv6_by_64() {
+        let peer = |ip: &str| Peer::Tcp(std::net::SocketAddr::new(ip.parse().unwrap(), 4000));
+        let group = |ip: &str| peer(ip).group();
+        assert_eq!(group("2001:db8:1:2::1"), group("2001:db8:1:2:ffff::9"));
+        assert_ne!(group("2001:db8:1:2::1"), group("2001:db8:1:3::1"));
+        assert_eq!(group("203.0.113.7"), group("::ffff:203.0.113.7"));
+        assert_ne!(group("203.0.113.7"), group("203.0.113.8"));
+        // Through Tailscale, nothing says who's who.
+        assert_eq!(Peer::Local.group(), None);
     }
 
     #[test]
