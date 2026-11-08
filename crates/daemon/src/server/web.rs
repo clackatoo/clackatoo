@@ -27,6 +27,16 @@ const MOST_CONNECTIONS: usize = 64;
 /// them.
 const MOST_FROM_ONE: usize = 8;
 
+/// The slots of [`MOST_CONNECTIONS`] kept for addresses and tailnet
+/// devices whose requests carried a device's token lately: the rest can't
+/// fill them.
+const KEPT_FOR_DEVICES: usize = 8;
+
+/// The most connections through the local socket that haven't yet said
+/// whom they're from: `tailscale serve` sends a request as soon as it
+/// connects, so these are few.
+const MOST_UNKNOWN: usize = 16;
+
 /// The most requests a connection has answered in one turn of the event
 /// loop: the rest wait for the next.
 const MOST_REQUESTS_AT_ONCE: usize = 16;
@@ -159,7 +169,10 @@ impl Daemon {
             let now = Instant::now();
             // Room first, so one refused for want of it costs its address
             // nothing.
-            let room = self.room_for_web(peer, now);
+            let favoured = (self.web.as_ref()).is_some_and(|web| {
+                (peer.group()).is_some_and(|group| web.favoured(&Who::Address(group), now))
+            });
+            let room = self.room_for_web(peer, favoured, now);
             let Some(web) = self.web.as_mut() else {
                 return;
             };
@@ -191,6 +204,7 @@ impl Daemon {
             let now = Instant::now();
             // Reached over HTTPS either way: TLS of its own, or Tailscale's.
             let mut conn = HttpConn::new(transport, peer, now, web.config.head_wait, true);
+            conn.favoured = favoured;
             let entry = self.sources.vacant_entry();
             let token = Token(entry.key());
             if let Err(err) =
@@ -224,26 +238,65 @@ impl Daemon {
     }
 
     /// Whether there's room at `now` for another HTTP connection, from
-    /// `peer`: with the connection to close to make it, if it's made by
-    /// closing one. Past [`MOST_FROM_ONE`] from its address, there's none.
-    /// Past [`MOST_CONNECTIONS`], one is closed from whoever has the most
-    /// open, never from one with only one: of theirs that may be closed
-    /// ([`HttpConn::evictable`]), the one open longest. So whoever holds
-    /// connections open can't keep out a device that holds few, short of
-    /// holding one each from every one of 64 addresses.
-    fn room_for_web(&self, peer: web::Peer, now: Instant) -> Result<Option<Token>, &'static str> {
+    /// `peer`, `favoured` if a request from there carried a device's token
+    /// lately: with the connection to close to make it, if it's made by
+    /// closing one. Past [`MOST_FROM_ONE`] from one address there's none.
+    ///
+    /// A device that holds a valid token is never kept out by those that
+    /// don't:
+    /// - Past [`MOST_CONNECTIONS`], or past all but [`KEPT_FOR_DEVICES`]
+    ///   for one not favoured, the one open longest of those that haven't
+    ///   authenticated is closed, however young or few: those whose
+    ///   requests wait on nothing first, then those waiting on a password
+    ///   or a window. One not favoured closes only one not favoured
+    ///   either, so the slots kept are kept.
+    /// - None is closed that authenticated while any that hasn't is open.
+    ///   When all have, a favoured one may close one from whoever has the
+    ///   most open, never from one with only one ([`HttpConn::evictable`]).
+    /// - Through Tailscale nothing says who a connection is from until its
+    ///   first request: past [`MOST_UNKNOWN`] of those, the one open
+    ///   longest is closed for another.
+    fn room_for_web(
+        &self,
+        peer: web::Peer,
+        favoured: bool,
+        now: Instant,
+    ) -> Result<Option<Token>, &'static str> {
         let Some(web) = self.web.as_ref() else {
             return Err("the web app is off");
         };
-        let who = peer.group().map(Who::Address);
-        let (mut open, mut from_there) = (0, 0);
+        let who = peer.group().map_or(Who::Unknown, Who::Address);
+        let (mut open, mut from_there, mut strangers, mut unknown) = (0, 0, 0, 0);
+        // Of those not authenticated, the one open longest: of strangers'
+        // waiting on nothing, of strangers' waiting on the daemon, of
+        // those favoured, and of those not yet known.
+        let mut oldest: [Option<(Instant, Token)>; 4] = [None; 4];
         let mut crowds: Vec<Crowd<'_>> = Vec::new();
         for &token in &web.conns {
             let Some(Source::Web(conn)) = self.sources.get(token.0) else {
                 continue;
             };
             open += 1;
-            from_there += usize::from(who.as_ref() == Some(&conn.who));
+            from_there += usize::from(who != Who::Unknown && conn.who == who);
+            let opened = conn.opened();
+            let older = |oldest: &mut Option<(Instant, Token)>| {
+                if oldest.is_none_or(|(at, _)| opened < at) {
+                    *oldest = Some((opened, token));
+                }
+            };
+            if conn.who == Who::Unknown {
+                unknown += 1;
+                older(&mut oldest[3]);
+            }
+            if !conn.authenticated {
+                if conn.favoured {
+                    older(&mut oldest[2]);
+                } else {
+                    strangers += 1;
+                    older(&mut oldest[usize::from(conn.waits_on_daemon())]);
+                }
+                continue;
+            }
             let at = if let Some(at) = crowds.iter().position(|crowd| *crowd.who == conn.who) {
                 at
             } else {
@@ -256,23 +309,32 @@ impl Daemon {
             };
             let crowd = &mut crowds[at];
             crowd.open += 1;
-            if conn.evictable(now)
-                && (crowd.oldest).is_none_or(|(opened, _)| conn.opened() < opened)
-            {
-                crowd.oldest = Some((conn.opened(), token));
+            if conn.evictable(now) {
+                older(&mut crowd.oldest);
             }
         }
         if from_there >= MOST_FROM_ONE {
             return Err("too many from its address are open");
         }
-        if open < MOST_CONNECTIONS {
+        let pick = |oldest: Option<(Instant, Token)>| oldest.map(|(_, token)| Some(token));
+        if who == Who::Unknown && unknown >= MOST_UNKNOWN {
+            return pick(oldest[3]).ok_or("too many are open");
+        }
+        let kept = if favoured { 0 } else { KEPT_FOR_DEVICES };
+        if open < MOST_CONNECTIONS && strangers < MOST_CONNECTIONS - kept {
             return Ok(None);
+        }
+        let strangers_oldest = oldest[0].or(oldest[1]);
+        if !favoured {
+            return pick(strangers_oldest).ok_or("too many are open");
+        }
+        if let Some(closing) = pick(strangers_oldest.or(oldest[2])) {
+            return Ok(closing);
         }
         crowds.sort_by_key(|crowd| std::cmp::Reverse(crowd.open));
         (crowds.iter())
             .filter(|crowd| crowd.open > 1)
-            .find_map(|crowd| crowd.oldest)
-            .map(|(_, token)| Some(token))
+            .find_map(|crowd| pick(crowd.oldest))
             .ok_or("too many are open")
     }
 
@@ -364,9 +426,11 @@ impl Daemon {
             if let Some(peer) = Web::tailnet_peer(conn, &request) {
                 let who = Who::Peer(peer);
                 let crowded = self.web_from(&who, token) >= MOST_FROM_ONE;
+                let favoured = (self.web.as_ref()).is_some_and(|web| web.favoured(&who, now));
                 let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
                     return;
                 };
+                conn.favoured = favoured;
                 if crowded {
                     let refused = web::Response::error(429, "too many connections are open");
                     conn.respond_and_close(&refused, now);

@@ -1674,14 +1674,14 @@ fn one_address_opens_connections_only_so_fast() {
 }
 
 #[test]
-fn when_full_a_connection_whose_answers_wait_unread_makes_room() {
+fn strangers_make_room_at_once_whatever_they_do() {
     // Kept from the start.
     logged();
     let (_daemon, address, _pems, trusted) = public_daemon(|web| web.assets = big_assets());
-    // Eight from each of eight addresses, every one asking for an answer
-    // it never reads.
+    // Seven from each of eight addresses, as many as strangers may hold,
+    // every one asking for an answer and reading it as slowly as it can.
     let fillers: Vec<_> = (120..128)
-        .flat_map(|host| (0..8).map(move |_| format!("127.0.0.{host}")))
+        .flat_map(|host| (0..7).map(move |_| format!("127.0.0.{host}")))
         .map(|from| {
             let trusted = trusted.clone();
             std::thread::spawn(move || slow_reader(&from, address, &trusted))
@@ -1690,22 +1690,127 @@ fn when_full_a_connection_whose_answers_wait_unread_makes_room() {
     let fillers: Vec<_> = (fillers.into_iter())
         .map(|filler| filler.join().unwrap())
         .collect();
-    // Each is still writing, or only just stopped: none goes yet.
-    std::thread::sleep(Duration::from_millis(1200));
-    let mut early = connect_from("127.0.0.129", address);
-    assert!(
-        closed_within(&mut early, Duration::from_secs(1)),
-        "one still taking its answer made room"
-    );
-    // Once their answers have waited unread a while, they make room.
-    std::thread::sleep(Duration::from_secs(3));
+    // None of them has authenticated, so each makes way, at once.
     let mut phone = connect_from("127.0.0.130", address);
     assert!(!closed_within(&mut phone, Duration::from_millis(500)));
     let closed: Vec<String> = (logged_of("closed to make room").into_iter())
         .filter(|line| line.contains("from 127.0.0.12"))
         .collect();
+    // The slots strangers may hold are full: one of theirs makes way.
     assert_eq!(closed.len(), 1, "one, for the phone: {closed:?}");
     drop(fillers);
+}
+
+#[test]
+fn strangers_holding_one_connection_each_from_64_addresses_make_room() {
+    let (_daemon, address, _pems, _) = public_daemon(|_| {});
+    let mut open: Vec<Conn> = (0..64)
+        .map(|host| connect_from(&format!("127.0.1.{host}"), address))
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let mut phone = connect_from("127.0.1.100", address);
+    assert!(!closed_within(&mut phone, Duration::from_millis(500)));
+    assert!(
+        closed_within(&mut open[0], Duration::from_secs(2)),
+        "the oldest made room"
+    );
+}
+
+/// Asks the public app at `address`, over TLS from `from`, trusting only
+/// `trusted`, with `method`, `path`, the app's headers and `more`, and
+/// `body`: the whole answer.
+fn tls_http(
+    from: &str,
+    address: SocketAddr,
+    trusted: &rustls::pki_types::CertificateDer<'static>,
+    (method, path): (&str, &str),
+    more: &[(String, String)],
+    body: &str,
+) -> Http {
+    let mut tls = tls_to(tcp_from(from, address, None), trusted);
+    let host = format!("localhost:{}", address.port());
+    let mut headers = vec![
+        ("Origin".to_owned(), format!("https://{host}")),
+        ("Host".to_owned(), host),
+        ("Connection".to_owned(), "close".to_owned()),
+    ];
+    headers.extend_from_slice(more);
+    tls.write_all(request_bytes(method, path, &headers, body).as_bytes())
+        .unwrap();
+    let mut answer = Vec::new();
+    let _ = tls.read_to_end(&mut answer);
+    let split = (answer.windows(4))
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a head");
+    let head = String::from_utf8(answer[..split].to_vec()).unwrap();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .unwrap()
+        .split(' ')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    Http {
+        status,
+        headers,
+        body: answer[split + 4..].to_vec(),
+    }
+}
+
+#[test]
+fn slots_are_kept_for_an_address_a_device_was_let_in_from() {
+    let (_daemon, address, _pems, trusted) = public_daemon(|_| {});
+    let phone = "127.0.0.140";
+    let body = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
+    let paired = tls_http(phone, address, &trusted, ("POST", "/pair"), &[], &body);
+    assert_eq!(paired.status, 200, "{}", paired.text());
+    let cookie = vec![("Cookie".to_owned(), paired.cookie().unwrap())];
+    let session = tls_http(phone, address, &trusted, ("GET", "/session"), &cookie, "");
+    assert!(
+        session.text().contains("\"state\":\"paired\""),
+        "{}",
+        session.text()
+    );
+    // Strangers take all they may, and go on opening more.
+    let strangers = |hosts: std::ops::Range<u8>, each: usize| -> Vec<Conn> {
+        (hosts.flat_map(|host| (0..each).map(move |_| host)))
+            .map(|host| connect_from(&format!("127.0.0.{host}"), address))
+            .collect()
+    };
+    let _first = strangers(150..158, 7);
+    let _more = strangers(158..159, 8);
+    std::thread::sleep(Duration::from_millis(200));
+    // The phone gets in, and isn't closed for a stranger.
+    let mut waiting = connect_from(phone, address);
+    assert!(!closed_within(&mut waiting, Duration::from_millis(300)));
+    let _later = strangers(159..161, 8);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!closed_within(&mut waiting, Duration::from_millis(300)));
+    let again = tls_http(phone, address, &trusted, ("GET", "/session"), &cookie, "");
+    assert!(
+        again.text().contains("\"state\":\"paired\""),
+        "{}",
+        again.text()
+    );
+}
+
+#[test]
+fn connections_not_yet_saying_whom_theyre_from_are_few() {
+    let daemon = TestDaemon::start();
+    let mut open: Vec<Conn> = (0..16).map(|_| Conn::open(&daemon.web)).collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let mut newest = Conn::open(&daemon.web);
+    assert!(
+        closed_within(&mut open[0], Duration::from_secs(2)),
+        "the oldest made room"
+    );
+    assert!(!closed_within(&mut newest, Duration::from_millis(300)));
 }
 
 #[test]
@@ -1793,11 +1898,19 @@ fn a_device_on_the_tailnet_opens_only_so_many_connections() {
     ninth.read_to_end(&mut answer).unwrap();
     let answer = String::from_utf8_lossy(&answer);
     assert!(answer.starts_with("HTTP/1.1 429"), "{answer}");
-    // Another device isn't held up by it.
-    let mut other = ask("100.64.0.8");
-    let mut head = [0; 12];
-    other.read_exact(&mut head).unwrap();
-    assert_eq!(&head, b"HTTP/1.1 200");
+    // Another device isn't held up by it, nor one in its IPv6 /64.
+    for other in ["100.64.0.8", "fd7a:115c:a1e0::7"] {
+        let _crowd: Vec<Conn> = if other.contains(':') {
+            (0..8).map(|_| ask("fd7a:115c:a1e0::6")).collect()
+        } else {
+            Vec::new()
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let mut other = ask(other);
+        let mut head = [0; 12];
+        other.read_exact(&mut head).unwrap();
+        assert_eq!(&head, b"HTTP/1.1 200");
+    }
 }
 
 /// Sets where a request says, as `tailscale serve` does, it came from.
@@ -1807,21 +1920,19 @@ fn forwarded_for(address: &str) -> impl FnOnce(&mut Vec<(String, String)>) + use
 }
 
 #[test]
-fn addresses_in_one_ipv6_64_share_their_tries() {
+fn each_ipv6_device_on_a_tailnet_has_tries_of_its_own() {
+    // A tailnet's addresses share one /64, and aren't anyone's.
     let daemon = TestDaemon::start();
     let wrong = r#"{"name":"phone","password":"hunter2"}"#;
-    for n in 1..=5 {
-        let from = forwarded_for(&format!("2001:db8:1:2::{n}"));
+    for _ in 0..5 {
+        let from = forwarded_for("fd7a:115c:a1e0::1");
         assert_eq!(daemon.post("/pair", wrong, from).status, 403);
     }
-    let hopped = daemon.post("/pair", wrong, forwarded_for("2001:db8:1:2:ffff::99"));
-    assert_eq!(
-        hopped.status, 429,
-        "a new address in the same /64 gains nothing"
-    );
+    let again = daemon.post("/pair", wrong, forwarded_for("fd7a:115c:a1e0::1"));
+    assert_eq!(again.status, 429);
     let right = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
-    let elsewhere = daemon.post("/pair", &right, forwarded_for("2001:db8:9::1"));
-    assert_eq!(elsewhere.status, 200, "{}", elsewhere.text());
+    let other = daemon.post("/pair", &right, forwarded_for("fd7a:115c:a1e0::2"));
+    assert_eq!(other.status, 200, "{}", other.text());
 }
 
 #[test]

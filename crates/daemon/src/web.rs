@@ -30,7 +30,7 @@ mod http;
 mod push;
 mod socket;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,14 @@ const ASK_EVERY: Duration = Duration::from_mins(2);
 /// The most passwords waiting to be checked, one after another: past it,
 /// a try is turned away to come back in a moment.
 const MOST_CHECKS_WAITING: usize = 8;
+
+/// How long after a request from someone carried a device's token their
+/// new connections may take the slots kept for devices.
+const LATELY: Duration = Duration::from_hours(1);
+
+/// The most addresses and tailnet devices whose tokens are remembered
+/// as having come lately: past it, the least lately goes.
+const MOST_LATELY: usize = 64;
 
 /// The most lines kept to tell the next window of devices paired while
 /// none was open: past it, the last says more did.
@@ -299,6 +307,9 @@ pub(crate) struct Web {
     pub(crate) put_off: VecDeque<mio::Token>,
     /// The connections refused, for the log.
     pub(crate) refusals: Refusals,
+    /// Whom a request carrying a device's token came from lately, and
+    /// when: their new connections may take the slots kept for them.
+    lately: HashMap<Who, Instant>,
     /// What every window's bar is to say: each device paired since a
     /// window was last told, kept until one is, at most [`MOST_SAID`].
     pub(crate) said: Vec<String>,
@@ -366,6 +377,7 @@ impl Web {
             refused: 0,
             put_off: VecDeque::new(),
             refusals: Refusals::default(),
+            lately: HashMap::new(),
             said: Vec::new(),
             next_due: None,
         })
@@ -538,6 +550,11 @@ impl Web {
         } else {
             None
         };
+        conn.authenticated = self.verified(request, login.as_deref());
+        if conn.authenticated {
+            conn.favoured = true;
+            self.authenticated(conn.who.clone(), now);
+        }
         if !auth::host_allowed(
             self.config.origin.as_deref(),
             request.header("host"),
@@ -591,10 +608,10 @@ impl Web {
                     .and_then(|addresses| addresses.rsplit(',').next())
                     .map(str::trim)
                     .filter(|address| !address.is_empty());
+                // The whole address: a tailnet's aren't anyone's /64.
                 match forwarded {
-                    Some(address) => {
-                        (address.parse().ok()).map_or_else(|| address.to_owned(), auth::address_key)
-                    }
+                    Some(address) => (address.parse::<std::net::IpAddr>().ok())
+                        .map_or_else(|| address.to_owned(), |address| address.to_string()),
                     None => login.unwrap_or("local").to_owned(),
                 }
             }
@@ -652,6 +669,42 @@ impl Web {
                     })
             });
         expiring.chain(renewing).min()
+    }
+
+    /// Whether `request` carries the token of a device paired and let in
+    /// now, as `login` through Tailscale. Unlike [`Web::device`], it changes
+    /// nothing.
+    fn verified(&self, request: &Request, login: Option<&str>) -> bool {
+        let Some(token) = request.cookie(auth::COOKIE) else {
+            return false;
+        };
+        let Some(device) = self.devices.by_token(&auth::token_hash(token)) else {
+            return false;
+        };
+        let other_login =
+            matches!((&device.login, login), (Some(paired), Some(login)) if paired != login);
+        !other_login && lapsed(&self.config, device, epoch_millis()).is_none()
+    }
+
+    /// Notes that a request from `who` carried a device's token at `now`.
+    fn authenticated(&mut self, who: Who, now: Instant) {
+        if !self.lately.contains_key(&who) && self.lately.len() >= MOST_LATELY {
+            self.lately.retain(|_, at| now < *at + LATELY);
+            if self.lately.len() >= MOST_LATELY
+                && let Some(oldest) = (self.lately.iter())
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(who, _)| who.clone())
+            {
+                self.lately.remove(&oldest);
+            }
+        }
+        self.lately.insert(who, now);
+    }
+
+    /// Whether a request from `who` carried a device's token within
+    /// [`LATELY`] of `now`.
+    pub(crate) fn favoured(&self, who: &Who, now: Instant) -> bool {
+        (self.lately.get(who)).is_some_and(|at| now < *at + LATELY)
     }
 
     /// The device `request` carries the token of, if it's paired and let

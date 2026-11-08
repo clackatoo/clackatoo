@@ -30,19 +30,24 @@ use super::socket::{self, Frame, Stream, Transport};
 /// enough that idle connections don't pile up.
 pub(crate) const REQUEST_WAIT: Duration = Duration::from_secs(30);
 
-/// How long a connection is spared from being closed to make room while
-/// it shakes hands, or sends its request, from when it opened or began
-/// to: long enough for a phone's handshake. An address at the steady rate
-/// its bucket allows (`auth::CONNECT_EVERY`, five a second) keeps at most
-/// five that young, of the eight it may have open, so whoever fills every
-/// slot from as few addresses as they'd need always leaves some to close.
+/// How long after it opened a connection that has authenticated is spared
+/// from being closed to make room for another device's. Counted from when
+/// it opened only, so nothing it sends later makes it young again. One not
+/// authenticated is never spared: it's closed first (see
+/// `Daemon::room_for_web`).
 pub(crate) const GRACE: Duration = Duration::from_secs(1);
 
-/// How long answers may wait unread, with nothing of them written, before
-/// the connection may be closed to make room: it reads too slowly to be
-/// worth a slot. Over TLS, what's written is what TLS took, which is ahead
-/// of the socket by at most `socket::TLS_AHEAD`.
+/// How long answers may wait to be written before the connection may be
+/// closed to make room, if fewer than [`LEAST_RATE`] a second of them have
+/// been: it reads too slowly to be worth a slot. Counted from when they
+/// began to wait, however much is written meanwhile. Over TLS, what's
+/// written is what TLS took, which is ahead of the socket by at most
+/// `socket::TLS_AHEAD`.
 pub(crate) const STALLED: Duration = Duration::from_secs(3);
+
+/// The fewest bytes a second a connection must read of its answers, past
+/// [`STALLED`], to keep its slot when room is wanted.
+pub(crate) const LEAST_RATE: u64 = 4096;
 
 /// How long a request has to arrive whole, from its first byte, unless
 /// the settings say otherwise: a connection trickling a byte at a time is
@@ -89,12 +94,14 @@ pub(super) const CLOSING_LIMIT: Duration = Duration::from_secs(5);
 
 /// Whom a connection is counted as from, to limit how many each has open
 /// and to choose which to close to make room for another.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Who {
     /// An address on the network, IPv6 by /64.
     Address(Group),
     /// A device on the tailnet, as its last request said (`tailscale
-    /// serve` keeps connections and sends anyone's requests over them).
+    /// serve` keeps connections and sends anyone's requests over them):
+    /// its whole address, IPv6 too, as tailnet addresses aren't anyone's
+    /// /64.
     Peer(String),
     /// Through the local socket, before any request has said who.
     Unknown,
@@ -153,9 +160,14 @@ pub(crate) struct HttpConn {
     pub(crate) peer: Peer,
     /// Whom it's counted as from.
     pub(crate) who: Who,
-    /// When something of its answers was last written, or they began to
-    /// wait.
-    wrote: Instant,
+    /// Its last request carried the token of a device let in.
+    pub(crate) authenticated: bool,
+    /// Whom it's from had a request authenticated lately: it may take a
+    /// slot kept for such.
+    pub(crate) favoured: bool,
+    /// Since when answers have waited to be written, and how much of them
+    /// has been since.
+    waiting: Option<(Instant, u64)>,
     /// What's been read and not yet taken as a request.
     input: Vec<u8>,
     /// What's waiting to be written.
@@ -211,7 +223,9 @@ impl HttpConn {
             transport,
             peer,
             who: peer.group().map_or(Who::Unknown, Who::Address),
-            wrote: now,
+            authenticated: false,
+            favoured: false,
+            waiting: None,
             input: Vec::new(),
             output: Vec::new(),
             state: State::Reading,
@@ -242,22 +256,28 @@ impl HttpConn {
         self.opened
     }
 
-    /// Whether it may be closed at `now` to make room for another: nothing
-    /// it asked waits on the daemon (a password being checked, a window's
-    /// answer), and its answers are written, or have waited unread for
-    /// [`STALLED`]. One that began shaking hands, or sending its request,
-    /// within [`GRACE`] is spared, as a phone's may be.
+    /// Whether something it asked waits on the daemon: a password being
+    /// checked, or a window's answer.
+    pub(crate) fn waits_on_daemon(&self) -> bool {
+        !matches!(self.state, State::Reading)
+    }
+
+    /// Whether, having authenticated, it may be closed at `now` to make
+    /// room for another device's: it opened over [`GRACE`] ago, nothing it
+    /// asked waits on the daemon, and its answers are written, or it reads
+    /// them too slowly.
     pub(crate) fn evictable(&self, now: Instant) -> bool {
-        if !matches!(self.state, State::Reading) {
-            return false;
-        }
-        let young = |since: Instant| now < since + GRACE;
-        if (self.transport.handshaking() && young(self.opened))
-            || self.head_started.is_some_and(young)
-        {
-            return false;
-        }
-        self.output.is_empty() || now >= self.wrote + STALLED
+        !self.waits_on_daemon() && now >= self.opened + GRACE && !self.reading_answers(now)
+    }
+
+    /// Whether its answers wait to be written, and it's reading them as
+    /// fast as [`LEAST_RATE`], or they began to wait under [`STALLED`] ago.
+    fn reading_answers(&self, now: Instant) -> bool {
+        self.waiting.is_some_and(|(since, written)| {
+            let waited = now.saturating_duration_since(since);
+            let least = u128::from(LEAST_RATE) * waited.as_millis() / 1000;
+            waited < STALLED || u128::from(written) >= least
+        })
     }
 
     /// Reads what's arrived, at most [`READ_BUDGET`] of it. A connection
@@ -334,7 +354,7 @@ impl HttpConn {
     /// the next request after it, giving it a while from `now` to come.
     pub(crate) fn respond(&mut self, response: &Response, head_only: bool, now: Instant) {
         if self.output.is_empty() {
-            self.wrote = now;
+            self.waiting = Some((now, 0));
         }
         response.write(&mut self.output, head_only, self.secure);
         self.state = State::Reading;
@@ -352,8 +372,13 @@ impl HttpConn {
     /// with: closing and written, or failed.
     pub(crate) fn flush(&mut self, registry: &Registry, token: Token) -> bool {
         match self.transport.write(&mut self.output) {
-            Ok(0) => {}
-            Ok(_) => self.wrote = Instant::now(),
+            Ok(written) => {
+                if self.output.is_empty() {
+                    self.waiting = None;
+                } else if let Some((_, so_far)) = &mut self.waiting {
+                    *so_far += written as u64;
+                }
+            }
             Err(err) => {
                 log::debug!("writing to a web connection failed: {err}");
                 return true;
@@ -602,5 +627,30 @@ impl WebLink {
         let due = (self.heard.max(self.pinged) + PING_EVERY).min(self.heard + SILENT_LIMIT);
         self.closing
             .map_or(due, |since| due.min(since + CLOSING_LIMIT))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_reading_its_answers_too_slowly_may_make_room() {
+        let (ours, _theirs) = mio::net::UnixStream::pair().unwrap();
+        let transport = Transport::new(Stream::Unix(ours), None).unwrap();
+        let start = Instant::now();
+        let mut conn = HttpConn::new(transport, Peer::Local, start, HEAD_WAIT, true);
+        let after = |secs| start + Duration::from_secs(secs);
+        assert!(!conn.evictable(start), "just opened");
+        assert!(conn.evictable(after(2)), "idle");
+        conn.waiting = Some((after(2), 0));
+        assert!(!conn.evictable(after(4)), "only just began to wait");
+        // A byte now and then never makes it young again.
+        conn.waiting = Some((after(2), 100));
+        assert!(conn.evictable(after(12)), "a trickle");
+        conn.waiting = Some((after(2), 10 * LEAST_RATE));
+        assert!(!conn.evictable(after(12)), "reading as fast as it must");
+        conn.state = State::Verifying(1);
+        assert!(!conn.evictable(after(60)), "waiting on the daemon");
     }
 }

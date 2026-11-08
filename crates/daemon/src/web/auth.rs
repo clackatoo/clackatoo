@@ -55,7 +55,7 @@ pub(super) const CONNECT_EVERY: Duration = Duration::from_millis(200);
 /// What tries and connections from an address are counted under: the
 /// address itself for IPv4, and its /64 for IPv6, which one subscriber
 /// usually has whole, so hopping between its addresses gains nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Group {
     V4(Ipv4Addr),
     /// The first four segments.
