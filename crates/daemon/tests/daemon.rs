@@ -3014,6 +3014,32 @@ fn a_question_about_a_subagents_tool_names_it_for_windows_to_show() {
 }
 
 #[test]
+fn a_question_about_another_servers_tool_is_the_users_whatever_its_input_says() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // One of clackatoo's own, as the adapter names it: answered at once,
+    // as it asks the user itself when it must.
+    let node = ask(&mut client, chat, "mcp-ask clackatoo");
+    assert_eq!(last_words(&node), "picked allow\n");
+    // Another server's, though the model wrote clackatoo's server's name
+    // into its input: the user is asked.
+    client
+        .chat(chat, ChatAction::Send("mcp-ask toy".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.question.is_some() || node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    let question = node.question.as_ref().expect("asked");
+    assert_eq!(question.title, "mcp__toy__note");
+    answer(&mut client, chat, Some("reject".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "picked reject\n");
+}
+
+#[test]
 fn a_loaded_session_puts_what_its_subagents_did_under_their_tasks_again() {
     let daemon = TestDaemon::start();
     let home = daemon.dir.path().to_owned();

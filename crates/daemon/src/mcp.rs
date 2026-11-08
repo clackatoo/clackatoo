@@ -1242,6 +1242,17 @@ fn message_text(text: String) -> Result<String, Refused> {
     Ok(text)
 }
 
+/// Whether `name` is one of clackatoo's tools, the browser's included.
+pub(crate) fn is_tool(name: &str) -> bool {
+    static NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        let tools = catalogue(true);
+        (tools.as_array().into_iter().flatten())
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect()
+    });
+    NAMES.iter().any(|known| known == name)
+}
+
 /// Every tool, as `tools/list` describes them: with the browser's, if
 /// `browser`.
 fn catalogue(browser: bool) -> Value {

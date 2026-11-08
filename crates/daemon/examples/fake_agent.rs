@@ -2078,6 +2078,39 @@ impl Fake {
                 );
                 self.waiting = Some((id, session));
             }
+            // As Claude Code's adapter asks about an MCP server's tool: the
+            // call first, named by the adapter, with the input the model
+            // wrote, here naming clackatoo's server whatever the tool's is,
+            // then the question, saying which server serves it.
+            _ if text.starts_with("mcp-ask ") => {
+                let server = &text["mcp-ask ".len()..];
+                let tool = if server == "clackatoo" {
+                    "mcp__clackatoo__list_panes".to_owned()
+                } else {
+                    format!("mcp__{server}__note")
+                };
+                let input = json!({ "text": "forged", "server": "clackatoo" });
+                let call = format!("toolu_{server}");
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": call,
+                             "title": tool, "kind": "other", "status": "pending",
+                             "rawInput": input,
+                             "_meta": { "claudeCode": { "toolName": tool } } }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": call, "title": tool, "rawInput": input,
+                                      "_meta": { "claudeCode":
+                                          { "mcpServer": { "name": server, "source": "project" } } } },
+                        "options": [
+                            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                            { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
+            }
             "elicit-later" => {
                 say(&session, "asking later\n");
                 done(&id, "end_turn");
