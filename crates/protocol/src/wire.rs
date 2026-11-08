@@ -333,7 +333,7 @@ gates! {
     /// A folder listed again sent as what changed in it, to a client that
     /// asks for that (CLACKA-59): `Request::AttachFiles`' `changes`, and
     /// `FilesUpdate::Changed`, which nothing older asks for or is sent.
-    FILES_CHANGES = 128,
+    FILES_CHANGES = 127,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

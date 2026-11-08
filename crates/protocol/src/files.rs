@@ -123,7 +123,7 @@ pub enum FilesUpdate {
     /// changes, when they're less to send. Only ever sent once the client
     /// has been sent the directory whole since it last expanded it, so a
     /// client holding no listing of `dir`, or one from before it last
-    /// expanded it, drops it. New in protocol 128.
+    /// expanded it, drops it. New in protocol 127.
     Changed {
         /// The directory's absolute path, as the client expanded it.
         dir: String,

@@ -145,7 +145,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 128;
+pub const PROTOCOL_VERSION: u32 = 127;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1018,7 +1018,7 @@ pub enum Request {
         files: FilesId,
         /// Send a folder listed again as what changed in it since it was
         /// last sent ([`FilesUpdate::Changed`]), not whole. New in protocol
-        /// 128: `false`, an older peer's, has every listing sent whole.
+        /// 127: `false`, an older peer's, has every listing sent whole.
         #[serde(
             skip_serializing_if = "wire::before::<{ wire::FILES_CHANGES }, _>",
             deserialize_with = "wire::since::<{ wire::FILES_CHANGES }, _, _>"
