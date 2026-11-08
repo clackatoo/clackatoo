@@ -550,7 +550,16 @@ impl Reader<'_> {
     /// A count, if one is typed.
     fn count(&mut self) -> Option<usize> {
         let mut count = None::<usize>;
-        while let Some(Stroke::Char { ch, ctrl: false }) = self.peek() {
+        loop {
+            // Del takes the last digit off, as Vim's.
+            if let (Some(typed), Some(Stroke::Delete)) = (count, self.peek()) {
+                count = Some(typed / 10).filter(|&count| count > 0);
+                self.at += 1;
+                continue;
+            }
+            let Some(Stroke::Char { ch, ctrl: false }) = self.peek() else {
+                break;
+            };
             let Some(digit) = ch.to_digit(10) else {
                 break;
             };
@@ -900,6 +909,20 @@ mod tests {
         );
         assert_eq!(read("r"), Parsed::Incomplete);
         assert_eq!(read("rx"), command(None, Action::Replace('x')));
+        let del = |keys: &[Stroke]| parse(keys, false, &Plain { tildeop: false });
+        let (two, three, x) = (Stroke::char('2'), Stroke::char('3'), Stroke::char('x'));
+        let deleting = Action::DeleteChars { before: false };
+        assert_eq!(
+            del(&[two, three, Stroke::Delete, x]),
+            command(Some(2), deleting)
+        );
+        assert_eq!(del(&[two, Stroke::Delete, x]), command(None, deleting));
+        // With nothing typed, it's Del's own; one more digit counts on.
+        assert_eq!(del(&[Stroke::Delete]), command(None, deleting));
+        assert_eq!(
+            del(&[two, Stroke::Delete, three, x]),
+            command(Some(3), deleting)
+        );
         let enter = parse(
             &[Stroke::char('r'), Stroke::Enter],
             false,
