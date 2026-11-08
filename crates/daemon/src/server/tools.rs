@@ -2803,39 +2803,38 @@ mod keeping_whose {
         daemon.maintain_agent_terminals(now);
         assert!(!daemon.agent_terminal(terminal).unwrap().finished);
         assert_eq!(daemon.tools.commanded[&terminal].close_due, None);
-        // Seen not back, it's looked at again only a while later, and
-        // later each time, not each time round.
-        let looked = |daemon: &super::Daemon| daemon.tools.commanded[&terminal].looked.unwrap();
-        let first = looked(&daemon);
-        assert!(!first.back);
-        assert_eq!(daemon.next_tool_due(), Some(first.again));
-        daemon.maintain_agent_terminals(first.again.checked_sub(Duration::from_millis(1)).unwrap());
-        assert_eq!(looked(&daemon).again, first.again);
-        daemon.maintain_agent_terminals(first.again);
-        let second = looked(&daemon);
-        assert_eq!(second.wait, first.wait * 2);
-        // Output since brings the next look nearer, but no nearer than
-        // a moment after the last.
-        daemon.terminal_moved_on(terminal);
-        assert_eq!(looked(&daemon).again, second.at + super::LOOK_AGAIN);
-        // A look that's due and was missed is due at once.
-        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
-        (daemon
-            .tools
-            .commanded
-            .get_mut(&terminal)
-            .unwrap()
-            .looked
-            .as_mut())
-        .unwrap()
-        .again = past;
-        assert!(daemon.next_tool_due().unwrap() <= Instant::now());
+        assert_looks_again(&mut daemon, terminal);
         daemon.maintain_agent_terminals(now + Duration::from_mins(2));
         assert!(daemon.terminals.contains_key(&terminal), "never closed");
         // The activity waits for its own block, whatever the agent typed
         // there since.
         daemon.tools.commanded.get_mut(&terminal).unwrap().expect = Some(block + 5);
         assert!(daemon.ended_by_marks(terminal).unwrap().looks);
+    }
+
+    /// Checks that `terminal`'s shell, seen not back, is looked at again
+    /// only a while later, and later each time, not each time round.
+    fn assert_looks_again(daemon: &mut super::Daemon, terminal: TerminalId) {
+        use std::time::{Duration, Instant};
+
+        let looked = |daemon: &super::Daemon| daemon.tools.commanded[&terminal].looked.unwrap();
+        let first = looked(daemon);
+        assert!(!first.back);
+        assert_eq!(daemon.next_tool_due(), Some(first.again));
+        daemon.maintain_agent_terminals(first.again.checked_sub(Duration::from_millis(1)).unwrap());
+        assert_eq!(looked(daemon).again, first.again);
+        daemon.maintain_agent_terminals(first.again);
+        let second = looked(daemon);
+        assert_eq!(second.wait, first.wait * 2);
+        // Output since brings the next look nearer, but no nearer than
+        // a moment after the last.
+        daemon.terminal_moved_on(terminal);
+        assert_eq!(looked(daemon).again, second.at + super::LOOK_AGAIN);
+        // A look that's due and was missed is due at once.
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let commanded = daemon.tools.commanded.get_mut(&terminal).unwrap();
+        commanded.looked.as_mut().unwrap().again = past;
+        assert!(daemon.next_tool_due().unwrap() <= Instant::now());
     }
 
     #[test]
