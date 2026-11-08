@@ -49,11 +49,15 @@ A device pairs once:
 - **with the password**, which `clackatoo web password` sets. Only its Argon2id hash is kept, in web.toml. Tries are limited to five at once, then one a minute, from each address (IPv6 by /64), and to about twenty a minute from everywhere together. After `lock_after` wrong passwords in a row (50 unless set), password pairing locks, and stays locked after a restart, until `:devices unlock` or `clackatoo devices unlock`; every window's bar says so. Anyone can lock it this way, but devices already paired keep working.
 - **by asking a window.** The phone shows a code, and every window's bar says a device asks. Type `:devices allow CODE` to let it in, or `:devices deny`. The window never shows the code, so only someone holding the phone can let it in.
 
-The device then keeps a token in a cookie its scripts can't read; the daemon keeps only its hash. `:devices` (or `clackatoo devices`) lists paired devices, and `:devices revoke N` unpairs one, cutting it off at once. A device unused for `expire_days` is unpaired, and one past `password_days` is asked for the password again; either cuts off a device that's connected.
+The device then keeps a token in a cookie its scripts can't read; the daemon keeps only its hash. Every window's bar says so whenever a device pairs, however it did, such as `phone (you@github) paired with the password: :devices revoke 3 unpairs it`. `:devices` (or `clackatoo devices`) lists paired devices, and `:devices revoke N` unpairs one, cutting it off at once. Devices are listed and unpaired only from a window or `clackatoo devices`; a device may unpair only itself. A device unused for `expire_days` is unpaired, and one past `password_days` is asked for the password again; either cuts off a device that's connected.
 
 On an iPhone, add the app to the home screen first (Share → Add to Home Screen) and pair it from there: the home-screen app keeps its own cookies, and only it can get notifications.
 
 What a phone does in a chat is logged with the device's number.
+
+### A paired device has a shell
+
+A paired device can do almost anything a window can, and it can type into your terminals. The daemon refuses a few things to devices: connecting to other machines or forgetting them, `:keep`, allowing other devices to pair, unlocking pairing, and listing or unpairing devices. Those are guards against mistakes, not a boundary: from a terminal, a device can run `clackatoo` itself, or anything else you could. A lost phone that's still paired is a lost shell on your computer. Unpair it with `:devices revoke N` at once, then check what's paired with `:devices`: every pairing since was said in your windows' bars.
 
 While the agent works, the bar at the foot of a chat says what it's doing and for how long, beside three pulsing dots, however far up you've scrolled. The seconds count only while the page is on screen and the app is connected, and the dots keep still if your phone asks for less motion. In the list of chats, running agents have a blue activity ring; approvals, unread replies and failures have distinct markers.
 

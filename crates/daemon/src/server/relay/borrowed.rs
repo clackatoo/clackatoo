@@ -43,7 +43,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use super::mirror::LentPane;
 use super::{Expect, Routed, Then};
-use crate::server::{Daemon, Source};
+use crate::server::{Daemon, Link, Source};
 use crate::workspaces::Borrowed;
 
 /// Where a pane being lent goes in this daemon's layout, once it has been.
@@ -718,7 +718,8 @@ impl Daemon {
         ))
     }
 
-    /// Has every window watching the workspaces say `said` in its bar.
+    /// Has every window watching the workspaces say `said` in its bar: not
+    /// the devices on the web app, whose app has no bar.
     pub(in crate::server) fn say_to_windows(&mut self, said: String) {
         let event = ServerMessage::Event(Event::Said(said));
         let mut event = crate::server::Broadcast::new(&event, "what's said");
@@ -727,6 +728,7 @@ impl Daemon {
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
+                && !matches!(client.link, Link::Web(_))
                 && let Some(bytes) = event.to(client.wire)
             {
                 client.outgoing.extend_from_slice(bytes);

@@ -1277,6 +1277,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "A file dragged onto an explorer's .. row, out of what it shows, is moved only once you say y",
     },
+    News {
+        id: "device-paired-said",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "The bar says whenever a phone pairs, with how to unpair it; phones can't list or unpair others",
+    },
 ];
 
 impl News {

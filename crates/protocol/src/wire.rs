@@ -1470,10 +1470,11 @@ impl Downgrade for ServerMessage {
     /// that asked for forwards, which an older one never does; and so is
     /// `BufferUpdate::Reattach`, as only another machine's buffers are
     /// attached again so, which an older peer isn't shown; and so is
-    /// `Event::Said`, which is only ever about a pane lent, which an
-    /// older peer is never shown; and `Event::Listening`, which goes only
-    /// to a client that asked for it, which an older one never does; and
-    /// `Event::Reveal`, which goes only to a window that reads it; and
+    /// `Event::Said`, which is about a pane lent, which an older peer is
+    /// never shown, or a device paired, which a window older than 93 isn't
+    /// told of; and `Event::Listening`, which goes only to a client that
+    /// asked for it, which an older one never does; and `Event::Reveal`,
+    /// which goes only to a window that reads it; and
     /// `FilesUpdate::Changed`, likewise, as a daemon passing another's
     /// explorer on asks for changes only while every client it passes
     /// them to reads them.

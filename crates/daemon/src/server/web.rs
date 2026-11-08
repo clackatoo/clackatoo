@@ -427,7 +427,7 @@ impl Daemon {
     /// Does what the web app's threads and timers ask: answers passwords
     /// checked, gives up on connections waiting too long, pings quiet
     /// devices, cuts off those no longer let in, sends notifications due,
-    /// and tells windows of devices asking.
+    /// and tells windows of devices asking, and of those paired.
     pub(super) fn web_chores(&mut self) {
         // Any client may watch the chats, the web app on or not.
         self.send_chat_summaries();
@@ -451,6 +451,10 @@ impl Daemon {
             self.web_timers(now);
         }
         self.send_pairing();
+        let said = (self.web.as_mut()).map(|web| std::mem::take(&mut web.said));
+        for said in said.into_iter().flatten() {
+            self.say_to_windows(said);
+        }
     }
 
     /// Acts on the web app's timers due by `now`.

@@ -195,8 +195,13 @@ struct Checking {
 /// What giving the password does.
 #[derive(Debug)]
 enum Pairing {
-    /// Pairs a new device, with this name, as this Tailscale login.
-    New { name: String, login: Option<String> },
+    /// Pairs a new device, with this name, as this Tailscale login, from
+    /// there, as windows are told.
+    New {
+        name: String,
+        login: Option<String>,
+        from: String,
+    },
     /// Gives this device's password again, as it's asked for.
     Renew(u64),
 }
@@ -285,6 +290,9 @@ pub(crate) struct Web {
     pub(crate) put_off: VecDeque<mio::Token>,
     /// The connections refused, for the log.
     pub(crate) refusals: Refusals,
+    /// What every window's bar is to say: each device paired since the
+    /// windows were last told.
+    pub(crate) said: Vec<String>,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
 }
@@ -345,6 +353,7 @@ impl Web {
             handshakes_left: 0,
             put_off: VecDeque::new(),
             refusals: Refusals::default(),
+            said: Vec::new(),
             next_due: None,
         })
     }
@@ -705,7 +714,8 @@ impl Web {
                     "too many devices are paired: unpair some with :devices",
                 ));
             }
-            Pairing::New { name, login }
+            let from = Self::from(conn, login.as_deref(), &who);
+            Pairing::New { name, login, from }
         };
         if let Some(password) = body["password"].as_str() {
             // Through Tailscale with no login named, the first device's
@@ -724,7 +734,9 @@ impl Web {
             return self.check_password(conn, token, password, pairing, &who, now);
         }
         match (body["ask"].as_bool(), pairing) {
-            (Some(true), Pairing::New { name, login }) => self.ask(conn, name, login, &who, now),
+            (Some(true), Pairing::New { name, login, from }) => {
+                self.ask(name, login, from, &who, now)
+            }
             _ => Handled::Respond(Response::error(400, "pairing gives a password, or asks")),
         }
     }
@@ -826,9 +838,9 @@ impl Web {
             }
             let response = if matches {
                 match checking.pairing {
-                    Pairing::New { name, login } => {
-                        let response = self.paired(name.clone(), login, true);
-                        log::info!("{name} paired with the password");
+                    Pairing::New { name, login, from } => {
+                        let response = self.paired(name.clone(), login, &from, true);
+                        log::info!("{name} ({from}) paired with the password");
                         response
                     }
                     Pairing::Renew(id) => {
@@ -849,24 +861,50 @@ impl Web {
         answers
     }
 
-    /// Pairs a device called `name`, as `login`, its password given if
-    /// `password`: the answer giving it its token.
-    fn paired(&mut self, name: String, login: Option<String>, password: bool) -> Response {
+    /// Pairs a device called `name`, as `login`, from `from`, its password
+    /// given if `password`, and has every window told: the answer giving it
+    /// its token. Whoever has a device can pair another from its terminals,
+    /// so every pairing is said, however it came about.
+    fn paired(
+        &mut self,
+        name: String,
+        login: Option<String>,
+        from: &str,
+        password: bool,
+    ) -> Response {
         let (token, hash) = auth::new_token(&self.random);
+        let how = if password {
+            "with the password"
+        } else {
+            "allowed with its code"
+        };
+        let said = format!("{name} ({from}) paired {how}");
         let id = self
             .devices
             .add(name, hash, login, password, epoch_millis());
+        self.said
+            .push(format!("{said}: :devices revoke {id} unpairs it"));
         Response::json(200, &json!({ "paired": true, "device": id }))
             .with("set-cookie", auth::set_cookie(&token))
     }
 
-    /// Asks every window to allow a device called `name`, as `login`, for
-    /// `who`.
+    /// Where a device pairing over `conn`, as `login`, for `who`, is said
+    /// to be from: its login, or else its address.
+    fn from(conn: &HttpConn, login: Option<&str>, who: &str) -> String {
+        match (login, conn.peer) {
+            (Some(login), _) => login.to_owned(),
+            (None, Peer::Tcp(address)) => address.ip().to_string(),
+            (None, Peer::Local) => who.to_owned(),
+        }
+    }
+
+    /// Asks every window to allow a device called `name`, as `login`, from
+    /// `from`, for `who`.
     fn ask(
         &mut self,
-        conn: &HttpConn,
         name: String,
         login: Option<String>,
+        from: String,
         who: &str,
         now: Instant,
     ) -> Handled {
@@ -896,11 +934,6 @@ impl Web {
             if !self.asks.iter().any(|ask| ask.code == code) {
                 break code;
             }
-        };
-        let from = match (&login, conn.peer) {
-            (Some(login), _) => login.clone(),
-            (None, Peer::Tcp(address)) => address.ip().to_string(),
-            (None, Peer::Local) => who.to_owned(),
         };
         let until = now + ASK_WAIT;
         let until_ms = epoch_millis() + millis(ASK_WAIT);
@@ -962,8 +995,8 @@ impl Web {
                         "too many devices are paired: unpair some with :devices",
                     )
                 } else {
-                    log::info!("{} paired, allowed from a window", ask.name);
-                    self.paired(ask.name, ask.login, false)
+                    log::info!("{} ({}) paired, allowed from a window", ask.name, ask.from);
+                    self.paired(ask.name, ask.login, &ask.from, false)
                 }
             }
             (Some(at), Some(false)) => {

@@ -610,10 +610,10 @@ pub enum Event {
     /// works again, to the client that last asked for that machine's.
     /// Only to a client of protocol 92 or later.
     Forwarded(String),
-    /// Something for the window's bar to say about the workspaces, such
-    /// as that a machine has lost panes it lent this daemon, which have
-    /// closed. To every client watching the workspaces, of protocol 93 or
-    /// later.
+    /// Something for the window's bar to say, such as that a machine has
+    /// lost panes it lent this daemon, which have closed, or that a device
+    /// paired with the web app. To every client watching the workspaces,
+    /// of protocol 93 or later, but devices on the web app.
     Said(String),
     /// The TCP ports the programs of each background tab listen on, as
     /// the daemon found them once asked

@@ -665,6 +665,51 @@ fn a_revoked_device_is_cut_off_and_refused() {
     assert_eq!(session["state"], "unpaired");
 }
 
+/// What the window's bar is told next, waiting for it.
+fn said_next(window: &mut Client) -> String {
+    window
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        match window.next_event() {
+            Ok(Event::Said(said)) => return said,
+            Ok(_) => {}
+            Err(err) => panic!("the window wasn't told: {err}"),
+        }
+    }
+}
+
+#[test]
+fn every_window_is_told_of_each_device_paired() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    window.watch_workspaces().unwrap();
+    let cookie = daemon.pair();
+    let said = said_next(&mut window);
+    assert!(
+        said.contains(&format!("phone ({LOGIN}) paired with the password")),
+        "{said}"
+    );
+    assert!(said.contains(":devices revoke 1"), "{said}");
+    // A device isn't told: devices are a window's to manage.
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert!(matches!(
+        phone.request(Request::WatchWorkspaces),
+        Response::Workspaces(_)
+    ));
+    daemon.pair_from_a_window();
+    let said = said_next(&mut window);
+    assert!(said.contains(&format!("phone ({LOGIN}) paired")), "{said}");
+    assert!(said.contains("allowed with its code"), "{said}");
+    assert!(said.contains(":devices revoke 2"), "{said}");
+    assert!(matches!(phone.request(Request::Version), Response::Text(_)));
+    assert!(
+        !(phone.events.iter()).any(|event| matches!(event, Event::Said(_))),
+        "{:?}",
+        phone.events
+    );
+}
+
 #[test]
 fn a_device_can_neither_list_nor_unpair_devices() {
     let daemon = TestDaemon::start();
