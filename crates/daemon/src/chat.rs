@@ -3175,9 +3175,13 @@ impl HostedChat {
             return None;
         }
         let mut paths: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let named = diffs.chain(tool.locations.iter().map(|location| &location.path));
         for path in named {
-            if !path.is_empty() && !paths.contains(path) {
+            if paths.len() >= MOST_LOCATIONS {
+                break;
+            }
+            if !path.is_empty() && seen.insert(path.as_str()) {
                 paths.push(path.clone());
             }
         }
@@ -4515,8 +4519,13 @@ fn streamed_output(meta: Option<&serde_json::Map<String, Value>>) -> Option<&str
         .find_map(|key| meta.get(*key)?.get("data")?.as_str())
 }
 
+/// The most files a tool is taken to name: past it, those it names go
+/// unread, unshown and unreviewed, as a patch naming thousands would cost
+/// a look at the disk for each, each time the agent said more of it.
+const MOST_LOCATIONS: usize = 256;
+
 fn tool_locations(locations: &[ToolCallLocation]) -> Vec<Location> {
-    (locations.iter())
+    (locations.iter().take(MOST_LOCATIONS))
         .map(|location| Location {
             path: location.path.to_string_lossy().into_owned(),
             line: location.line,
@@ -5440,6 +5449,25 @@ mod tests {
         let command = r#"{"sessionUpdate":"tool_call","toolCallId":"c","title":"ls",
                           "kind":"execute","status":"completed"}"#;
         assert_eq!(update(&mut chat, command), None);
+    }
+
+    /// A patch naming thousands of files, many twice, names as many as
+    /// are looked at, each once (CLACKA-220).
+    #[test]
+    fn a_tool_naming_thousands_of_files_names_so_many() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "edit it");
+        let locations: Vec<serde_json::Value> = (0..20_000)
+            .map(|n| serde_json::json!({ "path": format!("/f{}", n % 10_000) }))
+            .collect();
+        let call = serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": "e", "title": "Edit",
+            "kind": "edit", "status": "pending", "locations": locations,
+        });
+        let wrote = update(&mut chat, &call.to_string()).unwrap();
+        assert_eq!(wrote.paths.len(), MOST_LOCATIONS);
+        assert_eq!(wrote.paths[1], "/f1");
     }
 
     fn words(chat: &mut HostedChat, text: &str) {
