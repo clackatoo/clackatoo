@@ -35,6 +35,9 @@ struct TestDaemon {
     dir: tempfile::TempDir,
     shutdown: ShutdownHandle,
     thread: Option<JoinHandle<()>>,
+    /// The thread's directory in /proc, `/proc/PID/task/TID`, once it has
+    /// started: what the scheduler says of the daemon's loop.
+    task: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
 }
 
 impl TestDaemon {
@@ -133,11 +136,22 @@ impl TestDaemon {
             daemon.restore_workspaces();
         }
         let shutdown = daemon.shutdown_handle();
-        let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
+        let task = std::sync::Arc::new(std::sync::OnceLock::new());
+        let thread = {
+            let task = std::sync::Arc::clone(&task);
+            std::thread::spawn(move || {
+                // `PID/task/TID`.
+                if let Ok(this) = std::fs::read_link("/proc/thread-self") {
+                    let _ = task.set(Path::new("/proc").join(this));
+                }
+                drop(daemon.run().expect("daemon failed"));
+            })
+        };
         Self {
             dir,
             shutdown,
             thread: Some(thread),
+            task,
         }
     }
 
@@ -19751,7 +19765,9 @@ fn a_real_agents_long_output_leaves_the_daemon_answering() {
 /// buffer or not. Only `client` watches the chat, slowly, so the daemon
 /// isn't kept busy sending the diff. The file is rewritten as `small`, or
 /// with only its first line changed, as the live test does. Returns the
-/// slowest answer.
+/// slowest answer, less the time the daemon's loop and the asking thread
+/// spent waiting for a CPU meanwhile (see [`waited_for_a_cpu`]): what's
+/// measured is the daemon's own work, not how busy the machine is.
 fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Duration {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
@@ -19772,12 +19788,18 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
     let watcher = {
         let done = done.clone();
         let mut other = daemon.client();
+        let daemons = (daemon.task.get())
+            .expect("the daemon's loop is running")
+            .clone();
         std::thread::spawn(move || {
+            let ours = Path::new("/proc/thread-self");
+            let waited = || waited_for_a_cpu(&daemons) + waited_for_a_cpu(ours);
             let mut slowest = Duration::ZERO;
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                let asked = Instant::now();
+                let (asked, before) = (Instant::now(), waited());
                 other.list_terminals().unwrap();
-                slowest = slowest.max(asked.elapsed());
+                let took = (asked.elapsed()).saturating_sub(waited().saturating_sub(before));
+                slowest = slowest.max(took);
                 std::thread::sleep(Duration::from_millis(5));
             }
             slowest
@@ -19822,6 +19844,20 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
         }
     }
     slowest
+}
+
+/// How long the thread whose /proc directory is `task` has spent
+/// runnable but waiting for a CPU, as the scheduler counts it. On a
+/// loaded machine that's most of a slow answer: a turn that took the loop
+/// 35 ms of CPU took 160 ms, 125 ms of it waiting (CLACKA-211). Zero if
+/// the kernel keeps no schedstat, leaving the time as it was.
+fn waited_for_a_cpu(task: &Path) -> Duration {
+    let stat = std::fs::read_to_string(task.join("schedstat")).unwrap_or_default();
+    let waited = stat
+        .split_whitespace()
+        .nth(1)
+        .and_then(|ns| ns.parse().ok());
+    Duration::from_nanos(waited.unwrap_or(0))
 }
 
 #[test]
