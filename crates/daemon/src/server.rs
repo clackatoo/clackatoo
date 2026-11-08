@@ -1139,7 +1139,7 @@ impl Daemon {
             installs: Installs::new(config.declined.as_deref()),
             renames: rename::Renames::default(),
             finds,
-            tools: Tools::default(),
+            tools: Tools::with_limits(config.agents.subagent_limits()),
             background: background::Backgrounds::default(),
             keeps: keep::Keeps::default(),
             explorers: Explorers::default(),
@@ -1557,6 +1557,8 @@ impl Daemon {
         let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
         self.put_back_fits();
+        // While the chats are here to say when the user last wrote.
+        self.forget_stale_starts();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
                 Hosted::Pty(terminal) => {
@@ -3799,6 +3801,16 @@ impl Daemon {
     /// Does what a client asked of the chat `id`, as [`Self::chat_action`].
     #[allow(clippy::too_many_lines, reason = "one arm for each action")]
     fn chat_act(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
+        // How many chats agents started may work under it is held to the
+        // chats' above, which only the daemon sees.
+        if let ChatAction::Set { setting, value } = &action
+            && setting == crate::chat::SUBAGENTS_SETTING
+        {
+            let slot = self.terminals.get(&id).ok_or(Error::NoSuchTerminal(id))?;
+            slot.terminal.chat_ref().ok_or(Error::NotAChat(id))?;
+            self.set_subagents(id, value);
+            return Ok(());
+        }
         let slot = self
             .terminals
             .get_mut(&id)

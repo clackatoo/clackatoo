@@ -142,11 +142,15 @@ impl Daemon {
                 "The chat isn't in a pane to copy it beside.".to_owned(),
             ));
         };
+        // A copy is a chat of the user's, so no chat above holds it back:
+        // as many may work under it as under the chat it copies, not more.
+        let subagents = self.subagents_cap(id);
         let spec = self.agent_spec(&agent);
         let copy = self.next_terminal();
         let mut hosted = crate::chat::HostedChat::new(copy, size, cwd, &spec, tools, task, browser);
         let from = copied.uids.clone();
         let to = hosted.take_copy(copied);
+        hosted.set_subagents(subagents);
         let pairs: Vec<_> = from.iter().copied().zip(to).collect();
         self.agent_files.log.move_turns(id, copy, &pairs);
         // Handed back if the copy closes while the chat still shows them.
@@ -523,6 +527,57 @@ mod tests {
         assert_eq!(hunk_turns(&mut world, id), [1]);
         // Its undo is by index again, the uid it was made in.
         assert_eq!(world.undo(1, false, false), "Undid turn 2: a.txt.");
+    }
+
+    /// A copy (`:fork`) keeps the chat's Subagents setting, never more than
+    /// the chats above it allow, and an upgrade keeps both (CLACKA-209).
+    #[test]
+    fn a_copy_and_an_upgrade_keep_the_subagents_setting() {
+        let mut world = World::new();
+        world.end_turn();
+        let chat = world.chat;
+        world.daemon.set_subagents(chat, "4");
+        let show = |daemon: &mut Daemon, id| {
+            let name = daemon.workspaces.name_for_new(None).unwrap();
+            (daemon.workspaces).new_workspace(name, clackatoo_protocol::Content::Terminal(id));
+        };
+        show(&mut world.daemon, chat);
+        // The chat was made with the first ID, by hand.
+        world.daemon.next_terminal();
+        let copy = (world.daemon)
+            .fork_chat(chat, 1, clackatoo_protocol::ForkPlace::Tab)
+            .unwrap();
+        assert_eq!(world.daemon.chat_ref(copy).unwrap().subagents(), 4);
+        // A subagent's own may say more than its parent allows, if it was
+        // set before its parent was lowered: its copy has what it may.
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = clackatoo_protocol::Size::new(40, 10).unwrap();
+        let mut sub = crate::chat::HostedChat::new(
+            TerminalId(40),
+            size,
+            "/".into(),
+            &agent,
+            clackatoo_protocol::AgentTools::Ask,
+            true,
+            false,
+        );
+        sub.connected(crate::agent::Opened {
+            session: "s40".into(),
+            settings: None,
+        });
+        sub.act(ChatAction::Send("dig".into()));
+        sub.answered(Ok(agent_client_protocol_schema::v1::StopReason::EndTurn));
+        sub.started_by(chat, chat, 1, None);
+        world.daemon.add_chat(sub);
+        world.daemon.chat(TerminalId(40)).unwrap().set_subagents(8);
+        show(&mut world.daemon, TerminalId(40));
+        let copied = (world.daemon)
+            .fork_chat(TerminalId(40), 1, clackatoo_protocol::ForkPlace::Tab)
+            .unwrap();
+        assert_eq!(world.daemon.chat_ref(copied).unwrap().subagents(), 4);
+        let world = world.upgraded(|_| {});
+        assert_eq!(world.daemon.chat_ref(chat).unwrap().subagents(), 4);
+        assert_eq!(world.daemon.chat_ref(copy).unwrap().subagents(), 4);
     }
 
     #[test]

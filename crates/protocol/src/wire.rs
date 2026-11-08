@@ -326,6 +326,10 @@ gates! {
     TERMINAL_COUNTDOWN = 124,
     /// Language word characters in fenced chat code (CLACKA-175).
     CODE_WORDS = 125,
+    /// A chat's own Subagents setting, how many chats agents started under
+    /// it may work at once (CLACKA-209): `SettingKind::Subagents`. An older
+    /// peer is sent the chat's settings without it.
+    SUBAGENTS = 126,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -600,6 +604,7 @@ impl Since for SettingKind {
             Self::Mode | Self::Model | Self::Effort | Self::Tools | Self::Other | Self::Browser => {
                 EARLIER
             }
+            Self::Subagents => SUBAGENTS,
         }
     }
 }
@@ -1318,6 +1323,42 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
     message
 }
 
+/// `message` for a peer from before `SUBAGENTS`, without the chat's
+/// Subagents setting: it has nowhere to show it, and would take it for one
+/// of the agent's. `None` if there's none in it.
+fn without_subagents_setting(message: &ServerMessage) -> Option<ServerMessage> {
+    let mut dropped = false;
+    let mut drop_from = |settings: &mut Vec<Setting>| {
+        let before = settings.len();
+        settings.retain(|setting| setting.kind != SettingKind::Subagents);
+        dropped |= settings.len() != before;
+    };
+    let mut message = message.clone();
+    match &mut message {
+        ServerMessage::Response(Response::View(view))
+        | ServerMessage::Event(Event::View {
+            update: ViewUpdate::Snapshot(view),
+            ..
+        }) => {
+            if let Node::Chat(chat) = &mut view.root {
+                drop_from(&mut chat.settings);
+            }
+        }
+        ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        }) => {
+            for patch in patches {
+                if let Patch::Chat(ChatPatch::Settings(settings)) = patch {
+                    drop_from(settings);
+                }
+            }
+        }
+        _ => {}
+    }
+    dropped.then_some(message)
+}
+
 /// `message` as a peer of `wire`, older than `PROMPT_BOX`, reads a chat:
 /// without the chat updates it has no controls for (a sent draft before
 /// `PROMPT_BOX`, a retry before `CHAT_FACTS`, and the older ones), or
@@ -1422,6 +1463,14 @@ impl Downgrade for ServerMessage {
         }
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < SUBAGENTS
+            && let Some(older) = without_subagents_setting(self)
+        {
+            return match older.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
         }
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
@@ -1641,6 +1690,49 @@ mod tests {
             patches_at(AGENT_COMMANDS, vec![retrying, compacted_item()]).len(),
             1
         );
+    }
+
+    #[test]
+    fn a_peer_before_subagents_is_sent_the_settings_without_that_one() {
+        let setting = |kind, id: &str| Setting {
+            id: id.into(),
+            name: id.into(),
+            kind,
+            value: "6".into(),
+            choices: Vec::new(),
+        };
+        let settings = vec![
+            setting(SettingKind::Tools, "clackatoo.tools"),
+            setting(SettingKind::Subagents, "clackatoo.subagents"),
+        ];
+        let patch = Patch::Chat(ChatPatch::Settings(settings.clone()));
+        let same = patches_at(SUBAGENTS, vec![patch.clone()]);
+        assert_eq!(same, std::slice::from_ref(&patch));
+        // Dropped, never made one of the agent's, at any older wire.
+        let tools = Patch::Chat(ChatPatch::Settings(settings[..1].to_vec()));
+        let older = patches_at(SUBAGENTS - 1, vec![patch.clone()]);
+        assert_eq!(older, std::slice::from_ref(&tools));
+        assert_eq!(patches_at(FALLBACKS, vec![patch]), [tools]);
+        // And from a whole chat.
+        let chat = crate::ChatNode {
+            settings,
+            ..crate::ChatNode::default()
+        };
+        let snapshot = ServerMessage::Response(Response::View(crate::View {
+            title: String::new(),
+            cwd: None,
+            root: Node::Chat(Box::new(chat)),
+        }));
+        let Downgraded::To(ServerMessage::Response(Response::View(view))) =
+            snapshot.downgrade(SUBAGENTS - 1)
+        else {
+            panic!("not a view")
+        };
+        let Node::Chat(chat) = view.root else {
+            panic!("not a chat")
+        };
+        assert_eq!(chat.settings.len(), 1);
+        assert_eq!(chat.settings[0].kind, SettingKind::Tools);
     }
 
     fn compacted_item() -> Patch {
@@ -2390,6 +2482,7 @@ mod tests {
         assert_eq!(BufferUpdate::ChangedOnDisk.since(), EARLIER);
         assert_eq!(FilesUpdate::NoGit(String::new()).since(), EARLIER);
         assert_eq!(SettingKind::Browser.since(), EARLIER);
+        assert_eq!(SettingKind::Subagents.since(), SUBAGENTS);
         let exited = Event::Exited {
             terminal: crate::TerminalId(1),
         };

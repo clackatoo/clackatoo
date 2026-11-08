@@ -460,6 +460,7 @@ impl Daemon {
 
     /// Pane `id`, showing `content`, as it's kept: `None` for one that
     /// isn't, a buffer with no file yet or a chat's browser page.
+    #[allow(clippy::too_many_lines, reason = "an arm for each kind of pane")]
     fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
         if let Some(borrowed) = self.workspaces.borrowed().get(&id) {
             return Some(Pane::Terminal {
@@ -522,6 +523,7 @@ impl Daemon {
                     browser: chat.browser(),
                     started: self.kept_standing(terminal, chat),
                     branches: chat.saved_branches().map(Box::new),
+                    subagents: chat.subagents_chosen(),
                 }),
             },
             Content::Buffer(buffer) => {
@@ -935,6 +937,7 @@ impl Daemon {
                 browser,
                 started: _,
                 branches,
+                subagents,
             }) => {
                 if *room == 0 || chats.contains_key(id) {
                     return;
@@ -951,6 +954,12 @@ impl Daemon {
                     HostedChat::new(chat, size(), cwd.clone(), &spec, tools, *task, *browser);
                 if let Some(model) = model {
                     hosted.want_model(model.clone());
+                }
+                // Never more than may work at once in all; a subagent's is
+                // held to its parent's as it's put back under it.
+                if let Some(subagents) = subagents {
+                    let most = self.tools.subagent_limits().working;
+                    hosted.set_subagents((*subagents).min(most));
                 }
                 if let Some(session) = session {
                     hosted.go_on_with(ResumeSession {
@@ -1072,10 +1081,15 @@ impl Daemon {
                 cap,
             };
             let alone = started.parent.is_some() && parent.is_none();
+            // Never more of its own working than its parent allows.
+            let above = parent.map(|parent| self.subagents_cap(parent));
             let Some(hosted) = self.chat(chat) else {
                 continue;
             };
             hosted.stand_again(standing);
+            if let Some(above) = above {
+                hosted.set_subagents(hosted.subagents().min(above));
+            }
             if alone {
                 hosted.stand_alone();
                 log::info!("chat {chat} made again on its own: the chat that started it wasn't");
@@ -1476,9 +1490,10 @@ fn kept_standings<'a>(
 /// parent by the saved file's IDs: `None` if they go round, or further up
 /// than chats go deep.
 fn above(parents: &HashMap<u32, u32>, id: u32) -> Option<u8> {
-    /// Further than chats go deep (`MAX_DEPTH`), and than chats taken on
-    /// by those above as their parents close can be.
-    const MOST: u8 = 8;
+    /// Further than chats may be set to go deep (`depth` in the
+    /// `[subagents]` table of `agents.toml`), and than chats taken on by
+    /// those above as their parents close can be.
+    const MOST: u8 = crate::agents::DEEPEST_SUBAGENTS;
     let mut at = id;
     for count in 0..=MOST {
         match parents.get(&at) {
@@ -1745,6 +1760,65 @@ mod tests {
         assert_eq!(chat("chain 51").relations().parent, None);
         assert_eq!(chat("chain 52").relations().parent, Some(id("chain 53")));
         assert_eq!(chat("chain 59").relations().parent, Some(id("chain 60")));
+    }
+
+    /// A chat's Subagents setting is kept and comes back after a cold
+    /// start: never above how many may work at once in all, a subagent's
+    /// never above its parent's, and one kept before there was one at the
+    /// default (CLACKA-209).
+    #[test]
+    fn a_chats_subagents_setting_comes_back_after_a_cold_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let with = |mut chat: serde_json::Value, subagents: u8| {
+            chat["pane"]["chat"]["subagents"] = subagents.into();
+            chat
+        };
+        let started = serde_json::json!({ "parent": 20, "depth": 1 });
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [kept_workspace("here", &[
+                with(kept_chat(20, "user", None), 4),
+                with(kept_chat(21, "sub", Some(started)), 12),
+                with(kept_chat(22, "greedy", None), 99),
+                with(kept_chat(23, "off", None), 0),
+                kept_chat(24, "older", None),
+            ])],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let subagents = |title: &str| {
+            (daemon.terminals.values())
+                .filter_map(|slot| slot.terminal.chat_ref())
+                .find(|chat| chat.info().title == title)
+                .map(crate::chat::HostedChat::subagents)
+        };
+        assert_eq!(subagents("user"), Some(4));
+        assert_eq!(subagents("sub"), Some(4), "its parent's");
+        assert_eq!(subagents("greedy"), Some(16), "as many as may work at once");
+        assert_eq!(subagents("off"), Some(0));
+        assert_eq!(subagents("older"), Some(6), "the default");
+        // And it's kept again as it is.
+        let kept = daemon.kept_state();
+        let mut panes = Vec::new();
+        for tab in kept.workspaces.iter().flat_map(|workspace| &workspace.tabs) {
+            super::saved_panes(&tab.layout, &mut panes);
+        }
+        let mut values: Vec<(String, Option<u8>)> = (panes.into_iter())
+            .filter_map(|pane| match pane {
+                crate::saved::Pane::Chat {
+                    title, subagents, ..
+                } => Some((title.clone(), *subagents)),
+                _ => None,
+            })
+            .collect();
+        values.sort();
+        assert!(values.contains(&("user".to_owned(), Some(4))), "{values:?}");
+        assert!(values.contains(&("off".to_owned(), Some(0))), "{values:?}");
     }
 
     /// A chat kept with branches comes back with them waiting for its

@@ -35,12 +35,17 @@
 //!
 //! `tasks` says whether to ask the agent what it runs in the background
 //! (see [`crate::agent::Task`]): Claude Code is asked unless it's `false`.
+//! Its `[subagents]` table sets how far chats agents start may go (see
+//! [`SubagentLimits`]).
 //!
 //! It's the daemon's, not the window's, as the daemon runs the agent:
 //! it starts it again after an upgrade or a crash with no window there,
 //! for a chat opened from a phone as from a desktop, on its own machine.
 
 mod codex_steering;
+mod subagents;
+
+pub(crate) use subagents::{DEEPEST as DEEPEST_SUBAGENTS, SubagentLimits};
 
 use std::ffi::OsString;
 use std::fs;
@@ -395,6 +400,16 @@ impl AgentConfig {
             kept
         });
         kept.unwrap_or(true)
+    }
+
+    /// The limits on chats agents start, as the `[subagents]` table of
+    /// `agents.toml` sets them. It reads the file: the daemon keeps what
+    /// it says, and asks again only as a chat starts, never as an agent
+    /// calls a tool.
+    pub(crate) fn subagent_limits(&self) -> SubagentLimits {
+        (self.file.as_deref().and_then(read_document))
+            .map(|document| SubagentLimits::from_document(&document))
+            .unwrap_or_default()
     }
 
     /// The agent called `name`: the one clackatoo knows, changed or
@@ -953,6 +968,28 @@ mod tests {
             ..AgentConfig::default()
         };
         assert!(!switched.kept_through_upgrades());
+    }
+
+    /// The limits on chats agents start are read from the file's
+    /// `[subagents]` table (CLACKA-209).
+    #[test]
+    fn subagent_limits_come_from_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("agents.toml");
+        let config = AgentConfig {
+            file: Some(file.clone()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            config.subagent_limits(),
+            SubagentLimits::default(),
+            "no file"
+        );
+        fs::write(&file, "[subagents]\nworking = 4\ndepth = 2\n").unwrap();
+        let limits = config.subagent_limits();
+        assert_eq!((limits.working, limits.default, limits.depth), (4, 4, 2));
+        fs::write(&file, "not toml [").unwrap();
+        assert_eq!(config.subagent_limits(), SubagentLimits::default());
     }
 
     #[test]

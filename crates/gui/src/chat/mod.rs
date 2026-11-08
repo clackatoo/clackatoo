@@ -4458,14 +4458,16 @@ mod tests {
         fixtures::paint(&mut view, &mut fonts);
         let (hit, _) = view.hits.iter().find(|(hit, _)| matches!(hit, Hit::Chip(ids) if ids.contains(&"clackatoo.tools".to_owned()))).unwrap();
         let Hit::Chip(ids) = hit else { unreachable!() };
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), 4);
         let ids = ids.clone();
         view.toggle_menu(ids);
         let rows = picker::rows(&view.offer(), view.menu.as_ref().unwrap());
-        assert!(
-            rows.iter()
-                .any(|row| matches!(row, Row::Choice(c) if c.setting == "clackatoo.browser"))
-        );
+        for setting in ["clackatoo.browser", "clackatoo.subagents"] {
+            assert!(
+                rows.iter()
+                    .any(|row| matches!(row, Row::Choice(c) if c.setting == setting))
+            );
+        }
     }
 
     #[test]
@@ -5046,6 +5048,13 @@ mod tests {
                 "off",
                 &["Off", "On"],
             ),
+            own(
+                "clackatoo.subagents",
+                "Subagents",
+                SettingKind::Subagents,
+                "6",
+                &["Off", "2", "6"],
+            ),
         ]);
         view.node.usage = Some(clackatoo_protocol::Usage {
             used: 84_000,
@@ -5097,6 +5106,7 @@ mod tests {
                     "collaboration_mode".to_owned(),
                     "clackatoo.tools".to_owned(),
                     "clackatoo.browser".to_owned(),
+                    "clackatoo.subagents".to_owned(),
                 ],
             ]
         );

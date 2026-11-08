@@ -300,6 +300,11 @@ pub(crate) enum Pane {
         /// over, and come back with the branch the session knows.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branches: Option<Box<Branches>>,
+        /// How many chats agents started under it may work at once, its
+        /// Subagents setting, 0 for off (CLACKA-209). Builds before then
+        /// pass this over, and give it the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagents: Option<u8>,
     },
     /// An editor, editing a file, or a buffer with no file yet, by an
     /// empty path.
@@ -838,6 +843,7 @@ mod tests {
                                         browser: true,
                                         started: None,
                                         branches: None,
+                                        subagents: None,
                                     }),
                                     Layout::Pane(Pane::Review {
                                         chat: Some(7),
@@ -992,6 +998,7 @@ mod tests {
             browser: false,
             started: Some(started),
             branches: None,
+            subagents: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);
@@ -1016,10 +1023,38 @@ mod tests {
                 ..Started::default()
             }),
             branches: None,
+            subagents: None,
         });
         let text = String::from_utf8(state.encode()).unwrap();
         for absent in ["parent", "turn", "profile", "limits", "kept", "mode"] {
             assert!(!text.contains(&format!("\"{absent}\"")), "{absent}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_chats_subagents_setting_reads_back_and_is_left_out_when_there_is_none() {
+        let encoded = String::from_utf8(state().encode()).unwrap();
+        assert!(!encoded.contains("\"subagents\""), "{encoded}");
+        let mut state = state();
+        let chat = |subagents| Pane::Chat {
+            id: 8,
+            agent: "claude".into(),
+            session: None,
+            title: String::new(),
+            cwd: "/src".into(),
+            model: None,
+            tools: Tools::Ask,
+            task: false,
+            browser: false,
+            started: None,
+            branches: None,
+            subagents,
+        };
+        for subagents in [Some(0), Some(4)] {
+            state.workspaces[1].tabs[0].layout = Layout::Pane(chat(subagents));
+            let encoded = state.encode();
+            assert!(String::from_utf8_lossy(&encoded).contains("\"subagents\""));
+            assert_eq!(State::decode(&encoded).unwrap(), state);
         }
     }
 
@@ -1078,6 +1113,7 @@ mod tests {
             browser: false,
             started: None,
             branches: Some(Box::new(branches.clone())),
+            subagents: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);

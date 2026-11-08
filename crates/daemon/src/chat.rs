@@ -29,7 +29,7 @@ use clackatoo_protocol::{
 use serde_json::Value;
 
 use crate::agent::Opened;
-use crate::agents::AgentSpec;
+use crate::agents::{AgentSpec, SubagentLimits};
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
@@ -161,6 +161,13 @@ const BROWSER_VALUES: [(bool, &str, &str, &str); 2] = [
 /// an upgrade. Never shown, nor sent to the agent.
 const BROWSING_SETTING: &str = "clackatoo.browsing";
 
+/// The ID of the chat's own setting for how many chats agents started
+/// under it may work at once: `off`, or a number. Shown with the agent's
+/// settings, as the tools setting is, and never sent to the agent. Only
+/// the user changes it, and the daemon holds it to the chats' above (see
+/// `Daemon::set_subagents`).
+pub(crate) const SUBAGENTS_SETTING: &str = "clackatoo.subagents";
+
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
@@ -172,6 +179,7 @@ fn chat_wide(id: &str) -> bool {
         KEPT_SETTING,
         BROWSER_SETTING,
         BROWSING_SETTING,
+        SUBAGENTS_SETTING,
     ]
     .contains(&id)
 }
@@ -179,7 +187,25 @@ fn chat_wide(id: &str) -> bool {
 /// Whether the setting with `id` is one the chat shows of its own, after
 /// the agent's.
 fn shown_own(id: &str) -> bool {
-    id == TOOLS_SETTING || id == BROWSER_SETTING
+    id == TOOLS_SETTING || id == BROWSER_SETTING || id == SUBAGENTS_SETTING
+}
+
+/// The Subagents setting's value `value`, as a number: 0 for off. `None`
+/// if it isn't one.
+pub(crate) fn subagents_of(value: &str) -> Option<u8> {
+    match value {
+        "off" => Some(0),
+        _ => value.parse().ok(),
+    }
+}
+
+/// How the Subagents setting keeps `count`.
+fn subagents_value(count: u8) -> String {
+    if count == 0 {
+        "off".to_owned()
+    } else {
+        count.to_string()
+    }
 }
 
 /// The most questions a chat keeps waiting. Past it, a tool's question is
@@ -518,6 +544,9 @@ pub(crate) struct HostedChat {
     /// The uids of turns let go with branches, whose records the server
     /// is to forget.
     forgotten: Vec<TurnUid>,
+    /// The values its Subagents setting offers, as the daemon's limits
+    /// allow (see [`Self::offer_subagents`]).
+    subagents_offered: Vec<u8>,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -691,7 +720,14 @@ impl HostedChat {
             told: resume::Told::default(),
             node: ChatNode {
                 agent: agent.title.clone(),
-                settings: vec![tools_setting(tools), browser_setting(browser)],
+                settings: vec![
+                    tools_setting(tools),
+                    browser_setting(browser),
+                    subagents_setting(
+                        SubagentLimits::default().default,
+                        &SubagentLimits::default().offered(),
+                    ),
+                ],
                 // It keeps one, empty to begin with.
                 draft: Some(String::new()),
                 ..ChatNode::default()
@@ -743,6 +779,7 @@ impl HostedChat {
             forks: forks::ForkPoints::default(),
             tree: branches::Tree::default(),
             forgotten: Vec::new(),
+            subagents_offered: SubagentLimits::default().offered(),
         }
     }
 
@@ -898,6 +935,10 @@ impl HostedChat {
         }
         (resumed.node.settings).push(tools_setting(resumed.tools()));
         (resumed.node.settings).push(browser_setting(resumed.browser()));
+        (resumed.node.settings).push(subagents_setting(
+            resumed.subagents(),
+            &resumed.subagents_offered,
+        ));
         resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
         // What Up recalls is the user's messages among its turns, now
@@ -954,6 +995,41 @@ impl HostedChat {
     /// from before there was one doesn't.
     pub(crate) fn browser(&self) -> bool {
         (self.chosen.iter()).any(|(id, value)| id == BROWSER_SETTING && value == "on")
+    }
+
+    /// How many chats agents started under it may work at once, by its
+    /// own Subagents setting: 0 is off. The chats above it may allow fewer
+    /// (see `Daemon::subagents_cap`). One not yet given a value by the
+    /// daemon has the default.
+    pub(crate) fn subagents(&self) -> u8 {
+        self.subagents_chosen()
+            .unwrap_or(SubagentLimits::default().default)
+    }
+
+    /// Its Subagents setting, if it has been given one, to keep.
+    pub(crate) fn subagents_chosen(&self) -> Option<u8> {
+        (self.chosen.iter())
+            .find(|(id, _)| id == SUBAGENTS_SETTING)
+            .and_then(|(_, value)| subagents_of(value))
+    }
+
+    /// Sets its Subagents setting to `count`, as the daemon has held it to
+    /// the chats' above.
+    pub(crate) fn set_subagents(&mut self, count: u8) {
+        self.chosen.retain(|(id, _)| id != SUBAGENTS_SETTING);
+        (self.chosen).push((SUBAGENTS_SETTING.to_owned(), subagents_value(count)));
+        self.set_settings(self.agent_settings());
+    }
+
+    /// Has its Subagents setting offer what the daemon's `limits` allow,
+    /// and start at their default if it has no value yet.
+    pub(crate) fn offer_subagents(&mut self, limits: &SubagentLimits) {
+        self.subagents_offered = limits.offered();
+        if self.subagents_chosen().is_none() {
+            self.set_subagents(limits.default);
+        } else {
+            self.set_settings(self.agent_settings());
+        }
     }
 
     /// Whether the user has let its agent open pages in the browser.
@@ -1158,6 +1234,9 @@ impl HostedChat {
                     actions.push(Action::Browser(browser));
                 }
             }
+            // The server's, which holds it to the chats' above (see
+            // `Daemon::set_subagents`): the agent never hears of it.
+            ChatAction::Set { setting, .. } if setting == SUBAGENTS_SETTING => {}
             // The server's to do: they're about files, or other agents.
             ChatAction::Undo { .. }
             | ChatAction::Redo { .. }
@@ -1420,7 +1499,7 @@ impl HostedChat {
         // The notice that chats finished starts a new chain of messages,
         // as the user's own message does: a PM going round with its
         // builder isn't two agents answering each other, and what bounds
-        // those turns is the server's (`MAX_NOTICE_TURNS`). An activity's
+        // those turns is the server's (`notice_turns`). An activity's
         // notice, which nothing else bounds, leaves the chain as it was.
         if !message.is_notice() || message.is_finished_notice() {
             self.relations.hops = message.hops;
@@ -3630,9 +3709,13 @@ impl HostedChat {
 
     /// The agent's settings are `settings`, and the chat's own goes after
     /// them.
+    /// An agent's setting with the ID of one of the chat's own is left out:
+    /// the agent never changes those.
     fn set_settings(&mut self, mut settings: Vec<Setting>) {
+        settings.retain(|setting| !chat_wide(&setting.id));
         settings.push(tools_setting(self.tools()));
         settings.push(browser_setting(self.browser()));
+        settings.push(subagents_setting(self.subagents(), &self.subagents_offered));
         if self.node.settings != settings {
             self.node.settings.clone_from(&settings);
             self.journal.push(ChatPatch::Settings(settings));
@@ -3880,6 +3963,37 @@ fn browser_setting(browser: bool) -> Setting {
                 value: value.to_owned(),
                 name: name.to_owned(),
                 description: Some(description.to_owned()),
+            })
+            .collect(),
+    }
+}
+
+/// The chat's own setting for how many chats agents started under it may
+/// work at once, at `count`, offering `offered` and `count` itself.
+fn subagents_setting(count: u8, offered: &[u8]) -> Setting {
+    let mut values = offered.to_vec();
+    if !values.contains(&count) {
+        values.push(count);
+        values.sort_unstable();
+    }
+    Setting {
+        id: SUBAGENTS_SETTING.to_owned(),
+        name: "Subagents".to_owned(),
+        kind: SettingKind::Subagents,
+        value: subagents_value(count),
+        choices: (values.into_iter())
+            .map(|value| SettingChoice {
+                value: subagents_value(value),
+                name: if value == 0 {
+                    "Off".to_owned()
+                } else {
+                    value.to_string()
+                },
+                description: Some(match value {
+                    0 => "Starts no chats of its own".to_owned(),
+                    1 => "One chat it starts may work at a time".to_owned(),
+                    _ => format!("Up to {value} chats it starts may work at once"),
+                }),
             })
             .collect(),
     }
@@ -4140,9 +4254,10 @@ pub(crate) fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
             SettingKind::Model => handover::SettingKind::Model,
             SettingKind::Effort => handover::SettingKind::Effort,
             // Never handed over: the chat keeps its value with those chosen.
-            SettingKind::Other | SettingKind::Tools | SettingKind::Browser => {
-                handover::SettingKind::Other
-            }
+            SettingKind::Other
+            | SettingKind::Tools
+            | SettingKind::Browser
+            | SettingKind::Subagents => handover::SettingKind::Other,
         },
         value: setting.value,
         choices: (setting.choices.into_iter())
@@ -5572,12 +5687,69 @@ mod tests {
         assert_eq!(chat.tools(), AgentTools::Ask);
         assert_eq!(chat.act(set("everything")), []);
         assert_eq!(chat.tools(), AgentTools::Ask);
-        // Kept when the agent's settings change, before the browser's.
+        // Kept when the agent's settings change, before the browser's and
+        // the subagents'.
         chat.settings_changed(Ok(claude_settings("sonnet")));
-        let ids: Vec<&str> = (chat.node.settings.iter().rev().take(2))
+        let ids: Vec<&str> = (chat.node.settings.iter().rev().take(3))
             .map(|setting| setting.id.as_str())
             .collect();
-        assert_eq!(ids, [BROWSER_SETTING, TOOLS_SETTING]);
+        assert_eq!(ids, [SUBAGENTS_SETTING, BROWSER_SETTING, TOOLS_SETTING]);
+    }
+
+    /// The Subagents setting is the chat's own: a client's change is the
+    /// server's to make (`Daemon::set_subagents`), and an agent saying it
+    /// has a setting by that ID changes nothing (CLACKA-209).
+    #[test]
+    fn the_subagents_setting_is_never_the_agents() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.offer_subagents(&SubagentLimits::default());
+        assert_eq!(chat.subagents(), 6);
+        let set = ChatAction::Set {
+            setting: SUBAGENTS_SETTING.into(),
+            value: "16".into(),
+        };
+        assert_eq!(chat.act(set), [], "the agent never hears of it");
+        assert_eq!(chat.subagents(), 6, "nor does the chat change it itself");
+        chat.set_subagents(2);
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"config_option_update","configOptions":[
+                {"id":"clackatoo.subagents","name":"Subagents","type":"select",
+                 "currentValue":"16","options":[{"value":"16","name":"16"}]},
+                {"id":"clackatoo.tools","name":"Tools","type":"select",
+                 "currentValue":"allow","options":[{"value":"allow","name":"Allow"}]}]}"#,
+        );
+        assert_eq!(chat.subagents(), 2);
+        assert_eq!(chat.tools(), AgentTools::Ask);
+        let shown: Vec<&Setting> = (chat.node.settings.iter())
+            .filter(|setting| setting.id == SUBAGENTS_SETTING || setting.id == TOOLS_SETTING)
+            .collect();
+        let shown: Vec<(SettingKind, &str)> = (shown.iter())
+            .map(|setting| (setting.kind, setting.value.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [(SettingKind::Tools, "ask"), (SettingKind::Subagents, "2")]
+        );
+        // Off is kept as such, and offered with the usual numbers.
+        chat.set_subagents(0);
+        let setting = (chat.node.settings.iter())
+            .find(|setting| setting.id == SUBAGENTS_SETTING)
+            .unwrap();
+        assert_eq!(setting.value, "off");
+        let values: Vec<&str> = (setting.choices.iter())
+            .map(|choice| choice.value.as_str())
+            .collect();
+        assert_eq!(values, ["off", "2", "4", "6", "8", "12", "16"]);
+        // Through an upgrade, as it was.
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert_eq!(resumed.subagents_chosen(), Some(0));
+        let kinds = (resumed.node.settings.iter())
+            .filter(|setting| setting.kind == SettingKind::Subagents)
+            .count();
+        assert_eq!(kinds, 1);
     }
 
     #[test]
@@ -7554,6 +7726,7 @@ mod tests {
                 (SettingKind::Model, "haiku"),
                 (SettingKind::Tools, "ask"),
                 (SettingKind::Browser, "off"),
+                (SettingKind::Subagents, "6"),
             ]
         );
 

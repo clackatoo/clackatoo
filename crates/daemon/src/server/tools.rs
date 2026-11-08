@@ -158,6 +158,19 @@ enum Wait {
 }
 
 impl Tools {
+    /// What the daemon keeps for agents' tools as it starts, holding chats
+    /// agents start to `limits`.
+    pub(super) fn with_limits(limits: crate::agents::SubagentLimits) -> Self {
+        let mut tools = Self::default();
+        tools.talk.limits = limits;
+        tools
+    }
+
+    /// The limits on chats agents start, as `agents.toml` last said.
+    pub(super) fn subagent_limits(&self) -> crate::agents::SubagentLimits {
+        self.talk.limits
+    }
+
     pub(super) fn terminal_state(
         &self,
         terminal: TerminalId,

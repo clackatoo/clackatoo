@@ -109,7 +109,10 @@ pub fn panel(node: &ChatNode, picker: &Picker, capabilities: &[(String, String)]
                 .filter(|s| {
                     matches!(
                         s.kind,
-                        SettingKind::Mode | SettingKind::Tools | SettingKind::Browser
+                        SettingKind::Mode
+                            | SettingKind::Tools
+                            | SettingKind::Browser
+                            | SettingKind::Subagents
                     ) || s.is_plan_mode()
                 })
                 .map(choices),
@@ -367,5 +370,30 @@ mod tests {
         );
         assert_eq!(picks(&panel), ["set:ask", "set:auto"]);
         assert!(panel.find_all("id").is_empty());
+    }
+    #[test]
+    fn permissions_show_the_chats_subagents_setting() {
+        let mut node = node();
+        node.settings.push(Setting {
+            id: "clackatoo.subagents".into(),
+            name: "Subagents".into(),
+            kind: SettingKind::Subagents,
+            value: "6".into(),
+            choices: ["off", "2", "6"]
+                .map(|value| SettingChoice {
+                    value: value.into(),
+                    name: value.into(),
+                    description: None,
+                })
+                .to_vec(),
+        });
+        let picker = Picker {
+            tab: Tab::Permissions,
+            ..Picker::default()
+        };
+        assert_eq!(
+            picks(&panel(&node, &picker, &[])),
+            ["set:ask", "set:auto", "set:off", "set:2", "set:6"]
+        );
     }
 }

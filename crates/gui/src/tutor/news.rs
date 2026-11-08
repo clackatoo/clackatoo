@@ -1181,6 +1181,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Remote panes and pending editor acknowledgements survive local daemon upgrades",
     },
+    News {
+        id: "subagents-setting",
+        date: "2026-11-08",
+        lesson: "agents",
+        what: "A chat's Subagents setting says how many may work at once; [subagents] in agents.toml sets the rest",
+    },
 ];
 
 impl News {

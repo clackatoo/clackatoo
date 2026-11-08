@@ -93,7 +93,8 @@ impl Message {
     }
 
     /// Whether it's a notice that can wait for the user, past the turns
-    /// notices may start (`MAX_NOTICE_TURNS`): that chats finished, still
+    /// notices may start (`notice_turns`, see `agents.toml`): that chats
+    /// finished, still
     /// to say what, or what an upgrade stopped.
     pub(crate) fn is_held_kind(&self) -> bool {
         self.is_unfilled_notice() || self.is_upgrade_notice()

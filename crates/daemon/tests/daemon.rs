@@ -3959,8 +3959,8 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
         node.settings.iter().any(|setting| setting.value == "auto")
     });
     // The agent's two, and the chat's own for clackatoo's tools and the
-    // browser.
-    assert_eq!(node.settings.len(), 4);
+    // browser, and how many subagents may work at once.
+    assert_eq!(node.settings.len(), 5);
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "auto haiku\n"
@@ -4134,6 +4134,7 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
             "fast-mode",
             "clackatoo.tools",
             "clackatoo.browser",
+            "clackatoo.subagents",
         ]
     );
     assert_eq!(
@@ -14263,7 +14264,14 @@ fn starting_a_chat_opens_it_beside_with_the_message_without_asking() {
 
 #[test]
 fn chats_agents_start_are_limited_in_depth_and_number() {
-    let daemon = TestDaemon::with_tools();
+    // As agents.toml sets them (CLACKA-209).
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.agents.file = Some(dir.join("agents.toml"));
+        let limits = "[subagents]\ndepth = 2\nworking = 4\n";
+        std::fs::write(dir.join("agents.toml"), limits).unwrap();
+    });
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Allow);
     // The chat started starts one, which can start none.
@@ -14306,8 +14314,9 @@ fn chats_agents_start_are_limited_in_depth_and_number() {
     // a has heard all of it: no notice comes to take a turn.
     assert_eq!(chat_now(&mut client, a).turns.len(), 1);
 
-    // At most four chats agents started work at once: four that wait
-    // for ever are let start, and a fifth is refused.
+    // At most four chats agents started work at once, as set, which the
+    // chat's Subagents setting starts at too: four that wait for ever are
+    // let start, and a fifth is refused.
     let waiting = "mcp start_chat {\"prompt\":\"wait\"}";
     let prompt = [waiting; 5].join("\n");
     let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
@@ -14317,8 +14326,12 @@ fn chats_agents_start_are_limited_in_depth_and_number() {
         4,
         "{words}"
     );
+    // A new chat's Subagents setting is no more than may work in all.
     assert!(
-        words.contains("start_chat: failed: 4 chats started by agents are working already"),
+        words.contains(&format!(
+            "start_chat: failed: 4 chats started by agents for the user's chat {a} are working \
+             already, and its Subagents setting lets 4 work at once"
+        )),
         "{words}"
     );
 }
@@ -14827,9 +14840,10 @@ fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_fir
     let read = format!("mcp read_chat {{\"chat\":{one}}}");
     let read = last_words(&ask_for(&mut client, a, &read, Duration::from_secs(10)));
     assert!(read.contains("[tool: Write "), "{read}");
-    // Too many at once are refused whole: two more would be five working.
-    let more = serde_json::json!({ "chats": [{ "prompt": "wait" }, { "prompt": "wait" },
-                                             { "prompt": "wait" }, { "prompt": "wait" }] });
+    // Too many at once are refused whole: six more would be seven working,
+    // and the chat's Subagents setting lets six.
+    let wait = serde_json::json!({ "prompt": "wait" });
+    let more = serde_json::json!({ "chats": vec![wait; 6] });
     let words = last_words(&ask_for(
         &mut client,
         a,
@@ -14837,7 +14851,10 @@ fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_fir
         Duration::from_secs(10),
     ));
     assert!(
-        words.contains("start_chats: failed: 1 chats started by agents are working already"),
+        words.contains(&format!(
+            "start_chats: failed: 1 chats started by agents for the user's chat {a} are working \
+             already, and its Subagents setting lets 6 work at once: start fewer"
+        )),
         "{words}"
     );
     assert_eq!(card_of(&mut client, a).len(), 2, "none started");

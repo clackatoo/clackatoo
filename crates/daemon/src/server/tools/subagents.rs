@@ -439,6 +439,8 @@ impl Daemon {
         let mut child = HostedChat::new(id, size, cwd, &spec, tools, task, browser);
         child.started_by(chat, root, depth + 1, mode);
         child.start_as(&profile.name, limits, role, wanted);
+        // As many may work under it as under the chat that starts it.
+        child.set_subagents(self.subagents_cap(chat));
         self.start_hosted_chat(child);
         let pane = if new.show {
             match self.place_beside(chat, PaneTerminal::Existing(id)) {

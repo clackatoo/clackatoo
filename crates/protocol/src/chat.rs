@@ -726,6 +726,10 @@ pub enum SettingKind {
     /// Whether the agent gets tools that drive clackatoo's browser: a
     /// setting of the daemon's, not the agent's.
     Browser,
+    /// How many chats agents started under the chat may work at once,
+    /// its value `off` or a number: a setting of the daemon's, not the
+    /// agent's, which only the user changes.
+    Subagents,
 }
 
 /// One value a setting can take.

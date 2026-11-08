@@ -574,11 +574,26 @@ mod tests {
                 "ask",
                 vec![choice("ask", "Ask", None), choice("allow", "Allow", None)],
             ),
+            setting(
+                "clackatoo.subagents",
+                "Subagents",
+                SettingKind::Subagents,
+                "6",
+                vec![choice("off", "Off", None), choice("6", "6", None)],
+            ),
         ];
         let ids: Vec<String> = (permissions(&settings).into_iter())
             .map(|setting| setting.id)
             .collect();
-        assert_eq!(ids, ["mode", "collaboration_mode", "clackatoo.tools"]);
+        assert_eq!(
+            ids,
+            [
+                "mode",
+                "collaboration_mode",
+                "clackatoo.tools",
+                "clackatoo.subagents"
+            ]
+        );
         assert_eq!(permissions_label(&settings), "Auto review");
         settings[1].value = "plan".into();
         assert_eq!(permissions_label(&settings), "Plan · Auto review");
@@ -852,15 +867,19 @@ pub(super) fn fast_mode(settings: &[Setting]) -> Option<&Setting> {
 
 /// The settings the permissions control's menu holds, in order: the
 /// agent's mode, Codex's Plan mode (see [`Setting::is_plan_mode`]), and
-/// clackatoo's own Tools and Browser.
+/// clackatoo's own Tools, Browser and Subagents.
 pub(super) fn permissions(settings: &[Setting]) -> Vec<Setting> {
     let of = |kind| settings.iter().find(|setting| setting.kind == kind);
     (of(SettingKind::Mode).into_iter())
         .chain(settings.iter().find(|setting| setting.is_plan_mode()))
         .chain(
-            [SettingKind::Tools, SettingKind::Browser]
-                .into_iter()
-                .filter_map(of),
+            [
+                SettingKind::Tools,
+                SettingKind::Browser,
+                SettingKind::Subagents,
+            ]
+            .into_iter()
+            .filter_map(of),
         )
         .cloned()
         .collect()

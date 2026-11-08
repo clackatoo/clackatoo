@@ -433,6 +433,9 @@ impl Daemon {
     /// and gets it a session.
     pub(super) fn start_hosted_chat(&mut self, chat: HostedChat) {
         let id = chat.info().id;
+        // As `agents.toml` is read for the chat's agent, so are the limits
+        // on chats agents start: never as an agent calls a tool.
+        self.refresh_subagent_limits();
         self.add_chat(chat);
         self.offer_providers(Some(id));
         self.connect(id);
@@ -462,6 +465,8 @@ impl Daemon {
         let dir = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
         let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir.clone());
         chat.show_cwd(shown, &dir, project);
+        // A chat from before the Subagents setting gets the default.
+        chat.offer_subagents(&self.tools.subagent_limits());
         self.terminals.insert(
             id,
             Slot {

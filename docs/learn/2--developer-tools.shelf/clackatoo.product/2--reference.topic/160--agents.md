@@ -648,7 +648,7 @@ Once back in the background it is like any other there: it closes with the chat 
 
 #### Closing
 
-Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Otherwise a subagent stays open, finished or not, until you close it, with `:bd`, or the agent that started it does, with `close_chat`, so an agent can send its builder fixes for as long as the work takes. None is ever closed to make room: with 32 open under one of your chats, starting another is refused, and the agent is told to close those it's done with. One you had in a pane and sent back is yours: only you close it. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
+Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Otherwise a subagent stays open, finished or not, until you close it, with `:bd`, or the agent that started it does, with `close_chat`, so an agent can send its builder fixes for as long as the work takes. None is ever closed to make room: with 32 open under one of your chats (`open` under [`[subagents]`](#subagent-limits)), starting another is refused, and the agent is told to close those it's done with. One you had in a pane and sent back is yours: only you close it. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
 
 ### Profiles
 
@@ -687,10 +687,30 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 - A chat is started only inside the project of the chat starting it, a folder linked from inside it to outside included.
 - A chat an agent starts gets its parent's Tools setting and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes as session settings can't be held to its safest, so a chat started with one fails to start, and says so, whenever its session opens. Modes an agent offers only through ACP's older `modes` field aren't read.
 - What one agent sends another shows its control characters, and those that reorder the text around them, as `^G` or `<U+202E>`, so nothing in it hides from you. So do tag characters, which can spell out words unseen, unless they make a flag such as Scotland's, and variation selectors that follow nothing they could change. Joiners and other characters emoji and scripts such as Persian need are left as they are.
-- Agents send each other as many messages as the work needs. A chat of yours can have at most 32 chats started under it open at once, and 64 started under it in all, 4 of them working at once, a message waking one counting too, 2 deep. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
+- A chat whose [Subagents setting](#subagent-limits) lets more of its subagents work at once than the sender's may do more too, so a chat at 2 can't fan out through one at 8.
+- Agents send each other as many messages as the work needs, within the [limits](#subagent-limits) below. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
 - A notice from clackatoo, such as that a subagent finished or an [activity](#managed-activities-and-recovery) ended, always reaches the chat it's for, and counts against none of these. A turn that a notice that subagents finished starts begins a new chain of messages, as yours does, so an agent going round with its builder isn't stopped after 6. Instead, notices that subagents finished start at most 100 turns under one of your chats between two of your messages there: past that, the next waits until you write again, there or in the chat it waits in, and that chat says so. Nothing is lost, and anything else waiting in that chat goes on meanwhile. An agent waiting for a chat holding such a notice isn't kept waiting: it's told why. An [activity](#managed-activities-and-recovery)'s notice, which nothing counts, leaves the chain of messages as it was.
 
-Which chat started which, messages waiting their turn, which answers each chat has had from each other, and the counts above, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` goes on waiting through an upgrade, and its call is answered as it would have been. If the upgrade stops its agent instead, it hears when they settle, as a notice, whoever they were answering: each of them, or, waiting for the first, once. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
+### Subagent limits
+
+The permissions menu beside the model, in a window or on the phone, has a **Subagents** setting after Tools and Browser: how many subagents may work at once under the chat. It offers Off, 2, 4, 6, 8, 12 and 16, none more than `working` below, and starts at 6. Off refuses `start_chat` and `start_chats`, and the agent is told you turned it off. The count is of every subagent working under your chat, however deep, and the fewest that any chat on the way up allows holds: a subagent starts with its chat's value, and you can lower it in the subagent's pane, but never raise it above its chat's. A message that would set an idle subagent working again counts as starting one. Only you change it: an agent never can.
+
+The rest are set in `agents.toml`, in a table of their own:
+
+```toml
+[subagents]
+working = 16       # subagents working at once in all, under all your chats (1–64)
+default = 6        # the Subagents setting a new chat starts at (0, off, to working)
+open = 32          # open under one of your chats (1–256)
+started = 128      # started under one of your chats since you last wrote there (1–10000)
+depth = 3          # how deep subagents go: yours is 0, its subagents 1 (1–8)
+hops = 6           # the longest chain of messages, each in the turn the one before started (1–64)
+notice_turns = 100 # turns notices start under one of your chats since you last wrote (1–10000)
+```
+
+A value outside its range is ignored, and the default used, and the daemon's log says so: it's never brought into range. The daemon reads the table as it starts and again as each chat starts, never while an agent works. At a depth of 3, your chat's PM can start a builder, which can start a helper of its own.
+
+Which chat started which, messages waiting their turn, which answers each chat has had from each other, the counts above, and each chat's Subagents setting, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` goes on waiting through an upgrade, and its call is answered as it would have been. If the upgrade stops its agent instead, it hears when they settle, as a notice, whoever they were answering: each of them, or, waiting for the first, once. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
 
 ## Which agent
 
@@ -728,6 +748,9 @@ tasks = false                # don't ask what it runs in the background
 
 [upgrade]
 keep_agents = false          # stop agents as the daemon upgrades
+
+[subagents]
+working = 16                 # see Subagent limits
 ```
 
 The daemon reads it whenever a chat starts, and as it upgrades. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
@@ -748,9 +771,9 @@ What each turn changed in files lasts through an upgrade, so turns can still be 
 
 A chat that moved between agents keeps the sessions it had with each, and goes back to them after an upgrade too.
 
-When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, model, tools and Browser settings, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
+When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, model, tools, Browser and Subagents settings, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
 
-A [subagent](#subagents) in a pane comes back a subagent of its chat, if that chat is in a pane of the same workspace and so comes back with it: with its band, on its chat's card, under the turn that started it, and with its profile and that profile's limits. `:q` sends it back to the card, its chat can message it and wait for it, and one you'd sent back and opened again is still yours to close. It never comes back able to do more than it could: it keeps its limits (ones this build doesn't know count as read-only), never fewer than its chat's, it can start no deeper chats than it could, and it asks its agent for the mode it had chosen only if that's no higher than its chat's: otherwise for the safest, Manual or Read-only, and never the mode your own new chats start in. An agent whose modes clackatoo doesn't know is asked for none. A subagent whose chat didn't come back, because it was in no pane, or is in another workspace, comes back on its own, with its profile and limits, in a mode no higher than its agent's safest, and says so. Some things start again: how many chats agents have started under each of yours (64 may be), how many turns notices have started (100), messages from other agents still waiting their turn, and waits under way, which end. What its chat had already heard from it isn't told again: the conversation it tells again counts as no answer to anyone. One kept by a build from before then comes back as a chat of its own.
+A [subagent](#subagents) in a pane comes back a subagent of its chat, if that chat is in a pane of the same workspace and so comes back with it: with its band, on its chat's card, under the turn that started it, and with its profile and that profile's limits. `:q` sends it back to the card, its chat can message it and wait for it, and one you'd sent back and opened again is still yours to close. It never comes back able to do more than it could: it keeps its limits (ones this build doesn't know count as read-only), never fewer than its chat's, it can start no deeper chats than it could, and it asks its agent for the mode it had chosen only if that's no higher than its chat's: otherwise for the safest, Manual or Read-only, and never the mode your own new chats start in. An agent whose modes clackatoo doesn't know is asked for none. A subagent whose chat didn't come back, because it was in no pane, or is in another workspace, comes back on its own, with its profile and limits, in a mode no higher than its agent's safest, and says so. Its Subagents setting is never more than its chat's. Some things start again: how many chats agents have started under each of yours (128 may be), how many turns notices have started (100), messages from other agents still waiting their turn, and waits under way, which end. What its chat had already heard from it isn't told again: the conversation it tells again counts as no answer to anyone. One kept by a build from before then comes back as a chat of its own.
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
 

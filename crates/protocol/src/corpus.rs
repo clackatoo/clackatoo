@@ -779,6 +779,37 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    // A chat's own Subagents setting, after its Browser setting.
+    samples.push((
+        crate::wire::SUBAGENTS,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Settings(vec![
+                Setting {
+                    kind: SettingKind::Browser,
+                    ..setting()
+                },
+                Setting {
+                    id: "clackatoo.subagents".into(),
+                    name: "Subagents".into(),
+                    kind: SettingKind::Subagents,
+                    value: "6".into(),
+                    choices: vec![
+                        SettingChoice {
+                            value: "off".into(),
+                            name: "Off".into(),
+                            description: Some("Starts no chats".into()),
+                        },
+                        SettingChoice {
+                            value: "6".into(),
+                            name: "6".into(),
+                            description: None,
+                        },
+                    ],
+                },
+            ]))]),
+        })),
+    ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
