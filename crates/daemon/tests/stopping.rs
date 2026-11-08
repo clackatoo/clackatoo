@@ -108,10 +108,7 @@ impl Process {
     fn kill_and_start_again(&mut self, setup: &Setup) {
         self.signal(Signal::KILL);
         self.child.wait().unwrap();
-        self.child = spawn(self.root(), setup, false, &[]);
-        eventually("the daemon answers again", || {
-            Client::connect(&self.socket()).is_ok()
-        });
+        self.restart(setup, &[]);
     }
 
     /// Starts the daemon again, as set up by default, in the same
@@ -119,10 +116,31 @@ impl Process {
     /// exited, and waits until it answers.
     fn start_again(&mut self, args: &[&str]) {
         self.exits_within(Duration::from_secs(5));
-        self.child = spawn(self.root(), &Setup::default(), false, args);
-        eventually("the daemon answers again", || {
-            Client::connect(&self.socket()).is_ok()
+        self.restart(&Setup::default(), args);
+    }
+
+    /// Starts the daemon again, the last one having exited, once its lock
+    /// is let go, and waits until it answers. A program it was starting
+    /// as it exited holds the lock until it `exec`s, which on a busy
+    /// machine can be tens of milliseconds later: the new daemon would
+    /// find it held, and stop at once. `clackatoo stop` waits for the lock
+    /// in the same way.
+    fn restart(&mut self, setup: &Setup, args: &[&str]) {
+        eventually("the last daemon's lock is let go", || {
+            self.runtime().lock().is_ok()
         });
+        self.child = spawn(self.root(), setup, false, args);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Client::connect(&self.socket()).is_err() {
+            if Instant::now() >= deadline {
+                let exited = self.child.try_wait();
+                panic!(
+                    "the daemon never answered again ({exited:?}): {}",
+                    self.log()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
