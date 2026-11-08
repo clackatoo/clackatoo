@@ -283,6 +283,8 @@ pub(crate) struct Web {
     /// The connections still shaking hands that were put off to a later
     /// turn, first put off first.
     pub(crate) put_off: VecDeque<mio::Token>,
+    /// The connections refused, for the log.
+    pub(crate) refusals: Refusals,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
 }
@@ -342,6 +344,7 @@ impl Web {
             all_connects: Bucket::new(auth::ALL_CONNECTS, auth::ALL_CONNECT_EVERY, Instant::now()),
             handshakes_left: 0,
             put_off: VecDeque::new(),
+            refusals: Refusals::default(),
             next_due: None,
         })
     }
@@ -1243,6 +1246,64 @@ fn notified<'a>(
     })
 }
 
+/// How often the log says how many connections were refused: anyone can
+/// open them, so a line for each would let a stranger fill the log.
+const SAY_REFUSED_EVERY: Duration = Duration::from_mins(1);
+
+/// The connections refused, as the log is to say: the first at once,
+/// then those after it together, at most once each [`SAY_REFUSED_EVERY`].
+#[derive(Debug, Default)]
+pub(crate) struct Refusals {
+    /// How many were refused since the log last said.
+    count: u32,
+    /// The last of them: where from, and why.
+    last: Option<(Peer, &'static str)>,
+    /// When the log last said.
+    said: Option<Instant>,
+}
+
+impl Refusals {
+    /// Notes a connection from `peer` refused at `now` for `why`. Returns
+    /// what the log is to say now, if anything.
+    pub(crate) fn note(&mut self, peer: Peer, why: &'static str, now: Instant) -> Option<String> {
+        self.count += 1;
+        self.last = Some((peer, why));
+        if self.said.is_none_or(|said| now >= said + SAY_REFUSED_EVERY) {
+            return self.say(now);
+        }
+        None
+    }
+
+    /// What the log is to say at `now` of those refused since it last
+    /// said, if it's time.
+    pub(crate) fn due(&mut self, now: Instant) -> Option<String> {
+        if self.next().is_some_and(|next| now >= next) {
+            return self.say(now);
+        }
+        None
+    }
+
+    /// When the log is next to say how many were refused, if any are to
+    /// be said.
+    pub(crate) fn next(&self) -> Option<Instant> {
+        let said = self.said?;
+        (self.count > 0).then(|| said + SAY_REFUSED_EVERY)
+    }
+
+    fn say(&mut self, now: Instant) -> Option<String> {
+        let (peer, why) = self.last?;
+        let count = std::mem::take(&mut self.count);
+        self.said = Some(now);
+        Some(if count == 1 {
+            format!("a web connection from {peer} closed: {why}")
+        } else {
+            format!(
+                "{count} web connections closed in the last minute, the last from {peer}: {why}"
+            )
+        })
+    }
+}
+
 /// Why a device isn't let in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Denied {
@@ -1476,6 +1537,35 @@ mod tests {
             .map(|device| device.id)
             .collect();
         assert_eq!(told, [1]);
+    }
+
+    #[test]
+    fn refusals_are_said_once_a_minute_however_many() {
+        let peer = Peer::Tcp("203.0.113.7:4000".parse().unwrap());
+        let start = Instant::now();
+        let mut refusals = Refusals::default();
+        let first = refusals.note(peer, "too many are open", start);
+        assert_eq!(
+            first.as_deref(),
+            Some("a web connection from 203.0.113.7:4000 closed: too many are open")
+        );
+        assert_eq!(refusals.next(), None);
+        for n in 1..=1000 {
+            let at = start + Duration::from_millis(n);
+            assert_eq!(refusals.note(peer, "too many are open", at), None);
+        }
+        let due = start + SAY_REFUSED_EVERY;
+        assert_eq!(refusals.next(), Some(due));
+        assert_eq!(refusals.due(due - Duration::from_millis(1)), None);
+        assert_eq!(
+            refusals.due(due).as_deref(),
+            Some(
+                "1000 web connections closed in the last minute, the last from \
+                 203.0.113.7:4000: too many are open"
+            )
+        );
+        assert_eq!(refusals.next(), None);
+        assert_eq!(refusals.due(due + SAY_REFUSED_EVERY), None);
     }
 
     #[test]

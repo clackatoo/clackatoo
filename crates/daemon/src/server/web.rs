@@ -26,6 +26,10 @@ const MOST_CONNECTIONS: usize = 64;
 /// /64), TLS handshakes under way among them.
 const MOST_FROM_ONE: usize = 8;
 
+/// The most connections taken from the listener in one turn of the event
+/// loop: the rest wait for the next.
+const MOST_ACCEPTS_AT_ONCE: usize = 64;
+
 /// The most requests a connection has answered in one turn of the event
 /// loop: the rest wait for the next.
 const MOST_REQUESTS_AT_ONCE: usize = 16;
@@ -120,9 +124,10 @@ impl Daemon {
         self.web.as_ref()?.address()
     }
 
-    /// Takes the web connections waiting.
+    /// Takes the web connections waiting, at most a turn's worth: the
+    /// rest are taken next turn.
     pub(super) fn accept_web(&mut self) {
-        loop {
+        for _ in 0..MOST_ACCEPTS_AT_ONCE {
             let Some(web) = self.web.as_mut() else {
                 return;
             };
@@ -135,8 +140,9 @@ impl Daemon {
                     return;
                 }
             };
-            if let Err(why) = web.may_connect(peer, Instant::now()) {
-                log::warn!("a web connection from {peer} closed: {why}");
+            let now = Instant::now();
+            if let Err(why) = web.may_connect(peer, now) {
+                self.refuse_web(peer, why, now);
                 continue;
             }
             match self.room_for_web(peer) {
@@ -148,7 +154,7 @@ impl Daemon {
                     self.drop_web(oldest);
                 }
                 Err(why) => {
-                    log::warn!("a web connection from {peer} closed: {why}");
+                    self.refuse_web(peer, why, now);
                     continue;
                 }
             }
@@ -178,6 +184,24 @@ impl Daemon {
             web.due_by(conn.due());
             web.conns.push(token);
             entry.insert(Source::Web(Box::new(conn)));
+        }
+        // More may wait, and the listener won't say so again.
+        self.read_again(WEB);
+    }
+
+    /// Notes that a connection from `peer` was closed at `now` for `why`,
+    /// as soon as it was taken: the log says so once a while, not for each.
+    fn refuse_web(&mut self, peer: web::Peer, why: &'static str, now: Instant) {
+        let Some(web) = self.web.as_mut() else {
+            return;
+        };
+        match web.refusals.note(peer, why, now) {
+            Some(said) => log::warn!("{said}"),
+            None => {
+                if let Some(next) = web.refusals.next() {
+                    web.due_by(next);
+                }
+            }
         }
     }
 
@@ -322,6 +346,10 @@ impl Daemon {
             self.serve_web_conn(token, true);
         }
         for token in std::mem::take(&mut self.web_unread) {
+            if token == WEB {
+                self.accept_web();
+                continue;
+            }
             match self.sources.get(token.0) {
                 Some(Source::Web(_)) => self.serve_web(token),
                 Some(Source::Client(Client {
@@ -432,6 +460,9 @@ impl Daemon {
             return;
         };
         web.next_due = None;
+        if let Some(said) = web.refusals.due(now) {
+            log::warn!("{said}");
+        }
         web.drop_old_asks(now);
         web.reload_certificate(now);
         // Devices whose password is to be given again, or unused too long,
@@ -493,6 +524,9 @@ impl Daemon {
             }
             if let Some(reload) = web.reload_due() {
                 soonest(reload);
+            }
+            if let Some(refusals) = web.refusals.next() {
+                soonest(refusals);
             }
         }
         self.notify_due(now);
