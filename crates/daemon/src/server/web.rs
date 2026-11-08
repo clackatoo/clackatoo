@@ -1103,10 +1103,13 @@ impl Daemon {
     /// Every chat, summed up, in the order they were made: this daemon's,
     /// then those of other machines whose workspaces it shows.
     fn chat_summaries(&self) -> Vec<ChatSummary> {
-        (self.terminals.keys())
+        let mut chats: Vec<ChatSummary> = (self.terminals.keys())
             .filter_map(|&id| self.chat_summary(id))
-            .chain(self.relayed_chats().cloned())
-            .collect()
+            .collect();
+        let own = chats.len();
+        chats.extend(self.relayed_chats().cloned());
+        self.place_borrowed_chats(&mut chats[own..]);
+        chats
     }
 
     /// The chat `id`, summed up.

@@ -2372,8 +2372,9 @@ impl Daemon {
         if taken.held && !taken.changed {
             self.tell_workspaces();
         }
-        // Chats name workspaces, which may have been numbered since.
-        if taken.chats {
+        // Chats name workspaces, which may have been numbered since, or
+        // are in panes lent this daemon, whose workspaces here they're in.
+        if taken.chats || taken.lent {
             self.chat_watch.dirty = true;
         }
     }

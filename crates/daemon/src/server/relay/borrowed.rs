@@ -31,12 +31,12 @@
 //! nothing is closed, and anything else becomes one of its own
 //! workspaces, never lost on so little.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use clackatoo_protocol::{
-    ClientMessage, Content, Error, Event, MachineId, PaneId, PaneKind, PaneTerminal, Request,
-    Response, ServerMessage, Side, TabId, WorkspaceId, wire,
+    ChatSummary, ClientMessage, Content, Error, Event, MachineId, PaneId, PaneKind, PaneTerminal,
+    Request, Response, ServerMessage, Side, TabId, WorkspaceId, wire,
 };
 use mio::Token;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -580,6 +580,36 @@ impl Daemon {
         self.workspaces.lender_named(machine.id, &name);
         self.workspaces_changed();
         Some(Ok(Response::PaneCreated(pane)))
+    }
+
+    /// Puts the chats of `chats`, other machines' as this daemon's clients
+    /// are told them, that are in workspaces lent this daemon, in the
+    /// workspaces here whose panes borrowed them, as for a chat of this
+    /// daemon's own: the daemon there can't say, as it doesn't know them.
+    pub(in crate::server) fn place_borrowed_chats(&self, chats: &mut [ChatSummary]) {
+        let workspaces = self.workspaces.get();
+        let mut placed = HashMap::new();
+        for linked in &self.links.list {
+            let Some(machine) = &linked.machine else {
+                continue;
+            };
+            for (chat, key) in linked.relayed.mirror.lent_chats() {
+                let Some(pane) = self.workspaces.borrowed_as(machine.id, key) else {
+                    continue;
+                };
+                let workspace = (workspaces.find_pane(pane).map(|(workspace, ..)| workspace))
+                    .or_else(|| (workspaces.find_background_pane(pane)).map(|found| found.0));
+                if let Some(workspace) = workspace {
+                    placed.insert(chat, workspace.id);
+                }
+            }
+        }
+        if placed.is_empty() {
+            return;
+        }
+        for chat in chats.iter_mut().filter(|chat| chat.workspace.is_none()) {
+            chat.workspace = placed.get(&chat.chat).copied();
+        }
     }
 
     /// Shows in `shown`'s panes borrowed from other machines what the

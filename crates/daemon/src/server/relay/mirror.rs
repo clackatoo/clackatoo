@@ -495,6 +495,20 @@ impl Mirror {
             .map(|(&local, held)| (held.key, local))
     }
 
+    /// The chats it told of in workspaces it lent this daemon, by this
+    /// daemon's numbers, each with the number this daemon gave the pane
+    /// lent (see [`lent`](Self::lent)): a chat a borrowed pane shows, or
+    /// one a chat there started. Such a workspace isn't shown as one, so
+    /// their summaries name none.
+    pub(crate) fn lent_chats(&self) -> impl Iterator<Item = (TerminalId, u64)> + '_ {
+        (self.told_chats.iter()).filter_map(|summary| {
+            let workspace = summary.workspace?;
+            let (&key, _) = (self.lent.iter()).find(|(_, lent)| lent.workspace == workspace)?;
+            let chat = self.terminal_numbers.local(summary.chat.0)?;
+            Some((TerminalId(chat), key))
+        })
+    }
+
     /// Forgets the numbers of the terminals no longer shown or told, but
     /// for those of `followed`.
     fn keep_terminals(&mut self, followed: &BTreeSet<TerminalId>) {

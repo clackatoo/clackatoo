@@ -3070,6 +3070,30 @@ fn borrow(pair: &mut Pair, content: PaneTerminal) -> (PaneId, Content) {
     (there, content)
 }
 
+/// A chat in a pane another machine lent is among the chats in the
+/// workspace here whose pane borrowed it, as one of this daemon's own is,
+/// so its marks count there (CLACKA-118).
+#[test]
+fn a_borrowed_chat_is_in_the_workspace_that_borrowed_it() {
+    let mut pair = Pair::new();
+    let (pane, content) = borrow(&mut pair, chat());
+    let chat = terminal_of(content);
+    let shown = pair.window.watch_workspaces().unwrap();
+    let workspace = found(&shown, pane).0.id;
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+            panic!("no chats");
+        };
+        let summary = (chats.iter()).find(|summary| summary.chat == chat);
+        if summary.is_some_and(|summary| summary.workspace == Some(workspace)) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not in {workspace}: {chats:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn what_a_machine_lent_is_the_borrowers_alone() {
     let mut pair = Pair::new();
