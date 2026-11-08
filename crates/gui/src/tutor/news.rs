@@ -1193,6 +1193,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Drag files from the explorer: onto a folder to move (Ctrl copies), an editor to open, a terminal for the path",
     },
+    News {
+        id: "always-allow-commands",
+        date: "2026-11-08",
+        lesson: "agents",
+        what: "Always allow is now Always allow commands, offered only when an agent asks to run one",
+    },
 ];
 
 impl News {

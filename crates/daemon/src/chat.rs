@@ -223,7 +223,15 @@ pub(crate) const MAX_QUESTIONS: usize = 16;
 /// it's called, and what it means.
 const TOOL_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("allow", "Allow", ChoiceKind::AllowOnce),
-    ("always", "Always allow", ChoiceKind::AllowAlways),
+    ("always", "Always allow commands", ChoiceKind::AllowAlways),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
+];
+
+/// The answers to a question about one of clackatoo's tools that the
+/// Tools setting has no say in, as showing a file outside the project:
+/// there's nothing to allow always.
+const ONCE_CHOICES: [(&str, &str, ChoiceKind); 2] = [
+    ("allow", "Allow", ChoiceKind::AllowOnce),
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
@@ -238,9 +246,12 @@ const BROWSER_CHOICES: [(&str, &str, ChoiceKind); 2] = [
 /// Which answers a tool's question offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Choices {
-    /// Allow, Always allow, which lets the agent run commands in its own
-    /// terminals, and Reject.
+    /// Allow, Always allow commands, which sets the chat's Tools to
+    /// Allow, letting the agent run commands in its own terminals without
+    /// asking, and Reject: for questions about doing just that.
     Tool,
+    /// Allow and Reject, for questions Tools has no say in.
+    Once,
     /// Allow for this chat, which lets its agent open pages in the
     /// browser from then on, and Reject.
     Browser,
@@ -1234,6 +1245,14 @@ impl HostedChat {
                             modes::leaving_plan_for(&self.agent, option).map(str::to_owned);
                     }
                     self.show_question();
+                    // An answer to clackatoo's question is one it offered:
+                    // any other, such as "always" where it isn't, is no.
+                    let option = match asker {
+                        Asker::Tool(_) => option.filter(|option| {
+                            (asked.choices.iter()).any(|choice| choice.id == *option)
+                        }),
+                        _ => option,
+                    };
                     if asker == Asker::Slow {
                         self.slow_answered(option.as_deref(), &mut actions);
                     } else {
@@ -2536,6 +2555,7 @@ impl HostedChat {
         }
         let choices: &[(&str, &str, ChoiceKind)] = match offered {
             Choices::Tool => &TOOL_CHOICES,
+            Choices::Once => &ONCE_CHOICES,
             Choices::Browser => &BROWSER_CHOICES,
         };
         let choices = (choices.iter())
@@ -2571,9 +2591,10 @@ impl HostedChat {
     }
 
     /// What to do about the answer `option` to `asker`'s question.
-    /// "Always allow" for clackatoo's tools lets the agent run commands in
-    /// its own terminals without asking from then on, until the user
-    /// changes the chat's Tools setting back.
+    /// "Always allow commands" for clackatoo's tools lets the agent run
+    /// commands in its own terminals without asking from then on, until
+    /// the user changes the chat's Tools setting back: it's offered only
+    /// for questions about that.
     fn answer(&mut self, asker: Asker, option: Option<String>) -> Option<Action> {
         let install = option.as_deref() == Some(INSTALL);
         match asker {
@@ -5844,6 +5865,41 @@ mod tests {
             chat.about_own_tools(&served.tool_call, &served.options),
             Some("approved".to_owned())
         );
+    }
+
+    #[test]
+    fn an_answer_a_tools_question_didnt_offer_allows_nothing() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        chat.ask_for_tool(
+            1,
+            "show `/etc/hosts`, outside this chat's project",
+            None,
+            Choices::Once,
+        );
+        let ids: Vec<_> = (chat.node.question.as_ref().unwrap().choices.iter())
+            .map(|choice| choice.id.as_str())
+            .collect();
+        assert_eq!(ids, ["allow", "reject"]);
+        // Nothing offered says always: it's no, and the setting stays.
+        assert_eq!(
+            answer(&mut chat, Some("always".into())),
+            [Action::Permit {
+                call: 1,
+                allow: false,
+            }]
+        );
+        assert_eq!(chat.tools(), AgentTools::Ask);
+        chat.ask_for_tool(2, "open `https://example.com`", None, Choices::Browser);
+        assert_eq!(
+            answer(&mut chat, Some("allow".into())),
+            [Action::Permit {
+                call: 2,
+                allow: false,
+            }]
+        );
+        assert!(!chat.browsing());
     }
 
     #[test]

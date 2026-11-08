@@ -802,16 +802,12 @@ impl Daemon {
             self.answer_tool(token, &id, Err(why));
             return;
         }
-        let Some((what, whole)) = self.question_for(chat, &tool, tools) else {
+        let Some((what, whole, offered)) = self.question_for(chat, &tool, tools) else {
             self.carry_out(token, chat, id, tool, raw);
             return;
         };
         let call = self.tools.next_call;
         self.tools.next_call += 1;
-        let offered = match tool {
-            Tool::Browser(_) => Choices::Browser,
-            _ => Choices::Tool,
-        };
         let asked = (self.chat(chat))
             .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), offered));
         if !asked {
@@ -830,14 +826,17 @@ impl Daemon {
 
     /// What the user is asked before `tool` is used by the chat `chat`'s
     /// agent, allowed `tools`, if they're asked: the question, finishing
-    /// "Allow the agent to …?", and what would be typed, in full, if it's
-    /// too long for the question.
+    /// "Allow the agent to …?", what would be typed, in full, if it's too
+    /// long for the question, and the answers offered. Allowing always is
+    /// offered only where it's what the Tools setting allows: running
+    /// commands, and typing into the agent's own terminals.
     fn question_for(
         &mut self,
         chat: TerminalId,
         tool: &Tool,
         tools: AgentTools,
-    ) -> Option<(String, Option<String>)> {
+    ) -> Option<(String, Option<String>, Choices)> {
+        let with = |choices| move |(what, whole)| (what, whole, choices);
         match tool {
             Tool::RunInTerminal { command, cwd, .. } => {
                 if tools == AgentTools::Allow {
@@ -847,7 +846,8 @@ impl Daemon {
                     .as_ref()
                     .map(|cwd| format!(" in {}", visible(cwd)))
                     .unwrap_or_default();
-                Some(asked("run", command, &format!("in a new terminal{place}")))
+                let then = format!("in a new terminal{place}");
+                Some(asked("run", command, &then)).map(with(Choices::Tool))
             }
             Tool::RunInBackground { command, cwd, .. }
             | Tool::StartActivity { command, cwd, .. } => {
@@ -859,7 +859,7 @@ impl Daemon {
                     .map(|cwd| format!(" in {}", visible(cwd)))
                     .unwrap_or_default();
                 let then = format!("in a new background tab{place}, out of your tab bar");
-                Some(asked("run", command, &then))
+                Some(asked("run", command, &then)).map(with(Choices::Tool))
             }
             Tool::SendToTerminal { pane, text } => {
                 // Out of reach, it fails without asking.
@@ -870,12 +870,17 @@ impl Daemon {
                 if own && tools == AgentTools::Allow {
                     return None;
                 }
-                let whose = if own {
-                    format!("its terminal, pane {pane}")
+                let (whose, choices) = if own {
+                    (format!("its terminal, pane {pane}"), Choices::Tool)
                 } else {
-                    format!("pane {pane}, a terminal it didn't start")
+                    // Allowed or not, the user's terminals are always
+                    // asked about.
+                    (
+                        format!("pane {pane}, a terminal it didn't start"),
+                        Choices::Once,
+                    )
                 };
-                Some(asked("type", text, &format!("into {whose}")))
+                Some(asked("type", text, &format!("into {whose}"))).map(with(choices))
             }
             Tool::OpenFile { path, .. } | Tool::Explore { path: Some(path) } => {
                 let resolved = self.resolve_for(chat, path)?;
@@ -891,7 +896,7 @@ impl Daemon {
                         visible(&resolved.display().to_string()),
                         root.display()
                     );
-                    (what, None)
+                    (what, None, Choices::Once)
                 })
             }
             // The first page is asked about, whatever the Tools setting:
@@ -906,7 +911,7 @@ impl Daemon {
                      yours, and use it for the rest of this chat",
                     visible(url)
                 );
-                Some((what, None))
+                Some((what, None, Choices::Browser))
             }
             _ => None,
         }

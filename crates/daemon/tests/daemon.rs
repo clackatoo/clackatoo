@@ -13775,11 +13775,14 @@ fn showing_what_is_outside_the_project_asks_and_diagnostics_stay_inside() {
         .chat(chat, ChatAction::Send(prompt.to_owned()))
         .unwrap();
     let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
-    let title = asking.question.unwrap().title;
+    let question = asking.question.unwrap();
+    let title = question.title;
     assert!(
         title.starts_with("show ") && title.contains("outside.txt, outside this chat's project"),
         "{title}"
     );
+    // Allowing it always would mean nothing the Tools setting says.
+    assert_eq!(choice_ids(&question.choices), ["allow", "reject"]);
     answer(&mut client, chat, Some("reject".to_owned()));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     let words = last_words(&node);
@@ -13811,11 +13814,12 @@ fn typing_into_the_users_own_terminal_always_asks_and_the_setting_takes_it_back(
     );
     client.chat(chat, ChatAction::Send(prompt)).unwrap();
     let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
-    let title = asking.question.unwrap().title;
+    let question = asking.question.unwrap();
     assert_eq!(
-        title,
+        question.title,
         format!("type `echo x⏎` into pane {theirs}, a terminal it didn't start")
     );
+    assert_eq!(choice_ids(&question.choices), ["allow", "reject"]);
     answer(&mut client, chat, Some("reject".to_owned()));
     wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
 
@@ -13833,11 +13837,16 @@ fn typing_into_the_users_own_terminal_always_asks_and_the_setting_takes_it_back(
     let run = "mcp run_in_terminal {\"command\":\"true\"}";
     client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
     let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
-    assert_eq!(
-        asking.question.unwrap().title,
-        "run `true` in a new terminal"
-    );
+    let question = asking.question.unwrap();
+    assert_eq!(question.title, "run `true` in a new terminal");
+    // Running commands is what Tools allows: it may be allowed always.
+    assert_eq!(choice_ids(&question.choices), ["allow", "always", "reject"]);
     client.chat(chat, ChatAction::Stop).unwrap();
+}
+
+/// The ids of the answers `choices` offer.
+fn choice_ids(choices: &[clackatoo_protocol::Choice]) -> Vec<&str> {
+    choices.iter().map(|choice| choice.id.as_str()).collect()
 }
 
 #[test]
