@@ -845,20 +845,29 @@ then run `:agentaccess inspect` for screenshots and visible controls, or
 window. This is broad access to what the window can display and operate.
 The title and top bar identify the grant. Click the top bar's **Revoke** badge
 or use `:agentaccess off` from any pane. Closing the window or the chat, disconnecting or upgrading also clears it.
-Control can move around the window, click, and type into its own chat, an
-editor, a file explorer or a menu, as you would. The window refuses what only
-you may do, whenever automation's input would do it: answering a question or a
-form, changing any chat's settings, granting window access, typing into a
-terminal, starting a terminal with a command, a background command or a chat,
-sending, undoing or rewinding in another chat, pairing or revoking devices,
+**Control lets the agent act as you.** It can edit and save any file the
+window can, its config included: your shell's startup files, Claude Code's or
+Codex's settings and hooks, `agents.toml`, `init.lua`. What those run later
+runs as you, unasked. Grant it only to an agent you'd let use your keyboard,
+and revoke it when it's done. `:agentaccess control` says so as it asks.
+
+The window has speed bumps on top, not a boundary. While automation's input is
+handled, it refuses what only you may do: answering a question or a form;
+changing any chat's settings, agent or provider, or forking one; granting window
+access; typing into a terminal; starting a terminal with a command, a
+background command or a chat; sending, drafting, stopping, undoing or rewinding
+in another chat; keeping, rejecting or commenting on agents' changes in a
+review, or sending its comments; posting on a board; closing panes, tabs,
+workspaces, terminals or background tabs; pairing or revoking devices,
 unlocking pairing, `:keep`, connecting to or forgetting other machines,
-forwarding ports, installing and upgrading. The agent runs commands with its
-own tools instead, which ask first. Keys automation left to go on later, as
-the rest of a macro waiting for the daemon to answer, are dropped as each input
-ends. Control can still edit and save files and use the explorer as you can,
-and it is not an operating-system sandbox. An agent that runs commands without
-asking can reach the daemon itself, outside the window, so treat Control as
-letting it act as you.
+forwarding ports, installing, upgrading and `:reload`. While a chat has Control,
+what the config's Lua does by itself, rather than for a key you pressed, runs
+no commands, makes or closes no panes and connects to nothing. Keys automation
+left to go on later, as the rest of a macro waiting for the daemon to answer,
+are dropped as each input ends. `:set` changes only this window, as ever, so
+Control can change the window's options. None of this is an operating-system
+sandbox, and an agent that runs commands without asking can reach the daemon
+itself, outside the window.
 
 Only one chat can control a window, and one window can be granted to a chat.
 Federated mirrored chats cannot receive a grant; open a window directly on the

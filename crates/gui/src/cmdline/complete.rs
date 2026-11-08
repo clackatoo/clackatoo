@@ -238,7 +238,9 @@ fn argument_description(command: &str, word: &str) -> &'static str {
     match (command::canonical(command), word) {
         ("agentaccess", "off") => "Revoke this window's agent access",
         ("agentaccess", "inspect") => "Let this chat inspect the selected window",
-        ("agentaccess", "control") => "Let this chat click and type throughout the selected window",
+        ("agentaccess", "control") => {
+            "Let this chat act as you in the selected window, files included"
+        }
         ("gitsigns", "preview_hunk") => "Preview the Git change at the cursor",
         ("gitsigns", "reset_hunk") => "Discard the Git change at the cursor",
         ("gitsigns", "stage_hunk") => "Stage the Git change at the cursor",

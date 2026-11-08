@@ -310,11 +310,12 @@ then run `:agentaccess inspect` for screenshots and visible controls, or
 window. This is broad access to what the window can display and operate.
 The title and top bar identify the grant. Click the top bar's **Revoke** badge
 or use `:agentaccess off` from any pane. Closing the window, disconnecting or upgrading also clears it.
-Control types into its own chat, editors and menus, but the window refuses
-what only you may do: answering questions or forms, changing chat settings or
-access, typing into terminals, starting commands or chats, and sending as you to
-another chat. The agent's own tools run commands, asking first. Control is not an
-operating-system sandbox.
+Control lets the agent act as you: it can edit and save files, your config
+included, and what those files run later runs as you. Grant it only as you'd
+lend your keyboard. The window refuses some things from it, such as answering
+questions, changing chat settings, typing into terminals, starting commands or
+chats, and speaking as you to another chat, but that's a speed bump, not a
+boundary, and not an operating-system sandbox.
 
 Only one chat can control a window, and one window can be granted to a chat.
 Federated mirrored chats cannot receive a grant; open a window directly on the

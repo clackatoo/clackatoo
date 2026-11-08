@@ -450,7 +450,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             Some("off") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Off)),
             Some("inspect") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Inspect)),
             Some("control") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Control)),
-            _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control allows clicks and typing throughout this window.".into()),
+            _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control lets the agent act as you in this window, files and config included.".into()),
         },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         "devices" => return devices_command(argument).map(Command::Devices),

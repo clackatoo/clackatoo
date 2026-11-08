@@ -3322,6 +3322,7 @@ impl ApplicationHandler<SessionEvent> for App {
         // so and fonts and the GPU take tens: what it set, the font
         // included, is in place as the window opens. It's never waited for,
         // so a config that takes longer changes the font after.
+        self.desk.controlled = self.native.controlled();
         let said = self.desk.lua_said();
         match self.open(event_loop, startup) {
             Ok(frame) => {
@@ -3849,6 +3850,7 @@ impl App {
                 }
             }
             SessionEvent::Lua => {
+                self.desk.controlled = self.native.controlled();
                 if self.desk.lua_said() {
                     self.update_title();
                     self.request_redraw();

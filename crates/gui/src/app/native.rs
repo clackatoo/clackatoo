@@ -3,7 +3,7 @@ use std::cell::Cell;
 
 use clackatoo_protocol::{
     BackgroundAction, ChatAction, ClientMessage, NativeAccess, NativeAction, NativeReply,
-    PaneTerminal, Request, TerminalId,
+    PaneTerminal, Request, ReviewAction, TerminalId,
 };
 
 use super::{App, MouseButton};
@@ -20,48 +20,78 @@ pub(super) struct Native {
     pub(super) refused: bool,
 }
 
+impl Native {
+    /// Whether a chat has Control of this window.
+    pub(super) fn controlled(&self) -> bool {
+        matches!(self.grant, Some((_, NativeAccess::Control)))
+    }
+}
+
 /// Whether `message`, sent by input an agent gave the window it was
 /// granted for the chat `granted`, would do what only the user may: answer
-/// a question or form, change a chat's settings or access, run a command
-/// (typed into a terminal, or one a new terminal or background tab
-/// starts), start a chat, speak as the user to another, or change what the daemon
-/// trusts (pairing, devices, kept commands, other machines, installs and
-/// upgrades). The agent's own tools do those, asking first where they
-/// must.
+/// a question or form, change a chat's settings, agent or access, run a
+/// command (typed into a terminal, or one a new terminal or background
+/// tab starts), start a chat, speak or type as the user to another, review
+/// or comment on an agent's changes, post on a board, close or stop what
+/// the user has open, or change what the daemon trusts (pairing, devices,
+/// kept commands, other machines, installs and upgrades). The agent's own
+/// tools do those, asking first where they must.
+///
+/// A speed bump, not a boundary: input that edits files, as Control's
+/// may, can change what runs later, a config or a script.
 pub(super) fn changes_authority(message: &ClientMessage, granted: Option<TerminalId>) -> bool {
     let request = match message {
         ClientMessage::NativeGrant { .. }
         | ClientMessage::Login { .. }
-        | ClientMessage::Upgrade { .. } => return true,
+        | ClientMessage::Upgrade { .. }
+        | ClientMessage::Board { .. } => return true,
         ClientMessage::Request(request) => request,
         _ => return false,
     };
     match request {
         Request::Chat { terminal, action } => match action {
-            ChatAction::Answer { .. } | ChatAction::Fill { .. } | ChatAction::Set { .. } => true,
+            ChatAction::Answer { .. }
+            | ChatAction::Fill { .. }
+            | ChatAction::Set { .. }
+            | ChatAction::Switch { .. }
+            | ChatAction::SendTo { .. }
+            | ChatAction::Fork { .. }
+            | ChatAction::Submit {
+                target: Some(_), ..
+            } => true,
             // What the user says or does in another chat, as the user.
             ChatAction::Send(_)
             | ChatAction::SendImages { .. }
             | ChatAction::Submit { .. }
-            | ChatAction::SendTo { .. }
             | ChatAction::SendQueued { .. }
             | ChatAction::Resend
-            | ChatAction::Switch { .. }
             | ChatAction::Undo { .. }
             | ChatAction::Redo { .. }
             | ChatAction::Rewind { .. }
             | ChatAction::SwitchBranch { .. }
-            | ChatAction::Fork { .. } => Some(*terminal) != granted,
+            | ChatAction::Draft { .. }
+            | ChatAction::TakeBack { .. }
+            | ChatAction::RemoveQueued { .. }
+            | ChatAction::Stop
+            | ChatAction::StopTask { .. } => Some(*terminal) != granted,
             _ => false,
         },
+        Request::Review(action) => !matches!(action, ReviewAction::Refresh(_)),
         Request::NewTerminal(new) => new.command.is_some(),
         Request::NewWorkspace { terminal, .. }
         | Request::NewTab { terminal, .. }
         | Request::Split { terminal, .. }
         | Request::SplitTab { terminal, .. }
         | Request::Lend { terminal, .. } => starts(terminal),
-        Request::Background(action) => matches!(action, BackgroundAction::Start { .. }),
+        Request::Background(action) => matches!(
+            action,
+            BackgroundAction::Start { .. } | BackgroundAction::Dismiss { .. }
+        ),
         Request::SendInput { .. }
+        | Request::ClosePane { .. }
+        | Request::CloseTab { .. }
+        | Request::CloseWorkspace { .. }
+        | Request::CloseTerminal { .. }
         | Request::AnswerPairing { .. }
         | Request::UnlockPairing
         | Request::RevokeDevice { .. }
@@ -173,6 +203,7 @@ impl App {
             .revision
             .set(self.native.revision.get().wrapping_add(1));
         self.native.automating = true;
+        self.desk.automating = true;
         self.native.refused = false;
         let result = self.native_input(action);
         // Nothing it typed goes on once these checks are off: a macro or
@@ -180,6 +211,7 @@ impl App {
         let dropped = self.desk.drop_deferred_keys();
         self.send_outbox();
         self.native.automating = false;
+        self.desk.automating = false;
         self.request_redraw();
         result?;
         if self.native.refused {
@@ -370,7 +402,7 @@ mod tests {
         assert!(!changes(&chat(TerminalId(1), send.clone())));
         assert!(changes(&chat(TerminalId(2), send)));
         let draft = ChatAction::Draft { text: "x".into() };
-        assert!(!changes(&chat(TerminalId(2), draft)));
+        assert!(!changes(&chat(TerminalId(1), draft)));
         // It runs no command, by typing into a terminal or starting one.
         assert!(changes(&ClientMessage::Request(Request::SendInput {
             terminal: TerminalId(3),
@@ -388,6 +420,23 @@ mod tests {
         assert!(!changes(&terminal(None)), "a shell runs nothing typed");
         assert!(changes(&ClientMessage::Request(Request::UnlockPairing)));
         assert!(!changes(&ClientMessage::Request(Request::ListTerminals)));
+        // Not its own chat's agent, nor a provider, changed either.
+        let fork = ChatAction::Fork {
+            keep: 1,
+            place: clackatoo_protocol::ForkPlace::Tab,
+        };
+        assert!(changes(&chat(TerminalId(1), fork)));
+        // Nor its changes reviewed, nor comments sent as the user.
+        let send = ClientMessage::Request(Request::Review(ReviewAction::Send(TerminalId(1))));
+        assert!(changes(&send));
+        // Nor the user's panes closed, nor another chat's draft or turn.
+        let close = Request::ClosePane {
+            pane: clackatoo_protocol::PaneId(4),
+        };
+        assert!(changes(&ClientMessage::Request(close)));
+        assert!(changes(&chat(TerminalId(2), ChatAction::Stop)));
+        let draft = ChatAction::Draft { text: "x".into() };
+        assert!(changes(&chat(TerminalId(2), draft)));
     }
 
     #[test]

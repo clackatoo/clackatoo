@@ -151,8 +151,9 @@ impl Desk {
             .map(Lua::received)
             .unwrap_or_default();
         let redraw = !said.is_empty();
+        let guarded = self.controlled;
         for message in said {
-            self.lua_says(message);
+            self.lua_says(message, guarded);
         }
         redraw
     }
@@ -162,8 +163,10 @@ impl Desk {
     fn ask_lua(&mut self, message: impl FnOnce(u64) -> ToLua) -> Option<bool> {
         self.sync_lua();
         let (stop, said) = self.script.lua.as_mut()?.decide(message);
+        // For a key an agent pressed, it's the agent's.
+        let guarded = self.automating;
         for message in said {
-            self.lua_says(message);
+            self.lua_says(message, guarded);
         }
         stop
     }
@@ -323,13 +326,30 @@ impl Desk {
     pub(super) fn lua_ready(&mut self) {
         let said = self.script.lua.as_ref().expect("Lua started").ready();
         for message in said {
-            self.lua_says(message);
+            self.lua_says(message, false);
         }
-        self.lua_says(FromLua::Ready);
+        self.lua_says(FromLua::Ready, false);
     }
 
-    /// Does one thing Lua says.
-    fn lua_says(&mut self, message: FromLua) {
+    /// Does one thing Lua says, unless `guarded` and it runs commands or
+    /// changes panes or machines: then it says why it didn't (see
+    /// [`Desk::controlled`]).
+    pub(super) fn lua_says(&mut self, message: FromLua, guarded: bool) {
+        if guarded
+            && let FromLua::Split { .. }
+            | FromLua::Close { .. }
+            | FromLua::Command(_)
+            | FromLua::Forward(_)
+            | FromLua::Connect { .. }
+            | FromLua::Disconnect(_) = message
+        {
+            let why = "the config's command wasn't run: an agent controls this window";
+            if let FromLua::Split { request, .. } = message {
+                self.answer_lua(request, Err(why.to_owned()));
+            }
+            self.warn(why.to_owned());
+            return;
+        }
         match message {
             FromLua::Map {
                 modes,

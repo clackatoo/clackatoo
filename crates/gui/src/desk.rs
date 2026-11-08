@@ -286,6 +286,15 @@ const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 #[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct Desk {
     pub(crate) capability_report: Option<crate::shortcuts::Context>,
+    /// Whether the keys and clicks being handled are an agent's, through
+    /// native window access: they don't reload the config, nor run what
+    /// Lua says to.
+    pub(crate) automating: bool,
+    /// Whether a chat has Control of this window: what Lua says to do by
+    /// itself meanwhile, not for a key the user pressed, that runs
+    /// commands or changes panes isn't done, as the agent may have
+    /// written the config.
+    pub(crate) controlled: bool,
     scrolling: HashMap<PaneId, scrolling::Gesture>,
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
@@ -2661,6 +2670,9 @@ impl Desk {
     #[allow(clippy::too_many_lines, reason = "one arm per command, each short")]
     fn run(&mut self, command: Command) {
         match command {
+            Command::Reload if self.automating => {
+                return self.warn("an agent's input can't reload the config".into());
+            }
             Command::Reload => return self.reload_lua(),
             Command::Set(words) => return self.run_set(&words),
             Command::Update(host) => return self.ask_update(host),
@@ -2771,7 +2783,13 @@ impl Desk {
                 } {
                     self.outbox
                         .push(ClientMessage::NativeGrant { chat, access });
-                    self.say("Requesting window access change…".into());
+                    let said = if access == clackatoo_protocol::NativeAccess::Control {
+                        "Requesting Control: the agent acts as you in this window, files and \
+                         config included…"
+                    } else {
+                        "Requesting window access change…"
+                    };
+                    self.say(said.into());
                 } else {
                     self.say("Focus the chat to grant access to this window.".into());
                 }
@@ -10423,6 +10441,28 @@ mod tests {
         serve(&mut desk, &mut daemons);
         assert_eq!(cursor_line(&desk), 2, "no j");
         assert_eq!(daemon_text(&daemons, 7), "a!\nb!\n!\nd\n");
+    }
+
+    #[test]
+    fn an_agent_in_control_reloads_no_config_and_the_configs_commands_wait() {
+        let mut desk = desk(one_tab(pane(1)));
+        desk.take_outbox();
+        desk.automating = true;
+        desk.run(Command::Reload);
+        assert!(
+            (desk.message.as_deref()).is_some_and(|said| said.contains("can't reload")),
+            "{:?}",
+            desk.message
+        );
+        desk.automating = false;
+        // What Lua says by itself while a chat has Control isn't done.
+        let close = || crate::lua::FromLua::Close { pane: PaneId(1) };
+        desk.lua_says(close(), true);
+        desk.lua_says(crate::lua::FromLua::Command("bg make".into()), true);
+        assert_eq!(desk.take_outbox(), []);
+        // For the user's own key, it is.
+        desk.lua_says(close(), false);
+        assert_eq!(desk.take_outbox().len(), 1);
     }
 
     #[test]
