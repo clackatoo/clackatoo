@@ -381,7 +381,7 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 - A failed call of one of its tools for other agents, such as SendMessage, shows its error as plain text, not as code.
 - clackatoo also asks for AIR's session failures, so Claude Code says when it [tries a request again](#when-a-turn-fails), and why a turn failed by its kind. A turn that fails then ends as if well, with the failure beside, which clackatoo reads; and Claude Code's error for a failure leaves out the provider's words, which come with the failure instead.
 
-Commands' output, file changes and images are as before. To have none of this and no shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
+Commands' output, file changes and images are as before. To have none of this and no shelf, set `tasks = false` for Claude Code, beside its `command`, in [`agents.toml`](#which-agent).
 
 ### Claude Code's own subagents
 
