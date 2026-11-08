@@ -16,7 +16,7 @@
 //!
 //! - a chat lists, messages, reads and waits for only chats in its
 //!   workspace or family (the chat that started it, the chats it
-//!   started, and the chats its own started);
+//!   started, and the other chats the one that started it started);
 //! - a message to a chat outside the sender's family and project, or to
 //!   one that may do more, is refused: one whose Tools setting is looser,
 //!   whose limits, its mode's included, are fewer, or whose mode comes
