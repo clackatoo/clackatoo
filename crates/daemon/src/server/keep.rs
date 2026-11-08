@@ -29,8 +29,13 @@
 //! without job control does. The command is typed only while that holds,
 //! the shell's at its prompt, and still holds a moment later (see
 //! `type_command`). What's left: a program that has left the shell's
-//! session or group yet reads the terminal, or bytes queued between two
-//! programs of one command line faster than the moment. A shell that starts
+//! session or group yet reads the terminal, bytes queued between two
+//! programs of one command line faster than the moment, and the shell's
+//! own `read`, `select` or zsh's `vared`, which run in the shell itself, so
+//! nothing the pty says tells them from its line editor: a kept command
+//! that's a function or script printing what a program fetched, then
+//! asking with `read`, can have that print the marks of an end and a
+//! prompt, and the command is then typed as `read`'s answer. A shell that starts
 //! another rather than becoming it, as `sh -c fish` does, never has its
 //! terminal to itself, so nothing is typed at all, and what's said names
 //! it.
