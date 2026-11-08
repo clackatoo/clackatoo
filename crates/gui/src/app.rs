@@ -1669,8 +1669,36 @@ impl App {
         self.request_redraw();
     }
 
+    /// The arguments that open this window as it was opened: in a process
+    /// of windows, not necessarily the process's own.
+    fn opened_with(&self) -> Vec<std::ffi::OsString> {
+        let spec = &self.spec;
+        let mut args: Vec<std::ffi::OsString> = Vec::new();
+        if spec.pick_remote {
+            args.push("--connect-picker".into());
+        }
+        if let Some(remote) = &spec.remote {
+            args.extend(["--remote".into(), remote.host.clone().into()]);
+        }
+        if spec.pick_remote || spec.remote.is_some() {
+            args.extend([
+                "--remote-command".into(),
+                spec.remote_command.clone().into(),
+            ]);
+        }
+        if spec.font_fixed.family
+            && let Some(family) = &spec.font.family
+        {
+            args.extend(["--font".into(), family.clone().into()]);
+        }
+        if spec.font_fixed.size {
+            args.extend(["--font-size".into(), spec.font.size.to_string().into()]);
+        }
+        args
+    }
+
     /// Becomes the build `clackatoo update` just put in place of this one,
-    /// with the arguments this window was started with, connecting to the
+    /// with the arguments this window was opened with, connecting to the
     /// daemon it did: one picked from the picker of machines is named.
     /// Returns only if it couldn't, saying why.
     fn reopen_as_new_build(&self) -> String {
@@ -1681,7 +1709,7 @@ impl App {
         // The build put in place: this one's, or if this is the build an
         // update kept aside, the one that replaced it.
         let program = clackatoo_update::install::installed(program);
-        let args = reopen_args(std::env::args_os().skip(1), self.session.host());
+        let args = reopen_args(self.opened_with().into_iter(), self.session.host());
         log::info!("opening the window again as the new build");
         let err = std::process::Command::new(&program).args(args).exec();
         format!("updated, but the window couldn't reopen ({err}): open it again yourself")
@@ -1696,13 +1724,7 @@ impl App {
             return "this program can't be found, to open it again".into();
         };
         let program = clackatoo_update::install::installed(program);
-        let mut args = reopen_args(std::iter::empty(), self.session.host());
-        if self.session.host().is_some() {
-            args.extend([
-                "--remote-command".into(),
-                self.remote_command.clone().into(),
-            ]);
-        }
+        let args = reopen_args(self.opened_with().into_iter(), self.session.host());
         log::info!("opening this window again as the new build, in a process of its own");
         match spawn_window(&program, &args) {
             Ok(()) => {
@@ -4204,6 +4226,48 @@ mod tests {
     }
 
     #[test]
+    fn a_window_opens_again_with_its_own_arguments_not_its_processs() {
+        let runtime = clackatoo_daemon::RuntimeDir::at("/unused-reopen-test".into());
+        let session = Session::waiting(
+            &runtime,
+            crate::session::Proxy::Channel(std::sync::mpsc::channel().0),
+        );
+        let spec = host::Spec {
+            remote: Some(clackatoo_daemon::remote::Remote {
+                host: "desk".into(),
+                command: "~/bin/clackatoo".into(),
+            }),
+            remote_command: "~/bin/clackatoo".into(),
+            font: crate::FontOptions {
+                family: Some("Iosevka".into()),
+                size: 13.0,
+            },
+            font_fixed: crate::FontFixed {
+                family: true,
+                size: false,
+            },
+            ..host::Spec::default()
+        };
+        let app = App::new(Instant::now(), None, session, spec, host::Link::default());
+        let opened: Vec<String> = (app.opened_with().into_iter())
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            opened,
+            [
+                "--remote",
+                "desk",
+                "--remote-command",
+                "~/bin/clackatoo",
+                "--font",
+                "Iosevka"
+            ]
+        );
+        // A local window, opened with no arguments.
+        assert!(super::shortcut_tests::app().opened_with().is_empty());
+    }
+
+    #[test]
     fn only_a_build_put_in_place_opens_the_window_again() {
         let updated = |said: Result<&str, &str>, installed| updates::Updated {
             asked: updates::Asked::ForDaemon,
@@ -4406,7 +4470,7 @@ mod shortcut_tests {
     use clackatoo_daemon::RuntimeDir;
     use std::path::PathBuf;
 
-    fn app() -> App {
+    pub(super) fn app() -> App {
         let runtime = RuntimeDir::at(PathBuf::from("/unused-shortcut-test"));
         let session = Session::waiting(
             &runtime,
