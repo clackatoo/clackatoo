@@ -988,6 +988,11 @@ fn crlf(path: &Path) -> bool {
 /// hand, but short of a device such as `/dev/zero` filling the memory.
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 
+/// The most read of a file that says it's empty, as the files of `/proc`
+/// and `/sys` say they are, whatever they hold: some, such as a page map,
+/// go on for gigabytes, and the read is on the daemon's loop.
+const MAX_SAID_EMPTY: u64 = 4 * 1024 * 1024;
+
 /// Reads the file at `path` as text, and what it was as it was read. Only
 /// a regular file is read: a pipe would hang the daemon as it opened, even
 /// one swapped in for the file just before, and a device could go on for
@@ -998,9 +1003,14 @@ pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
     if metadata.len() > MAX_FILE {
         return Err(io::ErrorKind::FileTooLarge.into());
     }
+    let most = if metadata.len() == 0 {
+        MAX_SAID_EMPTY
+    } else {
+        MAX_FILE
+    };
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    (&mut file).take(MAX_FILE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_FILE {
+    (&mut file).take(most + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > most {
         return Err(io::ErrorKind::FileTooLarge.into());
     }
     let text = String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
@@ -1411,6 +1421,10 @@ mod tests {
             let _ = rustix::fs::open(&fifo, flags, rustix::fs::Mode::empty());
         }
         assert_eq!(crlf, Ok(false), "waited on the pipe");
+        // A file of `/proc` says it's empty: a small one is read whole,
+        // and one that goes on, such as the page map, isn't.
+        assert!(super::read(Path::new("/proc/self/status")).is_ok());
+        assert!(super::read(Path::new("/proc/self/pagemap")).is_err());
         let err = super::read(Path::new("/dev/zero")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }

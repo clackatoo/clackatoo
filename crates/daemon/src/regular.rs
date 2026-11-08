@@ -2,10 +2,12 @@
 //! whole is: a pipe would have the open wait for a writer, for ever if
 //! none comes, and a device such as `/dev/zero` could be read for ever.
 //!
-//! Each is opened without waiting, then asked what it is, so what's
-//! checked is what was opened, never what was at its path a moment
-//! before: something swapped in between would otherwise be opened
-//! unchecked. A regular file reads the same either way.
+//! What's at the path is looked at first, and only a regular file opened:
+//! opening a device can do something by itself, as opening a serial port
+//! raises its DTR line. It's then opened without waiting and asked again
+//! what it is, so what's read is what was checked: a pipe swapped in
+//! between would otherwise be waited on. A regular file reads the same
+//! either way.
 
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -27,21 +29,32 @@ pub(crate) enum Links {
 /// a device or a directory (which fails `IsADirectory`), nor, unless
 /// `links` follows them, a link.
 pub(crate) fn open(path: &Path, links: Links) -> io::Result<File> {
+    let regular = |meta: &std::fs::Metadata| {
+        if meta.is_dir() {
+            Err(io::Error::from(io::ErrorKind::IsADirectory))
+        } else if meta.is_file() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it isn't a regular file",
+            ))
+        }
+    };
     let mut flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    if links == Links::Refuse {
-        flags |= OFlags::NOFOLLOW;
+    match links {
+        Links::Follow => regular(&std::fs::metadata(path)?)?,
+        Links::Refuse => {
+            flags |= OFlags::NOFOLLOW;
+            let meta = std::fs::symlink_metadata(path)?;
+            if meta.is_symlink() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "it's a link"));
+            }
+            regular(&meta)?;
+        }
     }
     let file = File::from(rustix::fs::open(path, flags, Mode::empty())?);
-    let meta = file.metadata()?;
-    if meta.is_dir() {
-        return Err(io::ErrorKind::IsADirectory.into());
-    }
-    if !meta.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "it isn't a regular file",
-        ));
-    }
+    regular(&file.metadata()?)?;
     Ok(file)
 }
 
@@ -115,6 +128,16 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         let err = open(dir.path(), Links::Follow).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
+    }
+
+    #[test]
+    fn a_device_is_never_opened() {
+        // Refused for what it is, before it's opened: opened, the
+        // terminal would fail with no controlling one, or be one.
+        for links in [Links::Follow, Links::Refuse] {
+            let err = open(Path::new("/dev/tty"), links).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{links:?}");
+        }
     }
 
     #[test]
