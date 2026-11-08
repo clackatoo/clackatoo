@@ -215,13 +215,19 @@ fn subagents_value(count: u8) -> String {
     }
 }
 
-/// The most questions a chat keeps waiting. Past it, a tool's question is
-/// refused rather than queued.
+/// The most questions of each kind a chat keeps waiting: the agent's own,
+/// clackatoo's tools', and forms. Past it, one of that kind is refused
+/// rather than queued, and the others' are still asked.
 pub(crate) const MAX_QUESTIONS: usize = 16;
 
 /// The most characters of an answer's name, as the agent names it, that
 /// its question shows.
 const MOST_CHOICE_NAME: usize = 256;
+
+/// The most characters of the agent's own question's title, the command
+/// it asks to run, say, that it shows: past them it says how many more
+/// there are, so nothing goes unseen unsaid.
+const MOST_TITLE: usize = 4096;
 
 /// The answers to a question about one of clackatoo's tools: its ID, what
 /// it's called, and what it means.
@@ -2512,7 +2518,7 @@ impl HostedChat {
         options: &[PermissionOption],
         unknown: &[String],
     ) -> bool {
-        if self.asking.len() >= MAX_QUESTIONS {
+        if self.waiting_from(|asker| matches!(asker, Asker::Agent(_))) >= MAX_QUESTIONS {
             self.set_notice(Some(
                 "Turned down one of the agent's questions: too many are waiting for answers."
                     .to_owned(),
@@ -2544,7 +2550,7 @@ impl HostedChat {
             .collect();
         let question = Question {
             id: self.next_question,
-            title: clean(&title),
+            title: cut_saying(&clean(&title), MOST_TITLE),
             choices,
             own: false,
             form: None,
@@ -2555,6 +2561,11 @@ impl HostedChat {
         self.asking.push_back((Asker::Agent(request), question));
         self.show_question();
         true
+    }
+
+    /// How many of the questions waiting `asker` says are of a kind.
+    fn waiting_from(&self, kind: impl Fn(&Asker) -> bool) -> usize {
+        self.asking.iter().filter(|(asker, _)| kind(asker)).count()
     }
 
     /// One of clackatoo's tools asks whether the agent may do `what`, as
@@ -2570,7 +2581,7 @@ impl HostedChat {
         whole: Option<&str>,
         offered: Choices,
     ) -> bool {
-        if self.asking.len() >= MAX_QUESTIONS {
+        if self.waiting_from(|asker| matches!(asker, Asker::Tool(_))) >= MAX_QUESTIONS {
             return false;
         }
         if let Some(whole) = whole {
@@ -4344,6 +4355,18 @@ fn cut(text: &str, most: usize) -> String {
     }
 }
 
+/// `text`, cut to its first `most` characters, if it's longer, saying how
+/// many more there were.
+fn cut_saying(text: &str, most: usize) -> String {
+    match text.char_indices().nth(most) {
+        Some((at, _)) => {
+            let more = text[at..].chars().count();
+            format!("{}… and {more} more characters", &text[..at])
+        }
+        None => text.to_owned(),
+    }
+}
+
 /// The first whole lines of `text` that fit in `max` bytes, if it's
 /// longer.
 fn head(text: &str, max: usize) -> String {
@@ -5734,10 +5757,28 @@ mod tests {
         }
         assert!(!chat.ask(Value::from(99), &tool, &options, &[]));
         assert_eq!(chat.asking.len(), MAX_QUESTIONS);
+        // clackatoo's own tools' questions are still asked.
+        assert!(chat.ask_for_tool(1, "run `make` in a new terminal", None, Choices::Tool));
         // Its answers' names are cut to a size to show.
         let name = &chat.node.question.as_ref().unwrap().choices[0].name;
         assert_eq!(name.chars().count(), MOST_CHOICE_NAME + 1);
         assert!(name.ends_with('…'), "{name}");
+        // So is its title, saying how much more there is.
+        let mut chat = super::tests::chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        let long = format!(
+            r#"{{"toolCallId":"t","title":"{}"}}"#,
+            "x".repeat(MOST_TITLE + 10)
+        );
+        let tool: ToolCallUpdate = serde_json::from_str(&long).unwrap();
+        chat.ask(Value::from(1), &tool, &options, &[]);
+        let title = &chat.node.question.as_ref().unwrap().title;
+        assert!(
+            title.ends_with("x… and 10 more characters"),
+            "{}",
+            &title[4000..]
+        );
     }
 
     #[test]

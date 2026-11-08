@@ -13838,6 +13838,16 @@ fn where_a_command_would_run_is_shown_as_code_and_must_be_there() {
     let title = asking.question.unwrap().title;
     assert_eq!(title, "run `true` in a new terminal in `~/sub`");
     client.chat(chat, ChatAction::Stop).unwrap();
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    // A link shows as where it leads, which is where the command runs.
+    std::os::unix::fs::symlink(dir.join("sub"), dir.join("link")).unwrap();
+    let run = serde_json::json!({ "command": "true", "cwd": "link" });
+    let prompt = format!("mcp run_in_terminal {run}");
+    client.chat(chat, ChatAction::Send(prompt)).unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert_eq!(title, "run `true` in a new terminal in `~/sub`");
+    client.chat(chat, ChatAction::Stop).unwrap();
 }
 
 #[test]

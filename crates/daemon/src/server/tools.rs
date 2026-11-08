@@ -2483,19 +2483,28 @@ pub(super) fn visible(text: &str) -> String {
 /// override, as `<U+202E>`. Tag characters, which mirror ASCII unseen,
 /// stay only in an emoji tag sequence, as a subdivision's flag; others
 /// show as `<U+E0069>`. A supplementary variation selector stays only as
-/// the one after an ideograph. Joiners, the other variation selectors and
-/// the like stay, as emoji and many scripts need them. `\r\n` becomes
-/// `\n`.
+/// the one after an ideograph. Characters of no width (see [`zero_width`])
+/// show as `<U+200B>`, but for a joiner or non-joiner between two
+/// characters past ASCII, as emoji and many scripts need them; the other
+/// variation selectors and the like stay. `\r\n` becomes `\n`.
 pub(crate) fn unhidden(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut shown = String::with_capacity(text.len());
     // Whether the last character may take a supplementary variation
     // selector: it's an ideograph, and none has followed it yet.
     let mut selectable = false;
+    // The character before, to see what a joiner joins.
+    let mut before = None;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         let was_selectable = std::mem::replace(&mut selectable, false);
+        let after = chars.clone().next();
+        let joins = [before, after]
+            .iter()
+            .all(|side| side.is_some_and(|side: char| !side.is_ascii()));
+        before = Some(ch);
         match ch {
+            '\u{200C}' | '\u{200D}' if joins => shown.push(ch),
             '\n' | '\t' => shown.push(ch),
             '\u{1F3F4}' => {
                 shown.push(ch);
@@ -2512,7 +2521,7 @@ pub(crate) fn unhidden(text: &str) -> String {
                 }
             }
             '\u{E0100}'..='\u{E01EF}' if was_selectable => shown.push(ch),
-            ch if ch.is_control() || bidi_control(ch) || hidden_letter(ch) => {
+            ch if ch.is_control() || bidi_control(ch) || hidden_letter(ch) || zero_width(ch) => {
                 push_shown(&mut shown, ch);
             }
             ch => {
@@ -2522,6 +2531,17 @@ pub(crate) fn unhidden(text: &str) -> String {
         }
     }
     shown
+}
+
+/// Whether `ch` shows nothing, and takes no room, so it could pad or
+/// split a word unseen: the zero-width space, non-joiner and joiner, the
+/// word joiner, the byte-order mark and the soft hyphen. All are among
+/// [`invisible`]'s.
+fn zero_width(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}'
+    )
 }
 
 /// Whether `ch` is a tag letter or digit, which spell a subdivision in
@@ -3215,6 +3235,57 @@ fn command_bytes(command: &str, pasted: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// An Allow is checked again as it's given: the agent itself may have
+    /// moved to a mode that runs nothing since it asked, which takes
+    /// nothing back.
+    #[test]
+    fn an_allow_after_the_agent_moved_to_plan_mode_runs_nothing() {
+        use std::io::{BufRead, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = super::super::agent_files::tests::daemon_with_chat(dir.path());
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let stream = mio::net::UnixStream::from_std(ours);
+        let info = (String::new(), false);
+        let connection = Connection::new(stream, chat, Vec::new(), info, &daemon.parser);
+        let token = Token(daemon.sources.insert(Source::Tools(connection)));
+        let raw = mcp::Raw {
+            name: "run_in_terminal".to_owned(),
+            arguments: serde_json::json!({ "command": "make" }),
+        };
+        let tool = raw.read_again().unwrap();
+        let hosted = daemon.chat(chat).unwrap();
+        assert!(hosted.ask_for_tool(3, "run `make`", None, Choices::Tool));
+        daemon.tools.waiting.push(Waiting {
+            token,
+            id: serde_json::json!(5),
+            chat,
+            what: Wait::Permission { call: 3, tool, raw },
+        });
+        // Claude Code says it's in Plan mode now.
+        let update = r#"{"sessionId":"s1","update":{"sessionUpdate":"config_option_update",
+            "configOptions":[{"id":"mode","name":"Mode","category":"mode","type":"select",
+            "currentValue":"plan","options":[{"value":"default","name":"Manual"},
+            {"value":"plan","name":"Plan"}]}]}}"#;
+        let update: agent_client_protocol_schema::v1::SessionNotification =
+            serde_json::from_str(update).unwrap();
+        let hosted = daemon.chat(chat).unwrap();
+        hosted.update(update.update);
+        assert_eq!(hosted.all_limits(), crate::profiles::Limits::ReadOnly);
+        assert!(hosted.node().question.is_some(), "nothing took it back");
+        daemon.permitted(3, true);
+        let mut said = String::new();
+        BufReader::new(&theirs).read_line(&mut said).unwrap();
+        let answer: Value = serde_json::from_str(&said).unwrap();
+        assert_eq!(answer["id"], 5);
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+        assert!(said.contains("this chat is read-only"), "{said}");
+        assert!(daemon.terminals.len() == 1, "no terminal started");
+    }
+
     #[test]
     fn a_command_typed_as_a_paste_cant_end_the_paste_early() {
         let bytes = command_bytes("echo a\x1b[201~; rm -rf ~\nls", true);
@@ -3247,12 +3318,17 @@ mod tests {
             unhidden("ok\u{202e}gpj.exe\x1b[2J\r\u{2066}x\u{85}\u{200f}"),
             "ok<U+202E>gpj.exe^[[2J^M<U+2066>x<U+0085><U+200F>"
         );
-        // What emoji and scripts need stays: joiners, non-joiners,
-        // variation selectors, tags, a byte-order mark and a soft hyphen.
+        // What emoji and scripts need stays: joiners and non-joiners
+        // between their characters, variation selectors and tags.
         let family = "👩\u{200d}👩\u{200d}👧 ❤\u{fe0f} 🏴\u{e0067}\u{e0062}\u{e007f}";
         assert_eq!(unhidden(family), family);
-        let persian = "می\u{200c}خواهم \u{feff}co\u{ad}op";
+        let persian = "می\u{200c}خواهم";
         assert_eq!(unhidden(persian), persian);
+        // Characters of no width elsewhere show.
+        assert_eq!(
+            unhidden("r\u{200b}m \u{feff}co\u{ad}op a\u{200d}b \u{2060}x\u{200c}"),
+            "r<U+200B>m <U+FEFF>co<U+00AD>op a<U+200D>b <U+2060>x<U+200C>"
+        );
     }
 
     #[test]

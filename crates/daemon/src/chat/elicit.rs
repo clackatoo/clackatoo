@@ -34,7 +34,9 @@ impl HostedChat {
     /// session loads, or past [`MAX_QUESTIONS`] waiting, isn't, and is to
     /// be declined.
     pub(crate) fn elicit(&mut self, request: Value, asked: Asked) -> bool {
-        if self.told_again() || self.asking.len() >= MAX_QUESTIONS {
+        if self.told_again()
+            || self.waiting_from(|asker| matches!(asker, Asker::Elicit { .. })) >= MAX_QUESTIONS
+        {
             return false;
         }
         let quoted: String = asked.form.message.chars().take(MOST_QUOTED).collect();
