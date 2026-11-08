@@ -8046,7 +8046,7 @@ fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
     let serving = |n: usize| format!("Serve r{n}");
     let lost_task = |n: usize| format!("`Serve r{n} (sleep 1000)`");
     let answer = |turn: usize, n: usize| {
-        format!("Chat {builder}'s answer to your message, turn {turn}:\nbuilding r{n}\n")
+        format!("Chat {builder}'s answer to your message, turn {turn}:\n| building r{n}\n")
     };
     // What the builder said, as its turn `n` ended: as it would have, or,
     // if the upgrade stopped it, going on as clackatoo asks.
@@ -8291,7 +8291,7 @@ fn a_pm_runs_a_builder_through_upgrades(carried: bool) {
     nothing_tripped(&node);
     let said = last_words(&node);
     let from_helper = format!(
-        "wait_for_chat: Chat {helper}'s answer to your message, turn 1:\nbuilding rh\nbuilt rh\n"
+        "wait_for_chat: Chat {helper}'s answer to your message, turn 1:\n| building rh\n| built rh\n"
     );
     assert!(said.contains(&from_helper), "{said}");
     let from_builder = format!(

@@ -36,7 +36,7 @@ use clackatoo_protocol::{PaneId, PaneTerminal, SettingKind, Subagent, SubagentSt
 use mio::Token;
 use serde_json::Value;
 
-use super::talk::{final_words, going_note, head};
+use super::talk::{final_words, going_note, head, quoted};
 use super::{MAX_WAITS, Wait, Waiting};
 use crate::chat::{HostedChat, Wanted, role_for};
 use crate::mcp::NewChat;
@@ -614,10 +614,7 @@ impl Daemon {
             .saturating_sub(1);
         other.heard_by(chat, turns.len());
         match answer.map(final_words) {
-            Some(words) if !words.is_empty() => {
-                text.push_str(&head(&words, share));
-                text.push('\n');
-            }
+            Some(words) if !words.is_empty() => text.push_str(&quoted(&head(&words, share))),
             _ => text.push_str("It said nothing.\n"),
         }
         if earlier > 0 {

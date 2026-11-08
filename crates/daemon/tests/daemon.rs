@@ -14302,7 +14302,7 @@ fn chats_list_message_read_and_wait_for_each_other() {
     assert!(
         words.contains(&format!(
             "wait_for_chat: Chat {b}'s answer to your message, turn 1:\n\
-             echo: hello<U+202E> there^G\n[finished]"
+             | echo: hello<U+202E> there^G\n[finished]"
         )),
         "{words}"
     );
@@ -14499,7 +14499,7 @@ fn a_message_to_a_busy_chat_waits_for_its_turn_to_end() {
     let words = last_words(&node);
     assert!(
         words.contains(&format!(
-            "wait_for_chat: Chat {b}'s answer to your message, turn 2:\necho: hi b"
+            "wait_for_chat: Chat {b}'s answer to your message, turn 2:\n| echo: hi b"
         )),
         "{words}"
     );
