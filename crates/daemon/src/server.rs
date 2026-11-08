@@ -1536,6 +1536,7 @@ impl Daemon {
         // Written, for the next build to keep on from, before anything
         // goes over to it.
         self.keep_last();
+        self.kept_last();
         let activities = self.hand_over_activities().map_err(io::Error::other)?;
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
@@ -1947,9 +1948,9 @@ impl Daemon {
     fn stop(&mut self) {
         log::info!("shutting down");
         let started = Instant::now();
-        // As they are, before anything closes.
+        // As they are, before anything closes, written on the writer's
+        // thread while the rest stops.
         self.keep_last();
-        self.end_links();
         let servers_until = started + stopping::STOP_WAIT;
         let until = started + STOPPING_WAIT;
         // A client waiting for an upgrade hears why there won't be one.
@@ -1967,6 +1968,10 @@ impl Daemon {
         self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
         self.wait_for_stopping(servers_until);
+        // Only now what waits for the disk, as an upgrade does it: a slow
+        // fsync takes none of the time the servers have to stop.
+        self.kept_last();
+        self.end_links();
         self.wait_for_file_ops(until);
         self.finish_stopping_boards(until);
         drop(self.finish_stopping_recovery(until));

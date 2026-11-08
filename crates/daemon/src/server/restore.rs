@@ -250,13 +250,21 @@ impl Daemon {
         }
     }
 
-    /// Writes the workspaces as they are now, as the daemon stops or
-    /// upgrades, waiting a moment for them to be written. A daemon that
-    /// stops drops its terminals only after this, so what's written is
-    /// what there was, not the panes closing.
+    /// Has the workspaces written as they are now, for the last time, as
+    /// the daemon stops or upgrades: nothing after is written. The write
+    /// is waited for with [`kept_last`](Self::kept_last), so a slow disk
+    /// holds up nothing done meanwhile. A daemon that stops drops its
+    /// terminals only after this, so what's written is what there was,
+    /// not the panes closing.
     pub(super) fn keep_last(&mut self) {
         self.keeping.due = None;
         self.keep();
+        self.keeping.path = None;
+    }
+
+    /// Waits a moment for what [`keep_last`](Self::keep_last) had written
+    /// to be written, then lets the file go.
+    pub(super) fn kept_last(&mut self) {
         if let Some(writer) = self.keeping.writer.take()
             && !writer.stop(KEEP_WAIT)
         {
@@ -267,7 +275,6 @@ impl Daemon {
         }
         // Another build may keep them from here on: an upgrade's.
         self.keeping.lock = None;
-        self.keeping.path = None;
     }
 
     /// Takes in where a window says editor `pane` is, to keep. Anything
@@ -1653,6 +1660,7 @@ mod tests {
         // Or as the daemon stops, as nothing changed meanwhile.
         std::fs::remove_dir(&blocking).unwrap();
         daemon.keep_last();
+        daemon.kept_last();
         let kept = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(kept.contains("\"written\""), "{kept}");
     }
