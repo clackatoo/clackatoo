@@ -2180,6 +2180,22 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_the_user_sent_back_outlives_the_one_that_started_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        let kept = answered_chat(&mut daemon, 3, (b, a, 2));
+        daemon.chat(kept).unwrap().keep_for_user();
+        // It goes to the chat above, as one in a pane does.
+        daemon.subagent_closed(b, Some(a), &[]);
+        assert_eq!(daemon.chat_ref(kept).unwrap().relations().parent, Some(a));
+        assert!(daemon.chat_ref(a).unwrap().subagent(kept).is_some());
+        // With none above, it stays, the user's.
+        daemon.subagent_closed(a, None, &[]);
+        assert!(daemon.chat_ref(kept).is_some());
+    }
+
+    #[test]
     fn a_message_waking_a_chat_an_agent_started_counts_towards_those_working() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());

@@ -125,11 +125,13 @@ impl Daemon {
     /// `cards` for the chats it started: its card says so, and the chats
     /// it started that are in the background close with it.
     ///
-    /// Those in a pane, and those still going or with changes waiting for
-    /// review, themselves or in a chat under them, go to the chat above
-    /// instead, under the turn `chat` was started in, so a review of that
-    /// turn still lists their changes; as do those closed already whose
-    /// changes wait for review, by their cards.
+    /// Those in a pane, or the user had in one and sent back, which are
+    /// theirs, and those still going or with changes waiting for review,
+    /// themselves or in a chat under them, go to the chat above instead,
+    /// under the turn `chat` was started in, so a review of that turn
+    /// still lists their changes; as do those closed already whose changes
+    /// wait for review, by their cards. With none above, those in a pane
+    /// or sent back stay, as the user's.
     pub(in crate::server) fn subagent_closed(
         &mut self,
         chat: TerminalId,
@@ -156,10 +158,10 @@ impl Daemon {
             })
             .map(|(&id, _)| (id, workspaces.pane_showing(id).is_some()))
             .collect();
-        // One in a pane, or still going, or with changes waiting for
-        // review, goes to the chat above, if there is one, rather than
-        // lose its work: the user's own chat closing ends everything under
-        // it but what's in panes.
+        // One in a pane, or sent back from one, or still going, or with
+        // changes waiting for review, goes to the chat above, if there is
+        // one, rather than lose its work: the user's own chat closing ends
+        // everything under it but what's in panes or was sent back.
         let above = parent.filter(|&parent| self.chat_ref(parent).is_some());
         if let (Some(above), Some(turn)) = (above, started_in) {
             let waiting: Vec<Subagent> = (cards.iter())
@@ -180,8 +182,9 @@ impl Daemon {
             }
         }
         for (child, shown) in children {
+            let kept = (self.chat_ref(child)).is_some_and(HostedChat::kept_by_user);
             if let Some(above) = above
-                && (shown || self.keeps_work(child, 0))
+                && (shown || kept || self.keeps_work(child, 0))
                 && let Some(kid) = self.chat(child)
             {
                 log::info!(
@@ -198,7 +201,7 @@ impl Daemon {
                 self.note_subagent(child);
                 continue;
             }
-            if shown {
+            if shown || kept {
                 continue;
             }
             log::info!("chat {child} closes with chat {chat}, which started it");
