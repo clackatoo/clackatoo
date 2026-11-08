@@ -174,19 +174,22 @@ struct Capped {
 pub(crate) const AGENT_TRACE_CAP: u64 = 16 * 1024 * 1024;
 
 /// What runs `command`, in `cwd` if given. It's given only the absolute
-/// directories of the daemon's `$PATH` (see
+/// directories of `path`, the daemon's `$PATH` (see
 /// [`clackatoo_syntax::servers::absolute_only`]), so neither it, if it's
 /// named by a bare name, nor what it runs is found in the folder it runs
 /// in, a project anyone could have filled.
-fn command_for(command: &[OsString], cwd: Option<&Path>) -> io::Result<Command> {
+fn command_for(
+    command: &[OsString],
+    cwd: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> io::Result<Command> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command"))?;
     let mut command = Command::new(program);
     command.args(args);
-    if let Some(path) = std::env::var_os("PATH") {
-        command.env("PATH", clackatoo_syntax::servers::absolute_only(&path));
-    }
+    let path = clackatoo_syntax::servers::absolute_only(path.unwrap_or_default());
+    command.env("PATH", path);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -211,7 +214,7 @@ impl Peer {
         framing: Framing,
         parser: &Parser,
     ) -> io::Result<Self> {
-        let mut command = command_for(command, cwd)?;
+        let mut command = command_for(command, cwd, std::env::var_os("PATH").as_deref())?;
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -2002,21 +2005,23 @@ mod tests {
 
     #[test]
     fn a_peer_is_given_only_the_absolute_directories_of_path() {
-        let command = [OsString::from("rust-analyzer")];
-        let command = command_for(&command, Some(Path::new("/project"))).unwrap();
-        let path = (command.get_envs())
-            .find(|(name, _)| *name == "PATH")
-            .and_then(|(_, value)| value);
-        let daemons = std::env::var_os("PATH").unwrap_or_default();
+        let given = |daemons: Option<&str>| {
+            let command = [OsString::from("rust-analyzer")];
+            let cwd = Some(Path::new("/project"));
+            let command = command_for(&command, cwd, daemons.map(std::ffi::OsStr::new)).unwrap();
+            (command.get_envs())
+                .find(|(name, _)| *name == "PATH")
+                .and_then(|(_, value)| value)
+                .map(|path| path.to_str().unwrap().to_owned())
+        };
         assert_eq!(
-            path,
-            Some(clackatoo_syntax::servers::absolute_only(&daemons).as_os_str())
+            given(Some(":.:bin:/usr/bin::/bin:")).as_deref(),
+            Some("/usr/bin:/bin")
         );
-        let path = path.unwrap().as_encoded_bytes();
-        assert!(
-            path.split(|&byte| byte == b':')
-                .all(|dir| dir.starts_with(b"/"))
-        );
+        // Never an empty one, which is the folder it runs in.
+        let safe = Some(clackatoo_syntax::servers::SAFE_PATH);
+        assert_eq!(given(Some(".:bin")).as_deref(), safe);
+        assert_eq!(given(None).as_deref(), safe);
     }
 
     #[test]

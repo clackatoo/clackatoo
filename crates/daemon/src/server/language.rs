@@ -71,7 +71,10 @@ fn server_program(name: &str, servers: Option<&Path>) -> Option<PathBuf> {
         None => clackatoo_syntax::servers::on_path(name),
     }?;
     if !found.is_absolute() {
-        log::warn!("{name}: a language server is named by a bare name or an absolute path");
+        log::warn!(
+            "{name} isn't started: a relative path isn't run, only a bare name found on PATH \
+             or an absolute path"
+        );
         return None;
     }
     found.is_file().then_some(found)

@@ -471,14 +471,22 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
 /// relative one would find a program in whatever folder it's looked for
 /// from, or run in, which may be a project anyone could have filled, so
 /// a program is looked for only in the others, run by the absolute path
-/// found, and given this `$PATH`.
+/// found, and given this `$PATH`. With none, it's [`SAFE_PATH`]: an empty
+/// `$PATH` given to a program would have it look in the folder it's in.
 #[must_use]
 pub fn absolute_only(path: &OsStr) -> OsString {
     let kept: Vec<&[u8]> = (path.as_bytes().split(|&byte| byte == b':'))
         .filter(|dir| dir.starts_with(b"/"))
         .collect();
+    if kept.is_empty() {
+        return OsString::from(SAFE_PATH);
+    }
     OsString::from(OsStr::from_bytes(&kept.join(&b':')))
 }
+
+/// The `$PATH` given when there's no absolute directory to give: where
+/// programs are installed on any Linux.
+pub const SAFE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// The first file called `name` that may be run in the absolute
 /// directories of `path`, a `$PATH`.

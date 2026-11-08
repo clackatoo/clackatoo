@@ -197,7 +197,7 @@ mod tests {
         let installed = find(&path).unwrap();
         assert_eq!(installed.program, dir.path().join("git"));
         assert!(
-            find(OsStr::new(""))
+            find(OsStr::new("/nowhere"))
                 .unwrap_err()
                 .contains("isn't installed")
         );
