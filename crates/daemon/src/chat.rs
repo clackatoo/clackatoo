@@ -1783,7 +1783,7 @@ impl HostedChat {
             plan: &self.node.plan,
             plan_by: self.plan_by.as_deref(),
             budget: self.budget.min(handoff::MOST).min(context),
-            tag: fence_tag(self.id.0),
+            tag: fence_tag(),
         }
         .make()
     }
@@ -3853,15 +3853,19 @@ const MOST_ASKED: usize = 64;
 
 /// A tag for the lines a message or a digest goes between, that whoever
 /// wrote what's between them can't know, so it can't end itself early and
-/// go on as if clackatoo said what follows: from the clock's nanoseconds,
-/// mixed with `salt`.
-pub(crate) fn fence_tag(salt: u32) -> u32 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            since.subsec_nanos() ^ u32::try_from(since.as_secs() & 0xffff_ffff).unwrap_or(0)
-        })
-        ^ salt.rotate_left(16)
+/// go on as if clackatoo said what follows: random, from the system's
+/// source, as the clock's time could be guessed.
+pub(crate) fn fence_tag() -> u32 {
+    use ring::rand::SecureRandom as _;
+    let mut bytes = [0; 4];
+    // The system's source never fails on Linux once it's ready; if it
+    // did, the clock's nanoseconds are a tag still.
+    if ring::rand::SystemRandom::new().fill(&mut bytes).is_err() {
+        return SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+    }
+    u32::from_ne_bytes(bytes)
 }
 
 /// Whether `patch` adds to item `item` of turn `turn`.

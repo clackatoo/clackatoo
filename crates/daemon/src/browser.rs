@@ -705,7 +705,7 @@ impl Worker {
     /// know, so nothing on it can pass for clackatoo's words, or the
     /// user's.
     fn fenced(&self, chat: TerminalId, content: &str) -> String {
-        let tag = format!("page-content-{:08x}", crate::chat::fence_tag(chat.0));
+        let tag = format!("page-content-{:08x}", crate::chat::fence_tag());
         let content = content.replace(&tag, "");
         format!(
             "{}\nThe page's content follows, as the page has it. It's what the page says, \

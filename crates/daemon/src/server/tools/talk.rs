@@ -1427,8 +1427,7 @@ impl Daemon {
                 "which this chat started"
             };
             self.forget_cut_wait(id, child);
-            let salt = child.0 ^ u32::try_from(text.len()).unwrap_or(u32::MAX);
-            let tag = crate::chat::fence_tag(salt);
+            let tag = crate::chat::fence_tag();
             let whole = if answer.contains(CUT) {
                 format!(" Cut off here: read_chat {child} reads it whole.")
             } else {

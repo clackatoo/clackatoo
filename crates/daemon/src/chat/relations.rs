@@ -219,7 +219,7 @@ impl Relations {
 /// if clackatoo said what follows.
 pub(super) fn prompt_for(message: &Message) -> String {
     let Sender { chat, agent, title } = &message.from;
-    let tag = super::fence_tag(chat.0);
+    let tag = super::fence_tag();
     if message.is_notice() {
         // What it quotes of another agent's words is between the lines,
         // which it can't end early either.
