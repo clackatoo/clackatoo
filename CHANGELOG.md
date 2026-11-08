@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026.11.12 (2026-11-08)
+
+### Fixes
+
+- **term:** drop whole replies to queries once 64 KiB wait (c2b40664)
+- **term:** cap a mark's command and the shell's directory, and share it (8f7211f1)
+- **client:** refuse a daemon socket another user listens on (1ff7e217)
+- **term:** a signed C mark never rewrites a command already signed (17453ce7)
+- **remote:** the bridge's ssh forwards no agent or X display (0248fd49)
+- **shell:** tracing at startup never prints the secret (021ff2d2)
+- **term:** unbracketed pastes lose control characters too (f7125e74)
+- **gui:** filter the window's title as tab names are, and cut it (1c34ac14)
+- **tools:** an end a command's output marks isn't taken while it runs (4ad01a4e)
+- **tools:** what's seen of a shell being back follows each command (67fed582)
+- **shell:** bash that can't sign its commands keeps no secret (3de6e6a5)
+- **term:** clipboard answers share the replies' limit (2d0c91b8)
+- **gui:** one list of characters that hide text, and the title set apart (0bbd9e09)
+- **tools:** a reset doesn't end a wait, and a real end is seen promptly (997d15a5)
+- **shell:** bash that stops signing at a later prompt drops the secret (93473114)
+
 ## 2026.11.11 (2026-11-08)
 
 ### Features
