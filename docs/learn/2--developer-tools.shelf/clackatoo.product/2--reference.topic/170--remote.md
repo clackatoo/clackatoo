@@ -44,11 +44,11 @@ Your daemon keeps the connection. It makes it again whenever it drops, and again
 
 `:portforward 8080` in one of HOST's workspaces forwards this machine's port 8080 to HOST's, through your daemon's connection to it, which keeps listening while the connection drops and is made again. `:portforward` there lists the forwards and `:portforward! 8080` stops one, as for a window on another machine. A window that's itself on another machine than its daemon can't forward to HOST yet.
 
-## Local upgrades
+## Upgrading your daemon
 
-A local daemon upgrade keeps remote pane identities and cached layouts while connections return, including machines reached through another. Editor acknowledgements survive so already-applied edits are not repeated. A planned upgrade waits for accepted terminal input to be acknowledged, refusing the upgrade if that wait times out. Terminal input is never replayed after reconnect.
+[Upgrading](~clackatoo/reference/cli#upgrade) your daemon keeps HOST's workspaces as they were, panes and layouts and all, those of machines passed on through HOST too, while its connections are made again. What you typed in HOST's editors that HOST had already taken isn't sent twice. Keys you typed into HOST's terminals that HOST hasn't answered yet hold the upgrade back; if HOST doesn't answer, the upgrade is refused, saying so, rather than send those keys again after it: keys for a terminal are never sent twice.
 
-This protection applies when upgrading from a release that already keeps this state. An older daemon cannot supply it on the first installation. Open TCP streams and pending file-operation requests are not preserved.
+Only a daemon already on a release that keeps all this can hand it over, so the first upgrade onto one doesn't. Connections through [forwarded ports](#forwarding-ports), and file operations still waiting for HOST, are cut off.
 
 ## Machines passed on
 
@@ -93,7 +93,7 @@ Once connected, the window or command tries reaching the daemon straight over UD
 - **It survives your network changing,** such as moving from home Wi-Fi to a phone's hotspot, or a short sleep. ssh's connection dies when that happens; the QUIC connection carries on from the new network, and the window doesn't notice.
 - **Keys come back a little faster,** with ssh out of the way.
 
-It finds out with a few probes, small datagrams the daemon sends straight back, while the connection carries on inside ssh, so nothing waits on the attempt. If none comes back within two seconds, as when a firewall blocks UDP, the connection stays inside ssh. If UDP stops getting through later, the connection goes back into ssh after about ten seconds, if ssh's connection is still up, and tries UDP again a minute after.
+It finds out with a few probes, small datagrams the daemon sends straight back, while the connection carries on inside ssh, so nothing waits on the attempt. If none comes back within two seconds, as when a firewall blocks UDP, the connection stays inside ssh, and tries UDP again 15 seconds later. If UDP stops getting through later, the connection goes back into ssh after about 20 seconds, if ssh's connection is still up, longer than ssh takes to give up on a network that's gone, and tries UDP again 15 seconds after.
 
 [`clackatoo ping --remote host`](~clackatoo/reference/cli#ping) says which way each round went: `(over UDP)` or `(through ssh)`.
 
@@ -161,7 +161,7 @@ clackatoo passes ssh a few options of its own:
 
 ## When the other machine stops answering
 
-If what the window sends goes unanswered for about three seconds, a red notice at the right of the top bar says so: `No contact with desktop for 12 s`, counting up. The window stays as it was. Editors carry on: what you type in them is kept and goes when the other machine answers again, landing exactly as it would have. Keys for terminals and everything else aren't sent late: the bar says `not connected: keys aren't sent`, and the pane flashes. The notice goes as soon as the other machine answers again.
+If what the window sends goes unanswered for about five seconds, a red notice at the right of the top bar says so: `No contact with desktop for 12 s`, counting from when it was sent. The window stays as it was. Editors carry on: what you type in them is kept and goes when the other machine answers again, landing exactly as it would have. Keys for terminals and everything else aren't sent late: once what was sent has gone unanswered for three seconds, the bar says `not connected: keys aren't sent`, and the pane flashes. The notice goes as soon as the other machine answers again.
 
 An idle window notices within about 15 seconds, at its next keep-alive.
 
