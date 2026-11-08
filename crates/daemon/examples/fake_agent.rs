@@ -57,6 +57,7 @@
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
 //! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
 //! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
+//! | `session-signed-out` | Says, by itself, as AIR's `sessionFailure`, that its sign-in ran out, then `carried on` |
 //! | `session-error-fail` | Says, by itself, that the usage limit is reached, then ends its turn failed with the same, as AIR's `sessionFailure` |
 //! | `compact-late` | Compacts its context, as `compact` does, but says its last report with the next message |
 //! | `image-bad` | Shows an image in its words with no data, then `shown` |
@@ -1663,6 +1664,18 @@ impl Fake {
                             "id": "s:session-error:2", "revision": 1, "category": "connection",
                             "severity": "error", "title": "The connection to Claude was lost.",
                             "actions": ["new_session"] } } } } }),
+                );
+                say(session, "carried on\n");
+                done(id, "end_turn");
+            }
+            "session-signed-out" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "session_info_update", "_meta": { "jetbrains":
+                        { "air": { "version": 1, "sessionFailure": {
+                            "id": "s:session-error:4", "revision": 1, "category": "access",
+                            "severity": "error", "title": "Authentication required",
+                            "actions": ["login"] } } } } }),
                 );
                 say(session, "carried on\n");
                 done(id, "end_turn");

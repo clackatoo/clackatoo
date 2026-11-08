@@ -33,7 +33,7 @@
 
 use std::collections::VecDeque;
 
-use agent_client_protocol_schema::v1::{ContentBlock, Meta, StopReason};
+use agent_client_protocol_schema::v1::{ContentBlock, Meta, SessionUpdate, StopReason};
 use clackatoo_protocol::{ChatPatch, Cost, Item, Outcome, Spent, Tool, ToolKind, ToolStatus};
 use serde_json::Value;
 
@@ -132,9 +132,24 @@ impl HostedChat {
         }
     }
 
+    /// Whether `update` says, by itself, that the session failed, as AIR's
+    /// `sessionFailure`: only then is the command that logs in to its
+    /// agent looked for, on PATH, to name it (see
+    /// [`session_info`](Self::session_info)).
+    pub(crate) fn says_it_failed(update: &SessionUpdate) -> bool {
+        let SessionUpdate::SessionInfoUpdate(info) = update else {
+            return false;
+        };
+        (info.meta.as_ref())
+            .and_then(|meta| meta.get("jetbrains"))
+            .and_then(|jetbrains| jetbrains.pointer("/air/sessionFailure/severity"))
+            .is_some_and(|severity| severity == "error")
+    }
+
     /// Takes what a `session_info_update`'s `meta` says of a failure, or
-    /// of trying again.
-    pub(super) fn session_info(&mut self, meta: Option<&Meta>) {
+    /// of trying again; `login` is the command that logs in to the agent,
+    /// if it's known, for a failure that needs signing in.
+    pub(super) fn session_info(&mut self, meta: Option<&Meta>, login: Option<&str>) {
         let Some(meta) = meta else { return };
         // What a session told again says of failures is long past.
         if self.told_again() {
@@ -150,7 +165,7 @@ impl HostedChat {
                 Some("warning") if self.answering() && !title.is_empty() => {
                     self.set_retrying(Some(retrying_text(title)));
                 }
-                Some("error") => self.failure_said(record),
+                Some("error") => self.failure_said(record, login),
                 _ => {}
             }
             return;
@@ -181,8 +196,9 @@ impl HostedChat {
     /// adapter, to a client that asks for these, leaves its error out of
     /// the turn's words. Any other is of the session, such as its worker
     /// going, or its connection lost: a notice says so. None goes unsaid.
-    fn failure_said(&mut self, record: &Value) {
-        let said = failure::typed(record, &self.node.agent, None)
+    /// One that needs signing in names `login`, if it's known.
+    fn failure_said(&mut self, record: &Value, login: Option<&str>) {
+        let said = failure::typed(record, &self.node.agent, login)
             .unwrap_or_else(|| failure::untyped(record));
         if self.woken() {
             self.answered_as(Outcome::Failed(said.text), said.raw, None);

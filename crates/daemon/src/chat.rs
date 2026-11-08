@@ -2776,11 +2776,24 @@ impl HostedChat {
         self.set_question(question);
     }
 
-    /// Takes a change to the session. Returns the files a tool that has
-    /// finished says it changed, if the change says so: they're on disk
-    /// already, as Claude Code's tools write them.
-    #[allow(clippy::too_many_lines, reason = "one arm per ACP update")]
+    /// Takes a change to the session, as [`update_as`](Self::update_as)
+    /// does, with no command that logs in to its agent at hand.
     pub(crate) fn update(&mut self, update: SessionUpdate) -> Option<Wrote> {
+        self.update_as(update, None)
+    }
+
+    /// Takes a change to the session; `login` is the command that logs in
+    /// to its agent, if it's known, for a failure it says that needs
+    /// signing in (see [`says_it_failed`](Self::says_it_failed)). Returns
+    /// the files a tool that has finished says it changed, if the change
+    /// says so: they're on disk already, as Claude Code's tools write
+    /// them.
+    #[allow(clippy::too_many_lines, reason = "one arm per ACP update")]
+    pub(crate) fn update_as(
+        &mut self,
+        update: SessionUpdate,
+        login: Option<&str>,
+    ) -> Option<Wrote> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 self.progressed();
@@ -2956,7 +2969,7 @@ impl HostedChat {
                     }
                 }
                 // A failure, or the agent trying again.
-                self.session_info(info.meta.as_ref());
+                self.session_info(info.meta.as_ref(), login);
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
                 self.set_settings(settings_of(&update.config_options));

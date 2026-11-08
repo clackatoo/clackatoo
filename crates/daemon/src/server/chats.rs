@@ -1177,7 +1177,12 @@ impl Daemon {
             log::info!("chat {id}: its agent took a turn by itself");
         }
         let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));
-        if let Some(wrote) = chat.update(update) {
+        // Looked for on PATH, so only for a failure, as for a turn's.
+        let login = (HostedChat::says_it_failed(&update))
+            .then(|| self.login_of(name))
+            .flatten();
+        let chat = self.chat(id)?;
+        if let Some(wrote) = chat.update_as(update, login.as_deref()) {
             self.take_written(id, &wrote);
         }
         let chat = self.chat(id)?;

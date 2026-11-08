@@ -3526,6 +3526,13 @@ fn a_turn_the_agent_took_by_itself_fails_as_its_agent_says_and_no_failure_goes_u
         (node.notice.as_deref()).is_some_and(|notice| notice.contains("connection")),
         "{node:#?}"
     );
+    // A sign-in that ran out, said so, names the command that signs in,
+    // as a turn's failure does.
+    let node = ask(&mut client, chat, "session-signed-out");
+    assert!(
+        (node.notice.as_deref()).is_some_and(|notice| notice.contains("Run `")),
+        "{node:#?}"
+    );
 }
 
 #[test]
