@@ -190,6 +190,12 @@ impl HostedChat {
             .unwrap_or_default()
     }
 
+    /// What it may do at all: its limits, and what its agent's mode rules
+    /// out (see [`mode_limits`](Self::mode_limits)).
+    pub(crate) fn all_limits(&self) -> Limits {
+        self.limits().max(self.mode_limits())
+    }
+
     /// What its agent's mode rules out, as limits: a read-only mode, as
     /// Codex's, or a planning one, as Claude Code's, changes nothing. A
     /// chat it starts, which may have another agent and so not its mode,

@@ -588,7 +588,7 @@ No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a
 
 Before running a command or typing into a terminal, the agent asks: Allow, Always allow commands, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow commands sets the chat's Tools to Allow, below: the agent runs commands, and types into terminals it started, without asking. Typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project; as Tools has no say in those, their questions offer only Allow, for this once, and Reject. The tools that only show or read inside the project, and those that start and message chats, never ask.
 
-The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. Off refuses the agent's calls at once; as the agent is given no tools at all while it's Off, turning them back on reaches it only when its session next opens. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools.
+The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. Off refuses the agent's calls at once; as the agent is given no tools at all while it's Off, turning them back on reaches it only when its session next opens. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools. While the agent's mode changes nothing, as Claude Code's Plan or Codex's Read-only, the tools that run or type commands refuse, whatever Tools says, as they do for a chat with [limits](#profiles): the mode's promise holds for clackatoo's tools too.
 
 Waiting for a command relies on the shell marking where each one ends, as bash, zsh and fish do in clackatoo; such a shell gets up to 30 seconds to show its first prompt before the agent is told it didn't. In other shells the agent gets the terminal's last lines, and is told it can't know when a command finishes.
 
@@ -863,7 +863,7 @@ Each input consumes an observed screenshot revision; changed targets or human
 input require another screenshot. These tools do not change desktop focus.
 The tools are `native_snapshot`, and with Control, `native_click`,
 `native_type` and `native_key`; a chat whose limits are read-only or no
-commands gets Inspect's alone.
+commands, or whose mode is Plan or Read-only, gets Inspect's alone.
 
 ## Managed activities and recovery
 

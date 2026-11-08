@@ -101,7 +101,9 @@ impl Daemon {
         let inspecting = action == NativeAction::Snapshot;
         if !inspecting
             && (access != NativeAccess::Control
-                || self.chat_ref(chat).is_none_or(|c| c.limits().no_commands()))
+                || self
+                    .chat_ref(chat)
+                    .is_none_or(|c| c.all_limits().no_commands()))
         {
             self.answer_tool(
                 token,

@@ -1205,6 +1205,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Native window Control no longer types into terminals or other chats, nor finishes macros later",
     },
+    News {
+        id: "plan-runs-no-commands",
+        date: "2026-11-08",
+        lesson: "agents",
+        what: "In Plan or Read-only mode, clackatoo's own tools run no commands either, whatever Tools says",
+    },
 ];
 
 impl News {

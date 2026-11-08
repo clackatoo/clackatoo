@@ -568,11 +568,12 @@ impl Daemon {
         }
     }
 
-    /// Why the chat `chat`'s agent can't make `tool`, if its limits rule
-    /// it out: running or typing commands, for a chat with none, and
-    /// clicking or typing in a page, which can change what's behind it.
+    /// Why the chat `chat`'s agent can't make `tool`, if its limits, or
+    /// what its mode rules out, as Plan or Read-only, rule it out: running
+    /// or typing commands, for a chat with none, and clicking or typing
+    /// in a page, which can change what's behind it.
     fn limits_refused(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
-        let limits = self.chat_ref(chat)?.limits();
+        let limits = self.chat_ref(chat)?.all_limits();
         let acting = matches!(
             tool,
             Tool::Browser(Act::Click { .. } | Act::Type { .. } | Act::Press { .. })

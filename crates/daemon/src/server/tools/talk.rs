@@ -740,7 +740,7 @@ impl Daemon {
                 "chat {to} isn't ready yet: wait for it, then try again"
             ));
         }
-        let limits = |chat: &HostedChat| chat.limits().max(chat.mode_limits());
+        let limits = HostedChat::all_limits;
         let mode_looser = match (same, own.mode_rank(), rank) {
             (false, _, theirs) => theirs != Some(0),
             (true, Some(own), Some(theirs)) => theirs > own,

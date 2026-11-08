@@ -415,7 +415,7 @@ impl Daemon {
         // parent's mode rules out, such as Codex's Read-only or Claude
         // Code's planning, holds as limits of its own.
         let mode = same.then(|| own.mode().map(str::to_owned)).flatten();
-        let limits = (profile.limits).max(own.limits()).max(own.mode_limits());
+        let limits = (profile.limits).max(own.all_limits());
         let inherited = |kind| {
             (same && profile.inherit_model)
                 .then(|| own.setting_value(kind).map(str::to_owned))

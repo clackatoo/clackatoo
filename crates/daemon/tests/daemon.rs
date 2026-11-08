@@ -13798,6 +13798,45 @@ fn showing_what_is_outside_the_project_asks_and_diagnostics_stay_inside() {
 }
 
 #[test]
+fn a_chat_in_a_read_only_mode_runs_no_commands_through_clackatoos_tools() {
+    let daemon = TestDaemon::with_tools_and_agents(vec![custom_agent(
+        "codex",
+        vec![fake_agent().into(), "--codex".into()],
+    )]);
+    let mut client = daemon.client();
+    let chat = start_new_chat(
+        &mut client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: None,
+            agent: Some("codex".to_owned()),
+            tools: AgentTools::Allow,
+            task: true,
+            browser: false,
+            model: None,
+            resume: None,
+        },
+    );
+    // Codex's Read-only mode: its own sandbox runs nothing that writes,
+    // and clackatoo's tools, allowed or not, run nothing either.
+    let set = ChatAction::Set {
+        setting: "mode".to_owned(),
+        value: "read-only".to_owned(),
+    };
+    client.chat(chat, set).unwrap();
+    wait_for_chat(&mut client, chat, |node| {
+        (node.settings.iter()).any(|setting| setting.id == "mode" && setting.value == "read-only")
+    });
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    let words = last_words(&ask(&mut client, chat, run));
+    assert!(
+        words.contains("this chat is read-only: it runs no commands"),
+        "{words}"
+    );
+    assert_eq!(tab_contents(&mut client).len(), 1, "no terminal opened");
+}
+
+#[test]
 fn typing_into_the_users_own_terminal_always_asks_and_the_setting_takes_it_back() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
