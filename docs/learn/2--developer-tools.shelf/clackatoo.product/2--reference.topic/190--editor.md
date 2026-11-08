@@ -526,7 +526,7 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - A window isn't told of changes that came back until it opens their file, or `:recover`; a `[No Name]` that came back isn't in `:Buffers`.
 - No `breakat` or `breakindentopt`. Typing near the start of a line of megabytes that isn't plain ASCII takes a moment, as the rest of it is laid out again.
 - Lightbulbs or gutter hints for lines with code actions, and typing to narrow the menu of them.
-- `:jumps`, to list them, and `5%`, which goes to that part of the file in Vim.
+- `:jumps`, to list them.
 - A server installed some other way than through clackatoo, after a file of its was first opened, isn't looked for again until the daemon restarts.
 - `indentkeys` and `indentexpr` as options. Esc on a line with nothing but its indent leaves the indent. `.` doesn't wait for a repeated new line's indent to be put right.
 - In Python, `else:` typed under the body it ends stays where it's typed, where Neovim takes it back a step: the grammar clackatoo installs reads that line differently.
@@ -534,7 +534,6 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - Selecting, copying or searching rendered Markdown, images in it, scrolling a wide table in it sideways, and a link's heading in another file.
 - Choosing the colours. They're the palette's named colours where there's one to suit, so they follow the terminal's.
 - Options for one pane only: `:set` sets them for every pane.
-- `$` and `l` stop at a line's last character that isn't blank, as on a terminal's screen, so blanks at a line's end can be reached only with `A` and `D`.
 - `clackatoo edit` opens the tab, but the window doesn't switch to it.
 - `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that moves more than one line, as `:g/^/m0` does, leaves marks on them where they were, as its moves are made as one edit. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
 - Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S` and `R` don't act on whole lines as Vim's do, `X`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
