@@ -1540,14 +1540,19 @@ impl HostedChat {
     }
 
     /// Takes `message`, from another chat's agent: it goes at once, as a
-    /// turn of its own, unless the agent is answering. Then it waits for
-    /// the turn to end, behind any others waiting; with
-    /// [`MAX_INBOX`] waiting already, it's handed back. Returns what the
-    /// server must do to send it, if it went.
+    /// turn of its own, unless the agent is answering, or the user stopped
+    /// the chat. Then it waits for the turn to end, or for the user to
+    /// write, behind any others waiting; with [`MAX_INBOX`] waiting
+    /// already, it's handed back. Returns what the server must do to send
+    /// it, if it went.
     pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Message> {
         // While a new branch of the conversation waits for the user's
         // message, what comes waits too: it would show the branch left.
-        if self.answering() || !self.relations.inbox.is_empty() || self.branch_pending() {
+        if self.answering()
+            || !self.relations.inbox.is_empty()
+            || self.branch_pending()
+            || self.held_by_stop()
+        {
             // Notices from clackatoo don't count: there's at most one that
             // subagents finished (see `mark_finished`), and activities'
             // are bounded by the activities.
@@ -1558,9 +1563,47 @@ impl HostedChat {
                 return Err(message);
             }
             self.relations.inbox.push_back(message);
+            self.say_held();
             return Ok(Vec::new());
         }
         Ok(self.begin_message(message))
+    }
+
+    /// Whether the user stopped the chat and hasn't written in it since:
+    /// what other agents send, and the notices from clackatoo that chats
+    /// it started finished, wait for them rather than start a turn, as the
+    /// user's own queued messages wait, paused. The user's next message,
+    /// or one of theirs sent from the queue, lets them go after it: one
+    /// stopping the turn to go is on its way.
+    pub(crate) fn held_by_stop(&self) -> bool {
+        self.stop_requested && self.user_queue.restart.is_none()
+    }
+
+    /// The chat is held as the user stopped it, as the daemon upgrades
+    /// (see [`Self::held_by_stop`]).
+    pub(crate) fn hold_as_stopped(&mut self) {
+        self.stop_requested = true;
+    }
+
+    /// Says what waits for the user to write, while the chat is held as
+    /// they stopped it.
+    fn say_held(&mut self) {
+        let waiting = self.relations.inbox.len();
+        if !self.held_by_stop() || waiting == 0 {
+            return;
+        }
+        let (plural, wait, them) = if waiting == 1 {
+            ("", "waits", "it")
+        } else {
+            ("s", "wait", "them")
+        };
+        let said = format!(
+            "Stopped: {waiting} message{plural} from other agents {wait} until you write here. \
+             Stop again drops {them}."
+        );
+        if self.node.notice.as_deref() != Some(said.as_str()) {
+            self.set_notice(Some(said));
+        }
     }
 
     /// Sends the first message waiting from another agent, if the agent
@@ -1649,8 +1692,11 @@ impl HostedChat {
     /// Stops the agent answering, or takes back the message if it hasn't
     /// gone yet, and stops waiting for a session asked for, even with no
     /// message: one that comes after all is closed unseen, and the next
-    /// message asks again.
+    /// message asks again. What other agents send waits for the user to
+    /// write from then on (see [`Self::held_by_stop`]); stopping a chat
+    /// held so drops it.
     fn stop(&mut self, actions: &mut Vec<Action>) {
+        let again = self.held_by_stop();
         self.stop_requested = true;
         if let Some((id, _, _)) = self.user_queue.native {
             self.steered(id, Err("Stopped before acknowledgment".into()));
@@ -1661,6 +1707,7 @@ impl HostedChat {
             // A form the agent asked between turns, as a sign-in, is
             // answered as cancelled: stopping stops what it waits on.
             self.cancel_forms(actions);
+            self.hold_waiting(again);
             return;
         }
         // Questions waiting are answered with none, as the protocol asks.
@@ -1690,13 +1737,22 @@ impl HostedChat {
             self.clear_slow();
             actions.push(Action::Abandon);
         }
-        // The user wants the agent to stop: messages from other agents
-        // waiting their turn don't start it again.
+        self.hold_waiting(again);
+    }
+
+    /// The user wants the agent to stop: messages from other agents
+    /// waiting their turn don't start it again, but wait for the user, as
+    /// their own queued messages do; stopped `again`, the user drops them.
+    fn hold_waiting(&mut self, again: bool) {
+        if !again {
+            self.say_held();
+            return;
+        }
         let dropped = std::mem::take(&mut self.relations.inbox).len();
         if dropped > 0 {
             let plural = if dropped == 1 { "" } else { "s" };
             self.set_notice(Some(format!(
-                "Stopped: {dropped} message{plural} from other agents waiting their turn \
+                "Stopped: {dropped} message{plural} from other agents waiting for you \
                  weren't sent."
             )));
         }
@@ -8271,17 +8327,46 @@ mod tests {
         assert_eq!(chat.node.turns.last().unwrap().from, None);
     }
 
+    /// Stopping holds the messages waiting, and what comes after, for the
+    /// user, as their own queue is paused: none starts a turn until they
+    /// write, and theirs goes first. Stopping again drops them.
     #[test]
-    fn stopping_drops_the_messages_waiting_and_says_so() {
+    fn stopping_holds_the_messages_waiting_until_the_user_writes() {
         let mut chat = chat();
         connect(&mut chat, "s");
         send(&mut chat, "work");
         chat.deliver(message(7, "later", 1)).unwrap();
         assert_eq!(chat.act(ChatAction::Stop), [Action::Cancel]);
+        assert_eq!(chat.relations().inbox.len(), 1);
+        assert_eq!(
+            chat.node.notice.as_deref(),
+            Some(
+                "Stopped: 1 message from other agents waits until you write here. Stop again drops it."
+            )
+        );
+        chat.answered(Ok(StopReason::Cancelled));
+        assert_eq!(chat.deliver_next(), [], "held");
+        assert_eq!(chat.deliver(message(7, "more", 1)), Ok(Vec::new()));
+        chat.mark_finished();
+        assert_eq!(chat.relations().inbox.len(), 3);
+        assert_eq!(chat.next_message_from(), None);
+        assert_eq!(chat.node.turns.len(), 1);
+        // The user writes: theirs first, then what waited.
+        send(&mut chat, "go on");
+        assert_eq!(chat.node.turns.last().unwrap().from, None);
+        chat.answered(Ok(StopReason::EndTurn));
+        assert_eq!(chat.next_message_from(), Some(TerminalId(7)));
+        // Stopped again while held, what waits is dropped.
+        let mut chat = tests::chat();
+        connect(&mut chat, "s");
+        chat.act(ChatAction::Stop);
+        chat.deliver(message(7, "later", 1)).unwrap();
+        assert_eq!(chat.node.turns.len(), 0, "held while idle too");
+        chat.act(ChatAction::Stop);
         assert!(chat.relations().inbox.is_empty());
         assert_eq!(
             chat.node.notice.as_deref(),
-            Some("Stopped: 1 message from other agents waiting their turn weren't sent.")
+            Some("Stopped: 1 message from other agents waiting for you weren't sent.")
         );
     }
 

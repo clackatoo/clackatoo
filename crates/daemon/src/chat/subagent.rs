@@ -253,9 +253,13 @@ impl HostedChat {
     }
 
     /// Who sent the next message from another chat's agent, if it would be
-    /// begun now, as [`Self::deliver_next`] begins it.
+    /// begun now, as [`Self::deliver_next`] begins it: none while the user
+    /// stopped the chat (see [`Self::held_by_stop`]).
     pub(crate) fn next_message_from(&self) -> Option<TerminalId> {
-        if self.answering() || self.user_queue.native.is_some() || self.user_queue.restart.is_some()
+        if self.answering()
+            || self.user_queue.native.is_some()
+            || self.user_queue.restart.is_some()
+            || self.held_by_stop()
         {
             return None;
         }
@@ -273,6 +277,7 @@ impl HostedChat {
     pub(crate) fn mark_finished(&mut self) {
         if !(self.relations.inbox.iter()).any(Message::is_finished_notice) {
             (self.relations.inbox).push_back(Message::finished_notice(self.id));
+            self.say_held();
         }
     }
 
@@ -484,7 +489,8 @@ impl HostedChat {
             ChatState::Starting if self.answering() => return SubagentStatus::Starting,
             _ => {}
         }
-        if self.answering() || !self.relations.inbox.is_empty() {
+        // What waits for the user, who stopped it, isn't work under way.
+        if self.answering() || (!self.relations.inbox.is_empty() && !self.held_by_stop()) {
             return SubagentStatus::Working;
         }
         let last = (self.node.turns.iter()).rfind(|turn| turn.switch.is_none());

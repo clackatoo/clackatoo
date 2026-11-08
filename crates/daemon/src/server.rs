@@ -1441,6 +1441,10 @@ impl Daemon {
             // ran: the tasks show lost all the same.
             let asked_to_stop =
                 (standing.as_ref()).is_some_and(|standing| standing.stopped.contains(&id.0));
+            // And it stays held for the user, as they stopped it.
+            if asked_to_stop {
+                chat.hold_as_stopped();
+            }
             if !told && !asked_to_stop && chat.tell_upgrade(&stopped) {
                 log::info!(
                     "chat {id}: told what the upgrade stopped ({} background tasks)",

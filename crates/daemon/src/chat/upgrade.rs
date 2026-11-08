@@ -112,8 +112,12 @@ impl HostedChat {
     /// had.
     pub(crate) fn hand_over_standing(&self, talk: &mut handover::Talk) {
         talk.tasks.extend(self.hand_over_tasks());
-        // A turn the user asked to stop isn't told of after, nor what it ran.
-        if self.answering() && (self.stop_requested || self.skipping() || self.woken_stopping()) {
+        // A turn the user asked to stop isn't told of after, nor what it
+        // ran; and a chat they stopped stays held for them (see
+        // `held_by_stop`), what waits waiting on. A load passed over is
+        // taken for a stop too, as the build before took it.
+        let stopping = self.answering() && (self.skipping() || self.woken_stopping());
+        if self.stop_requested || stopping {
             talk.stopped.push(self.id.0);
         }
         let woke = (self.node.turns.iter().enumerate()).filter_map(|(turn, each)| {

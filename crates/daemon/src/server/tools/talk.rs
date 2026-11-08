@@ -994,11 +994,19 @@ impl Daemon {
             .chat(to)
             .ok_or_else(|| format!("chat {to} has closed"))?;
         let busy = target.is_answering();
+        let stopped = target.held_by_stop();
         let actions = target.deliver(message).map_err(|_| {
-            format!(
-                "chat {to} has {MAX_INBOX} messages waiting already: wait_for_chat, then try \
-                 again"
-            )
+            if stopped {
+                format!(
+                    "the user stopped chat {to}, and {MAX_INBOX} messages wait for them to \
+                     write there already: ask the user"
+                )
+            } else {
+                format!(
+                    "chat {to} has {MAX_INBOX} messages waiting already: wait_for_chat, then \
+                     try again"
+                )
+            }
         })?;
         let waiting = target.relations().inbox.len();
         if waiting > 0 {
@@ -1007,7 +1015,12 @@ impl Daemon {
         self.tools.talk.undelivered.remove(&(chat, to));
         self.act(to, actions);
         self.collect_damage(to);
-        Ok(if busy {
+        Ok(if stopped {
+            format!(
+                "Sent, but the user stopped chat {to}: it waits until they write there \
+                 ({waiting} waiting). Ask the user if it's needed sooner."
+            )
+        } else if busy {
             format!(
                 "Sent. Chat {to} is busy answering, so it waits its turn ({waiting} waiting). \
                  wait_for_chat waits for its answer."
@@ -1255,8 +1268,16 @@ impl Daemon {
     }
 
     /// What a chat waiting for the chat `chat` is told, if `chat` holds a
-    /// notice for the user, so it doesn't wait on for it.
+    /// notice for the user, or the user stopped it, so it doesn't wait on
+    /// for it.
     pub(super) fn held_note(&self, chat: TerminalId) -> Option<String> {
+        let other = self.chat_ref(chat)?;
+        if other.held_by_stop() && !other.is_answering() {
+            return Some(format!(
+                "[The user stopped chat {chat}: what agents send it waits until they write \
+                 there.]"
+            ));
+        }
         self.holds_notice(chat).then(|| {
             format!(
                 "[Chat {chat}'s own subagents' results wait for the user: notices have started \
@@ -1809,9 +1830,9 @@ fn users_last_turn(chat: &HostedChat) -> Option<TurnUid> {
 }
 
 /// Whether `chat` has nothing to finish: no answer under way, and no
-/// message waiting.
+/// message waiting, but for those that wait for the user, who stopped it.
 pub(super) fn idle(chat: &HostedChat) -> bool {
-    !chat.is_answering() && chat.relations().inbox.is_empty()
+    !chat.is_answering() && (chat.relations().inbox.is_empty() || chat.held_by_stop())
 }
 
 /// What `chat` is doing, in a few words.
@@ -3865,5 +3886,57 @@ mod tests {
             kid.node().tasks[0].state,
             clackatoo_protocol::AgentTaskState::Lost
         );
+    }
+
+    /// The user's Stop holds (CLACKA-220): a chat they stopped isn't
+    /// started again by its subagent finishing, nor by another chat's
+    /// message, nor by an upgrade. Both wait, and a chat waiting for it
+    /// isn't kept waiting, until the user writes there; then they go, after
+    /// the user's message.
+    #[test]
+    fn a_chat_the_user_stopped_waits_for_them_to_write() {
+        use agent_client_protocol_schema::v1::StopReason;
+        use clackatoo_protocol::ChatAction;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        answers(&mut daemon, a, "started b");
+        let c = under(&mut daemon, 3, b, a);
+        // The user stops b as it builds; then c, which b started, finishes.
+        assert_eq!(
+            daemon.chat(b).unwrap().act(ChatAction::Stop),
+            [crate::chat::Action::Cancel]
+        );
+        daemon.chat(b).unwrap().answered(Ok(StopReason::Cancelled));
+        daemon.note_subagent(b);
+        finishes(&mut daemon, c, "built it");
+        relay(&mut daemon);
+        let turns = |daemon: &Daemon| daemon.chat_ref(b).unwrap().node().turns.len();
+        assert_eq!(turns(&daemon), 1, "not started again by its subagent");
+        // Another chat's message waits too, and its sender is told why.
+        let sent = daemon.send_to_chat(a, b, "carry on").unwrap();
+        assert!(sent.contains("the user stopped chat 2"), "{sent}");
+        relay(&mut daemon);
+        assert_eq!(turns(&daemon), 1, "not started again by a message");
+        let stopped = daemon.chat_ref(b).unwrap();
+        assert_eq!(stopped.relations().inbox.len(), 2);
+        let said = stopped.node().notice.clone().unwrap_or_default();
+        assert!(said.contains("2 messages from other agents wait"), "{said}");
+        // Nothing to wait for: it's settled, and says why.
+        assert!(daemon.settled(b));
+        let answer = daemon.answer_of(a, b, false);
+        assert!(answer.contains("The user stopped chat 2"), "{answer}");
+        // Through an upgrade too.
+        let mut daemon = upgraded(daemon);
+        relay(&mut daemon);
+        assert_eq!(turns(&daemon), 1, "not started again by an upgrade");
+        // The user writes: theirs goes first, then what waited.
+        let chat = daemon.chat(b).unwrap();
+        chat.act(ChatAction::Send("go on".to_owned()));
+        answers(&mut daemon, b, "going on");
+        relay(&mut daemon);
+        let node = daemon.chat_ref(b).unwrap().node();
+        assert_eq!(node.turns[1].prompt, "go on");
+        assert_eq!(node.turns.len(), 3, "{:#?}", node.turns);
     }
 }

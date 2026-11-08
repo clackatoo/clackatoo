@@ -1325,6 +1325,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Programs asking the terminal's colours (OSC 10, 11, 4), as Neovim does for its background, are told them",
     },
+    News {
+        id: "stop-holds",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "Stop holds a chat: other agents' messages and subagents' notices wait until you write there again",
+    },
 ];
 
 impl News {

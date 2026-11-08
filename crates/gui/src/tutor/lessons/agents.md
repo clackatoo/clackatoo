@@ -36,6 +36,8 @@ For text sent to the installed Claude or Codex adapter, **Steer** adds the messa
 
 Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it: messages follow automatically continued work, while already paused queues and unconfirmed steering stay paused. A full daemon restart does not preserve it. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
 
+Stop holds the chat for you: messages from other agents, and the notice that its subagents finished, wait until you next write there, rather than start it again. The chat says how many wait; Stop again drops them.
+
 
 ## Viewing images
 
