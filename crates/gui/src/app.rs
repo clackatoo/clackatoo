@@ -1340,7 +1340,9 @@ impl App {
             return;
         };
         for mut message in messages {
-            if self.native.automating && native::changes_authority(&message) {
+            if self.native.automating
+                && native::changes_authority(&message, self.native.grant.map(|(chat, _)| chat))
+            {
                 self.native.refused = true;
                 continue;
             }

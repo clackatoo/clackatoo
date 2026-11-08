@@ -478,6 +478,21 @@ impl Desk {
         self.macros.waiting()
     }
 
+    /// Drops what the keys just typed left to do later: the macros and
+    /// bindings still being typed, waiting for something, and the keys
+    /// held behind them. Native window access does this as each input
+    /// ends, so nothing an agent typed runs after the window's checks on
+    /// its input are off. Returns whether anything was dropped.
+    pub(crate) fn drop_deferred_keys(&mut self) -> bool {
+        let deferred = self.frames_typing() || self.holding();
+        if deferred {
+            self.stop_macro(None);
+            self.drop_held();
+            self.held_for = None;
+        }
+        deferred
+    }
+
     /// Whether a macro or a binding is being typed, or waits to go on.
     pub(super) fn frames_typing(&self) -> bool {
         !self.macros.frames.is_empty()

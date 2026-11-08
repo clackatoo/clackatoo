@@ -1199,6 +1199,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Always allow is now Always allow commands, offered only when an agent asks to run one",
     },
+    News {
+        id: "native-control-limits",
+        date: "2026-11-08",
+        lesson: "agents",
+        what: "Native window Control no longer types into terminals or other chats, nor finishes macros later",
+    },
 ];
 
 impl News {

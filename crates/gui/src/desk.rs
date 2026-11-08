@@ -10426,6 +10426,30 @@ mod tests {
     }
 
     #[test]
+    fn keys_left_to_go_on_later_are_dropped_when_told() {
+        let text = "a\nb\nc\nd\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        type_text(&mut desk, "qaA!");
+        escape(&mut desk);
+        command(&mut desk, "w");
+        type_text(&mut desk, "jq");
+        serve(&mut desk, &mut daemons);
+        desk.answered(Response::Done);
+        assert!(!desk.drop_deferred_keys(), "nothing waits");
+        // The macro waits for the write, with an x held behind it, as
+        // native window access leaves it: neither goes on after.
+        type_text(&mut desk, "@ax");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb!\nc\nd\n");
+        assert!(desk.drop_deferred_keys());
+        desk.answered(Response::Done);
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb!\nc\nd\n", "no j, nor the x");
+        assert_eq!(cursor_line(&desk), 1);
+    }
+
+    #[test]
     fn keys_written_in_a_register_type_through_the_command_line() {
         let text = "x\n";
         let mut desk = editing("/t.txt", text);

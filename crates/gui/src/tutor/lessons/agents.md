@@ -310,8 +310,11 @@ then run `:agentaccess inspect` for screenshots and visible controls, or
 window. This is broad access to what the window can display and operate.
 The title and top bar identify the grant. Click the top bar's **Revoke** badge
 or use `:agentaccess off` from any pane. Closing the window, disconnecting or upgrading also clears it.
-Automation cannot use window input to answer approval questions, change chat
-permissions or grant itself access. Control is not an operating-system sandbox.
+Control types into its own chat, editors and menus, but the window refuses
+what only you may do: answering questions or forms, changing chat settings or
+access, typing into terminals, starting commands or chats, and sending as you to
+another chat. The agent's own tools run commands, asking first. Control is not an
+operating-system sandbox.
 
 Only one chat can control a window, and one window can be granted to a chat.
 Federated mirrored chats cannot receive a grant; open a window directly on the
