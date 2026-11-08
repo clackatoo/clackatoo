@@ -19765,9 +19765,9 @@ fn a_real_agents_long_output_leaves_the_daemon_answering() {
 /// buffer or not. Only `client` watches the chat, slowly, so the daemon
 /// isn't kept busy sending the diff. The file is rewritten as `small`, or
 /// with only its first line changed, as the live test does. Returns the
-/// slowest answer, less the time the daemon's loop and the asking thread
-/// spent waiting for a CPU meanwhile (see [`waited_for_a_cpu`]): what's
-/// measured is the daemon's own work, not how busy the machine is.
+/// slowest answer, less the time the machine kept it waiting for a CPU
+/// (see [`Sched`]): what's measured is the daemon's own work, not how
+/// busy the machine is.
 fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Duration {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
@@ -19788,17 +19788,19 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
     let watcher = {
         let done = done.clone();
         let mut other = daemon.client();
-        let daemons = (daemon.task.get())
-            .expect("the daemon's loop is running")
-            .clone();
+        let loops = daemon.task.get().cloned();
         std::thread::spawn(move || {
             let ours = Path::new("/proc/thread-self");
-            let waited = || waited_for_a_cpu(&daemons) + waited_for_a_cpu(ours);
+            // Both, or neither, and the answers' time as it is.
+            let now = || Option::zip(Sched::of(loops.as_deref()?), Sched::of(ours));
             let mut slowest = Duration::ZERO;
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                let (asked, before) = (Instant::now(), waited());
+                let (asked, before) = (Instant::now(), now());
                 other.list_terminals().unwrap();
-                let took = (asked.elapsed()).saturating_sub(waited().saturating_sub(before));
+                let mut took = asked.elapsed();
+                if let (Some((loop_was, ours_was)), Some((loop_is, ours_is))) = (before, now()) {
+                    took = Sched::own(took, loop_is.since(loop_was), ours_is.since(ours_was));
+                }
                 slowest = slowest.max(took);
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -19846,18 +19848,50 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
     slowest
 }
 
-/// How long the thread whose /proc directory is `task` has spent
-/// runnable but waiting for a CPU, as the scheduler counts it. On a
-/// loaded machine that's most of a slow answer: a turn that took the loop
-/// 35 ms of CPU took 160 ms, 125 ms of it waiting (CLACKA-211). Zero if
-/// the kernel keeps no schedstat, leaving the time as it was.
-fn waited_for_a_cpu(task: &Path) -> Duration {
-    let stat = std::fs::read_to_string(task.join("schedstat")).unwrap_or_default();
-    let waited = stat
-        .split_whitespace()
-        .nth(1)
-        .and_then(|ns| ns.parse().ok());
-    Duration::from_nanos(waited.unwrap_or(0))
+/// What the scheduler says of a thread (its `schedstat`): how long it has
+/// run, and how long it has been runnable but waiting for a CPU. On a
+/// loaded machine waiting is most of a slow answer: a turn that took the
+/// loop 35 ms of CPU took 160 ms, 125 ms of it waiting (CLACKA-211).
+#[derive(Clone, Copy)]
+struct Sched {
+    ran: Duration,
+    waited: Duration,
+}
+
+impl Sched {
+    /// The thread whose /proc directory is `task`, if the kernel says.
+    fn of(task: &Path) -> Option<Self> {
+        let stat = std::fs::read_to_string(task.join("schedstat")).ok()?;
+        let mut fields = stat.split_whitespace().map(|ns| ns.parse().ok());
+        let ran = fields.next()??;
+        let waited = fields.next()??;
+        Some(Self {
+            ran: Duration::from_nanos(ran),
+            waited: Duration::from_nanos(waited),
+        })
+    }
+
+    /// What it did between `earlier` and this.
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            ran: self.ran.saturating_sub(earlier.ran),
+            waited: self.waited.saturating_sub(earlier.waited),
+        }
+    }
+
+    /// An answer that took `took`, less what the machine kept it waiting,
+    /// given what the daemon's loop and the asking thread did meanwhile.
+    ///
+    /// The waits aren't added: the loop's own wait after it answered, until
+    /// the asker reads it, is a wait of the asker's too. Each alone is at
+    /// most the time the answer was kept waiting (the loop's before it
+    /// answered and the asker's after), so the larger is taken off, never
+    /// more. And never below the CPU the loop spent meanwhile, which is
+    /// its own work whatever the machine does.
+    fn own(took: Duration, daemons: Self, ours: Self) -> Duration {
+        let kept = daemons.waited.max(ours.waited);
+        took.saturating_sub(kept).max(daemons.ran.min(took))
+    }
 }
 
 #[test]
