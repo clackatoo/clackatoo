@@ -844,6 +844,24 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    // A pane the user opened from a file manager, and the window told to
+    // switch to it.
+    samples.extend([
+        (
+            crate::wire::REVEAL,
+            Client(ClientMessage::Request(Request::Reveal {
+                pane: PaneId(7),
+                token: Some("launcher-token".into()),
+            })),
+        ),
+        (
+            crate::wire::REVEAL,
+            Server(ServerMessage::Event(Event::Reveal {
+                pane: PaneId(7),
+                token: None,
+            })),
+        ),
+    ]);
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,

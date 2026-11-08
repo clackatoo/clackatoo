@@ -710,6 +710,16 @@ impl Client {
         self.send(&ClientMessage::Dismiss { pane })
     }
 
+    /// Says whether the client's user is there (see
+    /// [`ClientMessage::Present`]).
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn present(&mut self, here: bool) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Present { here })
+    }
+
     /// Limits how long [`next_event`](Self::next_event) and requests wait.
     /// A wait that runs out fails with an I/O error of kind `WouldBlock`.
     ///

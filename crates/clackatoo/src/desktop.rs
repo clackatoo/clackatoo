@@ -1,4 +1,5 @@
-//! `clackatoo desktop`: puts clackatoo in the desktop's app launcher.
+//! `clackatoo desktop`: puts clackatoo in the desktop's app launcher, and
+//! in file managers' menus.
 //!
 //! Launchers such as GNOME's list the desktop entries (`.desktop` files)
 //! in `$XDG_DATA_HOME/applications`, and docks group windows under the
@@ -25,17 +26,34 @@
 //! connected to ("Connect to desktop", running `--remote desktop`). A
 //! window rewrites the entry when the machines connected to recently
 //! change (`desktop refresh-hosts`), if clackatoo wrote it.
+//!
+//! The entry says which kinds of file clackatoo opens (`MimeType`):
+//! folders, plain text, and the commonest kinds of source and data that
+//! are text, so file managers offer it in "Open With", and its `Exec` takes
+//! them (`clackatoo open -- %F`): a folder in a new terminal tab, a file
+//! in a new editor tab (see `open_paths` in `main.rs`). Started from the
+//! launcher, with no files, it opens a window. A window's `refresh-hosts`
+//! leaves both out of an entry that lacks them, as with `StartupNotify`,
+//! as the program it starts may have no `open`.
+//!
+//! `install` also adds "Open in clackatoo" to the menus of the file
+//! managers installed, which `remove` takes away (see `file_managers`).
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Context as _;
 use clackatoo_gui::hosts::{self, LAUNCHER_HOSTS};
 use clap::Subcommand;
+
+mod file_managers;
+
+use file_managers::{FileManager, Places};
 
 /// The desktop entry, as shipped. Its `Exec` and `TryExec` say plain
 /// `clackatoo`, for packagers; [`entry`] puts a build's path there.
@@ -53,15 +71,17 @@ const ICON_MANAGED: &str = "<!-- X-Clackatoo-Managed: written by `clackatoo desk
 #[derive(Clone, Copy, Debug, Subcommand)]
 pub(crate) enum DesktopCommand {
     /// Add clackatoo to your desktop's app launcher, as an entry that
-    /// starts this build, with clackatoo's icon. An entry or icon
+    /// starts this build, with clackatoo's icon, offered in file managers'
+    /// "Open With" for folders and text files; and "Open in clackatoo" to
+    /// the menus of the file managers installed. An entry, icon or menu
     /// clackatoo didn't write is left alone.
     Install {
         /// Replace an entry or icon clackatoo didn't write.
         #[arg(long)]
         force: bool,
     },
-    /// Take clackatoo out of the app launcher. An entry or icon clackatoo
-    /// didn't write is left alone.
+    /// Take clackatoo out of the app launcher and file managers' menus.
+    /// An entry, icon or menu clackatoo didn't write is left alone.
     Remove {
         /// Remove them even if clackatoo didn't write them.
         #[arg(long)]
@@ -87,6 +107,7 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
     match command {
         DesktopCommand::Install { force } => {
             let program = program()?;
+            let managers = file_managers::installed();
             match install(&paths, &program, &hosts, force)? {
                 Outcome::Done(_) => {
                     update_caches(&paths);
@@ -96,6 +117,22 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
                         paths.entry().display(),
                         paths.icon().display()
                     );
+                    match hook(&places(&data)?, &program, &managers, force)? {
+                        Outcome::Done(added) => say_hooked(&added),
+                        Outcome::Refused(theirs) => anyhow::bail!(
+                            "{} clackatoo's, so no file manager's menu was changed; `clackatoo \
+                             desktop install --force` replaces {}",
+                            are_not(&theirs),
+                            them(&theirs)
+                        ),
+                    }
+                    if opens_folders() {
+                        println!(
+                            "no file manager is set to open folders, so your desktop now opens them \
+                             with clackatoo; `xdg-mime default <its .desktop file> inode/directory` \
+                             sets one, such as org.gnome.Nautilus.desktop"
+                        );
+                    }
                     Ok(())
                 }
                 Outcome::Refused(theirs) => anyhow::bail!(
@@ -108,18 +145,24 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
             }
         }
         DesktopCommand::Remove { force } => match remove(&paths, force)? {
-            Outcome::Done(removed) if removed.is_empty() => {
-                println!("clackatoo isn't in the app launcher");
-                Ok(())
-            }
-            Outcome::Done(removed) => {
+            Outcome::Done(mut removed) => {
+                let (unhooked, left) = file_managers::remove(&places(&data)?, force)?;
+                for why in &left {
+                    eprintln!("clackatoo: {why}");
+                }
+                if removed.is_empty() && unhooked.is_empty() {
+                    println!("clackatoo isn't in the app launcher");
+                    return Ok(());
+                }
+                removed.extend(unhooked);
                 update_caches(&paths);
                 let removed: Vec<String> = (removed.iter())
                     .map(|path| path.display().to_string())
                     .collect();
                 println!(
-                    "took clackatoo out of the app launcher: removed {}",
-                    removed.join(" and ")
+                    "took clackatoo out of the app launcher and file managers: removed or \
+                     changed {}",
+                    removed.join(", ")
                 );
                 Ok(())
             }
@@ -135,6 +178,10 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
             if refresh(&paths, &program, &hosts)? {
                 update_caches(&paths);
                 println!("the app launcher's entry now starts {}", program.display());
+                let program = program_text(&program)?;
+                for path in file_managers::refresh(&places(&data)?, program)? {
+                    println!("{} now starts it too", path.display());
+                }
             }
             Ok(())
         }
@@ -146,6 +193,82 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Adds "Open in clackatoo", starting `program`, to the file managers
+/// `managers`, unless a file in the way isn't clackatoo's, or `force`.
+fn hook(
+    places: &Places,
+    program: &Path,
+    managers: &[FileManager],
+    force: bool,
+) -> anyhow::Result<Outcome<file_managers::Added>> {
+    let theirs = file_managers::theirs(places, managers)?;
+    if !theirs.is_empty() && !force {
+        return Ok(Outcome::Refused(theirs));
+    }
+    Ok(Outcome::Done(file_managers::install(
+        places,
+        program_text(program)?,
+        managers,
+    )?))
+}
+
+/// Says what was added to file managers.
+fn say_hooked(added: &file_managers::Added) {
+    if !added.to.is_empty() {
+        let names: Vec<&str> = added.to.iter().map(|manager| manager.name()).collect();
+        let files: Vec<String> = (added.written.iter())
+            .map(|path| path.display().to_string())
+            .collect();
+        let wrote = if files.is_empty() {
+            String::new()
+        } else {
+            format!(": wrote {}", files.join(", "))
+        };
+        println!(
+            "added \"Open in clackatoo\" to {}{wrote}; a file manager open now shows it once \
+             it's opened again",
+            names.join(", ")
+        );
+    }
+    for why in &added.not {
+        eprintln!("clackatoo: {why}");
+    }
+}
+
+/// Whether the desktop opens folders with clackatoo, as it does once the
+/// entry offers to if no file manager is set to (in `mimeapps.list`), as
+/// `xdg-mime` asks. Not if it can't tell.
+fn opens_folders() -> bool {
+    Command::new("xdg-mime")
+        .args(["query", "default", "inode/directory"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "clackatoo.desktop")
+}
+
+/// Where file managers' hooks go, beside the entry in `data`.
+fn places(data: &Path) -> anyhow::Result<Places> {
+    let absolute =
+        |name: &str| (std::env::var_os(name).map(PathBuf::from)).filter(|dir| dir.is_absolute());
+    let config = absolute("XDG_CONFIG_HOME")
+        .or_else(|| Some(absolute("HOME")?.join(".config")))
+        .context("there's no config directory: neither XDG_CONFIG_HOME nor HOME is set")?;
+    let system_config = std::env::var_os("XDG_CONFIG_DIRS")
+        .map(|dirs| {
+            std::env::split_paths(&dirs)
+                .filter(|dir| dir.is_absolute())
+                .collect()
+        })
+        .filter(|dirs: &Vec<PathBuf>| !dirs.is_empty())
+        .unwrap_or_else(|| vec![PathBuf::from("/etc/xdg")]);
+    Ok(Places {
+        data: data.to_owned(),
+        config,
+        system_config,
+    })
 }
 
 /// `paths` and "isn't" or "aren't", for a sentence.
@@ -209,9 +332,9 @@ impl Paths {
 /// What `install` or `remove` did.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
-pub(crate) enum Outcome {
+pub(crate) enum Outcome<T = Vec<PathBuf>> {
     /// It's done, to these files.
-    Done(Vec<PathBuf>),
+    Done(T),
     /// Nothing was done, because these files aren't clackatoo's.
     Refused(Vec<PathBuf>),
 }
@@ -277,6 +400,10 @@ fn refresh_hosts(paths: &Paths, hosts: &[String]) -> anyhow::Result<bool> {
     // it: only `refresh`, run by the build being installed, adds the line.
     if !text.lines().any(|line| line.starts_with("StartupNotify=")) {
         rewritten = rewritten.replace("\nStartupNotify=true\n", "\n");
+    }
+    // Or from before `open`, which it would fail to run.
+    if !text.lines().any(|line| line.starts_with("MimeType=")) {
+        rewritten = without_opening(&rewritten);
     }
     if rewritten == text {
         return Ok(false);
@@ -364,14 +491,7 @@ fn icon_is_ours(text: &str) -> bool {
 /// `hosts`, the machines connected to recently, newest first, leaving out
 /// any that doesn't look like a machine.
 fn entry(program: &Path, hosts: &[String]) -> anyhow::Result<String> {
-    let path = (program.to_str())
-        .filter(|path| !path.contains(char::is_control))
-        .with_context(|| {
-            format!(
-                "{} can't go in a desktop entry: it isn't UTF-8, or has control characters",
-                program.display()
-            )
-        })?;
+    let path = program_text(program)?;
     let exec = escape_value(&exec_argument(path));
     let try_exec = escape_value(path);
     let hosts: Vec<&str> = (hosts.iter())
@@ -422,6 +542,50 @@ fn entry(program: &Path, hosts: &[String]) -> anyhow::Result<String> {
         );
     }
     Ok(text)
+}
+
+/// `entry` as it was before clackatoo opened files: no `MimeType`, and its
+/// main `Exec` the program alone.
+fn without_opening(entry: &str) -> String {
+    let mut text = String::with_capacity(entry.len());
+    let mut in_main = false;
+    for line in entry.lines() {
+        if line.starts_with('[') {
+            in_main = line == "[Desktop Entry]";
+        }
+        if in_main && line.starts_with("MimeType=") {
+            continue;
+        }
+        let line = (line.strip_suffix(OPEN_FILES))
+            .filter(|_| in_main && line.starts_with("Exec="))
+            .unwrap_or(line);
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
+/// What the main `Exec` gives the program after it.
+const OPEN_FILES: &str = " open -- %F";
+
+/// The kinds of file the entry says clackatoo opens, as its `MimeType`
+/// says, ending in `;`, for file managers' menus to offer it for too.
+fn mime_types() -> &'static str {
+    (ENTRY.lines())
+        .find_map(|line| line.strip_prefix("MimeType="))
+        .expect("the shipped entry says what it opens")
+}
+
+/// `program` as text, as it is in the entry.
+fn program_text(program: &Path) -> anyhow::Result<&str> {
+    (program.to_str())
+        .filter(|path| !path.contains(char::is_control))
+        .with_context(|| {
+            format!(
+                "{} can't go in a desktop entry: it isn't UTF-8, or has control characters",
+                program.display()
+            )
+        })
 }
 
 /// Adds the mark as the last key of the main group, before the blank line
@@ -509,6 +673,18 @@ fn icon() -> String {
 /// half of it. The new file is made afresh, never opened through a link
 /// someone left in its place.
 fn write(path: &Path, text: &str) -> anyhow::Result<()> {
+    write_mode(path, text, 0o666)
+}
+
+/// Writes `text` to `path` as [`write`] does, as a file anyone may run,
+/// as Dolphin wants the service menus a user adds.
+fn write_executable(path: &Path, text: &str) -> anyhow::Result<()> {
+    write_mode(path, text, 0o777)
+}
+
+/// Writes `text` to `path` as [`write`] does, making it with `mode`, less
+/// what the umask takes away.
+fn write_mode(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
     let dir = path.parent().context("a file with no directory")?;
     fs::create_dir_all(dir).with_context(|| format!("couldn't create {}", dir.display()))?;
     let mut name = std::ffi::OsString::from(".");
@@ -517,7 +693,7 @@ fn write(path: &Path, text: &str) -> anyhow::Result<()> {
     let staged = dir.join(name);
     // One left by a crash. A link is removed, not followed.
     let _ = fs::remove_file(&staged);
-    let written = (OpenOptions::new().write(true).create_new(true))
+    let written = (OpenOptions::new().write(true).create_new(true).mode(mode))
         .open(&staged)
         .and_then(|mut file| file.write_all(text.as_bytes()))
         .and_then(|()| fs::rename(&staged, path));
@@ -601,12 +777,17 @@ mod tests {
             Outcome::Done(vec![entry_path.clone(), icon_path.clone()])
         );
         let entry = read(&entry_path);
-        // The main entry and the New Window action both start it, and
-        // Connect to… starts it as the picker of a machine.
+        // The main entry opens the files it's given, the New Window action
+        // starts it, and Connect to… starts it as the picker of a machine.
         assert_eq!(
             values(&entry, "Exec"),
-            [PROGRAM, PROGRAM, &format!("{PROGRAM} --connect-picker")]
+            [
+                &format!("{PROGRAM} open -- %F"),
+                PROGRAM,
+                &format!("{PROGRAM} --connect-picker")
+            ]
         );
+        assert_eq!(values(&entry, "MimeType"), [mime_types()]);
         assert_eq!(values(&entry, "TryExec"), [PROGRAM]);
         assert_eq!(values(&entry, "StartupWMClass"), ["clackatoo"]);
         assert_eq!(values(&entry, "StartupNotify"), ["true"]);
@@ -726,7 +907,11 @@ mod tests {
 
         assert_eq!(
             values(&read(&paths.entry()), "Exec"),
-            [PROGRAM, PROGRAM, &format!("{PROGRAM} --connect-picker")]
+            [
+                &format!("{PROGRAM} open -- %F"),
+                PROGRAM,
+                &format!("{PROGRAM} --connect-picker")
+            ]
         );
         assert_eq!(read(&paths.icon()), icon());
 
@@ -780,7 +965,10 @@ mod tests {
         );
         // Then the key file's own escaping doubles every backslash.
         let written = entry(Path::new(r"/x/a\b c/clackatoo"), &[]).unwrap();
-        assert_eq!(values(&written, "Exec")[0], r#""/x/a\\\\b c/clackatoo""#);
+        assert_eq!(
+            values(&written, "Exec")[0],
+            r#""/x/a\\\\b c/clackatoo" open -- %F"#
+        );
         assert_eq!(values(&written, "TryExec"), [r"/x/a\\b c/clackatoo"]);
         assert!(entry(Path::new("/x/a\nb/clackatoo"), &[]).is_err());
     }
@@ -790,7 +978,11 @@ mod tests {
         // Every line `entry` rewrites is there, once in each group.
         assert_eq!(
             values(ENTRY, "Exec"),
-            ["clackatoo", "clackatoo", "clackatoo --connect-picker"]
+            [
+                "clackatoo open -- %F",
+                "clackatoo",
+                "clackatoo --connect-picker"
+            ]
         );
         assert_eq!(values(ENTRY, "TryExec"), ["clackatoo"]);
         assert!(!entry_is_ours(ENTRY));
@@ -850,7 +1042,7 @@ mod tests {
         assert_eq!(
             values(&entry, "Exec"),
             [
-                quoted.to_owned(),
+                format!("{quoted} open -- %F"),
                 quoted.to_owned(),
                 format!("{quoted} --connect-picker"),
                 format!("{quoted} --remote desktop"),
@@ -920,6 +1112,58 @@ mod tests {
         write(&paths.entry(), HANDMADE).unwrap();
         assert!(!refresh_hosts(&paths, &hosts(&["desktop"])).unwrap());
         assert_eq!(read(&paths.entry()), HANDMADE);
+    }
+
+    /// File managers offer clackatoo for folders and kinds of text, and
+    /// never for a kind that isn't text, which it would show as garbage.
+    #[test]
+    fn the_entry_opens_folders_and_text_and_nothing_else() {
+        let kinds: Vec<&str> = mime_types().strip_suffix(';').unwrap().split(';').collect();
+        assert_eq!(kinds[..2], ["inode/directory", "text/plain"]);
+        let text_like = [
+            "application/javascript",
+            "application/json",
+            "application/xml",
+            "application/x-yaml",
+            "application/toml",
+            "application/x-shellscript",
+        ];
+        for kind in &kinds[1..] {
+            assert!(
+                kind.starts_with("text/") || text_like.contains(kind),
+                "{kind} may not be text"
+            );
+        }
+        let mut sorted = kinds.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), kinds.len(), "a kind is there twice");
+    }
+
+    #[test]
+    fn an_entry_from_before_opening_files_gains_it_only_from_update() {
+        let (_data, paths) = setup();
+        let older = without_opening(&entry(Path::new(PROGRAM), &[]).unwrap());
+        assert!(values(&older, "MimeType").is_empty());
+        assert_eq!(values(&older, "Exec")[..2], [PROGRAM, PROGRAM]);
+
+        // Not by a window's, whose build may be newer than the program
+        // the entry starts, which may have no `open`.
+        write(&paths.entry(), &older).unwrap();
+        assert!(refresh_hosts(&paths, &hosts(&["desktop"])).unwrap());
+        let refreshed = read(&paths.entry());
+        assert!(values(&refreshed, "MimeType").is_empty());
+        assert_eq!(values(&refreshed, "Exec")[..2], [PROGRAM, PROGRAM]);
+        assert_eq!(
+            refreshed,
+            without_opening(&entry(Path::new(PROGRAM), &hosts(&["desktop"])).unwrap())
+        );
+
+        // By `clackatoo update`'s refresh.
+        assert!(refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
+        let updated = read(&paths.entry());
+        assert_eq!(values(&updated, "MimeType"), [mime_types()]);
+        assert_eq!(values(&updated, "Exec")[0], format!("{PROGRAM} open -- %F"));
     }
 
     #[test]

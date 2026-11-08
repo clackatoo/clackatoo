@@ -30,7 +30,7 @@ const X11_VAR: &str = "DESKTOP_STARTUP_ID";
 
 /// The tokens the desktop launched this process with, if it did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LaunchToken {
+pub struct LaunchToken {
     /// `XDG_ACTIVATION_TOKEN`'s.
     wayland: Option<String>,
     /// `DESKTOP_STARTUP_ID`'s.
@@ -61,6 +61,22 @@ impl LaunchToken {
         };
         reset();
         tokens
+    }
+
+    /// The token, for a window already open to take the focus with,
+    /// whichever display it's on: launchers that set both, as GNOME's
+    /// does, set them to the same.
+    #[must_use]
+    pub fn token(&self) -> Option<&str> {
+        self.wayland.as_deref().or(self.x11.as_deref())
+    }
+
+    /// The variables to give a window this process starts, so it opens
+    /// with the tokens, as it would have if launched itself.
+    pub fn vars(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [(WAYLAND_VAR, &self.wayland), (X11_VAR, &self.x11)]
+            .into_iter()
+            .filter_map(|(name, token)| Some((name, token.as_deref()?)))
     }
 
     /// The token for a window on Wayland or on X11, as winit itself picks:

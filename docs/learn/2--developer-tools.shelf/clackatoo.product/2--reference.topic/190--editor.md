@@ -534,7 +534,7 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - Selecting, copying or searching rendered Markdown, images in it, scrolling a wide table in it sideways, and a link's heading in another file.
 - Choosing the colours. They're the palette's named colours where there's one to suit, so they follow the terminal's.
 - Options for one pane only: `:set` sets them for every pane.
-- `clackatoo edit` opens the tab, but the window doesn't switch to it.
+- `clackatoo edit` opens the tab, but the window doesn't switch to it ([`clackatoo open`](~clackatoo/reference/cli#open) does).
 - `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that moves more than one line, as `:g/^/m0` does, leaves marks on them where they were, as its moves are made as one edit. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
 - Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S` and `R` don't act on whole lines as Vim's do, `X`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
 - A change typed just as the connection to the daemon drops can be lost.

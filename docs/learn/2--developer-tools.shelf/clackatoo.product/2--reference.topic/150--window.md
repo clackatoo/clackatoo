@@ -23,6 +23,8 @@ The window sizes itself so that its one pane holds 100×30 cells. Resizing the w
 
 With `--remote <HOST>`, the window shows the workspaces on another machine, through ssh. See [another machine](~clackatoo/reference/remote).
 
+From a file manager, "Open With" clackatoo, or "Open in clackatoo" in its menu, opens each folder in a new terminal tab and each file in a new editor tab, in the window you used last, which switches to them and comes to the front; with none open, a window opens on them. [`clackatoo desktop install`](~clackatoo/reference/cli#file-managers) sets this up, and [`clackatoo open`](~clackatoo/reference/cli#open) is what runs.
+
 | Option | Environment variable | [Setting](#settings) | |
 |---|---|---|---|
 | `--font <FAMILY>` | `CLACKATOO_FONT` | `font` | The font family. Default: your system's monospace font. |

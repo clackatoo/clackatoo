@@ -17,6 +17,7 @@ mod web_app;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
 use clackatoo_protocol::{
-    NewTerminal, OpenFile, PaneTerminal, Request, Response, Size, TerminalId,
+    NewTerminal, OpenFile, PaneId, PaneTerminal, Request, Response, Size, TerminalId,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -146,6 +147,12 @@ enum Command {
     /// Edit a file, or browse a folder as its listing, in a new tab of the
     /// workspace last used.
     Edit(Edit),
+    /// Open files and folders as a file manager does: each folder in a new
+    /// terminal tab, in the folder, and each file in a new editor tab, in
+    /// the workspace last used, which the window last used switches to and
+    /// brings to the front. With no window open, one opens on them. With
+    /// no paths, opens a window, as `clackatoo` alone does.
+    Open(Open),
     /// Type a command into a terminal and press Enter.
     Run(Run),
     /// Start a command in a new background tab of a workspace, where it
@@ -399,6 +406,15 @@ struct Edit {
 }
 
 #[derive(Debug, Args)]
+struct Open {
+    /// The files and folders. A relative path is from the current
+    /// directory. Put `--` before them, so that one starting with `-`
+    /// isn't taken for an option.
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct Ping {
     /// How many rounds to time.
     #[arg(short, long, default_value_t = 10)]
@@ -492,6 +508,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Bg(bg) => start_in_background(bg),
         Command::Keep(keep) => keep_running(&keep),
         Command::Edit(edit) => edit_file(edit),
+        Command::Open(open) => open_paths(&open),
         Command::Language(command) => language::run(command),
         Command::Desktop(command) => desktop::run(command),
         Command::Web(command) => web::run(&command),
@@ -790,17 +807,11 @@ fn start_in_background(bg: Bg) -> anyhow::Result<()> {
     }
     let workspaces = client.watch_workspaces()?;
     // This daemon's own: another machine's keeps its background tabs.
-    let own = |workspace: &&clackatoo_protocol::Workspace| {
-        workspace.home.is_none() && workspace.lent.is_none()
-    };
     let workspace = match &bg.workspace {
-        Some(name) => (workspaces.list.iter().filter(own))
+        Some(name) => (workspaces.list.iter().filter(|workspace| own(workspace)))
             .find(|workspace| workspace.name == *name)
             .ok_or_else(|| anyhow::anyhow!("there's no workspace called {name:?}"))?,
-        None => (workspaces.active)
-            .and_then(|active| workspaces.get(active))
-            .filter(own)
-            .or_else(|| workspaces.list.iter().find(own))
+        None => last_used(&workspaces)
             .ok_or_else(|| anyhow::anyhow!("there's no workspace yet: open a window first"))?,
     };
     let start = clackatoo_protocol::BackgroundAction::Start {
@@ -861,14 +872,158 @@ fn edit_file(edit: Edit) -> anyhow::Result<()> {
         cwd: Some(path_string(cwd, "the current directory")?),
     });
     let mut client = connect(&edit.connection)?;
-    let workspaces = client.watch_workspaces()?;
-    let active =
-        (workspaces.active).or_else(|| workspaces.list.first().map(|workspace| workspace.id));
-    let pane = match active {
-        Some(workspace) => client.new_tab(workspace, file)?,
-        None => client.new_workspace(None, file)?,
-    };
+    let pane = new_tabs(&mut client, vec![file])?;
     client.focus(pane)?;
+    Ok(())
+}
+
+/// Whether `workspace` is the daemon's own, not one shown from another
+/// machine, whose panes and paths are that machine's.
+fn own(workspace: &clackatoo_protocol::Workspace) -> bool {
+    workspace.home.is_none() && workspace.lent.is_none()
+}
+
+/// The daemon's own workspace that was used last, or else its first.
+fn last_used(
+    workspaces: &clackatoo_protocol::Workspaces,
+) -> Option<&clackatoo_protocol::Workspace> {
+    (workspaces.active)
+        .and_then(|active| workspaces.get(active))
+        .filter(|workspace| own(workspace))
+        .or_else(|| workspaces.list.iter().find(|workspace| own(workspace)))
+}
+
+/// Opens `contents`, one tab each, in order, in the daemon's own
+/// workspace used last, or a new one if there's none, and returns the
+/// last tab's pane.
+fn new_tabs(client: &mut Client, contents: Vec<PaneTerminal>) -> anyhow::Result<PaneId> {
+    let workspaces = client.watch_workspaces()?;
+    let mut workspace = last_used(&workspaces).map(|workspace| workspace.id);
+    let mut last = None;
+    for content in contents {
+        let pane = if let Some(workspace) = workspace {
+            client.new_tab(workspace, content)?
+        } else {
+            let pane = client.new_workspace(None, content)?;
+            workspace =
+                (client.watch_workspaces()?.find_pane(pane)).map(|(workspace, _, _)| workspace.id);
+            pane
+        };
+        last = Some(pane);
+    }
+    last.context("nothing to open")
+}
+
+/// `clackatoo open`: what a file manager runs to open files and folders
+/// in clackatoo, from the desktop entry's `Exec`, or the menus `clackatoo
+/// desktop install` adds to file managers.
+///
+/// The paths come straight from the file manager, and may be anything: no
+/// shell sees them, and they're taken as bytes. One the daemon can't take,
+/// as one that isn't UTF-8, is said and left out, and the rest opened.
+fn open_paths(open: &Open) -> anyhow::Result<()> {
+    if open.paths.is_empty() {
+        // The desktop entry run from the app launcher, with no files.
+        let cli = Cli::parse_from(["clackatoo"]);
+        return open_window(&cli.window);
+    }
+    // Before the daemon may start, which mustn't inherit it: it's for the
+    // window that shows what's opened.
+    let launched = clackatoo_gui::take_launch_token();
+    let cwd = std::env::current_dir().ok();
+    let mut contents = Vec::new();
+    let mut failed = 0;
+    for path in &open.paths {
+        match open_content(path, cwd.as_deref()) {
+            Ok(content) => contents.push(content),
+            Err(err) => {
+                eprintln!("clackatoo: {err:#}");
+                failed += 1;
+            }
+        }
+    }
+    if !contents.is_empty() {
+        let runtime = RuntimeDir::for_current_user();
+        let mut client = match launch::connect_or_start(&runtime) {
+            Ok(client) => client,
+            Err(launch::LaunchError::Client(ClientError::VersionMismatch { daemon, ours })) => {
+                anyhow::bail!(other_version(daemon, ours, ""))
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let pane = new_tabs(&mut client, contents)?;
+        // Where a window opening now starts.
+        client.focus(pane)?;
+        if !revealed(&mut client, pane, launched.token()) {
+            start_window(&launched)?;
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} couldn't be opened", open.paths.len());
+    }
+    Ok(())
+}
+
+/// What `clackatoo open` shows `path` in, from `cwd` if it's relative: a
+/// new terminal, in it, if it's a folder, or a link to one; otherwise an
+/// editor on it.
+fn open_content(path: &Path, cwd: Option<&Path>) -> anyhow::Result<PaneTerminal> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.context("the current directory can't be read")?
+            .join(path)
+    };
+    let text = (path.to_str())
+        .with_context(|| {
+            format!(
+                "{} isn't UTF-8, which clackatoo can't open yet",
+                path.display()
+            )
+        })?
+        .to_owned();
+    Ok(if path.is_dir() {
+        PaneTerminal::New(NewTerminal {
+            size: Size::new(80, 24).expect("a size"),
+            command: None,
+            cwd: Some(text),
+            record_to: None,
+        })
+    } else {
+        PaneTerminal::File(OpenFile {
+            path: text,
+            cwd: None,
+        })
+    })
+}
+
+/// Has the window used last switch to `pane` and come to the front, with
+/// the desktop's `token`. Says whether one did: none might be open, or the
+/// daemon might be from before windows could be asked.
+fn revealed(client: &mut Client, pane: PaneId, token: Option<&str>) -> bool {
+    if !client.daemon_has(clackatoo_protocol::wire::REVEAL) {
+        return false;
+    }
+    let reveal = Request::Reveal {
+        pane,
+        token: token.map(str::to_owned),
+    };
+    matches!(client.request(&reveal), Ok(Response::Done))
+}
+
+/// Starts a window, as `clackatoo` alone does, to open on the tab focused
+/// last, with the desktop's tokens, and leaves it running: in a process
+/// group of its own, so it outlives whatever started this one.
+fn start_window(launched: &clackatoo_gui::LaunchToken) -> anyhow::Result<()> {
+    let program = std::env::current_exe().context("this program can't be found")?;
+    std::process::Command::new(program)
+        .envs(launched.vars())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("couldn't start a window")?;
     Ok(())
 }
 

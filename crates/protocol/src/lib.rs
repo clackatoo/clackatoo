@@ -648,6 +648,17 @@ pub enum Event {
         /// ASCII punctuation added by each block's language pack.
         words: Vec<String>,
     },
+    /// The user asked, from outside any window, to see this pane
+    /// ([`Request::Reveal`]): switch to it, wherever it is, and come to
+    /// the front. Sent to one window alone, and only one of protocol 128
+    /// or later. The pane is in the workspaces sent before this.
+    Reveal {
+        /// The pane.
+        pane: PaneId,
+        /// The desktop's activation token to take the focus with, if the
+        /// asker had one.
+        token: Option<String>,
+    },
 }
 
 /// The TCP ports a background tab's programs listen on: see
@@ -1507,6 +1518,19 @@ pub enum Request {
         key: u64,
         /// What's asked.
         action: LentBackgroundAction,
+    },
+    /// Asks one window to switch to a pane and come to the front, for the
+    /// user asking from outside any window, as `clackatoo open` does for a
+    /// file manager: the window whose user was there last, of those on
+    /// this machine that read [`Event::Reveal`]. Answered with
+    /// [`Response::Done`] once one is told, or an error if none is open.
+    /// Only to a daemon of protocol 128 or later ([`wire::REVEAL`]).
+    Reveal {
+        /// The pane, in one of the daemon's own workspaces' tabs.
+        pane: PaneId,
+        /// The desktop's activation token the asker was started with, for
+        /// the window to take the focus with.
+        token: Option<String>,
     },
 }
 

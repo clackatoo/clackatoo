@@ -13,6 +13,8 @@ related:
 
 Each release has a build for `x86_64` and `aarch64` Linux, signed with clackatoo's release key. The [README](https://github.com/clackatoo/clackatoo#install) shows how to check and install the first one; after that, [`clackatoo update`](~clackatoo/reference/cli#update) installs each new one.
 
+The README's install also runs [`clackatoo desktop install`](~clackatoo/reference/cli#desktop), which puts clackatoo in your app launcher, under "Open With" in file managers for folders and text files, and "Open in clackatoo" in the menus of the file managers you have. Run it again after installing another file manager.
+
 ## Or build it
 
 clackatoo is a Cargo workspace. Build the `clackatoo` command in release mode:

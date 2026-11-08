@@ -1156,6 +1156,13 @@ impl Desk {
         (std::time::Instant::now() < until).then_some(pane)
     }
 
+    /// The user asked, from outside the window, to see `pane`, as by
+    /// opening a file from a file manager (`clackatoo open`): the window
+    /// switches to it, wherever it is, as if they had.
+    pub(crate) fn reveal(&mut self, pane: PaneId) {
+        self.show_pane(pane);
+    }
+
     /// Switches to `pane`, wherever it is, which takes the window's mode.
     /// The pane left keeps its place, but not what was half done in it.
     fn show_pane(&mut self, pane: PaneId) {

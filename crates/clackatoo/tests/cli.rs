@@ -1980,3 +1980,130 @@ fn bg_starts_a_command_in_a_background_tab_of_the_workspace_named() {
     drop(runtime);
     wait(daemon);
 }
+
+/// Runs `clackatoo open` with `paths` after `--`, in `cwd`, against the
+/// daemon in `runtime`, as a launcher would, with its token, and nothing
+/// of the desktop's or the user's config: a window it starts can't open,
+/// but says it tried in `state`'s window log.
+fn open(runtime: &Path, state: &Path, cwd: &Path, paths: &[&std::ffi::OsStr]) -> Output {
+    Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
+        .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("XDG_STATE_HOME", state)
+        .env("XDG_CONFIG_HOME", state)
+        .env("XDG_ACTIVATION_TOKEN", "launcher-token")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("DISPLAY")
+        .current_dir(cwd)
+        .args(["open", "--"])
+        .args(paths)
+        .output()
+        .expect("clackatoo runs")
+}
+
+#[test]
+fn open_makes_a_tab_for_each_path_and_has_the_window_used_last_show_the_last() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{Content, Event};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let folder = files.path().join("a 'folder'\nwith a line break");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(files.path().join("-n"), "a file\n").unwrap();
+    let odd = files.path().join(OsStr::from_bytes(b"caf\xe9"));
+    std::fs::write(&odd, "").unwrap();
+    let mut window = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
+    window.watch_workspaces().unwrap();
+    window.present(true).unwrap();
+    window.list_terminals().unwrap();
+
+    let opened = open(
+        runtime.path(),
+        state.path(),
+        files.path(),
+        &[folder.as_os_str(), OsStr::new("-n"), odd.as_os_str()],
+    );
+
+    // One the daemon can't take is said, and the rest opened.
+    assert!(!opened.status.success(), "{opened:?}");
+    let said = String::from_utf8_lossy(&opened.stderr);
+    assert!(said.contains("isn't UTF-8"), "{said}");
+    window
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (pane, token) = loop {
+        if let Event::Reveal { pane, token } = window.next_event().unwrap() {
+            break (pane, token);
+        }
+    };
+    assert_eq!(token.as_deref(), Some("launcher-token"));
+    let workspaces = window.watch_workspaces().unwrap();
+    let tabs = &workspaces.list[0].tabs;
+    let contents: Vec<Content> = (tabs.iter())
+        .map(|tab| tab.layout.panes()[0].content)
+        .collect();
+    assert!(
+        matches!(contents[..], [Content::Terminal(_), Content::Buffer(_)]),
+        "{contents:?}"
+    );
+    assert_eq!(tabs[1].layout.panes()[0].id, pane);
+    // The terminal is in the folder.
+    let terminal = contents[0].terminal().unwrap();
+    let pid = (window.list_terminals().unwrap().iter())
+        .find(|info| info.id == terminal)
+        .and_then(|info| info.pid)
+        .unwrap();
+    let real = folder.canonicalize().unwrap();
+    eventually("the shell is in the folder", || {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == real)
+    });
+    // A window was there to show them, so none was started.
+    assert!(!state.path().join("clackatoo/window.log").exists());
+    drop(runtime);
+    wait(daemon);
+}
+
+#[test]
+fn open_with_no_window_open_starts_one_on_the_last_tab() {
+    use clackatoo_daemon::Client;
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let state = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    std::fs::write(files.path().join("notes.txt"), "notes\n").unwrap();
+
+    let opened = open(
+        runtime.path(),
+        state.path(),
+        files.path(),
+        &[files.path().as_os_str(), std::ffi::OsStr::new("notes.txt")],
+    );
+
+    assert!(opened.status.success(), "{opened:?}");
+    let mut client = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    // What a window opening starts on: the last tab.
+    let workspace = workspaces.get(workspaces.active.unwrap()).unwrap();
+    assert_eq!(workspace.tabs.len(), 2);
+    assert_eq!(workspace.active_tab, workspace.tabs[1].id);
+    assert!(matches!(
+        workspace.tabs[1].layout.panes()[0].content,
+        clackatoo_protocol::Content::Buffer(_)
+    ));
+    // A window was started: it logs as it opens.
+    let log = state.path().join("clackatoo/window.log");
+    eventually("a window starts", || log.exists());
+    drop(runtime);
+    wait(daemon);
+}

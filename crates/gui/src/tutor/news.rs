@@ -1211,6 +1211,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "In Plan or Read-only mode, clackatoo's own tools run no commands either, whatever Tools says",
     },
+    News {
+        id: "open-from-file-managers",
+        date: "2026-11-08",
+        lesson: "explorer",
+        what: "Open With clackatoo from a file manager: folders as terminals, files in editors, in the window used last",
+    },
 ];
 
 impl News {

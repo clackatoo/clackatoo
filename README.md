@@ -53,7 +53,11 @@ a launcher entry you wrote yourself: it says what it would write instead,
 and `--force` replaces it. `clackatoo desktop remove` takes them out
 again. Right-clicking clackatoo in the launcher offers a new window,
 "Connect to…", which picks a machine to open a window on, and the last
-three machines you connected to.
+three machines you connected to. File managers offer clackatoo under
+"Open With" for folders and text files, and `install` adds "Open in
+clackatoo" to the menus of Dolphin, Nemo, Thunar and (with
+nautilus-python) GNOME Files, if you have them: a folder opens in a new
+terminal tab, a file in a new editor tab, in the window you used last.
 
 Run `clackatoo` to open a window. It starts the daemon if it isn't
 running.

@@ -3812,6 +3812,12 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Show { pane, at })) => {
                 self.agent_shows(pane, at);
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Reveal { pane, token })) => {
+                self.desk.reveal(pane);
+                self.update_title();
+                self.raise(token.as_deref());
+                self.request_redraw();
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Exited { terminal })) => {
                 self.desk.terminal_exited(terminal, Instant::now());
             }
@@ -3885,13 +3891,15 @@ impl App {
         }
     }
 
-    /// Brings the window to the front, for a desktop notification clicked,
-    /// as far as the desktop lets a window do that itself. On X11 it takes
-    /// the focus. On Wayland a window can't without an activation token:
-    /// GNOME raises it anyway, as clackatoo's desktop file's (`clackatoo
-    /// desktop install`). `token`, the one the notification server gave
-    /// for the click, would do it on other desktops, but winit 0.30 takes
-    /// one only as a window opens, so it isn't used yet.
+    /// Brings the window to the front, for a desktop notification clicked
+    /// or a file opened from a file manager (`clackatoo open`), as far as
+    /// the desktop lets a window do that itself. On X11 it takes the
+    /// focus. On Wayland a window can't without an activation token: GNOME
+    /// raises it anyway, as clackatoo's desktop file's (`clackatoo desktop
+    /// install`). `token`, the one the notification server gave for the
+    /// click, or the launcher gave `clackatoo open`, would do it on other
+    /// desktops, but winit 0.30 takes one only as a window opens, so it
+    /// isn't used yet.
     fn raise(&self, token: Option<&str>) {
         let Some(window) = self.frame.as_ref().and_then(Frame::window) else {
             return;

@@ -84,6 +84,7 @@ mod recovery;
 mod relay;
 mod rename;
 mod restore;
+mod reveal;
 mod review;
 mod settling;
 mod signs;
@@ -453,6 +454,9 @@ struct Client {
     watching_connections: bool,
     /// Until when the client's user is there, as it last said.
     present_until: Option<Instant>,
+    /// When the client last said its user was there, which a window says
+    /// while it's used: the one to reveal a pane in (see `reveal`).
+    last_here: Option<Instant>,
     /// Events to queue after the answer to the request being answered.
     later: Vec<u8>,
     /// Answers waiting for one before them, which was passed on to the
@@ -694,6 +698,7 @@ impl Client {
             carrier_only: false,
             carrier_as: None,
             present_until: None,
+            last_here: None,
             later: Vec::new(),
             held: VecDeque::new(),
         }
@@ -3565,6 +3570,10 @@ impl Daemon {
             Request::LentBackground { key, action } => {
                 self.serve_lent_background(token, key, action)
             }
+            Request::Reveal {
+                pane,
+                token: launch,
+            } => self.reveal(token, pane, launch),
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),

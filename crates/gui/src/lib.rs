@@ -80,6 +80,7 @@ use clackatoo_daemon::remote::Remote;
 pub use complete::Ranking;
 pub use editor::EditorBench;
 pub use fonts::FontOptions;
+pub use launch::LaunchToken;
 use winit::event_loop::EventLoop;
 
 /// How to open the window.
@@ -151,6 +152,17 @@ pub enum GraphicsApi {
 /// reading it, so this must come before the process starts any thread.
 pub fn forget_launch_token() {
     launch::LaunchToken::take();
+}
+
+/// Takes the desktop's launch token out of the environment, as
+/// [`forget_launch_token`] does, for a command that hands it on: to a
+/// window already open, or as the environment of one it starts.
+///
+/// It must come before the process starts any thread, or any program,
+/// such as the daemon.
+#[must_use]
+pub fn take_launch_token() -> LaunchToken {
+    launch::LaunchToken::take()
 }
 
 /// Opens a window on the daemon's workspaces, making one if there are none,

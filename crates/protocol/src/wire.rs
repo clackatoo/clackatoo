@@ -334,6 +334,10 @@ gates! {
     /// asks for that (CLACKA-59): `Request::AttachFiles`' `changes`, and
     /// `FilesUpdate::Changed`, which nothing older asks for or is sent.
     FILES_CHANGES = 127,
+    /// A window told to switch to a pane and come to the front, for the
+    /// user opening something from outside it, as from a file manager
+    /// (CLACKA-223): `Request::Reveal` and `Event::Reveal`.
+    REVEAL = 128,
     /// The secret an agent's MCP server shows to serve a chat's tools
     /// (CLACKA-215): `Request::CarryMcp`'s `token`. The daemon refuses a
     /// request without one.
@@ -654,6 +658,7 @@ impl Since for Event {
             Self::Exited { .. } => EXITED,
             Self::Coloured { .. } => COLOURS,
             Self::CodeWords { .. } => CODE_WORDS,
+            Self::Reveal { .. } => REVEAL,
             Self::Connections(_) | Self::Login { .. } => FEDERATION,
             Self::Forwarded(_) => RELAY,
             Self::Said(_) => LEND,
@@ -1450,6 +1455,7 @@ impl Downgrade for ServerMessage {
     /// `Event::Said`, which is only ever about a pane lent, which an
     /// older peer is never shown; and `Event::Listening`, which goes only
     /// to a client that asked for it, which an older one never does; and
+    /// `Event::Reveal`, which goes only to a window that reads it; and
     /// `FilesUpdate::Changed`, likewise, as a daemon passing another's
     /// explorer on asks for changes only while every client it passes
     /// them to reads them.
@@ -1547,6 +1553,7 @@ impl Downgrade for ServerMessage {
                 | Event::Exited { .. }
                 | Event::Coloured { .. }
                 | Event::CodeWords { .. }
+                | Event::Reveal { .. }
                 | Event::Connections(_)
                 | Event::Login { .. }
                 | Event::Forwarded(_)
@@ -2379,7 +2386,8 @@ mod tests {
         // lent, which an older peer is never shown; and the ports
         // background tabs listen on, which only a client that asked is
         // sent; and what changed in a folder, which only a client that
-        // asked for changes is sent.
+        // asked for changes is sent; and a pane to switch to, which only
+        // a window that reads it is sent.
         matches!(
             message,
             ServerMessage::Event(
@@ -2391,6 +2399,7 @@ mod tests {
                     | Event::Exited { .. }
                     | Event::Coloured { .. }
                     | Event::CodeWords { .. }
+                    | Event::Reveal { .. }
                     | Event::Connections(_)
                     | Event::Login { .. }
                     | Event::Forwarded(_)

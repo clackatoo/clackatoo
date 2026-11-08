@@ -881,7 +881,11 @@ impl Daemon {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
-        client.present_until = here.then(|| Instant::now() + PRESENT_FOR);
+        let now = Instant::now();
+        client.present_until = here.then(|| now + PRESENT_FOR);
+        if here {
+            client.last_here = Some(now);
+        }
         if here {
             let followed: Vec<TerminalId> = client.views.keys().copied().collect();
             for id in followed {

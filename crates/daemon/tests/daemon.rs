@@ -1894,6 +1894,94 @@ fn quic_clients_are_served_like_local_ones() {
     assert_eq!(listed.len(), 1);
 }
 
+/// The pane the next `Event::Reveal` sent `window` asks it to switch to,
+/// and its token, if one comes within `wait`.
+fn next_reveal(window: &mut Client, wait: Duration) -> Option<(PaneId, Option<String>)> {
+    let until = Instant::now() + wait;
+    window.set_read_timeout(Some(wait)).unwrap();
+    loop {
+        match window.next_event() {
+            Ok(Event::Reveal { pane, token }) => return Some((pane, token)),
+            Ok(_) if Instant::now() < until => {}
+            _ => return None,
+        }
+    }
+}
+
+/// Says whether `window`'s user is there, and waits for the daemon to
+/// have heard.
+fn say_present(window: &mut Client, here: bool) {
+    window.present(here).unwrap();
+    window.list_terminals().unwrap();
+}
+
+#[test]
+fn a_pane_opened_from_outside_is_revealed_in_the_one_window_whose_user_was_there_last() {
+    let daemon = TestDaemon::start();
+    let mut asker = daemon.client();
+    let pane = asker.new_workspace(None, new_pane(&["cat"])).unwrap();
+    let mut reveal = |token: Option<&str>| {
+        asker
+            .request(&Request::Reveal {
+                pane,
+                token: token.map(Into::into),
+            })
+            .unwrap()
+    };
+    // With no window, the asker is told, and opens one.
+    assert!(
+        matches!(reveal(None), Response::Error(Error::Other(_))),
+        "no window"
+    );
+
+    // One that never said its user was there, if it's the only one.
+    let mut first = daemon.client();
+    first.watch_workspaces().unwrap();
+    assert_eq!(reveal(Some("token")), Response::Done);
+    assert_eq!(
+        next_reveal(&mut first, Duration::from_secs(5)),
+        Some((pane, Some("token".into())))
+    );
+
+    // Of two, the one used last, though its user just left it for the
+    // file manager; and never one on another machine.
+    let mut second = daemon.client();
+    second.watch_workspaces().unwrap();
+    let mut far = daemon.quic_client();
+    far.watch_workspaces().unwrap();
+    say_present(&mut first, true);
+    say_present(&mut second, true);
+    say_present(&mut far, true);
+    say_present(&mut second, false);
+    assert_eq!(reveal(None), Response::Done);
+    assert_eq!(
+        next_reveal(&mut second, Duration::from_secs(5)),
+        Some((pane, None))
+    );
+    let moment = Duration::from_millis(300);
+    assert_eq!(next_reveal(&mut first, moment), None);
+    assert_eq!(next_reveal(&mut far, moment), None);
+
+    say_present(&mut first, true);
+    assert_eq!(reveal(None), Response::Done);
+    assert_eq!(
+        next_reveal(&mut first, Duration::from_secs(5)),
+        Some((pane, None))
+    );
+    assert_eq!(next_reveal(&mut second, moment), None);
+
+    // Only a pane there is.
+    assert_eq!(
+        asker
+            .request(&Request::Reveal {
+                pane: PaneId(999),
+                token: None,
+            })
+            .unwrap(),
+        Response::Error(Error::NoSuchPane(PaneId(999)))
+    );
+}
+
 #[test]
 fn a_view_over_quic_keeps_up_with_a_flood() {
     let daemon = TestDaemon::start();
@@ -6139,6 +6227,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Exited { .. }
             | Event::Coloured { .. }
             | Event::CodeWords { .. }
+            | Event::Reveal { .. }
             | Event::Connections(_)
             | Event::Login { .. }
             | Event::Forwarded(_)
