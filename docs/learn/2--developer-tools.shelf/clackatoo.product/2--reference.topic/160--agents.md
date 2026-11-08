@@ -586,7 +586,7 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 | `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output: the last 50 lines, unless it asks for up to 500. |
 | `wait_for_terminal` | Waits until the command in a terminal finishes, for a minute unless it asks for longer, up to ten. |
 | `send_to_terminal` | Types into a terminal, as you would: an answer to a prompt, or another command. |
-| `explore` | Opens a file explorer beside the chat. |
+| `explore` | Opens a file explorer beside the chat, at a folder if it gives one. The next it opens shows its folder in that explorer instead. |
 | `list_panes`, `show_pane` | List the panes in the chat's workspace, its background tabs' too, and point one out: its border flashes, or its tab is marked `●`. A background tab's pane isn't pointed out. Nothing an agent does moves your typing to another pane or tab. |
 | `get_diagnostics` | What the language servers say is wrong in the chat's project, as the editor shows it. |
 

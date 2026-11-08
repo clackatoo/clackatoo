@@ -97,6 +97,9 @@ pub(super) struct Tools {
     /// The editor pane each chat last opened a file in, by chat, which
     /// the next file it opens replaces.
     editors: BTreeMap<TerminalId, PaneId>,
+    /// The explorer pane each chat last opened, by chat, which the next
+    /// it opens shows instead.
+    explorers: BTreeMap<TerminalId, PaneId>,
     /// Agents talking to each other.
     talk: talk::Talk,
 }
@@ -1478,10 +1481,30 @@ impl Daemon {
                 .root(&self.config.home)
                 .unwrap_or_else(|_| dir.clone().into())
         };
-        let open = OpenFiles {
-            dir: Some(root.to_string_lossy().into_owned()),
+        // The explorer it opened last, still in the chat's tab, shows the
+        // directory instead of another: an agent calling this over and
+        // over fills no tab with panes.
+        let workspaces = self.workspaces.get();
+        let tab = (self.anchor_pane(chat))
+            .and_then(|own| workspaces.find_pane(own))
+            .map(|(_, tab, _)| tab);
+        let last = (self.tools.explorers.get(&chat).copied()).and_then(|pane| {
+            (tab?.layout.panes().into_iter()).find_map(|shown| match shown.content {
+                Content::Files(files) if shown.id == pane => Some(files),
+                _ => None,
+            })
+        });
+        let pane = if let (Some(files), Some(&pane)) = (last, self.tools.explorers.get(&chat)) {
+            self.reroot(None, files, root.clone());
+            self.show(pane, None);
+            pane
+        } else {
+            let open = OpenFiles {
+                dir: Some(root.to_string_lossy().into_owned()),
+            };
+            self.place_beside(chat, PaneTerminal::Files(open))?
         };
-        let pane = self.place_beside(chat, PaneTerminal::Files(open))?;
+        self.tools.explorers.insert(chat, pane);
         Ok(format!(
             "Showing the files in {} in pane {pane}.",
             root.display()
@@ -2100,6 +2123,7 @@ impl Daemon {
         self.tools.talk.forget(terminal);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
+        self.tools.explorers.remove(&terminal);
         self.forget_activities_of(terminal);
         self.drop_browser_acts(terminal, "the chat has closed");
         self.chat_left_browser(terminal);

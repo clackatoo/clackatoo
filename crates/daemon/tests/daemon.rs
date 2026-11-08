@@ -14205,6 +14205,22 @@ fn panes_open_in_a_column_and_pointing_one_out_moves_no_focus() {
     );
 }
 
+/// An agent exploring again and again shows each directory in the explorer
+/// it opened last, not a new pane each time (CLACKA-220).
+#[test]
+fn exploring_again_shows_the_same_explorer() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp explore {}\nmcp explore {}\nmcp explore {\"path\":\".\"}";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert_eq!(words.matches("in pane 2.").count(), 3, "{words}");
+    let explorers = (tab_contents(&mut client).into_iter())
+        .filter(|content| matches!(content, Content::Files(_)))
+        .count();
+    assert_eq!(explorers, 1);
+}
+
 #[test]
 fn the_tools_reach_only_the_chats_own_workspace() {
     let daemon = TestDaemon::with_tools();

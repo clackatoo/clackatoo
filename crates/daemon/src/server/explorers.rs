@@ -680,7 +680,7 @@ impl Daemon {
                 let dir = PathBuf::from(dir);
                 self.collapse_where_in(&dir, |viewer| viewer == (token, files));
             }
-            FilesAction::Root(dir) => self.reroot(token, files, PathBuf::from(dir)),
+            FilesAction::Root(dir) => self.reroot(Some(token), files, PathBuf::from(dir)),
             FilesAction::Refresh => {
                 let now = Instant::now();
                 for dir in self.explorers.dirs.values_mut() {
@@ -744,11 +744,12 @@ impl Daemon {
     }
 
     /// Makes `dir` explorer `files`' root, as the client at `token` asks,
-    /// and tells every client following it; or, if it's the root already,
-    /// tells the client that asked again, as one waiting to hear its root,
-    /// as `:Explore! DIR` does, would wait for ever. A relative `dir` is
-    /// from the root, and one starting `~/` from the home directory.
-    fn reroot(&mut self, token: Token, files: FilesId, dir: PathBuf) {
+    /// or an agent, with none, and tells every client following it; or, if
+    /// it's the root already, tells the client that asked again, as one
+    /// waiting to hear its root, as `:Explore! DIR` does, would wait for
+    /// ever. A relative `dir` is from the root, and one starting `~/` from
+    /// the home directory.
+    pub(super) fn reroot(&mut self, token: Option<Token>, files: FilesId, dir: PathBuf) {
         let Some(explorer) = self.explorers.list.get_mut(&files) else {
             return;
         };
@@ -763,8 +764,10 @@ impl Daemon {
             return;
         }
         if explorer.root == root {
-            let update = root_update(&root, &self.config.home);
-            self.tell_files(token, files, update);
+            if let Some(token) = token {
+                let update = root_update(&root, &self.config.home);
+                self.tell_files(token, files, update);
+            }
             return;
         }
         explorer.root.clone_from(&root);
