@@ -36,7 +36,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::client::{Client, ClientError, UdpTarget};
-use crate::launch::{self, LaunchError};
+use crate::launch::{self, LaunchError, Origin};
 use crate::quic::{Redial, Redialed};
 use crate::runtime::RuntimeDir;
 
@@ -109,7 +109,13 @@ pub enum RemoteError {
 /// The program run as ssh: `$CLACKATOO_SSH`, or `ssh`.
 #[must_use]
 pub fn ssh_program() -> OsString {
-    std::env::var_os("CLACKATOO_SSH")
+    ssh_program_for(&Origin::default())
+}
+
+/// The program `origin` runs as ssh.
+fn ssh_program_for(origin: &Origin) -> OsString {
+    origin
+        .var("CLACKATOO_SSH")
         .filter(|program| !program.is_empty())
         .unwrap_or_else(|| "ssh".into())
 }
@@ -138,6 +144,20 @@ pub fn connect(
     replace: bool,
     askpass: Option<&Path>,
 ) -> Result<Client, RemoteError> {
+    connect_from(remote, replace, askpass, &Origin::default())
+}
+
+/// As [`connect`], running ssh as `origin` would, every time it's run.
+///
+/// # Errors
+///
+/// As [`connect`].
+pub fn connect_from(
+    remote: &Remote,
+    replace: bool,
+    askpass: Option<&Path>,
+    origin: &Origin,
+) -> Result<Client, RemoteError> {
     let asking = match askpass {
         Some(socket) => Some(Asking {
             program: std::env::current_exe()?,
@@ -145,7 +165,8 @@ pub fn connect(
         }),
         None => None,
     };
-    connect_with(remote, &ssh_program(), replace, asking, None)
+    let ssh = ssh_program_for(origin);
+    connect_with(remote, &ssh, replace, asking, None, origin.clone())
 }
 
 /// As [`connect`], running `ssh` as ssh, which asks its questions as
@@ -157,8 +178,9 @@ pub(crate) fn connect_with(
     replace: bool,
     asking: Option<Asking>,
     cancel: Option<&Arc<Cancel>>,
+    origin: Origin,
 ) -> Result<Client, RemoteError> {
-    let command = ssh_command(remote, ssh, replace, asking.as_ref(), false);
+    let command = ssh_command(remote, ssh, replace, asking.as_ref(), false, &origin);
     let (stream, ssh_process, address) = dial(command, &remote.host, cancel)?;
     // Whenever ssh closes, as when it gives up on a network that went
     // away, the connection carries on through a new one, which never
@@ -169,7 +191,7 @@ pub(crate) fn connect_with(
         let ssh = ssh.to_owned();
         let cancel = cancel.cloned();
         Box::new(move || {
-            let command = ssh_command(&remote, &ssh, false, asking.as_ref(), false);
+            let command = ssh_command(&remote, &ssh, false, asking.as_ref(), false, &origin);
             let (stream, ssh, _) =
                 dial(command, &remote.host, cancel.as_ref()).map_err(io::Error::other)?;
             Ok(Redialed::keeping(stream, ssh))
@@ -212,7 +234,14 @@ pub(crate) fn dial_ssh(
     cancel: Option<&Arc<Cancel>>,
     batch: bool,
 ) -> Result<(UnixStream, Ssh, Option<IpAddr>), RemoteError> {
-    let command = ssh_command(remote, ssh, false, asking.filter(|_| !batch), batch);
+    let command = ssh_command(
+        remote,
+        ssh,
+        false,
+        asking.filter(|_| !batch),
+        batch,
+        &Origin::default(),
+    );
     dial(command, &remote.host, cancel)
 }
 
@@ -226,8 +255,10 @@ fn ssh_command(
     replace: bool,
     asking: Option<&Asking>,
     batch: bool,
+    origin: &Origin,
 ) -> Command {
     let mut ssh = Command::new(program);
+    origin.apply(&mut ssh);
     if let Some(asking) = asking {
         ssh.env("SSH_ASKPASS", &asking.program)
             .env("SSH_ASKPASS_REQUIRE", "force")

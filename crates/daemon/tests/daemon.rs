@@ -24789,15 +24789,46 @@ fn managed_activity_cancelled_before_persistence_never_runs() {
 /// up: the thread waiting on its connection wakes, and the daemon lets
 /// the client go.
 #[test]
-fn a_client_that_hangs_up_wakes_its_own_receiver() {
+fn a_client_that_hangs_up_wakes_its_own_receiver_and_the_daemon_lets_it_go() {
     let daemon = TestDaemon::start();
-    let (sender, mut receiver) = daemon.client().split().unwrap();
-    let waiting = std::thread::spawn(move || receiver.receive());
-    std::thread::sleep(Duration::from_millis(100));
+    let mut other = daemon.client();
+    let terminal = spawn(&mut other, &["cat"]);
+    let size_now = |other: &mut Client| {
+        let listed = other.list_terminals().unwrap();
+        listed.iter().find(|info| info.id == terminal).unwrap().size
+    };
+    let own = size_now(&mut other);
+    // A fit lasts only while the client that made it is there.
+    let mut leaving = daemon.client();
+    leaving.attach(terminal).unwrap();
+    let fitted = Size::new(30, 8).unwrap();
+    let fit = Request::Fit {
+        terminal,
+        size: Some(fitted),
+        renew: false,
+    };
+    assert_eq!(leaving.request(&fit).unwrap(), Response::Done);
+    assert_eq!(size_now(&mut other), fitted);
+    let (sender, mut receiver) = leaving.split().unwrap();
+    let waiting = std::thread::spawn(move || {
+        // What attaching brought, then the hang-up.
+        loop {
+            if let Err(err) = receiver.receive() {
+                return err;
+            }
+        }
+    });
     sender.close();
     let woke = waiting.join().unwrap();
-    assert!(woke.is_err(), "{woke:?}");
-    assert!(daemon.client().list_terminals().is_ok());
+    assert!(
+        matches!(woke, ClientError::Disconnected | ClientError::Io(_)),
+        "{woke:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while size_now(&mut other) != own {
+        assert!(Instant::now() < deadline, "the daemon kept the client");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

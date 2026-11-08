@@ -8,6 +8,7 @@
 //! says who is on the other end) and signals it, as closing every terminal
 //! would.
 
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -15,7 +16,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
@@ -27,6 +29,45 @@ use crate::runtime::{LockError, RuntimeDir};
 
 /// How long a daemon may take to start, or to stop.
 const DEADLINE: Duration = Duration::from_secs(5);
+
+/// Where a client came from, for the programs started on its behalf: a
+/// window opened by a process of windows starts them as the `clackatoo`
+/// that asked for it would have, with its environment and in its
+/// directory, not the process's.
+#[derive(Clone, Debug, Default)]
+pub struct Origin {
+    /// Its whole environment, in place of this process's.
+    pub env: Option<Arc<[(OsString, OsString)]>>,
+    /// Its working directory.
+    pub dir: Option<PathBuf>,
+}
+
+impl Origin {
+    /// Starts `command` as the origin would: with its environment, and in
+    /// its directory, if that's still there.
+    pub fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
+        if let Some(env) = &self.env {
+            command
+                .env_clear()
+                .envs(env.iter().map(|(name, value)| (name, value)));
+        }
+        if let Some(dir) = self.dir.as_ref().filter(|dir| dir.is_dir()) {
+            command.current_dir(dir);
+        }
+        command
+    }
+
+    /// The variable `name`, as the origin has it.
+    #[must_use]
+    pub fn var(&self, name: &str) -> Option<OsString> {
+        match &self.env {
+            Some(env) => (env.iter())
+                .find(|(each, _)| each == name)
+                .map(|(_, value)| value.clone()),
+            None => std::env::var_os(name),
+        }
+    }
+}
 
 /// Starting or stopping the daemon failed.
 #[derive(Debug, thiserror::Error)]
@@ -74,7 +115,16 @@ pub enum LaunchError {
 /// older daemon is running, which [`stop`] can end. Otherwise, if the
 /// daemon can't be started or reached.
 pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
-    Ok(Client::over(socket_or_start(runtime)?)?)
+    connect_or_start_from(runtime, &Origin::default())
+}
+
+/// As [`connect_or_start`], starting the daemon as `origin` would.
+///
+/// # Errors
+///
+/// As [`connect_or_start`].
+pub fn connect_or_start_from(runtime: &RuntimeDir, origin: &Origin) -> Result<Client, LaunchError> {
+    Ok(Client::over(socket_or_start_from(runtime, origin)?)?)
 }
 
 /// Connects to the daemon's socket, starting the daemon in the background
@@ -84,6 +134,15 @@ pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
 ///
 /// If the daemon can't be started or reached.
 pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> {
+    socket_or_start_from(runtime, &Origin::default())
+}
+
+/// As [`socket_or_start`], starting the daemon as `origin` would.
+///
+/// # Errors
+///
+/// As [`socket_or_start`].
+fn socket_or_start_from(runtime: &RuntimeDir, origin: &Origin) -> Result<UnixStream, LaunchError> {
     let socket = runtime.socket_path();
     match client::connect_socket(&socket) {
         Ok(stream) => return Ok(stream),
@@ -98,7 +157,9 @@ pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> 
         .append(true)
         .mode(0o600)
         .open(&log_path)?;
-    let mut daemon = std::process::Command::new(std::env::current_exe()?)
+    let mut daemon = Command::new(std::env::current_exe()?);
+    let mut daemon = origin
+        .apply(&mut daemon)
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
