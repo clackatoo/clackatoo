@@ -680,6 +680,11 @@ impl Raw {
     }
 }
 
+/// The most items of any list in a tool's arguments: as many links as a
+/// board's entry has, more than chats are started or waited for at once.
+const MOST_ITEMS: usize = crate::boards::MAX_LINKS;
+const _: () = assert!(MOST_ITEMS >= MAX_FAN_OUT);
+
 /// The tool `name` called with `arguments`.
 #[allow(clippy::too_many_lines, reason = "one arm per tool, each short")]
 fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
@@ -888,6 +893,18 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
     #[serde(deny_unknown_fields)]
     struct ActivityRead {
         id: Option<String>,
+    }
+    // No list a tool takes is long: one that is is refused before
+    // anything is made of each of its items.
+    if let Some((key, list)) =
+        (arguments.as_object().into_iter().flatten()).find_map(|(key, value)| {
+            Some((key, value.as_array()?)).filter(|(_, list)| list.len() > MOST_ITEMS)
+        })
+    {
+        return Err(Bad(format!(
+            "{key} has {} items: no list takes more than {MOST_ITEMS}",
+            list.len()
+        )));
     }
     Ok(match name {
         "start_activity" => {
@@ -2243,6 +2260,22 @@ mod tests {
             parse("start_chats", &json!({ "chats": chats })),
             Ok(Tool::StartChats(started)) if started.len() == MAX_FAN_OUT
         ));
+    }
+
+    /// A list longer than any tool takes is refused before anything is
+    /// made of its items, as a board's links once were each looked up on
+    /// disk first (CLACKA-220).
+    #[test]
+    fn a_long_list_is_refused_before_its_items_are_read() {
+        let links: Vec<Value> = (0..10_000).map(|_| json!({ "path": "" })).collect();
+        let post = json!({ "board": "b", "text": "t", "links": links });
+        let Err(Bad(why)) = parse("board_post", &post) else {
+            panic!("taken");
+        };
+        assert_eq!(why, "links has 10000 items: no list takes more than 32");
+        let links: Vec<Value> = (0..32).map(|_| json!({ "path": "a.txt" })).collect();
+        let post = json!({ "board": "b", "text": "t", "links": links });
+        assert!(parse("board_post", &post).is_ok());
     }
 
     /// An answer too big to send is refused before it's encoded, and the

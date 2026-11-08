@@ -51,7 +51,7 @@ pub(crate) const MAX_EDITS: usize = 20;
 pub(crate) const MAX_BOARDS: usize = 200;
 
 /// The most links an entry has.
-const MAX_LINKS: usize = 32;
+pub(crate) const MAX_LINKS: usize = 32;
 
 /// How long a claim lasts unless it's given a time, and the longest one
 /// lasts before it must be renewed.

@@ -76,9 +76,10 @@ impl Daemon {
                 text,
                 links,
             } => {
-                let links = self.resolve_links(chat, links);
+                // Its links are looked up on disk only for a board there is.
                 self.board_named(&board, workspace.as_deref())
                     .and_then(|id| {
+                        let links = self.resolve_links(chat, links);
                         let entry =
                             (self.change_board(id, |b| b.post(&by, now, kind, &text, links)))?;
                         Ok(format!(
