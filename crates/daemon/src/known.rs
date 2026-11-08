@@ -21,6 +21,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clackatoo_protocol::MachineId;
@@ -53,6 +54,9 @@ pub(crate) struct Known {
     /// The threads writing, or about to, so `kept` can wait for them: one
     /// that hasn't taken `writing` yet would otherwise write after it.
     writers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Something known isn't in the file yet: a change no thread has
+    /// written, as none could be started or its write failed.
+    unwritten: Arc<AtomicBool>,
 }
 
 /// The file, as it's written and read.
@@ -81,6 +85,7 @@ impl Known {
             keys: Arc::new(Mutex::new(keys)),
             writing: Arc::default(),
             writers: Mutex::default(),
+            unwritten: Arc::default(),
         }
     }
 
@@ -143,18 +148,23 @@ impl Known {
         let Some(file) = self.file.clone() else {
             return;
         };
+        self.unwritten.store(true, Ordering::SeqCst);
         let writing = Arc::clone(&self.writing);
         let keys = Arc::clone(&self.keys);
+        let unwritten = Arc::clone(&self.unwritten);
         let spawned = std::thread::Builder::new()
             .name("known-machines".into())
             .spawn(move || {
                 let _held = writing.lock().unwrap_or_else(PoisonError::into_inner);
+                // Before the keys are read: a change after it is seen.
+                unwritten.store(false, Ordering::SeqCst);
                 let keys: Vec<(MachineId, Pin)> = (keys.lock())
                     .unwrap_or_else(PoisonError::into_inner)
                     .iter()
                     .map(|(&id, &pin)| (id, pin))
                     .collect();
                 if let Err(err) = write(&file, &keys) {
+                    unwritten.store(true, Ordering::SeqCst);
                     log::error!("{} couldn't be written: {err}", file.display());
                 }
             });
@@ -169,14 +179,19 @@ impl Known {
     }
 
     /// Waits for what's being written to the file to be written, as the
-    /// daemon stops or upgrades: every thread writing, and then once more.
+    /// daemon stops or upgrades: every thread writing, and then once more,
+    /// if something known still isn't in the file. A file that has it all
+    /// already isn't written again: an fsync can take seconds on a busy
+    /// disk, and the daemon has only a few to stop in.
     pub(crate) fn kept(&self) {
         let writers =
             std::mem::take(&mut *self.writers.lock().unwrap_or_else(PoisonError::into_inner));
         for writer in writers {
             let _ = writer.join();
         }
-        if let Some(file) = &self.file {
+        if let Some(file) = &self.file
+            && self.unwritten.swap(false, Ordering::SeqCst)
+        {
             let _held = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
             if let Err(err) = write(file, &self.all()) {
                 log::error!("{} couldn't be written: {err}", file.display());
@@ -281,7 +296,7 @@ mod tests {
 
     #[test]
     fn keys_are_kept_for_the_user_alone_and_read_again() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let dir = tempfile::tempdir().unwrap();
         let file = Known::beside(&dir.path().join("machine"));
@@ -296,6 +311,10 @@ mod tests {
         known.kept();
         let mode = fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        // With nothing new since, the file isn't written again.
+        let written = fs::metadata(&file).unwrap().ino();
+        known.kept();
+        assert_eq!(fs::metadata(&file).unwrap().ino(), written);
         assert_eq!(Known::load(Some(file.clone())).get(server), Some(pin));
         // Learned from elsewhere, a key known already stays.
         let other = Pin {
