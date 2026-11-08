@@ -1465,6 +1465,40 @@ fn when_full_the_oldest_connection_idle_makes_room() {
     assert!(!closed_within(&mut open[63], Duration::from_millis(100)));
 }
 
+#[test]
+fn one_address_opens_connections_only_so_fast() {
+    let (_daemon, address, _pems, _) = public_daemon(|_| {});
+    // Opened and closed again and again, so never many are open at once.
+    let mut refused = None;
+    for n in 0..60 {
+        let mut conn = connect_from("127.0.0.2", address);
+        if closed_within(&mut conn, Duration::from_millis(50)) {
+            refused = Some(n);
+            break;
+        }
+    }
+    let refused = refused.expect("one address opened connections as fast as it liked");
+    assert!(refused >= 20, "refused before a burst's worth: {refused}");
+    // Another address isn't held up by it.
+    let mut other = connect_from("127.0.0.3", address);
+    assert!(!closed_within(&mut other, Duration::from_millis(300)));
+}
+
+#[test]
+fn handshakes_put_off_to_a_later_turn_still_finish() {
+    let (_daemon, address, _pems, trusted) = public_daemon(|web| web.handshakes_at_once = 1);
+    let sessions: Vec<_> = (0..6)
+        .map(|_| {
+            let trusted = trusted.clone();
+            std::thread::spawn(move || session_over_tls(address, &trusted))
+        })
+        .collect();
+    for session in sessions {
+        let answer = session.join().unwrap().expect("the whole answer");
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    }
+}
+
 /// Sets where a request says, as `tailscale serve` does, it came from.
 fn forwarded_for(address: &str) -> impl FnOnce(&mut Vec<(String, String)>) + use<> {
     let address = address.to_owned();

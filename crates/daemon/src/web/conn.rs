@@ -35,6 +35,13 @@ pub(crate) const REQUEST_WAIT: Duration = Duration::from_secs(30);
 /// closed.
 pub(crate) const HEAD_WAIT: Duration = Duration::from_secs(10);
 
+/// The most TLS handshakes worked on in one turn of the event loop,
+/// unless the settings say otherwise. A client's first message of one
+/// costs the daemon a key exchange and a signature, which it costs the
+/// client nothing to ask for again and again: about 0.1 ms each with an
+/// ECDSA key, and ten times that with RSA.
+pub(crate) const HANDSHAKES_AT_ONCE: usize = 4;
+
 /// The most read from a connection in one turn of the event loop.
 pub(crate) const READ_BUDGET: usize = 64 * 1024;
 

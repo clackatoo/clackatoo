@@ -38,7 +38,9 @@ and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tail
     key = "/path/privkey.pem"
     origin = "https://example.com:8765"
 
-This needs a password and `origin`, and `ask` is off unless you turn it on. Getting certificates by ACME isn't built yet, so you bring your own; it's read again when its files change.
+This needs a password and `origin`, and `ask` is off unless you turn it on. Getting certificates by ACME isn't built yet, so you bring your own; it's read again when its files change. Prefer an ECDSA key, as certbot, acme.sh and `tailscale cert` make by default: each new connection's TLS handshake is worked out by the daemon itself, and with an RSA key one costs about ten times as much.
+
+Anyone on the network can open connections, so the daemon limits them: twenty from one address in a burst, then five a second, and about two hundred a second from everywhere together; eight open at once from one address, and 64 in all. IPv6 addresses count by their /64. Once 64 are open, the one open longest that isn't waiting on the daemon is closed to make room, so connections someone else holds open can't keep your phone out. Only a few handshakes are worked on at a time, so a flood of them slows new connections, not your terminals. Connections a device's app keeps open to follow your chats don't count.
 
 ## Pairing a device
 

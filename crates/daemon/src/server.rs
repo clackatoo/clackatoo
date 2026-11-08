@@ -1834,7 +1834,8 @@ impl Daemon {
             let tools_unread = self.tools_unread();
             // Queued as floods, which the poll doesn't wait for.
             self.relays_unpacked();
-            let web_unread = !self.web_unread.is_empty();
+            let web_unread = !self.web_unread.is_empty()
+                || (self.web.as_ref()).is_some_and(|web| !web.put_off.is_empty());
             let peers_flooded = std::mem::take(&mut self.peers_flooded);
             let timeout = if self.unread.is_empty()
                 && !peers_flooded
@@ -1889,6 +1890,9 @@ impl Daemon {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(err),
+            }
+            if let Some(web) = &mut self.web {
+                web.new_turn();
             }
             // What came while a flood was being read came before what epoll
             // has now.

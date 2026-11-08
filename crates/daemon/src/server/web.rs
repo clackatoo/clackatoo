@@ -135,6 +135,10 @@ impl Daemon {
                     return;
                 }
             };
+            if let Err(why) = web.may_connect(peer, Instant::now()) {
+                log::warn!("a web connection from {peer} closed: {why}");
+                continue;
+            }
             match self.room_for_web(peer) {
                 Ok(None) => {}
                 Ok(Some(oldest)) => {
@@ -213,10 +217,26 @@ impl Daemon {
     /// Reads what an HTTP connection sent, at most a turn's worth, answers
     /// what's whole of it, and writes what it can of the answers.
     pub(super) fn serve_web(&mut self, token: Token) {
+        self.serve_web_conn(token, false);
+    }
+
+    /// Serves the HTTP connection at `token`, as [`serve_web`] does: if it's
+    /// still shaking hands, only if this turn has handshakes left, after
+    /// those `put_off` before it, or else it's put off to a later turn. A
+    /// handshake costs the loop a key exchange and a signature, so a turn
+    /// works on only a few, however many connections a stranger opens.
+    ///
+    /// [`serve_web`]: Self::serve_web
+    fn serve_web_conn(&mut self, token: Token, put_off: bool) {
         let now = Instant::now();
-        let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
+        let (Some(Source::Web(conn)), Some(web)) =
+            (self.sources.get_mut(token.0), self.web.as_mut())
+        else {
             return;
         };
+        if conn.transport.handshaking() && !web.may_shake_hands(token, put_off) {
+            return;
+        }
         match conn.fill(&mut self.buffer, now) {
             Filled::Closed => {
                 self.drop_web(token);
@@ -295,8 +315,12 @@ impl Daemon {
         }
     }
 
-    /// Serves the web connections that had more to read or answer.
+    /// Serves the web connections that had more to read or answer, and
+    /// those whose handshakes were put off, as far as this turn may.
     pub(super) fn serve_web_unread(&mut self) {
+        while let Some(token) = self.web.as_mut().and_then(Web::next_put_off) {
+            self.serve_web_conn(token, true);
+        }
         for token in std::mem::take(&mut self.web_unread) {
             match self.sources.get(token.0) {
                 Some(Source::Web(_)) => self.serve_web(token),
@@ -326,6 +350,7 @@ impl Daemon {
         }
         if let Some(web) = self.web.as_mut() {
             web.conns.retain(|&conn| conn != token);
+            web.put_off.retain(|&conn| conn != token);
         }
     }
 

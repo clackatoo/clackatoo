@@ -135,6 +135,9 @@ pub struct WebConfig {
     /// How many wrong passwords in a row lock pairing with the password,
     /// until a window unlocks it.
     pub lock_after: u32,
+    /// The most TLS handshakes worked on in one turn of the event loop:
+    /// the rest wait for the next.
+    pub handshakes_at_once: usize,
 }
 
 impl WebConfig {
@@ -159,6 +162,7 @@ impl WebConfig {
             head_wait: super::conn::HEAD_WAIT,
             reload_every: Duration::from_mins(1),
             lock_after: LOCK_AFTER,
+            handshakes_at_once: super::conn::HANDSHAKES_AT_ONCE,
         }
     }
 

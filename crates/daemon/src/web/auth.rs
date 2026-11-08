@@ -46,6 +46,17 @@ pub(super) const TRY_EVERY: Duration = Duration::from_mins(1);
 pub(super) const ALL_TRIES: u32 = 20;
 pub(super) const ALL_TRY_EVERY: Duration = Duration::from_secs(3);
 
+/// How many connections may be opened from one address in a burst, and
+/// how often one more may: far more than a phone opens, and few enough
+/// that one address can't keep the event loop shaking hands.
+pub(super) const CONNECTS: u32 = 20;
+pub(super) const CONNECT_EVERY: Duration = Duration::from_millis(200);
+
+/// How many connections may be opened in a burst from everywhere at
+/// once, and how often one more may: about 200 a second.
+pub(super) const ALL_CONNECTS: u32 = 200;
+pub(super) const ALL_CONNECT_EVERY: Duration = Duration::from_millis(5);
+
 /// What tries and connections from an address are counted under: the
 /// address itself for IPv4, and its /64 for IPv6, which one subscriber
 /// usually has whole, so hopping between its addresses gains nothing.

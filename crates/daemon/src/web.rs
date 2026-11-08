@@ -30,6 +30,7 @@ mod http;
 mod push;
 mod socket;
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -272,6 +273,16 @@ pub(crate) struct Web {
     checks: u64,
     /// The connections, HTTP and WebSocket, by their tokens.
     pub(crate) conns: Vec<mio::Token>,
+    /// New connections from each address (IPv6 by /64).
+    connects: Buckets,
+    /// New connections from everywhere at once.
+    all_connects: Bucket,
+    /// How many more connections still shaking hands may be read in this
+    /// turn of the event loop.
+    handshakes_left: usize,
+    /// The connections still shaking hands that were put off to a later
+    /// turn, first put off first.
+    pub(crate) put_off: VecDeque<mio::Token>,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
 }
@@ -327,8 +338,60 @@ impl Web {
             checking: Vec::new(),
             checks: 0,
             conns: Vec::new(),
+            connects: Buckets::new(auth::CONNECTS, auth::CONNECT_EVERY),
+            all_connects: Bucket::new(auth::ALL_CONNECTS, auth::ALL_CONNECT_EVERY, Instant::now()),
+            handshakes_left: 0,
+            put_off: VecDeque::new(),
             next_due: None,
         })
+    }
+
+    /// Whether a new connection from `peer` may be taken at `now`, or why
+    /// not: each address, and everyone at once, may open only so many so
+    /// fast, as each one's handshake costs the event loop more than it
+    /// costs whoever opens it. Through Tailscale, every connection comes
+    /// from this machine, so only the limit for everyone counts.
+    pub(crate) fn may_connect(&mut self, peer: Peer, now: Instant) -> Result<(), &'static str> {
+        if let Some(ip) = peer.ip()
+            && self.connects.take(&auth::address_key(ip), now).is_err()
+        {
+            return Err("its address opens too many too fast");
+        }
+        if self.all_connects.take(now).is_err() {
+            return Err("too many are being opened");
+        }
+        Ok(())
+    }
+
+    /// A turn of the event loop begins: it may work on its share of TLS
+    /// handshakes.
+    pub(crate) fn new_turn(&mut self) {
+        self.handshakes_left = self.config.handshakes_at_once;
+    }
+
+    /// Whether the connection at `token`, still shaking hands, may be read
+    /// now, or else is put off to a later turn: a turn works on only so
+    /// many handshakes, those put off first, in order. With `put_off`, it
+    /// was put off before, and is first in line.
+    pub(crate) fn may_shake_hands(&mut self, token: mio::Token, put_off: bool) -> bool {
+        if self.handshakes_left == 0 || (!put_off && !self.put_off.is_empty()) {
+            if put_off {
+                self.put_off.push_front(token);
+            } else if !self.put_off.contains(&token) {
+                self.put_off.push_back(token);
+            }
+            return false;
+        }
+        self.handshakes_left -= 1;
+        true
+    }
+
+    /// The next connection put off, if this turn may shake hands with it.
+    pub(crate) fn next_put_off(&mut self) -> Option<mio::Token> {
+        if self.handshakes_left == 0 {
+            return None;
+        }
+        self.put_off.pop_front()
     }
 
     /// Where it listens, if on the network.
