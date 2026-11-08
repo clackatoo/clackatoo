@@ -644,8 +644,9 @@ options! {
     /// About the most of a conversation, in tokens, a chat tells an agent
     /// it moves to, as the model menu moves it from Claude Code to Codex,
     /// say: the newest turns whole, older ones a line each. An agent it
-    /// goes back to hears only what happened since, as briefly.
-    carryover("co", "Token budget for context handed to another provider"): u32 (1000..=200_000) = 20_000;
+    /// goes back to hears only what happened since, as briefly. No more
+    /// than the daemon takes.
+    carryover("co", "Token budget for context handed to another provider"): u32 (1000..=50_000) = 20_000;
     /// Which chats you can't see the desktop shows a notification for:
     /// one whose agent finished or failed, or asks you something, while
     /// the window doesn't have the focus or the chat isn't in the tab
@@ -1217,6 +1218,12 @@ mod tests {
             Err("explorerwidth is 0, or a whole number from 10 to 200".into())
         );
         assert_eq!(options.explorerwidth, 0);
+        // No more than the daemon takes, as `handoff::MOST` says.
+        assert_eq!(options.set(info("co"), Value::Number(50_000)), Ok(true));
+        assert_eq!(
+            options.set(info("co"), Value::Number(50_001)),
+            Err("carryover is a whole number from 1000 to 50000".into())
+        );
     }
 
     #[test]

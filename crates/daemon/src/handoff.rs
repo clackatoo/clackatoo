@@ -35,7 +35,8 @@ use clackatoo_protocol::{Item, Outcome, ToolKind, Turn};
 /// How many tokens a digest keeps to when the window doesn't say.
 pub(crate) const BUDGET: usize = 20_000;
 
-/// The most tokens a digest takes, whatever the window says.
+/// The most tokens a digest takes, whatever the window says: the top of
+/// its `carryover` option's range too.
 pub(crate) const MOST: usize = 50_000;
 
 /// The bytes counted as a token: fewer than most text takes, so a digest
