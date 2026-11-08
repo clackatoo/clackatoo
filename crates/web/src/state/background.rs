@@ -107,6 +107,9 @@ impl State {
     /// Brings background tab `tab` back as a tab of its workspace. Returns
     /// the terminal it shows, to show here.
     pub fn bring_back(&mut self, tab: TabId) -> Option<TerminalId> {
+        if !self.run_confirmed {
+            return None;
+        }
         let terminal = self.background_terminal(tab)?;
         self.dismissing = None;
         self.request(
@@ -123,6 +126,9 @@ impl State {
             return;
         };
         self.dirty.home = true;
+        if !self.run_confirmed {
+            return;
+        }
         if !background.state.ended() && !self.confirming(tab) {
             self.dismissing = Some((tab, self.now));
             return;
@@ -155,8 +161,8 @@ impl State {
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{
-        BackgroundState, ClientMessage, Content, Event, Layout, Pane, PaneId, ServerMessage, Size,
-        Tab, TerminalInfo, TerminalStatus, Workspace, Workspaces,
+        BackgroundState, ClientMessage, Content, Event, Layout, Pane, PaneId, Response,
+        ServerMessage, Size, Tab, TerminalInfo, TerminalStatus, Workspace, Workspaces,
     };
 
     use super::*;
@@ -185,7 +191,7 @@ mod tests {
     /// which failed with 2; and nothing waiting to be sent.
     fn with_background() -> State {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.receive(ServerMessage::Event(Event::Workspaces(Workspaces {
             list: vec![Workspace {
                 id: WorkspaceId(1),
@@ -225,12 +231,14 @@ mod tests {
         );
         state.open_terminal(TerminalId(5));
         assert!(state.take_outbox().is_empty());
+        // Reconnected, it's focused again once the workspaces say the
+        // daemon is the one whose terminal 5 it was.
         state.connected();
-        assert!(
-            state
-                .take_outbox()
-                .contains(&ClientMessage::Request(Request::Focus { pane: PaneId(5) }))
-        );
+        let focus = ClientMessage::Request(Request::Focus { pane: PaneId(5) });
+        assert!(!state.take_outbox().contains(&focus));
+        let workspaces = state.workspaces.clone();
+        state.receive(ServerMessage::Response(Response::Workspaces(workspaces)));
+        assert!(state.take_outbox().contains(&focus));
     }
 
     /// The background actions among `sent`.

@@ -36,7 +36,9 @@ use self::terminal::TermPage;
 use crate::action::{Action, Pick, RowKey};
 use crate::dom;
 use crate::keys::{Key, Modifiers};
-use crate::state::{Received, RunNews, State};
+use crate::state::{
+    RUN_KEY, Received, RunNews, State, draft_key, restarted_since, stale_draft_keys,
+};
 use crate::term::Fit;
 use crate::ui::el;
 use crate::view::{self, Notifications, pairing};
@@ -63,15 +65,6 @@ const REFIT_AFTER: i32 = 300;
 /// How long typing pauses, in milliseconds, before what's typed in a
 /// chat's box is told the daemon, as in the window.
 const DRAFT_PAUSE: i32 = 600;
-
-/// What the page's storage keys for drafts begin with: then the daemon's
-/// run, and the chat, as `clackatoo.draft.RUN.CHAT`.
-const DRAFT_KEY: &str = "clackatoo.draft.";
-
-/// The page's storage key for the daemon's run the page last knew, so a
-/// reload shows its draft before it connects, and drops it once it finds
-/// the daemon started afresh.
-const RUN_KEY: &str = "clackatoo.run";
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -1395,23 +1388,15 @@ impl App {
         };
         // The page loaded with drafts of a run before this one: those it
         // took in are of other chats now, as after a restart it saw.
-        let stored = self.stored_run();
-        let restarted = news == RunNews::Restarted
-            || stored
-                .as_ref()
-                .is_some_and(|stored| *stored != run.to_string());
+        let restarted = restarted_since(news, self.stored_run().as_deref(), run);
         if restarted && news == RunNews::Known {
             self.state.started_afresh();
         }
         if let Ok(Some(storage)) = self.window.session_storage() {
             let _ = storage.set_item(RUN_KEY, &run.to_string());
-            let ours = format!("{DRAFT_KEY}{run}.");
             let length = storage.length().unwrap_or(0);
-            let keys: Vec<String> = (0..length)
-                .filter_map(|at| storage.key(at).ok().flatten())
-                .filter(|key| key.starts_with(DRAFT_KEY) && !key.starts_with(&ours))
-                .collect();
-            for key in keys {
+            let keys = (0..length).filter_map(|at| storage.key(at).ok().flatten());
+            for key in stale_draft_keys(keys, run) {
                 let _ = storage.remove_item(&key);
             }
         }
@@ -2346,7 +2331,7 @@ impl App {
     /// Until the app has connected, the run the page last knew is taken.
     fn draft_key(&self, chat: TerminalId) -> Option<String> {
         let run = (self.state.run().map(|run| run.to_string())).or_else(|| self.stored_run())?;
-        Some(format!("{DRAFT_KEY}{run}.{chat}"))
+        Some(draft_key(&run, chat))
     }
 
     /// The daemon's run the page last knew, kept in its storage.

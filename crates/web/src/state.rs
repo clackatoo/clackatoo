@@ -231,6 +231,46 @@ pub struct State {
     run: Option<(MachineId, u64)>,
     /// The run became known, or changed, since the app last looked.
     pub run_news: Option<RunNews>,
+    /// The workspaces have come since the connection opened, so the run
+    /// is known to be the one the page's numbers are of. Until then,
+    /// nothing is done to a chat, terminal or tab by its number: no
+    /// message, key, draft, fit or focus.
+    run_confirmed: bool,
+}
+
+/// What the page's storage keys for drafts begin with: then the daemon's
+/// run, and the chat, as `clackatoo.draft.RUN.CHAT`.
+pub const DRAFT_KEY: &str = "clackatoo.draft.";
+
+/// The page's storage key for the daemon's run the page last knew, so a
+/// reload shows its draft before it connects, and drops it once it finds
+/// the daemon started afresh.
+pub const RUN_KEY: &str = "clackatoo.run";
+
+/// The page's storage key for chat `chat`'s draft, in the daemon's run
+/// `run`: chat numbers are only that run's.
+#[must_use]
+pub fn draft_key(run: &str, chat: TerminalId) -> String {
+    format!("{DRAFT_KEY}{run}.{chat}")
+}
+
+/// Those of the page's storage `keys` that are drafts of a run other than
+/// `run`, to be dropped: kept under the numbers of another run's chats,
+/// or from before drafts were kept by run.
+#[must_use]
+pub fn stale_draft_keys(keys: impl IntoIterator<Item = String>, run: u64) -> Vec<String> {
+    let ours = format!("{DRAFT_KEY}{run}.");
+    (keys.into_iter())
+        .filter(|key| key.starts_with(DRAFT_KEY) && !key.starts_with(&ours))
+        .collect()
+}
+
+/// Whether the daemon, now known to be at `run` as `news` says, started
+/// afresh since the page last knew it: it saw it restart, or it loaded
+/// with drafts of another run, `stored`.
+#[must_use]
+pub fn restarted_since(news: RunNews, stored: Option<&str>, run: u64) -> bool {
+    news == RunNews::Restarted || stored.is_some_and(|stored| stored != run.to_string())
 }
 
 /// What became of the daemon's run, for the app: drafts are kept in the
@@ -286,6 +326,7 @@ impl Default for State {
             seen_failures: Vec::new(),
             run: None,
             run_news: None,
+            run_confirmed: false,
         }
     }
 }
@@ -294,6 +335,7 @@ impl State {
     /// The connection opened: says hello, and asks for what the app shows.
     pub fn connected(&mut self) {
         self.online = Online::Open;
+        self.run_confirmed = false;
         self.asked.clear();
         self.outbox.clear();
         self.outbox.push(ClientMessage::Hello {
@@ -353,6 +395,14 @@ impl State {
             term.fit = Fit::Off;
             term.dirty.header = true;
         }
+    }
+
+    /// Connects, as [`connected`](Self::connected) does, with the run
+    /// known to be the page's: for tests of what's done once it is.
+    #[cfg(test)]
+    pub(crate) fn connected_now(&mut self) {
+        self.connected();
+        self.run_confirmed = true;
     }
 
     /// Takes in a message from the daemon.
@@ -526,23 +576,34 @@ impl State {
 
     /// Takes in the workspaces, and which run of which daemon they came
     /// from: if it's another than before, the daemon started afresh.
+    /// Once they've come since the connection opened, the page acts on
+    /// its chats and terminals again: the terminal shown is focused, and
+    /// what was typed meanwhile is told.
     fn workspaces_came(&mut self, workspaces: Workspaces) {
         let run = (workspaces.machine.as_ref()).map(|machine| (machine.id, machine.run));
         self.workspaces = workspaces;
-        let Some(run) = run else {
-            return;
-        };
-        match self.run {
-            Some(known) if known == run => return,
-            Some(_) => {
+        let confirmed = !std::mem::replace(&mut self.run_confirmed, true);
+        // From a daemon that doesn't say, there's nothing to compare.
+        if let Some(run) = run
+            && self.run != Some(run)
+        {
+            if self.run.is_some() {
                 self.started_afresh();
                 self.run_news = Some(RunNews::Restarted);
-            }
-            None => {
+            } else {
                 self.run_news.get_or_insert(RunNews::Known);
             }
+            self.run = Some(run);
         }
-        self.run = Some(run);
+        if confirmed {
+            if let Some(terminal) = (self.term.as_ref())
+                .filter(|term| !term.paused)
+                .map(|term| term.id)
+            {
+                self.select_terminal(terminal);
+            }
+            self.tell_draft();
+        }
     }
 
     /// The daemon started afresh since the page last knew it, as after the
@@ -730,7 +791,7 @@ impl State {
     /// with later. Its failure, as from another machine's older daemon, is
     /// only logged, and the draft stays here.
     pub fn tell_draft_of(&mut self, terminal: TerminalId) {
-        if self.online != Online::Open {
+        if self.online != Online::Open || !self.run_confirmed {
             return;
         }
         let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
@@ -756,6 +817,9 @@ impl State {
         let Some(open) = &self.open else {
             return;
         };
+        if !self.run_confirmed {
+            return;
+        }
         let Some(activity) = open
             .view
             .as_ref()
@@ -813,6 +877,10 @@ impl State {
     /// Records an actual selection with the terminal's owner, through a
     /// relay too. Attaching alone can also mean merely watching a split.
     fn select_terminal(&mut self, terminal: TerminalId) {
+        // The workspaces held may be of a run before this one.
+        if !self.run_confirmed {
+            return;
+        }
         let pane = self.workspaces.pane_showing(terminal).or_else(|| {
             self.workspaces
                 .background_showing(terminal)?
@@ -949,6 +1017,7 @@ impl State {
     #[must_use]
     pub fn keys_go(&self) -> bool {
         self.online == Online::Open
+            && self.run_confirmed
             && (self.asked.front()).is_none_or(|&(_, sent)| self.now - sent <= KEYS_UNANSWERED)
     }
 
@@ -1048,7 +1117,7 @@ impl State {
             return;
         };
         term.dirty.header = true;
-        if !online {
+        if !online || !self.run_confirmed {
             self.note = Some("Not connected: try again in a moment".to_owned());
             return;
         }
@@ -1078,7 +1147,7 @@ impl State {
     /// Asks for the fit of the terminal shown again, if it's fitted and
     /// was last asked for [`FIT_EVERY`] ago, so the daemon keeps it.
     pub fn renew_fit(&mut self) {
-        if self.online != Online::Open {
+        if self.online != Online::Open || !self.run_confirmed {
             return;
         }
         let Some(term) = self.term.as_mut().filter(|term| !term.paused) else {
@@ -1147,7 +1216,7 @@ impl State {
         let Some(open) = &self.open else {
             return;
         };
-        if self.online != Online::Open {
+        if self.online != Online::Open || !self.run_confirmed {
             self.note = Some(format!("Not connected: try {doing} again in a moment"));
             self.dirty.footer = true;
             return;
@@ -1172,6 +1241,11 @@ impl State {
         }
         if self.online != Online::Open {
             self.note = Some("You're offline. Your draft is kept until you send it.".into());
+            self.dirty.footer = true;
+            return;
+        }
+        if !self.run_confirmed {
+            self.note = Some("Still connecting. Your draft is kept until you send it.".into());
             self.dirty.footer = true;
             return;
         }
@@ -1363,7 +1437,7 @@ mod tests {
     /// A state with chat 4 open, connected, and what it sent so far taken.
     fn drafting() -> State {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.take_outbox();
         // What it asked to open, answered.
@@ -1444,7 +1518,7 @@ mod tests {
         assert_eq!(shown(&state), "");
         // Nor does a reconnect bring back what the daemon had.
         state.lost(1);
-        state.connected();
+        state.connected_now();
         state.take_outbox();
         state.asked.clear();
         state.receive(kept("old words"));
@@ -1622,6 +1696,84 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_sent_typed_or_told_before_the_workspaces_say_which_run_this_is() {
+        let mut state = drafting();
+        state.receive(ServerMessage::Event(Event::Workspaces(workspaces_of_run(
+            1,
+        ))));
+        state.receive(kept(""));
+        state.take_outbox();
+        // Reconnected: until the workspaces come, chat 4 may be another's.
+        state.lost(1);
+        state.connected();
+        state.take_outbox();
+        type_in_box(&mut state, "the staging password is");
+        // The pause after typing ends: the draft isn't told yet.
+        state.tell_draft();
+        assert!(told(&mut state).is_empty());
+        state.submit(false);
+        assert!(state.take_outbox().is_empty(), "nothing is sent");
+        assert!(state.submitting.is_empty());
+        assert_eq!(shown(&state), "the staging password is");
+        state.chat(ChatAction::Stop, "stopping the chat");
+        assert!(state.take_outbox().is_empty());
+        // The same run: what was typed meanwhile is told, and sends.
+        state.receive(ServerMessage::Response(Response::Workspaces(
+            workspaces_of_run(1),
+        )));
+        assert_eq!(told(&mut state), ["the staging password is"]);
+        state.submit(false);
+        assert!(state.submitting.contains(&TerminalId(4)));
+    }
+
+    #[test]
+    fn no_key_or_focus_goes_before_the_workspaces_say_which_run_this_is() {
+        let mut state = showing_a_terminal(InputModes::default());
+        state.workspaces = workspaces_of_run(1);
+        state.lost(1);
+        state.connected();
+        let focused = |sent: &[ClientMessage]| {
+            (sent.iter())
+                .any(|message| matches!(message, ClientMessage::Request(Request::Focus { .. })))
+        };
+        assert!(!focused(&state.take_outbox()));
+        assert!(!state.type_key(&Key::Text("y".into()), Modifiers::default()));
+        assert!(typed(&mut state).is_empty());
+        state.fit(Some(Size::new(30, 8).unwrap()));
+        assert!(state.take_outbox().is_empty());
+        // The run is the same: the terminal is the page's still.
+        state.receive(ServerMessage::Response(Response::Workspaces(
+            workspaces_of_run(1),
+        )));
+        answer_all(&mut state);
+        state.take_outbox();
+        assert!(state.type_key(&Key::Text("y".into()), Modifiers::default()));
+        assert_eq!(typed(&mut state), [b"y".to_vec()]);
+    }
+
+    #[test]
+    fn drafts_are_kept_in_the_pages_storage_by_run() {
+        assert_eq!(draft_key("17", TerminalId(4)), "clackatoo.draft.17.4");
+        let keys = [
+            "clackatoo.draft.17.4",
+            "clackatoo.draft.9.4",
+            // From before drafts were kept by run.
+            "clackatoo.draft.4",
+            "clackatoo.run",
+            "something.else",
+        ];
+        assert_eq!(
+            stale_draft_keys(keys.map(String::from), 17),
+            ["clackatoo.draft.9.4", "clackatoo.draft.4"]
+        );
+        assert!(!restarted_since(RunNews::Known, None, 17));
+        assert!(!restarted_since(RunNews::Known, Some("17"), 17));
+        // Reloaded after the daemon started afresh.
+        assert!(restarted_since(RunNews::Known, Some("9"), 17));
+        assert!(restarted_since(RunNews::Restarted, Some("17"), 17));
+    }
+
+    #[test]
     fn an_agent_starting_is_as_busy_as_one_answering() {
         let node = |state| ChatNode {
             state,
@@ -1637,7 +1789,7 @@ mod tests {
         let mut state = drafting();
         state.receive(kept("and then"));
         state.lost(1);
-        state.connected();
+        state.connected_now();
         state.take_outbox();
         state.asked.clear();
         state.receive(kept("from the laptop"));
@@ -1661,7 +1813,7 @@ mod tests {
     #[test]
     fn chat_pages_are_requested_once_and_reconnect_retains_the_range() {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         let full = ChatNode {
             turns: (0..24).map(|i| turn(&i.to_string())).collect(),
@@ -1719,7 +1871,7 @@ mod tests {
             [Item::Words("live".into())]
         );
         assert_eq!(node.first_turn, 8);
-        state.connected();
+        state.connected_now();
         assert!(
             state
                 .take_outbox()
@@ -1765,7 +1917,7 @@ mod tests {
     #[test]
     fn a_chats_changes_are_drawn_then_acknowledged() {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.take_outbox();
         state.receive(snapshot(vec![turn("a"), turn("b")]));
@@ -1805,7 +1957,7 @@ mod tests {
         use clackatoo_protocol::Question;
 
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.receive(snapshot(vec![turn("a"), turn("b")]));
         state.drawn();
@@ -1833,7 +1985,7 @@ mod tests {
     #[test]
     fn moving_between_chats_detaches_and_acknowledges_stragglers() {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.take_outbox();
         state.open_chat(TerminalId(5));
@@ -1863,7 +2015,7 @@ mod tests {
     #[test]
     fn what_fails_is_said() {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.chat(ChatAction::Stop, "stopping the agent");
         for _ in 0..4 {
@@ -1910,7 +2062,7 @@ mod tests {
     /// request answered and nothing to send.
     fn showing_a_terminal(modes: InputModes) -> State {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_terminal(TerminalId(9));
         state.receive(screen(Size::new(80, 24).unwrap(), modes));
         answer_all(&mut state);
@@ -1942,7 +2094,7 @@ mod tests {
     #[test]
     fn a_terminal_is_followed_drawn_then_acknowledged() {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.take_outbox();
         state.open_terminal(TerminalId(9));
         assert_eq!(
@@ -2039,7 +2191,7 @@ mod tests {
         state.lost(1);
         assert!(!state.type_key(&key, Modifiers::default()));
         assert_eq!(state.term.as_ref().unwrap().refused, 1);
-        state.connected();
+        state.connected_now();
         assert!(typed(&mut state).is_empty());
         assert_eq!(state.term.as_ref().unwrap().refused, 0, "back again");
     }
@@ -2271,7 +2423,7 @@ mod tests {
     }
     fn sending_state() -> State {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.asked.clear();
         state.take_outbox();
@@ -2350,7 +2502,7 @@ mod tests {
         state.submit(false);
         state.take_outbox();
         state.lost(1);
-        state.connected();
+        state.connected_now();
         assert_eq!(state.drafts[&TerminalId(4)], "first draft");
         assert!(
             state

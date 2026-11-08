@@ -76,7 +76,7 @@ mod tests {
 
     fn state() -> State {
         let mut state = State::default();
-        state.connected();
+        state.connected_now();
         state.open_chat(TerminalId(4));
         state.asked.clear();
         state.take_outbox();
