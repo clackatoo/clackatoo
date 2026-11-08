@@ -217,11 +217,11 @@ impl Action {
     }
 
     /// Whether, in visual mode, it acts on what's selected: an operator,
-    /// `p` and `P`, `J` and `r`.
+    /// `S` and `R` on its lines, `p` and `P`, `J` and `r`.
     pub(crate) fn on_selection(self) -> bool {
         matches!(
             self,
-            Self::Operate(_, Target::Selection | Target::SelectedLines)
+            Self::Operate(_, Target::Selection | Target::SelectedLines | Target::Lines)
                 | Self::Put { .. }
                 | Self::Join
                 | Self::Replace(_)
@@ -372,7 +372,7 @@ mod tests {
         // What `.` makes again on as much text, made in visual mode.
         assert!(Action::Operate(Operator::Indent, Target::Selection).on_selection());
         assert!(Action::Replace('x').on_selection());
-        assert!(!Action::Operate(Operator::Change, Target::Lines).on_selection());
+        assert!(Action::Operate(Operator::Change, Target::Lines).on_selection());
         assert!(!Action::Insert(Entry::LineStart).on_selection());
         let word = Action::Select {
             object: Object::Word,

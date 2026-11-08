@@ -424,7 +424,12 @@ impl Reader<'_> {
                 Action::Operate(operator, Target::Selection)
             }
             'x' if visual => Action::Operate(Operator::Delete, Target::Selection),
+            // As Vim's `v_X` and `v_Y`: the lines selected, a block staying
+            // a block.
+            'X' if visual => Action::Operate(Operator::Delete, Target::SelectedLines),
             'Y' if visual => Action::Operate(Operator::Yank, Target::SelectedLines),
+            // As Vim's `v_R`, the lines selected, a block's too, as `S`.
+            'R' if visual => Action::Operate(Operator::Change, Target::Lines),
             '~' if visual => Action::Operate(Operator::Recase(Recase::Toggle), Target::Selection),
             'u' if visual => Action::Operate(Operator::Recase(Recase::Lower), Target::Selection),
             'U' if visual => Action::Operate(Operator::Recase(Recase::Upper), Target::Selection),

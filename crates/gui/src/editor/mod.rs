@@ -1692,6 +1692,7 @@ impl Editor {
     ) -> Done {
         let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
+        let command = self.by_visual_lines(command);
         self.cut_count = None;
         if !again {
             self.start_change(command, copy);
@@ -1919,17 +1920,42 @@ impl Editor {
         }
     }
 
-    /// `target`, but the lines selected (`Y` in visual mode) as what's
-    /// selected once it's by lines, as Vim's `v_Y` makes it, a block
-    /// staying a block.
+    /// `target`, but in visual mode, the lines selected as what's selected
+    /// once it's by lines: for `Y` and `X` (`SelectedLines`), as Vim's
+    /// `v_Y` makes it, a block staying a block; for `S` and `R` (`Lines`),
+    /// a block's lines too.
     fn selecting_lines(&mut self, target: Target) -> Target {
-        if target != Target::SelectedLines {
+        let Mode::Visual(kind) = self.mode else {
             return target;
+        };
+        match target {
+            Target::SelectedLines if kind == Selection::Block => Target::Selection,
+            Target::SelectedLines | Target::Lines => {
+                self.mode = Mode::Visual(Selection::Lines);
+                Target::Selection
+            }
+            target => target,
         }
-        if matches!(self.mode, Mode::Visual(kind) if kind != Selection::Block) {
-            self.mode = Mode::Visual(Selection::Lines);
+    }
+
+    /// `command`, but in visual mode by characters or lines, `D` and `C`
+    /// as the operators on the lines selected they are in Vim: in a block
+    /// they take each line from its left edge on, as their own.
+    fn by_visual_lines(&self, command: Command) -> Command {
+        match (command.action, self.mode) {
+            (Action::DeleteToEnd { change }, Mode::Visual(kind)) if kind != Selection::Block => {
+                let operator = if change {
+                    Operator::Change
+                } else {
+                    Operator::Delete
+                };
+                Command {
+                    action: Action::Operate(operator, Target::Lines),
+                    ..command
+                }
+            }
+            _ => command,
         }
-        Target::Selection
     }
 
     /// Does `command`, which keeps text in a register or puts it from one:
@@ -1962,8 +1988,9 @@ impl Editor {
             }
             // `D` is `d$` and `C` is `c$`, as Vim's: over lines from a
             // line's start `D` takes them whole (`2D`), and with a count
-            // past the last line, they fail.
-            Action::DeleteToEnd { change } if !matches!(self.mode, Mode::Visual(_)) => {
+            // past the last line, they fail. In visual mode by characters
+            // or lines, they're operators by now (see `by_visual_lines`).
+            Action::DeleteToEnd { change } => {
                 let (to_end, count) = (Target::Motion(Motion::LineEnd), command.count);
                 let operator = if change {
                     Operator::Change
@@ -1974,7 +2001,6 @@ impl Editor {
                     self.fail();
                 }
             }
-            Action::DeleteToEnd { change } => self.delete_to_end(change, times, copy, registers),
             Action::Substitute => {
                 self.delete_chars(false, times, copy, registers);
                 self.enter_insert(1);
@@ -2843,36 +2869,6 @@ impl Editor {
         registers.wrote(name, Register::chars(removed), small);
         self.make(edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(line_start + start));
-    }
-
-    /// `D`, or `C` if `change`: from the cursor to its line's end, and to
-    /// the end of `times - 1` lines more, kept in `registers` under `name`.
-    fn delete_to_end(
-        &mut self,
-        change: bool,
-        times: usize,
-        copy: &mut BufferCopy,
-        (registers, name): (&mut Registers, Option<char>),
-    ) {
-        let text = self.text(copy);
-        let at = self.cursor.at;
-        let start = text.byte_at(at);
-        let last = (at.line + times as u64 - 1).min(text.last_line());
-        let end = text.line_end(last).max(start);
-        let removed = text.slice(start, end);
-        let (_, edit) = text.removal(start, end);
-        drop(text);
-        let small = !removed.contains('\n');
-        let wrote = Wrote::Delete {
-            small,
-            history: !small,
-        };
-        registers.wrote(name, Register::chars(removed), wrote);
-        self.make(edit, copy);
-        self.cursor = Cursor::new(self.text(copy).point_of(start));
-        if change {
-            self.enter_insert(1);
-        }
     }
 
     /// `p`, or `P` if `before`: what the register `name` holds, or the

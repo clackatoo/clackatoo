@@ -679,3 +679,54 @@ fn past_a_lines_end_in_every_kind_of_selection_and_back_to_it() {
     assert_eq!(copied("xy\nabc\n", "jv$ggy"), "\na");
     assert_eq!(copied("abc\nxy\n", "v$Vvy"), "abc\n");
 }
+
+/// Three lines, for `D`, `X`, `C`, `S` and `R` in visual mode.
+const THREE: &str = "abc\ndef\nghi\n";
+
+#[test]
+fn visual_d_x_c_s_and_r_take_the_lines_selected_as_vims_do() {
+    for keys in ["lvjD", "lvjX", "lVjD", "lvj2D"] {
+        let mut setup = Setup::new(THREE);
+        setup.keys(keys);
+        assert_eq!(setup.text(), "ghi\n", "{keys}");
+        assert_eq!(setup.cursor(), (0, 1), "{keys}");
+        assert_eq!(setup.editor.mode, Mode::Normal, "{keys}");
+        assert_eq!(setup.register().text, "abc\ndef\n", "{keys}");
+        assert!(setup.register().lines, "{keys}");
+    }
+    assert_eq!(grid_after_three("lvX"), "def\nghi\n");
+    for keys in ["lvjCZ<Esc>", "lvjSZ<Esc>", "lvjRZ<Esc>"] {
+        let mut setup = Setup::new(THREE);
+        setup.keys(keys);
+        assert_eq!(setup.text(), "Z\nghi\n", "{keys}");
+        assert_eq!(setup.cursor(), (0, 0), "{keys}");
+        assert!(setup.register().lines, "{keys}");
+    }
+    assert_eq!(grid_after_three("jlvRZ<Esc>"), "abc\nZ\nghi\n");
+    // In a block, `X` takes the block, and `S` and `R` its lines.
+    assert_eq!(grid_after_three("l<C-v>jX"), "ac\ndf\nghi\n");
+    assert_eq!(grid_after_three("l<C-v>jSZ<Esc>"), "Z\nghi\n");
+    assert_eq!(grid_after_three("l<C-v>jRZ<Esc>"), "Z\nghi\n");
+}
+
+#[test]
+fn dot_makes_a_visual_d_s_or_x_again_on_as_many_lines() {
+    let five = "abc\ndef\nghi\njkl\nmno\n";
+    let after = |keys: &str| {
+        let mut setup = Setup::new(five);
+        setup.keys(keys);
+        setup.text()
+    };
+    assert_eq!(after("lvjD."), "mno\n");
+    assert_eq!(after("lvjSZ<Esc>j."), "Z\nZ\nmno\n");
+    assert_eq!(after("lvjCZ<Esc>j."), "Z\nZ\nmno\n");
+    assert_eq!(after("lvXj."), "def\njkl\nmno\n");
+}
+
+/// The text after typing `keys` into [`THREE`].
+fn grid_after_three(keys: &str) -> String {
+    let mut setup = Setup::new(THREE);
+    setup.keys(keys);
+    assert_eq!(setup.editor.mode, Mode::Normal, "after {keys}");
+    setup.text()
+}
