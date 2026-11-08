@@ -712,10 +712,12 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
     wait(daemon);
 }
 
+/// `clackatoo mcp` serves a chat's tools only showing the secret its
+/// agent was given (CLACKA-215), which `cat`, as the agent here, never
+/// asks for: serving them is tested with an agent that does, in the
+/// daemon's tests.
 #[test]
-fn mcp_serves_a_chats_tools_on_stdio() {
-    use std::io::{BufRead, BufReader, Write};
-
+fn mcp_serves_a_chats_tools_only_to_its_agent() {
     use clackatoo_daemon::Client;
     use clackatoo_protocol::{AgentTools, NewAgent, PaneTerminal};
 
@@ -750,33 +752,25 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     client.new_workspace(None, chat).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
 
-    let mut mcp = Command::new(BINARY)
-        .env("CLACKATOO_WORKSPACES", "off")
-        .env("CLACKATOO_BOARDS", "off")
-        .env("CLACKATOO_RECOVERY", "off")
-        .env("CLACKATOO_MACHINE", "off")
-        .env("CLACKATOO_DISPLAY", "off")
-        .args(["mcp", "--chat", &chat.0.to_string()])
-        .env("XDG_RUNTIME_DIR", runtime.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = mcp.stdin.take().unwrap();
-    let mut output = BufReader::new(mcp.stdout.take().unwrap());
-    let mut ask = |message: &str| {
-        writeln!(input, "{message}").unwrap();
-        let mut line = String::new();
-        output.read_line(&mut line).unwrap();
-        line
-    };
-    let started = ask(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
-    assert!(started.contains(r#""name":"clackatoo""#), "{started}");
-    let listed =
-        ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_panes"}}"#);
-    assert!(listed.contains("pane 1: this chat"), "{listed}");
-    drop(input);
-    assert!(mcp.wait().unwrap().success());
+    // Naming the chat, with no secret or another, is refused.
+    for token in [None, Some("5ec7e7")] {
+        let mut mcp = Command::new(BINARY);
+        mcp.env("CLACKATOO_WORKSPACES", "off")
+            .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
+            .args(["mcp", "--chat", &chat.0.to_string()])
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .stdin(std::process::Stdio::null());
+        if let Some(token) = token {
+            mcp.env("CLACKATOO_MCP_TOKEN", token);
+        }
+        let refused = mcp.output().unwrap();
+        assert!(!refused.status.success());
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(said.contains("served only to its agent"), "{said}");
+    }
 
     // A terminal is no chat, and has no tools.
     let refused = Command::new(BINARY)

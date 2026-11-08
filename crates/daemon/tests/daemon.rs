@@ -13127,8 +13127,16 @@ fn an_agent_is_given_tools_for_its_own_chat_unless_they_are_off() {
     let off = start_tooled_chat(&mut client, AgentTools::Off);
     assert_eq!(last_words(&ask(&mut client, off, "tools")), "[]\n");
     // Nor can anything ask to serve them.
-    let refused = mcp_relay(&daemon, off);
+    let refused = mcp_relay(&daemon, off, None);
     assert!(refused.contains("has none"), "{refused}");
+    // Only the server the agent was told of, showing the chat's secret,
+    // serves its tools: not any process that names the chat.
+    let refused = mcp_relay(&daemon, chat, None);
+    assert!(refused.contains("served only to its agent"), "{refused}");
+    let refused = mcp_relay(&daemon, chat, Some("00"));
+    assert!(refused.contains("served only to its agent"), "{refused}");
+    let token = tools_token(&mut client, chat);
+    assert_eq!(mcp_relay(&daemon, chat, Some(&token)), "");
 }
 
 /// The `_meta` the agent's session in `chat` was last opened with.
@@ -13195,15 +13203,28 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
 }
 
 /// Runs the fake agent's relay for `chat`'s tools, as `clackatoo mcp`,
-/// with nothing to send: what it says on stderr if it can't.
-fn mcp_relay(daemon: &TestDaemon, chat: TerminalId) -> String {
-    let output = std::process::Command::new(fake_agent())
+/// showing `token`, with nothing to send: what it says on stderr if it
+/// can't.
+fn mcp_relay(daemon: &TestDaemon, chat: TerminalId, token: Option<&str>) -> String {
+    let mut relay = std::process::Command::new(fake_agent());
+    relay
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
+        .stdin(std::process::Stdio::null());
+    if let Some(token) = token {
+        relay.env("CLACKATOO_MCP_TOKEN", token);
+    }
+    let output = relay.output().unwrap();
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The secret the chat `chat`'s agent was given for its tools' MCP
+/// server, as the fake agent says the servers it was told of.
+fn tools_token(client: &mut Client, chat: TerminalId) -> String {
+    let words = last_words(&ask(client, chat, "tools"));
+    let tools: serde_json::Value = serde_json::from_str(&words).unwrap();
+    assert_eq!(tools[0]["env"][0]["name"], "CLACKATOO_MCP_TOKEN");
+    tools[0]["env"][0]["value"].as_str().unwrap().to_owned()
 }
 
 #[test]
@@ -13212,9 +13233,11 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
     let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let token = tools_token(&mut client, chat);
     let mut relay = std::process::Command::new(fake_agent())
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
+        .env("CLACKATOO_MCP_TOKEN", token)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -15893,7 +15916,7 @@ fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
         chat,
         &[r#"board_create {"name":"plan","purpose":"who does what"}"#],
     );
-    let told = told_on_connecting(&daemon, chat);
+    let told = told_on_connecting(&daemon, &mut client, chat);
     assert!(
         told.contains(&format!("This chat is chat {chat}")),
         "{told}"
@@ -15905,11 +15928,13 @@ fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
 
 /// What the agent of `chat` is told about its tools when it connects to
 /// them, through the fake agent's relay.
-fn told_on_connecting(daemon: &TestDaemon, chat: TerminalId) -> String {
+fn told_on_connecting(daemon: &TestDaemon, client: &mut Client, chat: TerminalId) -> String {
     use std::io::BufRead;
+    let token = tools_token(client, chat);
     let mut relay = std::process::Command::new(fake_agent())
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
+        .env("CLACKATOO_MCP_TOKEN", token)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -15934,7 +15959,7 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
     let with = start_tooled_chat(&mut client, AgentTools::Ask);
-    let told = told_on_connecting(&daemon, with);
+    let told = told_on_connecting(&daemon, &mut client, with);
     assert!(
         told.contains(
             "For all subagent work, use start_chat, or start_chats for several at once, with a \
@@ -15963,7 +15988,7 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
             resume: None,
         },
     );
-    let told = told_on_connecting(&daemon, without);
+    let told = told_on_connecting(&daemon, &mut client, without);
     assert!(!told.contains("Task"), "{told}");
     assert!(
         told.contains("For all subagent work, use start_chat, or start_chats"),
@@ -17897,9 +17922,11 @@ fn browser_tools_stay_discoverable_but_obey_the_live_setting() {
     let daemon = with_fake_browser(&serde_json::json!({}), None, Duration::from_mins(1));
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
+    let token = tools_token(&mut client, chat);
     let mut relay = std::process::Command::new(fake_agent())
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
+        .env("CLACKATOO_MCP_TOKEN", token)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

@@ -398,11 +398,20 @@ impl Daemon {
     /// Answers [`Request::CarryMcp`](clackatoo_protocol::Request::CarryMcp)
     /// from the client at `token`: it's to serve the tools of the chat
     /// `chat`, once its answer is queued.
-    pub(super) fn carry_mcp(&mut self, token: Token, chat: TerminalId) -> Result<Response, Error> {
-        let tools = self.chat(chat).ok_or(Error::NotAChat(chat))?.tools();
-        if tools == AgentTools::Off || self.config.mcp.is_none() {
+    pub(super) fn carry_mcp(
+        &mut self,
+        token: Token,
+        chat: TerminalId,
+        shown: Option<&str>,
+    ) -> Result<Response, Error> {
+        let served = self.config.mcp.is_some();
+        let hosted = self.chat(chat).ok_or(Error::NotAChat(chat))?;
+        if hosted.tools() == AgentTools::Off || !served {
             return Err(Error::NoTools(format!("chat {chat} has none")));
         }
+        let secret = shown
+            .filter(|shown| hosted.gave_mcp_token(shown))
+            .map(str::to_owned);
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return Err(Error::NoTools("the connection closed".to_owned()));
         };
@@ -411,15 +420,35 @@ impl Daemon {
                 "only a connection to the daemon's socket can serve them".to_owned(),
             ));
         }
-        client.serving_tools = Some(chat);
+        // Only the server the daemon told the chat's agent of, which was
+        // given the chat's secret, serves its tools: not any process that
+        // names the chat.
+        let Some(secret) = secret else {
+            return Err(Error::NoTools(format!(
+                "chat {chat}'s tools are served only to its agent"
+            )));
+        };
+        client.serving_tools = Some((chat, secret));
         Ok(Response::Done)
     }
 
-    /// Whether clackatoo's MCP server serves the chat `chat`'s tools now,
-    /// on a connection its agent started.
+    /// Whether clackatoo's MCP server serves the tools of the chat
+    /// `chat`'s session now: a connection showing the secret given as
+    /// that session opened. One carried through an upgrade, from before
+    /// secrets were kept, serves whichever session the chat has.
     pub(super) fn serves_tools(&self, chat: TerminalId) -> bool {
-        (self.sources.iter()).any(|(_, source)| {
-            matches!(source, Source::Tools(connection) if connection.chat == chat && !connection.finished)
+        let session = self
+            .chat_ref(chat)
+            .and_then(crate::chat::HostedChat::session_mcp_token);
+        (self.sources.iter()).any(|(_, source)| match source {
+            Source::Tools(connection) if connection.chat == chat && !connection.finished => {
+                match (&connection.token, session) {
+                    (None, _) => true,
+                    (Some(shown), Some(session)) => shown == session,
+                    (Some(_), None) => false,
+                }
+            }
+            _ => false,
         })
     }
 
@@ -431,8 +460,9 @@ impl Daemon {
             return None;
         }
         let address = self.listener.local_addr().ok()?;
-        let socket = address.as_pathname()?;
-        Some(mcp::server_entry(&command, socket, chat))
+        let socket = address.as_pathname()?.to_owned();
+        let token = self.chat(chat)?.give_mcp_token();
+        Some(mcp::server_entry(&command, &socket, chat, &token))
     }
 
     /// Turns the client at `token`, which asked to serve a chat's tools
@@ -442,9 +472,15 @@ impl Daemon {
             return;
         };
         self.forget_viewer(token, &client);
-        let (Link::Unix(mut stream), Some(chat)) = (client.link, client.serving_tools) else {
+        let (Link::Unix(mut stream), Some((chat, secret))) = (client.link, client.serving_tools)
+        else {
             return;
         };
+        // Clackatoo's own server serves the session opened last: Codex
+        // didn't start another in its place.
+        if let Some(hosted) = self.chat(chat) {
+            hosted.mcp_served(&secret);
+        }
         let instructions = self.tools_instructions(chat);
         // Agents can cache the first catalogue for the whole session, even
         // when they accept MCP's list_changed notification. Advertise what
@@ -460,13 +496,15 @@ impl Daemon {
             log::error!("chat {chat}: serving its tools failed: {err}");
             return;
         }
-        entry.insert(Source::Tools(Connection::new(
+        let mut connection = Connection::new(
             stream,
             chat,
             client.outgoing,
             (instructions, browser),
             &self.parser,
-        )));
+        );
+        connection.token = Some(secret);
+        entry.insert(Source::Tools(connection));
         log::info!("chat {chat}: its agent's tools are served");
         self.flush_tools(new);
         // The agent waits for the answer before it sends anything, but
@@ -3238,6 +3276,33 @@ mod tests {
     /// An Allow is checked again as it's given: the agent itself may have
     /// moved to a mode that runs nothing since it asked, which takes
     /// nothing back.
+    /// Clackatoo's server serves a session's tools only on a connection
+    /// showing the secret given as that session opened: one of an older
+    /// session's, still open, doesn't serve the next.
+    #[test]
+    fn tools_are_served_to_a_session_by_its_own_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = super::super::agent_files::tests::daemon_with_chat(dir.path());
+        let opened = |session: &str| crate::agent::Opened {
+            session: session.to_owned(),
+            settings: None,
+        };
+        let first = daemon.chat(chat).unwrap().give_mcp_token();
+        daemon.chat(chat).unwrap().connected(opened("s2"));
+        assert!(!daemon.serves_tools(chat), "nothing connected");
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let stream = mio::net::UnixStream::from_std(ours);
+        let info = (String::new(), false);
+        let mut connection = Connection::new(stream, chat, Vec::new(), info, &daemon.parser);
+        connection.token = Some(first);
+        daemon.sources.insert(Source::Tools(connection));
+        assert!(daemon.serves_tools(chat));
+        daemon.chat(chat).unwrap().give_mcp_token();
+        daemon.chat(chat).unwrap().connected(opened("s3"));
+        assert!(!daemon.serves_tools(chat), "an older session's server");
+    }
+
     #[test]
     fn an_allow_after_the_agent_moved_to_plan_mode_runs_nothing() {
         use std::io::{BufRead, BufReader};

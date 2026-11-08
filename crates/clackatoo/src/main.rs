@@ -589,7 +589,11 @@ fn run(command: Command) -> anyhow::Result<()> {
             // bytes back until a newline.
             let input = std::fs::File::from(io::stdin().as_fd().try_clone_to_owned()?);
             let output = std::fs::File::from(io::stdout().as_fd().try_clone_to_owned()?);
-            clackatoo_daemon::mcp::relay(&socket, TerminalId(args.chat), input, output)?;
+            // The secret the daemon gave this chat's MCP server, through
+            // the agent, which only it and the agent know.
+            let token = std::env::var(clackatoo_daemon::mcp::TOKEN_VARIABLE).ok();
+            let chat = TerminalId(args.chat);
+            clackatoo_daemon::mcp::relay(&socket, chat, token.as_deref(), input, output)?;
             Ok(())
         }
     }

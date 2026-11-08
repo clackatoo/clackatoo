@@ -1268,6 +1268,7 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
     };
     let refused = phone.request(Request::CarryMcp {
         chat: chats[0].chat,
+        token: None,
     });
     assert!(
         matches!(&refused, Response::Error(Error::NoTools(why)) if why.contains("socket")),

@@ -147,7 +147,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 127;
+pub const PROTOCOL_VERSION: u32 = 129;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -924,6 +924,14 @@ pub enum Request {
     CarryMcp {
         /// The chat.
         chat: TerminalId,
+        /// The secret the daemon gave the agent's MCP server for the chat,
+        /// in its environment, as `CLACKATOO_MCP_TOKEN`: one without it,
+        /// as from a client older than protocol 129, is refused.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::MCP_TOKEN }, _>",
+            deserialize_with = "wire::since::<{ wire::MCP_TOKEN }, _, _>"
+        )]
+        token: Option<String>,
     },
     /// Starts sending the buffer: a snapshot, then each change to it (see
     /// [`BufferUpdate`]). Attaching twice sends a fresh snapshot.

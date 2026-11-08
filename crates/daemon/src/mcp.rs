@@ -336,6 +336,9 @@ pub(crate) struct Connection {
     /// Whether this daemon supports browsing. The catalogue stays stable
     /// even when the chat's Browser setting changes.
     browser: bool,
+    /// The secret it showed for the chat's tools, which says the session
+    /// it serves: `None` for one an upgrade carried, which keeps none.
+    pub(crate) token: Option<String>,
 }
 
 impl Connection {
@@ -361,6 +364,7 @@ impl Connection {
             finished: false,
             instructions,
             browser,
+            token: None,
         }
     }
 
@@ -479,6 +483,8 @@ impl Connection {
             finished: false,
             instructions,
             browser: live.browser,
+            // The handover keeps no secret: it was shown as it connected.
+            token: None,
         })
     }
 
@@ -1756,10 +1762,11 @@ fn clackatoo_tools() -> Value {
 pub fn relay(
     socket: &Path,
     chat: TerminalId,
+    token: Option<&str>,
     mut input: impl Read + Send + 'static,
     mut output: impl Write,
 ) -> Result<(), ClientError> {
-    let mut daemon = connect(socket, chat)?;
+    let mut daemon = connect(socket, chat, token)?;
     let mut to_daemon = daemon.try_clone()?;
     std::thread::Builder::new()
         .name("mcp-input".into())
@@ -1789,12 +1796,16 @@ const RECONNECT: [Duration; 5] = [
 /// again a few times, a little later each: the listening socket outlives
 /// the upgrade, and the next build answers. A daemon that says no isn't
 /// asked again.
-fn connect(socket: &Path, chat: TerminalId) -> Result<StdUnixStream, ClientError> {
+fn connect(
+    socket: &Path,
+    chat: TerminalId,
+    token: Option<&str>,
+) -> Result<StdUnixStream, ClientError> {
     let mut waits = RECONNECT.iter();
     loop {
         let tried = crate::client::connect_socket(socket)
             .map_err(ClientError::Connect)
-            .and_then(|mut stream| open(&mut stream, chat).map(|()| stream));
+            .and_then(|mut stream| open(&mut stream, chat, token).map(|()| stream));
         match tried {
             Ok(stream) => return Ok(stream),
             Err(
@@ -1819,8 +1830,12 @@ fn connect(socket: &Path, chat: TerminalId) -> Result<StdUnixStream, ClientError
 }
 
 /// Greets the daemon on `stream` and asks it to serve the chat's tools
-/// there.
-fn open(stream: &mut StdUnixStream, chat: TerminalId) -> Result<(), ClientError> {
+/// there, showing `token`, the secret it was given for them.
+fn open(
+    stream: &mut StdUnixStream,
+    chat: TerminalId,
+    token: Option<&str>,
+) -> Result<(), ClientError> {
     // A socket nothing serves would otherwise hang.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     // The relay is usually the daemon's own program, but needn't be after
@@ -1833,7 +1848,8 @@ fn open(stream: &mut StdUnixStream, chat: TerminalId) -> Result<(), ClientError>
     )?)?;
     let mut decoder = FrameDecoder::new();
     let wire = agree(receive(stream, &mut decoder, PROTOCOL_VERSION)?)?;
-    let carry = ClientMessage::Request(Request::CarryMcp { chat });
+    let token = token.map(str::to_owned);
+    let carry = ClientMessage::Request(Request::CarryMcp { chat, token });
     stream.write_all(&frame::encode(wire, &carry)?)?;
     match receive(stream, &mut decoder, wire)? {
         ServerMessage::Response(Response::Done) => {}
@@ -1866,13 +1882,18 @@ fn copy(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
     }
 }
 
+/// What the agent's MCP server is given its chat's secret in: never its
+/// arguments, which any process can read.
+pub const TOKEN_VARIABLE: &str = "CLACKATOO_MCP_TOKEN";
+
 /// The ACP `mcpServers` entry that tells an agent how to start
 /// `command`, `clackatoo mcp`, to reach the tools of the chat `chat` from
-/// the daemon listening at `socket`.
+/// the daemon listening at `socket`, showing `token`.
 pub(crate) fn server_entry(
     command: &[std::ffi::OsString],
     socket: &Path,
     chat: TerminalId,
+    token: &str,
 ) -> Value {
     let (program, args) = command
         .split_first()
@@ -1889,7 +1910,8 @@ pub(crate) fn server_entry(
         "--socket".to_owned(),
         socket.to_string_lossy().into_owned(),
     ]);
-    json!({ "name": SERVER_NAME, "command": program, "args": args, "env": [] })
+    let env = json!([{ "name": TOKEN_VARIABLE, "value": token }]);
+    json!({ "name": SERVER_NAME, "command": program, "args": args, "env": env })
 }
 
 #[cfg(test)]
@@ -1931,14 +1953,16 @@ mod tests {
                 .ok()?;
             Some(carry)
         });
-        let opened = open(&mut relay, TerminalId(3));
+        let opened = open(&mut relay, TerminalId(3), Some("t"));
         drop(relay);
         let carried = fake.join().unwrap();
         if opened.is_ok() {
+            let token = (reply >= clackatoo_protocol::wire::MCP_TOKEN).then(|| "t".to_owned());
             assert_eq!(
                 carried,
                 Some(ClientMessage::Request(Request::CarryMcp {
-                    chat: TerminalId(3)
+                    chat: TerminalId(3),
+                    token,
                 }))
             );
         }
@@ -1986,12 +2010,13 @@ mod tests {
                 .unwrap();
             carry
         });
-        let connected = connect(&socket, TerminalId(3));
+        let connected = connect(&socket, TerminalId(3), Some("t"));
         assert!(connected.is_ok(), "{connected:?}");
         assert_eq!(
             fake.join().unwrap(),
             ClientMessage::Request(Request::CarryMcp {
-                chat: TerminalId(3)
+                chat: TerminalId(3),
+                token: Some("t".to_owned()),
             })
         );
     }
@@ -2235,12 +2260,18 @@ mod tests {
             &["/bin/clackatoo".into(), "mcp".into()],
             Path::new("/run/c.sock"),
             TerminalId(7),
+            "5ec7e7",
         );
         assert_eq!(entry["name"], "clackatoo");
         assert_eq!(entry["command"], "/bin/clackatoo");
         assert_eq!(
             entry["args"],
             json!(["mcp", "--chat", "7", "--socket", "/run/c.sock"])
+        );
+        // The secret goes in its environment, never its arguments.
+        assert_eq!(
+            entry["env"],
+            json!([{ "name": "CLACKATOO_MCP_TOKEN", "value": "5ec7e7" }])
         );
     }
 }

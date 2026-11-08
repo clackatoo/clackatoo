@@ -810,6 +810,14 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ]))]),
         })),
     ));
+    // An agent's MCP server showing its chat's secret.
+    samples.push((
+        crate::wire::MCP_TOKEN,
+        Client(ClientMessage::Request(Request::CarryMcp {
+            chat: TerminalId(3),
+            token: Some("5ec7e7".into()),
+        })),
+    ));
     // An explorer attached asking for changes, and a folder sent as what
     // changed in it.
     let files = FilesId(4);

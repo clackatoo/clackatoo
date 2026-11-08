@@ -556,6 +556,11 @@ pub(crate) struct HostedChat {
     /// `clackatoo` of its own, which it starts instead: no tool of that
     /// name is ours then.
     own_server_lost: bool,
+    /// The secrets its agent's MCP server was given, the latest few, the
+    /// newest last, each with the session it was given as, once that
+    /// opened: only a server showing one serves the chat's tools, and only
+    /// the session's own is clackatoo's server for that session.
+    mcp_tokens: VecDeque<(Option<String>, String)>,
     /// Its agent's account's limits, as the daemon last heard them from
     /// any of that agent's chats, shown with the context it fills. Not
     /// handed over: after an upgrade they come again with the next that
@@ -805,6 +810,7 @@ impl HostedChat {
             tasks_session: None,
             own_tools: VecDeque::new(),
             own_server_lost: false,
+            mcp_tokens: VecDeque::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
@@ -1672,6 +1678,12 @@ impl HostedChat {
         let fresh = !opened.session.is_empty();
         if fresh {
             self.session = Some(opened.session);
+        }
+        // The secret given as it was asked for is the session's.
+        if let Some((given, _)) = self.mcp_tokens.back_mut()
+            && given.is_none()
+        {
+            *given = self.session.clone();
         }
         if let Some(options) = &opened.settings {
             self.set_settings(settings_of(options));
@@ -2561,6 +2573,53 @@ impl HostedChat {
         self.asking.push_back((Asker::Agent(request), question));
         self.show_question();
         true
+    }
+
+    /// A new secret for the MCP server its agent is told of as a session
+    /// opens, which the server shows to serve the chat's tools.
+    pub(crate) fn give_mcp_token(&mut self) -> String {
+        /// How many are kept: more than sessions open at once.
+        const KEPT: usize = 8;
+        use ring::rand::SecureRandom as _;
+        let mut bytes = [0u8; 16];
+        // The system's source fails only before it's ready, long before a
+        // chat opens; a server then can't show the secret, and goes
+        // without the chat's tools.
+        if ring::rand::SystemRandom::new().fill(&mut bytes).is_err() {
+            return String::new();
+        }
+        let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        if self.mcp_tokens.len() == KEPT {
+            self.mcp_tokens.pop_front();
+        }
+        self.mcp_tokens.push_back((None, token.clone()));
+        token
+    }
+
+    /// Whether `token` is one of the secrets given for its MCP server.
+    pub(crate) fn gave_mcp_token(&self, token: &str) -> bool {
+        !token.is_empty() && self.mcp_tokens.iter().any(|(_, given)| given == token)
+    }
+
+    /// The secret its current session's MCP server was given, if known.
+    pub(crate) fn session_mcp_token(&self) -> Option<&str> {
+        let session = self.session.as_deref()?;
+        (self.mcp_tokens.iter().rev())
+            .find(|(given, _)| given.as_deref() == Some(session))
+            .map(|(_, token)| token.as_str())
+    }
+
+    /// Clackatoo's MCP server connected, showing `token`: if it's the
+    /// newest secret, for the session opened last, that session's server is
+    /// clackatoo's after all.
+    pub(crate) fn mcp_served(&mut self, token: &str) {
+        if self
+            .mcp_tokens
+            .back()
+            .is_some_and(|(_, newest)| newest == token)
+        {
+            self.own_server_lost = false;
+        }
     }
 
     /// How many of the questions waiting `asker` says are of a kind.
@@ -5845,6 +5904,36 @@ mod tests {
                            {{"optionId":"cancel","name":"Cancel","kind":"reject_once"}}]}}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn the_secret_given_as_a_session_opens_is_that_sessions() {
+        let mut chat = chat_with("codex");
+        let first = chat.give_mcp_token();
+        assert_eq!(first.len(), 32);
+        connect(&mut chat, "s");
+        assert_eq!(chat.session_mcp_token(), Some(first.as_str()));
+        assert!(chat.gave_mcp_token(&first));
+        assert!(!chat.gave_mcp_token("") && !chat.gave_mcp_token("5ec7e7"));
+        // Another session asked for: the one open keeps its own till then.
+        let second = chat.give_mcp_token();
+        assert_ne!(first, second);
+        assert_eq!(chat.session_mcp_token(), Some(first.as_str()));
+        // Clackatoo's own server connecting for the session asked for last
+        // says Codex didn't start another in its place; for an older one,
+        // nothing.
+        chat.own_server_lost = true;
+        chat.mcp_served(&first);
+        assert!(chat.own_server_lost);
+        chat.mcp_served(&second);
+        assert!(!chat.own_server_lost);
+        connect(&mut chat, "t");
+        assert_eq!(chat.session_mcp_token(), Some(second.as_str()));
+        // Opened again with no new id, as a load answers, it's the same
+        // session's, and so its secret.
+        let third = chat.give_mcp_token();
+        connect(&mut chat, "");
+        assert_eq!(chat.session_mcp_token(), Some(third.as_str()));
     }
 
     #[test]

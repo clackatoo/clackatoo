@@ -415,8 +415,8 @@ struct Client {
     /// The connection is to become a carrier, once its answer is queued.
     carrying: bool,
     /// The connection is to serve this chat's agent's tools, once its
-    /// answer is queued.
-    serving_tools: Option<TerminalId>,
+    /// answer is queued, with the secret it showed for them.
+    serving_tools: Option<(TerminalId, String)>,
     /// Over QUIC, the stream each terminal's view updates go on, so one
     /// terminal's never wait behind another's, or behind answers. Kept
     /// while the terminal lives, even when the client stops following it:
@@ -4118,7 +4118,9 @@ impl Daemon {
     /// agent's tools are served on.
     fn carry(&mut self, token: Token, request: &Request) -> Result<Response, Error> {
         match request {
-            &Request::CarryMcp { chat } => self.carry_mcp(token, chat),
+            Request::CarryMcp { chat, token: shown } => {
+                self.carry_mcp(token, *chat, shown.as_deref())
+            }
             _ => self.carry_quic(token),
         }
     }

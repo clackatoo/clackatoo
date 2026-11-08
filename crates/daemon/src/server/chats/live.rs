@@ -109,8 +109,8 @@ impl Daemon {
             if matches!(client.link, super::super::Link::Unix(_))
                 && !client.finished
                 && (!client.asked
-                    || client.serving_tools.is_some_and(|chat| {
-                        chats.iter().any(|(id, _)| *id == chat)
+                    || client.serving_tools.as_ref().is_some_and(|(chat, _)| {
+                        chats.iter().any(|(id, _)| id == chat)
                     })))
         });
         let files = crate::agent::client_files(name);

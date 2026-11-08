@@ -170,7 +170,10 @@ fn main() {
     {
         let chat = clackatoo_protocol::TerminalId(chat.parse().unwrap());
         let (input, output) = (std::io::stdin(), std::io::stdout());
-        if let Err(err) = clackatoo_daemon::mcp::relay(socket.as_ref(), chat, input, output) {
+        let token = std::env::var(clackatoo_daemon::mcp::TOKEN_VARIABLE).ok();
+        let relayed =
+            clackatoo_daemon::mcp::relay(socket.as_ref(), chat, token.as_deref(), input, output);
+        if let Err(err) = relayed {
             eprintln!("fake_agent mcp: {err}");
             std::process::exit(1);
         }
@@ -2527,8 +2530,13 @@ fn call_tools(session: &str, server: &Value, calls: &[String]) {
     let args: Vec<&str> = (server["args"].as_array().unwrap().iter())
         .map(|arg| arg.as_str().unwrap())
         .collect();
+    // With the environment it's given, its secret in it, as an agent
+    // starts an MCP server.
+    let env = (server["env"].as_array().into_iter().flatten())
+        .filter_map(|variable| Some((variable["name"].as_str()?, variable["value"].as_str()?)));
     let mut child = Command::new(server["command"].as_str().unwrap())
         .args(args)
+        .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
