@@ -149,7 +149,7 @@ To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`]
 
 ### Keeping a terminal running
 
-`:keep` marks the focused terminal to run its command again by itself as the daemon starts afresh, in its folder: the one exception to nothing running by itself, and only because you asked. Its command is the one its shell runs, or else ran last, as the shell's integration said it with its secret, taken as you mark it and kept: never what a program printed, nor whatever runs later. A shell that hasn't said, as one clackatoo didn't start as your shell, can't be marked. A terminal marked so offers nothing after a restart: it runs.
+`:keep` marks the focused terminal to run its command again by itself as the daemon starts afresh, in its folder: the one exception to nothing running by itself, and only because you asked. Its command is the one its shell runs, or else ran last, as the shell's integration said it with its secret, taken as you mark it and kept: never what a program printed, nor whatever runs later. A shell that hasn't said, as one clackatoo didn't start as your shell, can't be marked. A terminal marked so offers nothing after a restart: it runs. The secret is one of the shell's variables, so a command typed at the shell, yours or an agent's, can read it. What the shell said a command is stays, whatever that command prints with the secret while it runs; but once it has printed the marks that say it ended, it can say another started, with the secret, and that's the command an offer or `:keep` would then take. Read what `:keep` says it keeps.
 
 | Command | Does |
 |---|---|

