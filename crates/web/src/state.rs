@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatPatch, ChatSummary, ClientMessage, Content, Event, PROTOCOL_VERSION,
-    Patch, Request, Response, ServerMessage, Size, TerminalId, TerminalInfo, View, ViewUpdate,
-    Workspace, WorkspaceId, Workspaces,
+    ChatAction, ChatNode, ChatPatch, ChatSummary, ClientMessage, Content, Event, MachineId,
+    PROTOCOL_VERSION, Patch, Request, Response, ServerMessage, Size, TerminalId, TerminalInfo,
+    View, ViewUpdate, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::keys::{self, Key, Modifiers};
@@ -225,6 +225,23 @@ pub struct State {
     /// The failures of background tabs the list said were seen, which it
     /// goes on saying while it's shown.
     pub seen_failures: Vec<(clackatoo_protocol::TabId, i32)>,
+    /// Which daemon, and which run of it, the workspaces last came from:
+    /// a daemon started afresh numbers its chats and terminals from 1
+    /// again, so the page's chat 7 may be another chat now.
+    run: Option<(MachineId, u64)>,
+    /// The run became known, or changed, since the app last looked.
+    pub run_news: Option<RunNews>,
+}
+
+/// What became of the daemon's run, for the app: drafts are kept in the
+/// page's storage under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunNews {
+    /// It became known.
+    Known,
+    /// It changed: the daemon started afresh. What was shown is let go,
+    /// and the app goes back to the list.
+    Restarted,
 }
 
 /// What came of a message from the daemon.
@@ -267,6 +284,8 @@ impl Default for State {
             ports: Vec::new(),
             dismissing: None,
             seen_failures: Vec::new(),
+            run: None,
+            run_news: None,
         }
     }
 }
@@ -366,7 +385,7 @@ impl State {
         }
         match (response, asked) {
             (Response::Workspaces(workspaces), _) => {
-                self.workspaces = workspaces;
+                self.workspaces_came(workspaces);
                 self.dirty.home = true;
             }
             (Response::Chats(chats), _) => {
@@ -474,7 +493,7 @@ impl State {
     fn event(&mut self, event: Event) {
         match event {
             Event::Workspaces(workspaces) => {
-                self.workspaces = workspaces;
+                self.workspaces_came(workspaces);
                 self.dirty.home = true;
                 // Terminals may have come or gone.
                 self.list_terminals();
@@ -497,6 +516,70 @@ impl State {
             Event::Listening(listening) => self.listening(listening),
             _ => {}
         }
+    }
+
+    /// The daemon's run, once known: drafts are kept under it.
+    #[must_use]
+    pub fn run(&self) -> Option<u64> {
+        self.run.map(|(_, run)| run)
+    }
+
+    /// Takes in the workspaces, and which run of which daemon they came
+    /// from: if it's another than before, the daemon started afresh.
+    fn workspaces_came(&mut self, workspaces: Workspaces) {
+        let run = (workspaces.machine.as_ref()).map(|machine| (machine.id, machine.run));
+        self.workspaces = workspaces;
+        let Some(run) = run else {
+            return;
+        };
+        match self.run {
+            Some(known) if known == run => return,
+            Some(_) => {
+                self.started_afresh();
+                self.run_news = Some(RunNews::Restarted);
+            }
+            None => {
+                self.run_news.get_or_insert(RunNews::Known);
+            }
+        }
+        self.run = Some(run);
+    }
+
+    /// The daemon started afresh while the page was open, as after the
+    /// computer restarted: its chats and terminals are numbered from 1
+    /// again, so what the page holds by their numbers is of others now.
+    /// The chat or terminal shown is let go, whatever its attach sent
+    /// before this was known comes to, and every draft and photo goes, so
+    /// none is sent to, or told as the draft of, a chat it wasn't for.
+    fn started_afresh(&mut self) {
+        let shown = self.open.is_some() || self.term.is_some();
+        self.close_chat();
+        self.close_terminal();
+        for (asked, _) in &mut self.asked {
+            if matches!(asked, Asked::Doing(_)) {
+                *asked = Asked::Quiet;
+            }
+        }
+        self.drafts.clear();
+        self.drafts_synced.clear();
+        self.drafts_touched.clear();
+        self.drafts_loaded.clear();
+        self.drafts_changed.clear();
+        self.images.clear();
+        self.loading_images.clear();
+        self.submitting.clear();
+        self.dismissing = None;
+        self.seen_failures.clear();
+        if shown {
+            self.note = Some(
+                "The daemon restarted, numbering its chats and terminals afresh, so the one \
+                 shown was closed."
+                    .into(),
+            );
+        }
+        self.dirty.home = true;
+        self.dirty.header = true;
+        self.dirty.footer = true;
     }
 
     /// Takes in a change to a chat's view.
@@ -1430,6 +1513,112 @@ mod tests {
         assert_eq!(shown(&state), "");
         // So a draft it told late can't leave the message in the daemon's.
         assert_eq!(told(&mut state), [""]);
+    }
+
+    /// The daemon's workspaces, none, from its run `run`.
+    fn workspaces_of_run(run: u64) -> Workspaces {
+        Workspaces {
+            machine: Some(clackatoo_protocol::Machine {
+                id: clackatoo_protocol::MachineId([7; 16]),
+                name: "desk".into(),
+                run,
+            }),
+            ..Workspaces::default()
+        }
+    }
+
+    #[test]
+    fn the_daemons_run_is_learned_once_without_losing_anything() {
+        let mut state = drafting();
+        type_in_box(&mut state, "and then");
+        state.receive(ServerMessage::Event(Event::Workspaces(workspaces_of_run(
+            1,
+        ))));
+        assert_eq!(state.run(), Some(1));
+        assert_eq!(state.run_news.take(), Some(RunNews::Known));
+        state.receive(ServerMessage::Event(Event::Workspaces(workspaces_of_run(
+            1,
+        ))));
+        assert_eq!(state.run_news, None);
+        assert_eq!(shown(&state), "and then");
+        assert_eq!(state.open.as_ref().unwrap().id, TerminalId(4));
+    }
+
+    #[test]
+    fn a_daemon_started_afresh_keeps_nothing_of_its_old_chats_and_terminals() {
+        let mut state = drafting();
+        state.receive(ServerMessage::Event(Event::Workspaces(workspaces_of_run(
+            1,
+        ))));
+        state.run_news = None;
+        type_in_box(&mut state, "the staging password is");
+        // The daemon starts afresh, numbering its chats from 1 again: chat
+        // 4 is another chat now.
+        state.lost(1);
+        state.connected();
+        state.take_outbox();
+        let answers = [
+            Response::Workspaces(workspaces_of_run(2)),
+            Response::Chats(Vec::new()),
+            Response::Terminals(Vec::new()),
+        ];
+        for answer in answers {
+            state.receive(ServerMessage::Response(answer));
+        }
+        assert_eq!(state.run_news, Some(RunNews::Restarted));
+        assert_eq!(state.run(), Some(2));
+        assert!(state.open.is_none() && state.term.is_none());
+        assert_eq!(shown(&state), "");
+        assert_eq!(
+            state.take_outbox(),
+            [ClientMessage::Request(Request::Detach {
+                terminal: TerminalId(4)
+            })]
+        );
+        // The attach sent before the daemon was known to be new, answered
+        // either way: nothing is shown or said of it.
+        state.receive(ServerMessage::Response(Response::Error(
+            clackatoo_protocol::Error::NoSuchTerminal(TerminalId(4)),
+        )));
+        state.receive(kept(""));
+        assert!(state.open.is_none());
+        let note = state.note.as_deref().unwrap_or_default();
+        assert!(note.starts_with("The daemon restarted"), "{note}");
+        assert_eq!(
+            state.take_outbox(),
+            [ClientMessage::FrameDone {
+                terminal: TerminalId(4)
+            }]
+        );
+        // Nothing typed for the old chat 4 is told as the new one's.
+        state.tell_draft_of(TerminalId(4));
+        assert!(told(&mut state).is_empty());
+    }
+
+    #[test]
+    fn a_terminal_shown_is_let_go_when_the_daemon_starts_afresh() {
+        let mut state = showing_a_terminal(InputModes::default());
+        state.receive(ServerMessage::Event(Event::Workspaces(workspaces_of_run(
+            1,
+        ))));
+        state.lost(1);
+        state.connected();
+        state.take_outbox();
+        state.receive(ServerMessage::Response(Response::Workspaces(
+            workspaces_of_run(2),
+        )));
+        assert!(state.term.is_none());
+        assert_eq!(state.run_news, Some(RunNews::Restarted));
+        assert!(
+            state
+                .take_outbox()
+                .contains(&ClientMessage::Request(Request::Detach {
+                    terminal: TerminalId(9)
+                })),
+        );
+        // Keys typed now reach no terminal.
+        state.type_key(&Key::Text("y".into()), Modifiers::default());
+        assert!(typed(&mut state).is_empty());
     }
 
     #[test]

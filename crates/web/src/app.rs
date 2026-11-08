@@ -36,7 +36,7 @@ use self::terminal::TermPage;
 use crate::action::{Action, Pick, RowKey};
 use crate::dom;
 use crate::keys::{Key, Modifiers};
-use crate::state::{Received, State};
+use crate::state::{Received, RunNews, State};
 use crate::term::Fit;
 use crate::ui::el;
 use crate::view::{self, Notifications, pairing};
@@ -63,6 +63,10 @@ const REFIT_AFTER: i32 = 300;
 /// How long typing pauses, in milliseconds, before what's typed in a
 /// chat's box is told the daemon, as in the window.
 const DRAFT_PAUSE: i32 = 600;
+
+/// What the page's storage keys for drafts begin with: then the daemon's
+/// run, and the chat, as `clackatoo.draft.RUN.CHAT`.
+const DRAFT_KEY: &str = "clackatoo.draft.";
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -1368,8 +1372,49 @@ impl App {
         for chat in std::mem::take(&mut self.state.drafts_changed) {
             self.save_draft(chat);
         }
+        if let Some(news) = self.state.run_news.take() {
+            self.run_known(news);
+        }
         self.send();
         self.draw_soon();
+    }
+
+    /// The daemon's run became known, or changed: the drafts in the
+    /// page's storage are kept under it, so those of another run, whose
+    /// chats had the same numbers, are dropped, and the chat shown takes
+    /// the one kept for it. After the daemon started afresh, the app goes
+    /// back to the list.
+    fn run_known(&mut self, news: RunNews) {
+        let Some(run) = self.state.run() else {
+            return;
+        };
+        if let Ok(Some(storage)) = self.window.session_storage() {
+            let ours = format!("{DRAFT_KEY}{run}.");
+            let length = storage.length().unwrap_or(0);
+            let keys: Vec<String> = (0..length)
+                .filter_map(|at| storage.key(at).ok().flatten())
+                .filter(|key| key.starts_with(DRAFT_KEY) && !key.starts_with(&ours))
+                .collect();
+            for key in keys {
+                let _ = storage.remove_item(&key);
+            }
+        }
+        if news == RunNews::Restarted {
+            self.go("");
+            return;
+        }
+        // Typed before the run was known, as while the page connected.
+        let typed: Vec<TerminalId> = self.state.drafts.keys().copied().collect();
+        for chat in typed {
+            self.save_draft(chat);
+        }
+        if let Some(chat) = self.state.open.as_ref().map(|open| open.id)
+            && !self.state.drafts.contains_key(&chat)
+            && let Some(draft) = self.stored_draft(chat)
+        {
+            self.state.drafts.insert(chat, draft);
+            self.state.dirty.footer = true;
+        }
     }
 
     /// The WebSocket closed, with `code`.
@@ -2280,9 +2325,22 @@ impl App {
             );
     }
 
+    /// The page's storage key for chat `chat`'s draft, once the daemon's
+    /// run is known: chat numbers are only the daemon's run's.
+    fn draft_key(&self, chat: TerminalId) -> Option<String> {
+        Some(format!("{DRAFT_KEY}{}.{chat}", self.state.run()?))
+    }
+
+    /// The draft kept in the page's storage for chat `chat`, if one is.
+    fn stored_draft(&self, chat: TerminalId) -> Option<String> {
+        let key = self.draft_key(chat)?;
+        self.window.session_storage().ok()??.get_item(&key).ok()?
+    }
+
     fn save_draft(&self, chat: TerminalId) {
-        if let Ok(Some(storage)) = self.window.session_storage() {
-            let key = format!("clackatoo.draft.{chat}");
+        if let Some(key) = self.draft_key(chat)
+            && let Ok(Some(storage)) = self.window.session_storage()
+        {
             match self.state.drafts.get(&chat).filter(|s| !s.is_empty()) {
                 Some(text) => {
                     let _ = storage.set_item(&key, text);
@@ -2503,8 +2561,7 @@ impl App {
                 self.page = None;
             }
             if !self.state.drafts.contains_key(&chat)
-                && let Ok(Some(storage)) = self.window.session_storage()
-                && let Ok(Some(draft)) = storage.get_item(&format!("clackatoo.draft.{chat}"))
+                && let Some(draft) = self.stored_draft(chat)
             {
                 self.state.drafts.insert(chat, draft);
             }
