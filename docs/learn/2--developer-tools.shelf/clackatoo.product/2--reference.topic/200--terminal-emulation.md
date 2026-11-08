@@ -84,6 +84,8 @@ A program you started from a shell is no different from one the daemon started: 
 | `CSI 6 n` and `CSI ? 6 n` (cursor position) | `CSI <line> ; <col> R`, with `?` for the second form. Relative to the scroll region in origin mode. |
 | `CSI > q` (terminal version) | `DCS > \| clackatoo <version> ST` |
 
+A program that asks faster than it reads the answers, as one at the far end of an ssh connection that has stopped reading can, gets no more once 64 KiB of answers and input wait for it. Answers are dropped whole, never cut, and what you type still goes in.
+
 ## Not supported yet
 
 These are ignored:

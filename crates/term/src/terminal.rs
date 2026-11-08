@@ -75,6 +75,11 @@ pub enum CursorShape {
     Bar,
 }
 
+/// How many bytes of replies to queries may wait to be taken. One read of
+/// a program's output can hold far more queries than this, each answered
+/// with several times its own length.
+const MAX_REPLIES: usize = 64 * 1024;
+
 /// A terminal emulator, minus everything that touches the outside world.
 ///
 /// Bytes from the program go in through [`advance`](Self::advance). The
@@ -1719,8 +1724,13 @@ impl Emulator {
         }
     }
 
+    /// Queues `bytes`, one whole reply, unless [`MAX_REPLIES`] are
+    /// waiting already: a program asking faster than it reads gets no
+    /// more answers, and never part of one, until they're taken.
     pub(crate) fn reply(&mut self, bytes: &[u8]) {
-        self.replies.extend_from_slice(bytes);
+        if self.replies.len() + bytes.len() <= MAX_REPLIES {
+            self.replies.extend_from_slice(bytes);
+        }
     }
 }
 

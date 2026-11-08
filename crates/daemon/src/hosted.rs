@@ -22,6 +22,13 @@ use crate::shell;
 /// larger than any real one fit.
 const MAX_PENDING_INPUT: usize = 8 * 1024 * 1024;
 
+/// How much input may wait before replies to the program's queries are
+/// dropped, whole: a program asking faster than it reads the answers, as
+/// one behind ssh to a host that has stopped reading, would otherwise
+/// have them kept without end. An answer behind this many unread is stale
+/// whatever it says.
+const MAX_PENDING_REPLIES: usize = 64 * 1024;
+
 /// What happened when output was read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadOutcome {
@@ -50,6 +57,9 @@ pub(crate) struct HostedTerminal {
     /// Input written by clients (and replies to the program's queries) that
     /// the PTY hasn't accepted yet.
     input: Vec<u8>,
+    /// Whether replies have been dropped since the last that weren't, to
+    /// say so once.
+    dropping_replies: bool,
     recording: Option<BufWriter<File>>,
     /// The secret the shell's integration adds to its marks, if it has
     /// one (see [`shell`]).
@@ -169,6 +179,7 @@ impl HostedTerminal {
             process: Some(spawned.process),
             status: TerminalStatus::Running,
             input: Vec::new(),
+            dropping_replies: false,
             recording,
             secret,
             exe,
@@ -256,6 +267,7 @@ impl HostedTerminal {
                 handover::Status::Killed(signal) => TerminalStatus::Killed(signal),
             },
             input: terminal.input.clone(),
+            dropping_replies: false,
             recording: None,
             secret,
             exe: None,
@@ -493,11 +505,29 @@ impl HostedTerminal {
             self.pty = Some(pty);
             let replies = self.emulator.take_replies();
             if !replies.is_empty() {
-                self.input.extend_from_slice(&replies);
-                self.flush_input();
+                self.queue_replies(&replies);
             }
         }
         outcome
+    }
+
+    /// Queues `replies`, whole replies to the program's queries, unless
+    /// they'd make more than [`MAX_PENDING_REPLIES`] wait: then they're
+    /// dropped, all of them, as a cut one is worse than none.
+    fn queue_replies(&mut self, replies: &[u8]) {
+        self.flush_input();
+        if self.input.len() + replies.len() > MAX_PENDING_REPLIES {
+            if !std::mem::replace(&mut self.dropping_replies, true) {
+                log::debug!(
+                    "terminal {}: replies dropped: the program isn't reading them",
+                    self.id
+                );
+            }
+            return;
+        }
+        self.dropping_replies = false;
+        self.input.extend_from_slice(replies);
+        self.flush_input();
     }
 
     fn process_output(&mut self, bytes: &[u8]) {
@@ -539,7 +569,9 @@ impl HostedTerminal {
         if self.pty.is_none() {
             return Err(Error::TerminalExited(self.id));
         }
-        if self.input.len() + bytes.len() > MAX_PENDING_INPUT {
+        // Replies waiting are never counted against the user's typing,
+        // so a program flooding queries can't keep keys out.
+        if self.input.len() + bytes.len() > MAX_PENDING_INPUT + MAX_PENDING_REPLIES {
             return Err(Error::InputBacklogFull(self.id));
         }
         self.input.extend_from_slice(bytes);
@@ -658,4 +690,59 @@ fn start_recording(path: &Path, request: &NewTerminal) -> io::Result<BufWriter<F
     let mut file = BufWriter::new(File::create(path)?);
     file.write_all(recording::header(request.size).as_bytes())?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// A terminal running `script` in `sh`.
+    fn running(script: &str) -> HostedTerminal {
+        let request = NewTerminal {
+            size: Size::new(80, 24).unwrap(),
+            command: Some(vec!["sh".into(), "-c".into(), script.into()]),
+            cwd: Some("/".into()),
+            record_to: None,
+        };
+        HostedTerminal::start(TerminalId(1), &request, &DaemonConfig::from_env(), None).unwrap()
+    }
+
+    /// Reads `terminal`'s output until there's been none for a while,
+    /// noting the most input that waited for it meanwhile.
+    fn read_all(terminal: &mut HostedTerminal) -> usize {
+        let mut buffer = vec![0; 4096];
+        let (mut most, mut quiet) = (0, 0);
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while quiet < 50 && Instant::now() < give_up {
+            match terminal.read_output(&mut buffer, 4096, || false) {
+                ReadOutcome::Drained => {
+                    quiet += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                ReadOutcome::BudgetExhausted => quiet = 0,
+                ReadOutcome::Closed => break,
+            }
+            most = most.max(terminal.input.len());
+        }
+        most
+    }
+
+    #[test]
+    fn replies_to_a_program_not_reading_them_stop_at_a_limit() {
+        // Queries, each answered with several times its length, from a
+        // program that never reads its terminal, as ssh to a host that
+        // has stopped reading.
+        let mut terminal = running(
+            "stty raw -echo; yes \"$(printf '\\033[>q')\" | tr -d '\\n' | head -c 400000; \
+             exec sleep 60",
+        );
+        let most = read_all(&mut terminal);
+        terminal.process.as_ref().unwrap().kill_group();
+        assert!(most <= MAX_PENDING_REPLIES, "{most} bytes waited");
+        assert!(most > MAX_PENDING_REPLIES / 2, "only {most} bytes waited");
+        // The user's own typing still goes in, all of it the limit allows.
+        terminal.send_input(&vec![b'x'; MAX_PENDING_INPUT]).unwrap();
+    }
 }

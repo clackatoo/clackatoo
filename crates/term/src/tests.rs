@@ -427,6 +427,22 @@ mod queries {
     }
 
     #[test]
+    fn replies_stop_at_a_limit_whole() {
+        // A program that floods queries can't make the terminal keep
+        // answers without end: past the limit, whole answers are dropped,
+        // never part of one.
+        let one = replies("\x1b[>q").len();
+        let mut t = after(10, 5, &"\x1b[>q".repeat(100_000));
+        let answers = t.take_replies();
+        assert!(answers.len() <= 64 * 1024, "{} bytes kept", answers.len());
+        assert!(answers.len() > 64 * 1024 - one);
+        assert_eq!(answers.len() % one, 0);
+        // Taken, they're answered again.
+        t.advance(b"\x1b[c");
+        assert_eq!(t.take_replies(), b"\x1b[?62;22c");
+    }
+
+    #[test]
     fn replies_are_taken_once() {
         let mut t = after(10, 5, "\x1b[c");
         assert!(!t.take_replies().is_empty());
