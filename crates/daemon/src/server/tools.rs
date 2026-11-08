@@ -214,9 +214,19 @@ struct Commanded {
     close_due: Option<Instant>,
     /// Last metadata published to views, so wait-only changes wake clients.
     published: Option<clackatoo_protocol::AgentTerminal>,
+    /// The latest block and how often blocks were numbered again (see
+    /// [`Commanded::blocks_of`]) when the shell was last seen to have the
+    /// terminal back, its command over: while they're the same, it needn't
+    /// be looked at again.
+    back: Option<(u32, u64)>,
 }
 
 impl Commanded {
+    /// What [`back`](Self::back) keeps of the blocks `grid` shows.
+    fn blocks_of(grid: &Terminal) -> Option<(u32, u64)> {
+        Some((grid.latest_block()?.0, grid.block_renumberings()))
+    }
+
     fn close_in(&self, now: Instant) -> Option<u8> {
         let left = self.close_due?.saturating_duration_since(now);
         let seconds = left.as_secs() + u64::from(left.subsec_nanos() != 0);
@@ -299,6 +309,13 @@ impl Commanded {
             None => progress != Progress::Running,
         })
     }
+}
+
+/// Whether a shell is back, as [`Daemon::shell_back`] says, from whether
+/// it has its terminal to itself: also when it has ended, or isn't one.
+fn shell_is_back(has: Result<(), crate::hosted::Taken>) -> bool {
+    use crate::hosted::Taken;
+    !matches!(has, Err(Taken::Program | Taken::Child(_) | Taken::Exec))
 }
 
 /// A command waiting for its shell's first prompt.
@@ -1486,10 +1503,37 @@ impl Daemon {
     }
 
     /// Whether the last command typed into `terminal`, or else the one
-    /// running in it, has finished: `None` if the shell doesn't say.
+    /// running in it, has finished: `None` if the shell doesn't say. The
+    /// marks that say so aren't signed, so any program can print them: an
+    /// end they say came is taken only once the shell is back (see
+    /// [`Self::shell_back`]). That settles when, not how: a program that
+    /// printed an end with status 0 as it ran leaves its block saying so,
+    /// and the shell's own mark at the real end is then ignored.
     fn finished(&self, terminal: TerminalId) -> Option<bool> {
         let grid = self.terminals.get(&terminal)?.terminal.grid()?;
-        Commanded::finished(self.tools.commanded.get(&terminal), grid)
+        let commanded = self.tools.commanded.get(&terminal);
+        let finished = Commanded::finished(commanded, grid)?;
+        // Never typed, it's over whatever the marks say.
+        let refused = commanded.is_some_and(|commanded| commanded.failed.is_some());
+        Some(finished && (refused || self.shell_back(terminal)))
+    }
+
+    /// Whether `terminal`'s shell has it to itself again, as once its
+    /// command has really ended, not as a program printing the marks of
+    /// an end does (see [`HostedTerminal::shell_has_terminal`]), or it
+    /// has ended itself. Reads `/proc` unless it was seen so already,
+    /// its blocks as they are now.
+    ///
+    /// [`HostedTerminal::shell_has_terminal`]: crate::hosted::HostedTerminal::shell_has_terminal
+    pub(super) fn shell_back(&self, terminal: TerminalId) -> bool {
+        let Some(slot) = self.terminals.get(&terminal) else {
+            return true;
+        };
+        let back = self.tools.commanded.get(&terminal).and_then(|c| c.back);
+        if back.is_some() && back == slot.terminal.grid().and_then(Commanded::blocks_of) {
+            return true;
+        }
+        shell_is_back(slot.terminal.shell_has_terminal())
     }
 
     /// `send_to_terminal`: types `text` into `pane`'s terminal, a newline
@@ -1773,11 +1817,24 @@ impl Daemon {
             let Some(slot) = self.terminals.get(&terminal) else {
                 continue;
             };
+            let said = slot.terminal.grid().is_some_and(|grid| {
+                Commanded::finished(Some(commanded), grid) == Some(true)
+                    && !matches!(grid.latest_block(), Some((_, Progress::Running)))
+            });
+            // An end the marks say came is taken once the shell is back,
+            // which is remembered with the blocks: looked at again only
+            // once they change, not each time round.
+            let blocks = slot.terminal.grid().and_then(Commanded::blocks_of);
+            if said
+                && commanded.failed.is_none()
+                && commanded.back != blocks
+                && shell_is_back(slot.terminal.shell_has_terminal())
+            {
+                commanded.back = blocks;
+            }
+            let back = commanded.failed.is_some() || commanded.back == blocks;
             let finished = slot.terminal.status() != clackatoo_protocol::TerminalStatus::Running
-                || slot.terminal.grid().is_some_and(|grid| {
-                    Commanded::finished(Some(commanded), grid) == Some(true)
-                        && !matches!(grid.latest_block(), Some((_, Progress::Running)))
-                });
+                || (said && back);
             let waiting = self.tools.waiting.iter().any(
                 |wait| matches!(wait.what, Wait::Finish { terminal: id, .. } if id == terminal),
             );
@@ -2475,6 +2532,96 @@ mod keeping_whose {
         assert_eq!(daemon.tools.commanded[&selected].next_close_tick(due), None);
         // No dangling terminal in the layout after automatic closure.
         assert!(daemon.workspaces.get().pane_showing(unseen).is_none());
+    }
+
+    #[test]
+    fn marks_a_running_command_prints_never_end_it() {
+        use super::{Commanded, Wait, Waiting};
+        use clackatoo_protocol::ActivityState;
+        use std::time::{Duration, Instant};
+
+        fn emulator(
+            daemon: &mut super::Daemon,
+            terminal: clackatoo_protocol::TerminalId,
+        ) -> &mut clackatoo_term::Terminal {
+            (daemon.terminals.get_mut(&terminal).unwrap().terminal.pty())
+                .unwrap()
+                .emulator_mut()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.workspaces.new_workspace("test".into(), chat);
+        daemon.next_id = chat.0 + 1;
+        // A shell running a command in its own group, as one without job
+        // control does.
+        let terminal = daemon
+            .new_terminal(&NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec!["sh".into(), "-c".into(), "sleep 600; :".into()]),
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        let pane = daemon
+            .place_beside(chat, clackatoo_protocol::PaneTerminal::Existing(terminal))
+            .unwrap();
+        daemon.tools.commanded.insert(
+            terminal,
+            Commanded {
+                owner: Some(chat),
+                ..Commanded::default()
+            },
+        );
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        let pid = slot.terminal.pty().unwrap().info().pid.unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while crate::ports::children_of(std::path::Path::new("/proc"), pid).is_empty() {
+            assert!(Instant::now() < give_up, "sleep never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;A\x07$ \x1b]133;C\x07");
+        let (block, _) = emulator(&mut daemon, terminal).latest_block().unwrap();
+        let record = serde_json::json!({
+            "activity": {
+                "id": "deploy", "owner": chat.0, "turn": 0, "title": "Deploy",
+                "command": "deploy", "cwd": "/", "pane": pane.0, "started": 0,
+                "ended": null, "state": "Running", "result": "",
+            },
+            "terminal": terminal.0, "expect": block, "renumbered": 0, "notified": false,
+        });
+        daemon
+            .tools
+            .activities
+            .push(serde_json::from_value(record).unwrap());
+        let now = Instant::now();
+        daemon.tools.waiting.push(Waiting {
+            token: mio::Token(usize::MAX),
+            id: serde_json::json!(1),
+            chat,
+            what: Wait::Finish {
+                terminal,
+                lines: 10,
+                due: now + Duration::from_mins(5),
+            },
+        });
+        // What it prints says it ended, and a prompt came.
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        daemon.answer_finished(terminal, false);
+        assert_eq!(daemon.tools.waiting.len(), 1, "the wait goes on");
+        assert_eq!(
+            daemon.tools.activities[0].activity.state,
+            ActivityState::Running
+        );
+        assert_eq!(
+            daemon.wait_for_terminal(chat, pane, Duration::from_secs(1)),
+            Ok(Some(terminal))
+        );
+        daemon.maintain_agent_terminals(now);
+        assert!(!daemon.agent_terminal(terminal).unwrap().finished);
+        assert_eq!(daemon.tools.commanded[&terminal].close_due, None);
+        daemon.maintain_agent_terminals(now + Duration::from_mins(2));
+        assert!(daemon.terminals.contains_key(&terminal), "never closed");
     }
 
     fn assert_countdown_ticks(

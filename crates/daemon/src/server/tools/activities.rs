@@ -298,6 +298,9 @@ impl Daemon {
         } else if let Some(Progress::Finished(code)) =
             grid.and_then(|g| record.expect.and_then(|block| g.block_progress(block)))
             && grid.is_some_and(|g| g.block_renumberings() == record.renumbered)
+            // Not as a program prints the marks of an end: only once the
+            // shell is back.
+            && (ended || self.shell_back(terminal))
         {
             code.map_or(ActivityState::Unknown, ActivityState::Exited)
         } else if ended

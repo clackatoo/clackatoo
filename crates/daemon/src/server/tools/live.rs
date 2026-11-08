@@ -248,6 +248,7 @@ impl Daemon {
                         .close_left
                         .map(|left| now + Duration::from_millis(left)),
                     published: None,
+                    back: None,
                 },
             );
         }
@@ -284,6 +285,7 @@ impl Daemon {
                 retained: true,
                 close_due: None,
                 published: None,
+                back: None,
             };
             if self.terminals.contains_key(&TerminalId(kept.terminal)) {
                 self.tools
