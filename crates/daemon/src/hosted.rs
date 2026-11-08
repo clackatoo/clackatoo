@@ -442,9 +442,9 @@ impl HostedTerminal {
         if self.pty.is_none() {
             return;
         }
-        // An answer is due whatever's queued, as replies to queries are.
-        self.input.extend_from_slice(&read.answer(text));
-        self.flush_input();
+        // Dropped, as replies to queries are, while the program leaves
+        // too many unread.
+        self.queue_replies(&read.answer(text));
     }
 
     /// Reads and processes the program's output until the PTY has nothing
@@ -513,10 +513,11 @@ impl HostedTerminal {
 
     /// Queues `replies`, whole replies to the program's queries, unless
     /// they'd make more than [`MAX_PENDING_REPLIES`] wait: then they're
-    /// dropped, all of them, as a cut one is worse than none.
+    /// dropped, all of them, as a cut one is worse than none. With nothing
+    /// waiting they go however long, as a clipboard's contents may be.
     fn queue_replies(&mut self, replies: &[u8]) {
         self.flush_input();
-        if self.input.len() + replies.len() > MAX_PENDING_REPLIES {
+        if !self.input.is_empty() && self.input.len() + replies.len() > MAX_PENDING_REPLIES {
             if !std::mem::replace(&mut self.dropping_replies, true) {
                 log::debug!(
                     "terminal {}: replies dropped: the program isn't reading them",
@@ -739,9 +740,17 @@ mod tests {
              exec sleep 60",
         );
         let most = read_all(&mut terminal);
-        terminal.process.as_ref().unwrap().kill_group();
         assert!(most <= MAX_PENDING_REPLIES, "{most} bytes waited");
         assert!(most > MAX_PENDING_REPLIES / 2, "only {most} bytes waited");
+        // Nor does an answer about the clipboard, which may be long.
+        terminal.emulator.advance(b"\x1b]52;c;?\x07");
+        let Some(ClipboardRequest::Read(read)) = terminal.take_clipboard().pop() else {
+            panic!("a read");
+        };
+        let waiting = terminal.input.len();
+        terminal.answer_clipboard(read, Some(&"x".repeat(100_000)));
+        assert_eq!(terminal.input.len(), waiting);
+        terminal.process.as_ref().unwrap().kill_group();
         // The user's own typing still goes in, all of it the limit allows.
         terminal.send_input(&vec![b'x'; MAX_PENDING_INPUT]).unwrap();
     }
