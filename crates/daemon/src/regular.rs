@@ -71,8 +71,7 @@ pub(crate) fn open_at(dir: impl AsFd, path: &Path, links: Links) -> io::Result<F
         )?),
     };
     let meta = file.metadata()?;
-    let same = u64::try_from(stat.st_dev).is_ok_and(|dev| dev == meta.dev())
-        && u64::try_from(stat.st_ino).is_ok_and(|ino| ino == meta.ino());
+    let same = (stat.st_dev, stat.st_ino) == (meta.dev(), meta.ino());
     if !meta.is_file() || !same {
         return refuse("it changed as it was opened");
     }

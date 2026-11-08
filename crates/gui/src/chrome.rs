@@ -423,6 +423,7 @@ pub(crate) enum NoteKind {
 
 /// Where everything in the window's frame goes.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct Chrome {
     pub(crate) geometry: Geometry,
     pub(crate) workspaces: Vec<Item<WorkspaceId>>,

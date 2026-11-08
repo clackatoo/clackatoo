@@ -126,11 +126,11 @@ pub(crate) fn opens_unasked(url: &str) -> bool {
 pub(crate) fn shown_whole(url: &str) -> String {
     let mut shown = String::with_capacity(url.len());
     for ch in url.chars() {
-        if !ch.is_ascii_graphic() {
+        if ch.is_ascii_graphic() {
+            shown.push(ch);
+        } else {
             let _ =
                 std::fmt::Write::write_fmt(&mut shown, format_args!("<U+{:04X}>", u32::from(ch)));
-        } else {
-            shown.push(ch);
         }
     }
     shown

@@ -289,8 +289,11 @@ type Stamp = (PathBuf, u64, u64, i64, i64, u64);
 /// The ignore files compiled for walks, by what they were, so a file not
 /// changed since isn't read or compiled again by the next walk, and how
 /// many bytes of text they came from.
-static COMPILED: std::sync::LazyLock<Mutex<(HashMap<Stamp, Arc<Gitignore>>, u64)>> =
+static COMPILED: std::sync::LazyLock<Mutex<Compiled>> =
     std::sync::LazyLock::new(|| Mutex::new((HashMap::new(), 0)));
+
+/// Each ignore file compiled, by what it was, and the bytes of text kept.
+type Compiled = (HashMap<Stamp, Arc<Gitignore>>, u64);
 
 impl Rules {
     /// The ignore file at `file`, whose patterns are from `dir`, as
