@@ -36,7 +36,7 @@ Its first row is a new chat, with its agent, model and folder. They start as the
 | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder. |
 | `l`, `h`, Right, Left | The picker's next or previous choice. |
 | `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
-| Esc | Clears what's typed, or closes the page. |
+| Esc, Ctrl+C | Clears what's typed, or closes the page. |
 
 `j`, `k`, `n`, `h` and `l` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
 
@@ -58,7 +58,7 @@ Sign in from a terminal on the machine that hosts the chat:
 clackatoo agent login antigravity
 ```
 
-Open the Google link it prints. On the same machine, the browser returns to the runtime and sign-in completes. From a laptop connected through federation, run the command in a terminal belonging to the desktop workspace. Open the link on your laptop; if the browser ends at an unreachable `127.0.0.1` page, copy the complete URL from its address bar, paste it into that terminal and press Enter. Input is hidden. Ctrl+C or `cancel` followed by Enter cancels sign-in. The return URL is accepted only for that login and only once; it never goes into chat history.
+Open the Google link it prints. On the same machine, the browser returns to the runtime and sign-in completes. From a laptop connected through federation, run the command in a terminal belonging to the desktop workspace. Open the link on your laptop; if the browser ends at an unreachable `127.0.0.1` page, copy the complete URL from its address bar, paste it into that terminal and press Enter. Input is hidden. Ctrl+C, Ctrl+D, or `cancel` followed by Enter cancels sign-in, and it gives up by itself after 10 minutes. Only one sign-in runs at a time: a second says another is already running. The return URL is accepted only for that login and only once; it never goes into chat history.
 
 This login is separate from the Antigravity IDE. Its credentials stay on the hosting machine, in the private `antigravity-profile` directory beside the installed agents. Runtime scratch lives there too, rather than in `/tmp`. Clackatoo does not import an IDE login or silently use an API key from the environment.
 
@@ -72,9 +72,9 @@ The separate **Gemini CLI** provider remains available for existing API-key setu
 
 ## Queuing and steering
 
-While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has a pencil to [take it back into the box](#messages-sent-and-drafts) to edit, an ↑ control to send it now, and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
+While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact panel above the composer, headed Queued, or Queue paused when delivery is paused, with the count. They run in order after a successful turn. Each row has a pencil to [take it back into the box](#messages-sent-and-drafts) to edit (but one with images, or one that moves the chat to another agent), an ↑ control to send it now, and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
 
-For text sent to the installed Claude or Codex adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. If the turn finishes while guidance is being delivered, that message runs once as the next turn instead. Codex uses the installed adapter with Clackatoo's steering backport; unpatched custom or PATH adapters retain Stop & continue. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
+For text sent to the installed Claude or Codex adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used; a message that seems to mention a file says **Stop & send**, as it can only go whole (see [Mentioning files](#mentioning-files)). If the turn finishes while guidance is being delivered, that message runs once as the next turn instead. Codex uses the installed adapter with Clackatoo's steering backport; unpatched custom or PATH adapters retain Stop & continue. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 
 Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it: messages follow automatically continued work, while already paused queues and unconfirmed steering stay paused. A full daemon restart does not preserve it. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
 
@@ -89,7 +89,7 @@ The viewer loads the original image when opened and shows its pixel dimensions w
 
 When a tool returns an image, a thumbnail appears beneath its entry in the conversation, even when the turn's work is folded. Open the entry to give the preview more room. This works with Codex's View Image and other agents, including Claude, when their adapter returns inline image data or a link to a local image file.
 
-PNG, JPEG and BMP results are supported, up to four per result, with files limited to 8 MiB and images to 16 million pixels. The daemon reads local files on its own machine and sends small previews to the window, so remote chats work too. Web URLs are not fetched. Previews share the chat's 4 MiB history allowance with pasted images; older results keep their labels. Newly received previews survive reconnects and daemon upgrades, but history replayed after a full restart shows labels only. The web client shows a label for tool images.
+PNG, JPEG and BMP results are supported, up to four per result, with files limited to 8 MiB and images to 16 million pixels. The daemon reads local files on its own machine and sends small previews to the window, so remote chats work too. Web URLs are not fetched. Previews share the chat's 4 MiB history allowance with pasted images; older results keep their labels. Newly received previews survive reconnects and daemon upgrades, but history replayed after a full restart shows labels only. The web client shows the previews too.
 
 ## Pasting images
 
@@ -105,7 +105,8 @@ In insert mode, what you type goes in the box at the bottom.
 
 | Key | Does |
 |---|---|
-| Enter | Sends the message. |
+| Enter | Sends the message, or while the agent works, [queues it](#queuing-and-steering). |
+| Ctrl+Enter | While the agent works, steers it with the message (see [Queuing and steering](#queuing-and-steering)). |
 | Shift+Enter | Starts a new line in the message. |
 | Ctrl+C | While the agent answers, asks it to stop, unless text in the message is selected, which it copies. When it's not answering, copies what's selected in the message or the conversation. |
 | Backspace, Delete | Delete a character, or with Ctrl, a word. |
@@ -169,15 +170,15 @@ When the message is sent, the daemon finds each file it mentions and sends it to
 | What's mentioned | Claude Code | Codex, Gemini and others |
 |---|---|---|
 | A saved file | A link to it, which it reads with its Read tool | Its text, if it's at most 64 KiB; a link if bigger |
-| A file open in an editor with changes not saved | Its text as it is in the editor, at most 64 KiB | The same |
-| Lines of a file (`#L12-L40`) | Those lines' text, as they are in the editor if it's open | The same |
+| A file open in an editor with changes not saved | Its text as it is in the editor, at most 64 KiB; a link if bigger, which reads the saved file | The same |
+| Lines of a file (`#L12-L40`) | Those lines' text, as they are in the editor if it's open, at most 64 KiB; a link if more, or if the file isn't open and is over 8 MiB | The same |
 | A folder, or a file that isn't text | A link | A link |
 
 The text sent with one message is at most 256 KiB in all; files past that go as links. An agent that doesn't say it takes files' text gets links alone. Claude Code gets links to saved files because it edits only files its own Read tool has read, so text in the message would be read again before any edit; Read also gives it line numbers. Both agents show what they were given as `[@name](file:///…)` and a `<context>` block, and neither reads lines from anywhere but the link, so the lines go in it: `file:///…/parser.rs#L12-L40`.
 
-A mention of a file outside the chat's project (its repository, or else its folder, with links followed) goes to the agent as words, not the file, and the chat says so above the box; one that names nothing at all is just words. A message that's a slash command is sent as typed, its mentions as words, as the agents look for the command in its only or last part. Steering sends words alone, so a message steered in that mentions a file is sent whole instead, stopping the turn: the button says **Stop & send** for a message that seems to mention one (a path with a `/` or a `.`), and the daemon decides by whether it finds the file.
+A mention of a file outside the chat's project (its repository, or else its folder, with links followed) goes to the agent as words, not the file, and the chat says so above the box; one that names nothing at all is just words. A message that begins with `/` and a name, as a slash command does, is sent as typed, its mentions as words, as the agents look for a command in its only or last part. Steering sends words alone, so a message steered in that mentions a file is sent whole instead, stopping the turn: the button says **Stop & send** for a message that seems to mention one (a path with a `/` or a `.`), and the daemon decides by whether it finds the file.
 
-The files are read in the background, never holding up the daemon: the message waits for them, and so does what you ask of the chat after it, but Stop and answers to the agent don't, and Stop drops the message. A read that takes more than 2 seconds, as on a network file system that hangs, is given up on: the message goes as words, and the chat says it couldn't read the files in time. A file is read only if it's a plain file in the project when it's opened, never a link, a pipe or a device swapped in after it was checked, and never more of it than is sent.
+The files are read in the background, never holding up the daemon: the message waits for them, and so does what you ask of the chat after it, but Stop and answers to the agent don't, and Stop drops the message. A read that takes more than 2 seconds, as on a network file system that hangs, is given up on: the message goes as words, and the chat says it couldn't read the files in time. At most 8 messages' files are read at once; past that, a message goes as words, and the chat says so. A file is read only if it's a plain file in the project when it's opened, never a link, a pipe or a device swapped in after it was checked, and never more of it than is sent.
 
 In the conversation, mentions are chips in the link colour. Click one, or put the cursor on it in normal mode and type `gf` (or `gx`), to open the file, at its first line if it names lines; `gf` on a link or path in the agent's words opens it too. Going on with a past session shows its mentions as chips again, not the text that was sent with them.
 
@@ -185,7 +186,7 @@ From an editor, `<Space>a` in visual mode, or `:'<,'>Ask`, puts the lines select
 
 The phone shows mentions in sent messages as chips; typing `@path` by hand there works the same, as the daemon finds the files, but it has no menu.
 
-One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter keeps what you typed until it's done. Clicking the button with nothing being answered sends the message, as Enter does.
+One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter [queues](#queuing-and-steering) what you typed for when it's done (with a daemon too old to queue, it stays in the box). Clicking the button with nothing being answered sends the message, as Enter does.
 
 ### Messages sent and drafts
 
@@ -200,11 +201,11 @@ The box remembers what you've sent in the chat, as a shell remembers commands, a
 
 Up on a message's other lines moves the cursor up a line, so on a message of several lines, Up goes to its first line before it goes back to the one before. Typing anything forgets where Up had gone: the next Up goes back from what's typed then. In normal mode, `k` and `j` still move through the conversation.
 
-The messages Up recalls are your own, in this chat: not another chat's agent's, nor clackatoo's notices. They're worked out from the conversation itself, so every window and the phone have the same ones, and they last through upgrades, and after a restart once the chat has told its conversation again. Up to the newest 200 are kept, those over 16 KiB left out. A message with images recalls its words. Messages from other chats aren't recalled.
+The messages Up recalls are your own, in this chat: not another chat's agent's, nor clackatoo's notices. They're worked out from the conversation itself, so every window and the phone have the same ones, and they last through upgrades, and after a restart once the chat has told its conversation again. Up to the newest 200 are kept, each once, and at most 128 KiB of them, those over 16 KiB left out. A message with images recalls its words. Messages from other chats aren't recalled.
 
 The pencil on a queued message, or Up in an empty box, has the daemon move it out of the queue and into the chat's draft in one step, and puts it in your box before what you've typed there, so it's never both waiting and being edited, and never only in a window: if the window closes first, the next to open the chat starts with it. What's typed in other boxes stays in them. If it was sent meanwhile, the bar says so. A queued message with images, or one that moves the chat to another agent, has no pencil and isn't taken back: send or remove it. Taking messages back needs a daemon that keeps drafts.
 
-What you've typed but not sent is kept by the daemon too, as the chat's draft: a window, or the phone, tells it as you pause typing, as the box empties, and as it closes, and the daemon keeps the last told. A box takes it only while it's empty and you haven't typed in it there: as a window first shows the chat, after closing the window, after an upgrade, on another machine, or as the phone's page loads (over what the page kept itself, unless you've typed since it loaded). Typing isn't mirrored from box to box: a box you've typed in, or emptied, is never changed by what's typed elsewhere, nor by a reconnect, and with two boxes typed in at once, the last told is what the next window starts with. Sending a message, from any box, empties the draft, and every other box holding just that message empties too; a box holding anything else keeps it. Only the text is kept: images attached stay in the window. A full daemon restart doesn't keep it, and a chat on another machine whose daemon is older keeps no draft: the box is the window's alone there, and the phone keeps its own copy.
+What you've typed but not sent is kept by the daemon too, as the chat's draft: a window, or the phone, tells it as you pause typing, as the box empties, and as it closes, and the daemon keeps the last told. A box takes it only while it's empty and you haven't typed in it there: as a window first shows the chat, after closing the window, after an upgrade, on another machine, or as the phone's page loads (over what the page kept itself, unless you've typed since it loaded). Typing isn't mirrored from box to box: a box you've typed in, or emptied, is never changed by what's typed elsewhere, nor by a reconnect, and with two boxes typed in at once, the last told is what the next window starts with. Sending a message, from any box, empties the draft, and every other box holding just that message empties too; a box holding anything else keeps it. Only the text is kept, up to 64 KiB: images attached stay in the window. A full daemon restart doesn't keep it, and a chat on another machine whose daemon is older keeps no draft: the box is the window's alone there, and the phone keeps its own copy.
 
 
 ## The agent's settings
