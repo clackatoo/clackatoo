@@ -1292,6 +1292,21 @@ fn shells_traced_from_their_start_never_print_the_secret() {
     }
 }
 
+/// bash that can't sign its commands, as with `shopt -u promptvars`,
+/// keeps no secret: a command typed at it can't sign one either.
+#[test]
+fn bash_that_cant_sign_keeps_no_secret() {
+    let Some(bash) = on_path("bash") else {
+        eprintln!("bash isn't on PATH: skipped");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".bashrc"), "shopt -u promptvars\n").unwrap();
+    let mut user = UserShell::start(&bash, home.path(), &[]);
+    let ran = user.run("echo \"[${#__clackatoo_secret}]\"");
+    assert_eq!(user.output(&ran), "[0]");
+}
+
 /// bash sharing its history with other terminals, which each prompt
 /// reads in, never takes another terminal's line for one kept out of its
 /// own history: only a line with the number the prompt was to give it is

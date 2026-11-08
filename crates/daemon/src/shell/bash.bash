@@ -154,10 +154,14 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     # Shown after a command is read, before it runs (bash 4.4 and later).
     # The command and secret need PS0's `$(…)` expanded, which
     # `shopt -u promptvars` stops. Asked so that ~/.bashrc's `set -x`
-    # traces `1`, not the secret.
-    if [[ -n ${__clackatoo_secret:+1} ]] && shopt -q promptvars; then
+    # traces `1`, not the secret. A bash that can't sign its commands so
+    # keeps no secret: a command typed at it could read it, and sign a
+    # command of its choosing in the C mark bash left unsigned.
+    if [[ -n ${__clackatoo_secret:+1} ]] && shopt -q promptvars &&
+        (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
         PS0=$PS0'$(__clackatoo_command)'
     else
+        unset __clackatoo_secret
         PS0=$PS0'\e]133;C\a'
     fi
 fi

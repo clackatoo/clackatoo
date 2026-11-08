@@ -477,7 +477,7 @@ A command's output runs from its first line to the line before the next prompt, 
 Which shells mark their commands:
 
 - **fish** 4 and later, by itself. clackatoo also runs a small script once your startup files have run (`fish -C`), which marks each command again with the terminal's secret, so it can be offered after a restart. As the script runs after your startup files, a program they start, such as a prompt's daemon, starts while the secret's file is still there, and could read it.
-- **bash**, when it's your shell (`$SHELL`) and clackatoo starts it. clackatoo starts it with a startup script of its own, which reads your `~/.bashrc` first, then adds the marks to `PS1`, `PS0` and `PROMPT_COMMAND`. The command goes with its mark, from bash's history. bash started any other way, such as `clackatoo new -- bash`, is left as it is.
+- **bash**, when it's your shell (`$SHELL`) and clackatoo starts it. clackatoo starts it with a startup script of its own, which reads your `~/.bashrc` first, then adds the marks to `PS1`, `PS0` and `PROMPT_COMMAND`. The command goes with its mark, from bash's history. bash before 4.4, or with `shopt -u promptvars` in your `~/.bashrc`, can't sign its commands, so it keeps no secret, and offers nothing after a restart. bash started any other way, such as `clackatoo new -- bash`, is left as it is.
 - **zsh**, when it's your shell and clackatoo starts it. clackatoo points ZDOTDIR at a `.zshenv` of its own, which puts ZDOTDIR back, reads your `.zshenv`, and adds its hooks once your `.zshrc` has run, so oh-my-zsh, powerlevel10k (instant prompt included) and a ZDOTDIR of your own all work. A shell started with `exec zsh`, or inside another, isn't marked.
 - fish before 4 doesn't.
 
