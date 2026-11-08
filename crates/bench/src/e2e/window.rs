@@ -91,29 +91,44 @@ fn another_window(binary: &Path, display: &Display, report: &mut Report) -> anyh
         anyhow::ensure!(asked.success(), "asking for a window failed: {asked}");
         Ok(())
     };
-    // The first starts the process of windows, apart from the harness.
-    ask()?;
-    let _host = Host::listening_in(daemon.runtime_dir())?;
     let log = state.path().join("clackatoo/window.log");
     let frames =
         || std::fs::read_to_string(&log).map_or(0, |log| log.matches("first frame").count());
-    let deadline = Instant::now() + TIMEOUT;
-    while frames() == 0 {
-        anyhow::ensure!(Instant::now() < deadline, "the first window never drew");
-        std::thread::sleep(Duration::from_millis(10));
+    // Until the next window has drawn, from `started`.
+    let drawn = |started: Instant, before: usize| -> anyhow::Result<Duration> {
+        while frames() == before {
+            anyhow::ensure!(started.elapsed() < TIMEOUT, "a window never drew");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(started.elapsed())
+    };
+    // The first window forks the process of windows, apart from the
+    // harness: timed as it opens, then the process ended, each time.
+    let mut first = Vec::new();
+    for _ in 0..OPEN_RUNS {
+        let before = frames();
+        let started = Instant::now();
+        ask()?;
+        first.push(drawn(started, before)?);
+        Host::listening_in(daemon.runtime_dir())?.end()?;
     }
+    report.record(
+        "window/first-hosted",
+        "start to first frame, first window of a process of windows",
+        Unit::Seconds,
+        &seconds(&first),
+    );
+    ask()?;
+    let host = Host::listening_in(daemon.runtime_dir())?;
+    drawn(Instant::now(), frames().saturating_sub(1))?;
     let mut samples = Vec::new();
     for _ in 0..OPEN_RUNS {
         let before = frames();
         let started = Instant::now();
-        let deadline = started + TIMEOUT;
         ask()?;
-        while frames() == before {
-            anyhow::ensure!(Instant::now() < deadline, "a window never drew");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        samples.push(started.elapsed());
+        samples.push(drawn(started, before)?);
     }
+    host.end()?;
     report.record(
         "window/another",
         "start to first frame, another window",
@@ -139,6 +154,23 @@ impl Host {
             .with_context(|| format!("no process of windows at {}", socket.display()))?;
         let peer = rustix::net::sockopt::socket_peercred(&stream)?;
         Ok(Self(peer.pid))
+    }
+}
+
+impl Host {
+    /// Ends the process, and waits until it has.
+    fn end(self) -> anyhow::Result<()> {
+        let pid = self.0;
+        drop(self);
+        let deadline = Instant::now() + TIMEOUT;
+        while rustix::process::test_kill_process(pid).is_ok() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the process of windows never ended"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 }
 

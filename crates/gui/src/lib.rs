@@ -82,7 +82,6 @@ pub use complete::Ranking;
 pub use editor::EditorBench;
 pub use fonts::FontOptions;
 pub use launch::LaunchToken;
-pub use handoff::HOST_COMMAND;
 use winit::event_loop::EventLoop;
 
 /// How to open the window.
@@ -172,15 +171,15 @@ pub fn take_launch_token() -> LaunchToken {
 ///
 /// The window opens in the process of windows, which shares its GPU with
 /// every window, so that only the first sets it up: one already running is
-/// asked for it, or else one is started, apart from this process and its
-/// terminal (see [`host`]). Whatever the window starts, the daemon and ssh
-/// among them, is started with this process's environment and directory.
-/// Only if no process of windows can open it does the window open in this
-/// one, which then runs until it closes; with `CLACKATOO_WINDOW_HOST=off`,
-/// it always does.
+/// asked for it, or else this process forks one, apart from itself and its
+/// terminal, and hands it the window (see [`handoff`]). Whatever the window
+/// starts, the daemon and ssh among them, is started with this process's
+/// environment and directory. Only if no process of windows can open it
+/// does the window open in this one, which then runs until it closes; with
+/// `CLACKATOO_WINDOW_HOST=off`, it always does.
 ///
-/// It takes the desktop's launch token out of the environment first, so
-/// it must be called before this process starts any thread.
+/// It takes the desktop's launch token out of the environment first, and
+/// may fork, so it must be called before this process starts any thread.
 ///
 /// # Errors
 ///
@@ -215,37 +214,33 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let opened = |how: &str| {
         log::info!("window opened by {how}, after {:.1?}", started.elapsed());
     };
-    let not = match handoff::ask(&request, launch, &handoff::Socket::Shared, None) {
+    let not = match handoff::ask(&request, launch, None) {
         Ok(()) => {
             opened("the process of windows");
             return Ok(());
         }
         Err(not) => not,
     };
-    log::debug!("starting a process of windows: {}", not.why);
-    // One for every window from now on, unless the process asked keeps
-    // them, and this window has one of its own.
-    let at = if not.host {
-        handoff::Socket::Shared
-    } else {
-        handoff::Socket::private(&options.runtime)
-    };
     let mut launch = not.launch;
-    match handoff::start(&at, options.graphics_api) {
-        Ok(mut child) => match handoff::ask(&request, launch, &at, Some(&mut child)) {
-            Ok(()) => {
-                opened("a process of windows started for it");
-                return Ok(());
-            }
-            Err(not) => {
-                log::warn!(
-                    "the process of windows started didn't open the window: {}",
-                    not.why
-                );
-                launch = not.launch;
-            }
-        },
-        Err(err) => log::warn!("couldn't start a process of windows: {err}"),
+    if not.then != handoff::Then::Here {
+        log::debug!("forking a process of windows: {}", not.why);
+        let listen = not.then == handoff::Then::Host;
+        match fork_host(&options, listen) {
+            Ok(forked) => match handoff::ask(&request, launch, Some(forked)) {
+                Ok(()) => {
+                    opened("a process of windows forked for it");
+                    return Ok(());
+                }
+                Err(not) => {
+                    log::warn!(
+                        "the process of windows forked didn't open the window: {}",
+                        not.why
+                    );
+                    launch = not.launch;
+                }
+            },
+            Err(err) => log::warn!("couldn't fork a process of windows: {err:#}"),
+        }
     }
     spec.origin = clackatoo_daemon::launch::Origin::default();
     open_here(options, spec, launch, started, true)
@@ -266,7 +261,7 @@ fn open_here(
         runtime: options.runtime,
         config: options.config,
         graphics_api: options.graphics_api,
-        listen: None,
+        listen: false,
         share,
     };
     let waker = app::host::Waker::EventLoop(event_loop.create_proxy());
@@ -277,51 +272,70 @@ fn open_here(
     host.result
 }
 
-/// What a process of windows runs with.
-#[derive(Clone, Debug)]
-pub struct HostOptions {
-    /// Where the daemon is, and windows are asked for.
-    pub runtime: RuntimeDir,
-    /// clackatoo's config directory, whose `client/init.lua` configures
-    /// each window, if there is one.
-    pub config: Option<PathBuf>,
-    /// The graphics API to draw with.
-    pub graphics_api: GraphicsApi,
-    /// The font the first window is likely to want, found as the process
-    /// starts.
-    pub font: FontOptions,
-    /// Where to listen for the one window it's started for, if only that
-    /// window, and those it opens, are to be taken.
-    pub socket: Option<PathBuf>,
+/// Forks a process of windows, apart from this one (see
+/// [`clackatoo_daemon::launch::fork_apart`]), taking the windows asked for
+/// on `window.sock` too, with `listen`. Returns this end of the socket pair
+/// its first window is to be asked for on. The process forked never
+/// returns: it runs until its last window closes, then exits.
+fn fork_host(options: &Options, listen: bool) -> anyhow::Result<std::os::unix::net::UnixStream> {
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+    match clackatoo_daemon::launch::fork_apart()? {
+        clackatoo_daemon::launch::Forked::Parent(_) => Ok(ours),
+        clackatoo_daemon::launch::Forked::Child => {
+            drop(ours);
+            let hosted = host(
+                options.runtime.clone(),
+                options.config.clone(),
+                options.graphics_api,
+                listen,
+                theirs,
+            );
+            let code = match hosted {
+                Ok(()) => 0,
+                Err(err) => {
+                    log::error!("the process of windows failed: {err:#}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+    }
 }
 
-/// Runs the process of windows: started by `clackatoo` (see [`run`]) in a
-/// session of its own, with no terminal, it sets up the GPU and finds the
-/// fonts at once, takes the windows asked for, sharing them, and ends
-/// with its last window.
-///
-/// # Errors
-///
-/// If no window can be opened at all.
-pub fn host(options: HostOptions) -> anyhow::Result<()> {
-    // Apart from whoever started it: no terminal, signals of its own.
-    if let Err(err) = rustix::process::setsid() {
-        log::warn!("the process of windows shares a session: {err}");
-    }
-    let (event_loop, fonts, gpu) = starting(&options.font, options.graphics_api)?;
+/// Runs the process of windows, forked by `clackatoo` (see [`run`]), with
+/// the config in `config` and drawing with `graphics_api`: it reads the
+/// first window asked for on `first`, sets up the GPU and finds that
+/// window's fonts at once, takes the windows asked for on `window.sock`
+/// in `runtime` too, with `listen`, and ends with its last window.
+fn host(
+    runtime: RuntimeDir,
+    config: Option<PathBuf>,
+    graphics_api: GraphicsApi,
+    listen: bool,
+    first: std::os::unix::net::UnixStream,
+) -> anyhow::Result<()> {
+    // Panics are logged, as it has no stderr to say them on.
+    let said = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        log::error!("{panic}");
+        said(panic);
+    }));
+    let first = handoff::first(first, graphics_api)?;
+    let start = options::Options::drawing_with(&first.spec.font);
+    let (event_loop, fonts, gpu) = starting(&start.font_options(), graphics_api)?;
     let process = app::host::Process {
-        runtime: options.runtime,
-        config: options.config,
-        graphics_api: options.graphics_api,
-        listen: Some(match options.socket {
-            Some(path) => handoff::Socket::Private(path),
-            None => handoff::Socket::Shared,
-        }),
+        runtime,
+        config,
+        graphics_api,
+        listen,
         share: true,
     };
     let waker = app::host::Waker::EventLoop(event_loop.create_proxy());
     let mut host = app::host::Host::new(process, waker);
-    host.starting(fonts, gpu);
+    host.starting(fonts, gpu, first);
+    // Before the event loop runs, so windows asked for meanwhile wait for
+    // this process rather than fork their own.
+    host.listen();
     event_loop.run_app(&mut host)?;
     host.result
 }

@@ -48,13 +48,15 @@ pub(crate) fn command(default: &str) {
 /// several windows share the file.
 pub(crate) fn window() {
     let mut builder = builder(WINDOW);
-    let pid = std::process::id();
-    builder.format(move |out, record| {
+    // Asked each line: the process of windows is forked off a window's
+    // process after its logging starts.
+    builder.format(|out, record| {
         writeln!(
             out,
-            "[{} {:<5} {pid} {}] {}",
+            "[{} {:<5} {} {}] {}",
             out.timestamp_millis(),
             record.level(),
+            std::process::id(),
             record.target(),
             record.args()
         )

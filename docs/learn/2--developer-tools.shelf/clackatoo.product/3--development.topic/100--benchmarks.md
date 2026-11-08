@@ -105,6 +105,7 @@ What each group measures:
 | | Per scrollback line, typical | The same as the first, with lines of varying length, averaging half the width. |
 | `idle` | Wakeups | How often the daemon wakes up per second, with a client connected and three quiet terminals, one of which printed some history before going quiet. This should be zero. It is counted from the context switches in `/proc`. |
 | `window` | Start to first frame | From starting `clackatoo` to the window's first frame, in a process of its own (`CLACKATOO_WINDOW_HOST=off`), with the daemon already running. Most of it is the GPU driver starting up. |
+| | Start to first frame, first window of a process of windows | From starting `clackatoo` to the first frame of the first window, as by default: it forks the [process of windows](~clackatoo/reference/window#windows-share-one-process), which sets up the GPU and opens it. The process is ended after each. |
 | | Start to first frame, another window | From starting `clackatoo` to the first frame of a window it hands to the [process of windows](~clackatoo/reference/window#windows-share-one-process) with a window open already, which opens it on the GPU it set up then, as the process's log says. |
 | | Frame drawn, during a flood | How long the window takes over each frame, from starting on it to handing it to the compositor, while its terminal prints for two seconds without stopping. |
 | | Wakeups of the window's own threads | How often the window wakes up per second with nothing to draw. This should be zero. |

@@ -4,9 +4,10 @@
 //! Setting up the GPU is most of the time a window takes to open, so the
 //! process of windows does it once, for its first window, and every
 //! window after opens on the same device, in a few milliseconds. It's
-//! started apart from any terminal, for the first window asked for (see
-//! [`crate::handoff`]), and `clackatoo` asks it for each window; a window
-//! opening one on another machine opens it here too.
+//! forked off the `clackatoo` that asks for its first window, apart from
+//! any terminal (see [`crate::handoff`]), and `clackatoo` asks it for each
+//! window after; a window opening one on another machine opens it here
+//! too.
 //!
 //! What's shared is only what's slow to make and the same for every
 //! window: the GPU, and the fonts found on the system. Everything else is
@@ -21,7 +22,8 @@
 //! outside our code, in the GPU driver say, still takes every window: the
 //! price of sharing the device. The daemon holds everything they showed.
 //! If the device is lost, each window opens again in a process started
-//! afresh, and this one ends.
+//! afresh, one window first and the others once its process listens, and
+//! this one ends; if devices keep being lost, the windows close instead.
 //!
 //! Every window shares the one event loop, so a window stalls the others
 //! while it handles something: opening a window waits for the compositor's
@@ -51,7 +53,7 @@ use winit::window::WindowId;
 use super::{App, Gpu, Pending, Startup};
 use crate::desktop::Desktop;
 use crate::fonts::Fonts;
-use crate::handoff::{self, Asked, Build, Listening, Socket};
+use crate::handoff::{self, Asked, Build, Listening};
 use crate::launch::LaunchToken;
 use crate::session::{Closed, Location, Proxy, Session, SessionEvent};
 use crate::{FontFixed, FontOptions, GraphicsApi, cmdline, desk, lua, options, tutor, updates};
@@ -61,9 +63,18 @@ use crate::{FontFixed, FontOptions, GraphicsApi, cmdline, desk, lua, options, tu
 const TOKEN_WAIT: Duration = Duration::from_millis(500);
 
 /// How long a process of windows waits for its first window to be asked
-/// for, before ending with none, as when another process won the race to
-/// take the socket.
+/// for, before ending with none, as when its asker went.
 const FIRST_WAIT: Duration = Duration::from_secs(10);
+
+/// How many times within [`LOSSES_WITHIN`] the GPU may be lost before the
+/// windows close rather than open again: a GPU that can't be kept is
+/// lost again by every process opened on it.
+const MOST_LOSSES: usize = 3;
+const LOSSES_WITHIN: Duration = Duration::from_mins(1);
+
+/// How long, after the GPU is lost, the windows wait for the process the
+/// first window opens again in to listen, to open again in it too.
+const NEW_PROCESS_WAIT: Duration = Duration::from_secs(5);
 
 /// One of the process's windows, as events from its threads address it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -131,8 +142,8 @@ pub(crate) struct Process {
     pub(crate) config: Option<PathBuf>,
     /// The graphics API the process draws with.
     pub(crate) graphics_api: GraphicsApi,
-    /// Where other processes ask this one for windows, if they do.
-    pub(crate) listen: Option<Socket>,
+    /// Whether other processes ask this one for windows on `window.sock`.
+    pub(crate) listen: bool,
     /// Whether the windows its windows open, as the picker's new window,
     /// open in this process: not if every window is to have a process of
     /// its own (see [`handoff::OFF_VAR`]).
@@ -295,9 +306,15 @@ impl Host {
     }
 
     /// The fonts and GPU being made as the process starts, for the first
-    /// window asked for.
-    pub(crate) fn starting(&mut self, fonts: Pending<(Fonts, Desktop)>, gpu: Pending<Gpu>) {
+    /// window asked for, `first`.
+    pub(crate) fn starting(
+        &mut self,
+        fonts: Pending<(Fonts, Desktop)>,
+        gpu: Pending<Gpu>,
+        first: Asked,
+    ) {
         self.starting = Some((fonts, gpu));
+        self.waiting.push(first);
     }
 
     /// Makes a window for `spec`, drawing with `start`'s options until
@@ -446,6 +463,11 @@ impl Host {
             self.waiting.push(asked);
             return;
         }
+        // Dropped unanswered: the asker opens it elsewhere.
+        if self.ending || self.link.0.lost.get() {
+            log::info!("a window was asked for as the process of windows ends");
+            return;
+        }
         if !asked.take() {
             log::info!("a window was asked for, but the asker has stopped waiting");
             return;
@@ -482,12 +504,11 @@ impl Host {
         }
     }
 
-    /// Starts taking windows asked for by other processes, if it does.
-    fn listen(&mut self) {
-        let Some(at) = &self.process.listen else {
-            return;
-        };
-        if self.listening.is_some() || self.link.0.lost.get() {
+    /// Starts taking windows asked for by other processes, if it does: as
+    /// the process starts, before its event loop runs, so they wait for it
+    /// rather than start processes of their own.
+    pub(crate) fn listen(&mut self) {
+        if !self.process.listen || self.listening.is_some() || self.link.0.lost.get() {
             return;
         }
         let waker = self.waker.clone();
@@ -495,7 +516,7 @@ impl Host {
             let _ = waker.wake(Wake::Asked(asked));
         };
         let graphics_api = self.process.graphics_api;
-        match handoff::listen(&self.process.runtime, at, graphics_api, deliver) {
+        match handoff::listen(&self.process.runtime, graphics_api, deliver) {
             Ok(listening) => self.listening = Some(listening),
             Err(err) => log::warn!("windows asked for get processes of their own: {err:#}"),
         }
@@ -504,15 +525,42 @@ impl Host {
     /// The GPU's device is gone. Nothing more can be drawn with it, so
     /// windows asked for go elsewhere from now on, and each window opens
     /// again in a process started afresh, and closes here.
+    ///
+    /// One window opens again first, and the others once its new process
+    /// listens, so they share it rather than race to start one each. The
+    /// loop is held meanwhile: nothing can be drawn anyway.
     fn gpu_lost(&mut self) {
         if self.link.0.lost.replace(true) {
             return;
         }
-        log::error!("the GPU was lost: the windows open again in a new process");
         self.listening = None;
         self.shared = None;
         self.starting = None;
-        let keys: Vec<WindowKey> = self.windows.keys().copied().collect();
+        let mut keys: Vec<WindowKey> = self.windows.keys().copied().collect();
+        keys.sort_by_key(|key| key.0);
+        let losses = gpu_losses(&self.process.runtime);
+        if losses > MOST_LOSSES {
+            log::error!(
+                "the GPU was lost {losses} times within {LOSSES_WITHIN:?}: the windows close"
+            );
+            for key in keys {
+                self.on_window(key, |app| app.closing = true);
+            }
+            return;
+        }
+        log::error!("the GPU was lost: the windows open again in a new process");
+        // A moment more each time it's lost again.
+        let exponent = u32::try_from(losses.saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .min(4);
+        std::thread::sleep(Duration::from_millis(250) * 2_u32.pow(exponent));
+        let mut keys = keys.into_iter();
+        if let Some(first) = keys.next() {
+            self.on_window(first, App::open_elsewhere);
+        }
+        if keys.len() > 0 && !another_listens(&self.process.runtime, NEW_PROCESS_WAIT) {
+            log::warn!("no new process of windows listens: each window starts its own");
+        }
         for key in keys {
             self.on_window(key, App::open_elsewhere);
         }
@@ -559,6 +607,8 @@ impl Host {
             if let Err(err) = &result {
                 self.result = Err(anyhow!("{err:#}"));
             }
+            // Windows asked for from now on go to a process that stays.
+            self.listening = None;
             self.ending = true;
         } else if let Err(err) = &result {
             log::error!("{err:#}");
@@ -604,6 +654,45 @@ impl Host {
         }
         None
     }
+}
+
+/// Notes the GPU lost now, in `runtime`, where every process of windows
+/// notes it, and returns how many times it has been lost within
+/// [`LOSSES_WITHIN`], now included.
+fn gpu_losses(runtime: &RuntimeDir) -> usize {
+    let path = runtime.path().join("gpu-lost");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let recent: Vec<u64> = (std::fs::read_to_string(&path).unwrap_or_default().lines())
+        .filter_map(|line| line.parse::<u64>().ok())
+        .filter(|&lost| now.as_secs().saturating_sub(lost) < LOSSES_WITHIN.as_secs())
+        .chain([now.as_secs()])
+        .collect();
+    let text = (recent.iter().map(u64::to_string))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(err) = std::fs::write(&path, text) {
+        log::warn!("couldn't note the GPU lost: {err}");
+    }
+    recent.len()
+}
+
+/// Waits up to `wait` for a process of windows other than this one to
+/// listen in `runtime`, and says whether one does.
+fn another_listens(runtime: &RuntimeDir, wait: Duration) -> bool {
+    let socket = runtime.path().join("window.sock");
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(&socket)
+            && rustix::net::sockopt::socket_peercred(&stream)
+                .is_ok_and(|peer| peer.pid != rustix::process::getpid())
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// How a window came out of handling something.

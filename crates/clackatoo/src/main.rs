@@ -244,22 +244,6 @@ enum Command {
     /// from: the desktop you're logged in to, the daemon's own
     /// environment, or none.
     Display,
-    /// Run the process every window opens in, which `clackatoo` starts
-    /// apart from your terminal when none is running.
-    #[command(hide = true, name = clackatoo_gui::HOST_COMMAND)]
-    WindowHost(WindowHostArgs),
-}
-
-/// How `clackatoo` starts the process of windows.
-#[derive(Debug, Args)]
-struct WindowHostArgs {
-    /// The graphics API it draws with.
-    #[arg(long, value_name = "API")]
-    renderer: Option<RendererArg>,
-    /// Listen here, for one window and those it opens, rather than for
-    /// every window.
-    #[arg(long, value_name = "PATH")]
-    socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -547,7 +531,6 @@ fn run(command: Command) -> anyhow::Result<()> {
             clackatoo_daemon::antigravity::usage(&profile).map_err(Into::into)
         }
         Command::Daemon(args) => run_daemon(&args),
-        Command::WindowHost(args) => window_host(&args),
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
         Command::Bg(bg) => start_in_background(bg),
@@ -704,26 +687,6 @@ fn window_font(
         size: args.font_size.is_some(),
     };
     (font, fixed)
-}
-
-/// Runs the process of windows, as `clackatoo` starts it.
-fn window_host(args: &WindowHostArgs) -> anyhow::Result<()> {
-    logs::window();
-    let config = config::load();
-    clackatoo_gui::host(clackatoo_gui::HostOptions {
-        runtime: RuntimeDir::for_current_user(),
-        config: config::dir(),
-        graphics_api: args
-            .renderer
-            .map(Into::into)
-            .or(config.renderer)
-            .unwrap_or_default(),
-        font: clackatoo_gui::FontOptions {
-            family: config.font.clone(),
-            size: config.font_size.unwrap_or(12.0),
-        },
-        socket: args.socket.clone(),
-    })
 }
 
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
