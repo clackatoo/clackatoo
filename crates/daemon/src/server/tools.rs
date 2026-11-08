@@ -214,17 +214,55 @@ struct Commanded {
     close_due: Option<Instant>,
     /// Last metadata published to views, so wait-only changes wake clients.
     published: Option<clackatoo_protocol::AgentTerminal>,
-    /// The latest block and how often blocks were numbered again (see
-    /// [`Commanded::blocks_of`]) when the shell was last seen to have the
-    /// terminal back, its command over: while they're the same, it needn't
-    /// be looked at again.
-    back: Option<(u32, u64)>,
+    /// What was last seen of whether the shell has the terminal back (see
+    /// [`Daemon::shell_back`]).
+    looked: Option<Looked>,
 }
 
+/// What was seen of whether a terminal's shell had it to itself again, its
+/// command over (see [`Daemon::shell_back`]).
+#[derive(Clone, Copy, Debug)]
+struct Looked {
+    /// The blocks as they were then (see [`Commanded::blocks_of`]).
+    blocks: Blocks,
+    /// Whether the shell was back.
+    back: bool,
+    /// When to look again, if it wasn't.
+    again: Instant,
+    /// How long that was after looking.
+    wait: Duration,
+}
+
+/// What the marks say of a command an agent ran, and whether its terminal
+/// still runs.
+#[derive(Clone, Copy, Debug)]
+struct Ended {
+    /// The marks say the command ended.
+    said: bool,
+    /// The terminal's program still runs.
+    running: bool,
+    /// The end is only the marks' to say, so it's taken once the shell is
+    /// back (see [`Daemon::shell_back`]).
+    looks: bool,
+}
+
+/// The latest block, how far it had got, and how often blocks had been
+/// numbered again.
+type Blocks = (u32, Progress, u64);
+
+/// How long a shell not seen back is left before it's looked at again, at
+/// first; twice as long each time after, up to [`LOOK_AGAIN_AT_MOST`],
+/// until its blocks change.
+const LOOK_AGAIN: Duration = Duration::from_millis(250);
+
+/// The longest a shell not seen back is left before it's looked at again.
+const LOOK_AGAIN_AT_MOST: Duration = Duration::from_secs(4);
+
 impl Commanded {
-    /// What [`back`](Self::back) keeps of the blocks `grid` shows.
-    fn blocks_of(grid: &Terminal) -> Option<(u32, u64)> {
-        Some((grid.latest_block()?.0, grid.block_renumberings()))
+    /// What [`Looked`] keeps of the blocks `grid` shows.
+    fn blocks_of(grid: &Terminal) -> Option<Blocks> {
+        let (latest, progress) = grid.latest_block()?;
+        Some((latest, progress, grid.block_renumberings()))
     }
 
     fn close_in(&self, now: Instant) -> Option<u8> {
@@ -258,6 +296,8 @@ impl Commanded {
     /// to wait for.
     fn typed(&mut self, grid: &Terminal) {
         self.close_due = None;
+        // What was seen was of the command before.
+        self.looked = None;
         let latest = grid.latest_block();
         self.expect = match latest {
             Some((block, Progress::Prompt)) => Some(block),
@@ -313,6 +353,8 @@ impl Commanded {
 
 /// Whether a shell is back, as [`Daemon::shell_back`] says, from whether
 /// it has its terminal to itself: also when it has ended, or isn't one.
+/// A shell running ssh, or `docker exec`, isn't back while it runs,
+/// whatever the shell at the other end marks.
 fn shell_is_back(has: Result<(), crate::hosted::Taken>) -> bool {
     use crate::hosted::Taken;
     !matches!(has, Err(Taken::Program | Taken::Child(_) | Taken::Exec))
@@ -1492,7 +1534,7 @@ impl Daemon {
     /// wait for, or `None` if there's nothing to wait for, as when the
     /// shell is at its prompt, or doesn't say when commands finish.
     fn wait_for_terminal(
-        &self,
+        &mut self,
         chat: TerminalId,
         pane: PaneId,
         timeout: Duration,
@@ -1509,31 +1551,68 @@ impl Daemon {
     /// [`Self::shell_back`]). That settles when, not how: a program that
     /// printed an end with status 0 as it ran leaves its block saying so,
     /// and the shell's own mark at the real end is then ignored.
-    fn finished(&self, terminal: TerminalId) -> Option<bool> {
+    fn finished(&mut self, terminal: TerminalId) -> Option<bool> {
         let grid = self.terminals.get(&terminal)?.terminal.grid()?;
         let commanded = self.tools.commanded.get(&terminal);
         let finished = Commanded::finished(commanded, grid)?;
         // Never typed, it's over whatever the marks say.
         let refused = commanded.is_some_and(|commanded| commanded.failed.is_some());
-        Some(finished && (refused || self.shell_back(terminal)))
+        Some(finished && (refused || self.shell_back(terminal, Instant::now())))
     }
 
     /// Whether `terminal`'s shell has it to itself again, as once its
     /// command has really ended, not as a program printing the marks of
     /// an end does (see [`HostedTerminal::shell_has_terminal`]), or it
-    /// has ended itself. Reads `/proc` unless it was seen so already,
-    /// its blocks as they are now.
+    /// has ended itself. Reads `/proc`, but for a terminal an agent
+    /// commanded, what's seen is kept: seen back, until its blocks change
+    /// or a command is typed; not, for [`LOOK_AGAIN`], twice as long each
+    /// time after, so a program that printed an end and runs on costs a
+    /// look now and then, not one each time round the loop.
     ///
     /// [`HostedTerminal::shell_has_terminal`]: crate::hosted::HostedTerminal::shell_has_terminal
-    pub(super) fn shell_back(&self, terminal: TerminalId) -> bool {
+    pub(super) fn shell_back(&mut self, terminal: TerminalId, now: Instant) -> bool {
         let Some(slot) = self.terminals.get(&terminal) else {
             return true;
         };
-        let back = self.tools.commanded.get(&terminal).and_then(|c| c.back);
-        if back.is_some() && back == slot.terminal.grid().and_then(Commanded::blocks_of) {
-            return true;
+        let blocks = slot.terminal.grid().and_then(Commanded::blocks_of);
+        let looked = self.looked(terminal, blocks);
+        if let Some(looked) = looked
+            && (looked.back || now < looked.again)
+        {
+            return looked.back;
         }
-        shell_is_back(slot.terminal.shell_has_terminal())
+        let back = shell_is_back(slot.terminal.shell_has_terminal());
+        if let (Some(commanded), Some(blocks)) = (self.tools.commanded.get_mut(&terminal), blocks) {
+            let wait = looked.map_or(LOOK_AGAIN, |looked| {
+                (looked.wait * 2).min(LOOK_AGAIN_AT_MOST)
+            });
+            commanded.looked = Some(Looked {
+                blocks,
+                back,
+                again: now + wait,
+                wait,
+            });
+        }
+        back
+    }
+
+    /// As [`shell_back`](Self::shell_back), keeping nothing.
+    fn shell_seen_back(&self, terminal: TerminalId) -> bool {
+        let Some(slot) = self.terminals.get(&terminal) else {
+            return true;
+        };
+        let blocks = slot.terminal.grid().and_then(Commanded::blocks_of);
+        match self.looked(terminal, blocks) {
+            Some(looked) if looked.back || Instant::now() < looked.again => looked.back,
+            _ => shell_is_back(slot.terminal.shell_has_terminal()),
+        }
+    }
+
+    /// What was seen of whether `terminal`'s shell is back, its blocks
+    /// being `blocks`.
+    fn looked(&self, terminal: TerminalId, blocks: Option<Blocks>) -> Option<Looked> {
+        let looked = self.tools.commanded.get(&terminal)?.looked?;
+        (Some(looked.blocks) == blocks).then_some(looked)
     }
 
     /// `send_to_terminal`: types `text` into `pane`'s terminal, a newline
@@ -1748,8 +1827,15 @@ impl Daemon {
                 text.push('\n');
             }
         }
+        // The marks that say it ended aren't signed: what it printed may
+        // say so.
+        let back = block.running || self.shell_seen_back(terminal);
         match (block.running, block.exit) {
             (true, _) => text.push_str("[still running]"),
+            (false, _) if !back => text.push_str(
+                "[still running: it was marked as finished, but the shell doesn't have the \
+                 terminal back]",
+            ),
             (false, Some(exit)) => {
                 let _ = write!(text, "[exited with status {exit}]");
             }
@@ -1809,32 +1895,34 @@ impl Daemon {
     /// Work is only eligible after shell integration confirms completion.
     /// Unmarked shells, new work, and explicit keep rules never expire.
     pub(super) fn maintain_agent_terminals(&mut self, now: Instant) {
+        // An end the marks say came is taken once the shell is back (see
+        // `shell_back`); seen so now, what waits for it is told, first.
+        let commanded: Vec<TerminalId> = self.tools.commanded.keys().copied().collect();
+        let mut back_now = Vec::new();
+        for &terminal in &commanded {
+            if let Some(Ended { looks: true, .. }) = self.ended_by_marks(terminal)
+                && !self.seen_back(terminal)
+                && self.shell_back(terminal, now)
+            {
+                back_now.push(terminal);
+            }
+        }
+        for terminal in back_now {
+            self.answer_finished(terminal, false);
+        }
         let mut close = Vec::new();
-        for (&terminal, commanded) in &mut self.tools.commanded {
+        for terminal in commanded {
+            let Some(ended) = self.ended_by_marks(terminal) else {
+                continue;
+            };
+            let back = !ended.looks || self.seen_back(terminal);
+            let Some(commanded) = self.tools.commanded.get_mut(&terminal) else {
+                continue;
+            };
             let Some(parent) = commanded.owner else {
                 continue;
             };
-            let Some(slot) = self.terminals.get(&terminal) else {
-                continue;
-            };
-            let said = slot.terminal.grid().is_some_and(|grid| {
-                Commanded::finished(Some(commanded), grid) == Some(true)
-                    && !matches!(grid.latest_block(), Some((_, Progress::Running)))
-            });
-            // An end the marks say came is taken once the shell is back,
-            // which is remembered with the blocks: looked at again only
-            // once they change, not each time round.
-            let blocks = slot.terminal.grid().and_then(Commanded::blocks_of);
-            if said
-                && commanded.failed.is_none()
-                && commanded.back != blocks
-                && shell_is_back(slot.terminal.shell_has_terminal())
-            {
-                commanded.back = blocks;
-            }
-            let back = commanded.failed.is_some() || commanded.back == blocks;
-            let finished = slot.terminal.status() != clackatoo_protocol::TerminalStatus::Running
-                || (said && back);
+            let finished = !ended.running || (ended.said && back);
             let waiting = self.tools.waiting.iter().any(
                 |wait| matches!(wait.what, Wait::Finish { terminal: id, .. } if id == terminal),
             );
@@ -1858,8 +1946,36 @@ impl Daemon {
         }
     }
 
+    /// What the marks say of how `terminal`'s command is getting on, for
+    /// [`maintain_agent_terminals`](Self::maintain_agent_terminals).
+    fn ended_by_marks(&self, terminal: TerminalId) -> Option<Ended> {
+        let slot = self.terminals.get(&terminal)?;
+        let commanded = self.tools.commanded.get(&terminal)?;
+        let said = slot.terminal.grid().is_some_and(|grid| {
+            Commanded::finished(Some(commanded), grid) == Some(true)
+                && !matches!(grid.latest_block(), Some((_, Progress::Running)))
+        });
+        let running = slot.terminal.status() == clackatoo_protocol::TerminalStatus::Running;
+        Some(Ended {
+            said,
+            running,
+            looks: said && running && commanded.failed.is_none(),
+        })
+    }
+
+    /// Whether `terminal`'s shell was seen back already, its blocks as
+    /// they are now.
+    fn seen_back(&self, terminal: TerminalId) -> bool {
+        let blocks = (self.terminals.get(&terminal))
+            .and_then(|slot| slot.terminal.grid())
+            .and_then(Commanded::blocks_of);
+        self.looked(terminal, blocks)
+            .is_some_and(|looked| looked.back)
+    }
+
     /// When the tools next need the loop's attention: a shell's first
-    /// prompt given up on, or a wait timing out.
+    /// prompt given up on, a wait timing out, or a shell not seen back to
+    /// be looked at again.
     pub(super) fn next_tool_due(&self) -> Option<Instant> {
         let typing = (self.tools.commanded.values())
             .filter_map(|commanded| commanded.typing.as_ref())
@@ -1887,7 +2003,18 @@ impl Daemon {
             .commanded
             .values()
             .filter_map(|commanded| commanded.next_close_tick(now));
-        typing.chain(waits).chain(finished).chain(closing).min()
+        // Only those still to come: one passed is looked at as the loop
+        // goes round, if the marks still say the command ended.
+        let looks = (self.tools.commanded.values())
+            .filter_map(|commanded| commanded.looked)
+            .filter(|looked| !looked.back && looked.again > now)
+            .map(|looked| looked.again);
+        typing
+            .chain(waits)
+            .chain(finished)
+            .chain(closing)
+            .chain(looks)
+            .min()
     }
 
     /// Types the commands whose shells' prompts haven't come, or haven't
@@ -2432,7 +2559,7 @@ fn shorten(path: &Path, dir: &str) -> String {
 
 #[cfg(test)]
 mod keeping_whose {
-    use clackatoo_protocol::{NewTerminal, Size};
+    use clackatoo_protocol::{NewTerminal, Size, TerminalId};
 
     use crate::server::agent_files::tests::daemon_with_chat;
 
@@ -2479,17 +2606,6 @@ mod keeping_whose {
                 .values()
                 .all(|command| command.close_due.is_none())
         );
-        for terminal in [unseen, selected] {
-            daemon
-                .terminals
-                .get_mut(&terminal)
-                .unwrap()
-                .terminal
-                .pty()
-                .unwrap()
-                .emulator_mut()
-                .advance(b"\x1b]133;A\x07$ test\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
-        }
         daemon.tools.waiting.push(Waiting {
             token: mio::Token(usize::MAX),
             id: serde_json::json!(1),
@@ -2502,6 +2618,20 @@ mod keeping_whose {
         });
         daemon.maintain_agent_terminals(now);
         assert!(daemon.agent_terminal(unseen).unwrap().waiting);
+        for terminal in [unseen, selected] {
+            daemon
+                .terminals
+                .get_mut(&terminal)
+                .unwrap()
+                .terminal
+                .pty()
+                .unwrap()
+                .emulator_mut()
+                .advance(b"\x1b]133;A\x07$ test\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        }
+        // Its end seen, with the shell back, the wait is answered.
+        daemon.maintain_agent_terminals(now);
+        assert!(!daemon.agent_terminal(unseen).unwrap().waiting);
         assert_countdown_ticks(&mut daemon, unseen, now);
         daemon.tools.waiting.clear();
         daemon.maintain_agent_terminals(now + Duration::from_secs(1));
@@ -2617,11 +2747,119 @@ mod keeping_whose {
             daemon.wait_for_terminal(chat, pane, Duration::from_secs(1)),
             Ok(Some(terminal))
         );
+        let read = daemon.describe_terminal(pane, terminal, 10);
+        assert!(read.ends_with("doesn't have the terminal back]"), "{read}");
         daemon.maintain_agent_terminals(now);
         assert!(!daemon.agent_terminal(terminal).unwrap().finished);
         assert_eq!(daemon.tools.commanded[&terminal].close_due, None);
+        // Seen not back, it's looked at again only a while later, and
+        // later each time, not each time round.
+        let looked = |daemon: &super::Daemon| daemon.tools.commanded[&terminal].looked.unwrap();
+        let first = looked(&daemon);
+        assert!(!first.back);
+        assert_eq!(daemon.next_tool_due(), Some(first.again));
+        daemon.maintain_agent_terminals(first.again - Duration::from_millis(1));
+        assert_eq!(looked(&daemon).again, first.again);
+        daemon.maintain_agent_terminals(first.again);
+        assert_eq!(looked(&daemon).wait, first.wait * 2);
         daemon.maintain_agent_terminals(now + Duration::from_mins(2));
         assert!(daemon.terminals.contains_key(&terminal), "never closed");
+    }
+
+    #[test]
+    fn a_second_command_isnt_ended_by_marks_it_prints_either() {
+        use super::{Commanded, Wait, Waiting};
+        use std::time::{Duration, Instant};
+
+        fn emulator(
+            daemon: &mut super::Daemon,
+            terminal: clackatoo_protocol::TerminalId,
+        ) -> &mut clackatoo_term::Terminal {
+            (daemon.terminals.get_mut(&terminal).unwrap().terminal.pty())
+                .unwrap()
+                .emulator_mut()
+        }
+        fn wait(daemon: &mut super::Daemon, chat: TerminalId, terminal: TerminalId) {
+            daemon.tools.waiting.push(Waiting {
+                token: mio::Token(usize::MAX),
+                id: serde_json::json!(1),
+                chat,
+                what: Wait::Finish {
+                    terminal,
+                    lines: 10,
+                    due: Instant::now() + Duration::from_mins(5),
+                },
+            });
+        }
+        fn typed(daemon: &mut super::Daemon, terminal: TerminalId) {
+            let grid = daemon.terminals[&terminal].terminal.grid().unwrap();
+            daemon
+                .tools
+                .commanded
+                .get_mut(&terminal)
+                .unwrap()
+                .typed(grid);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.workspaces.new_workspace("test".into(), chat);
+        daemon.next_id = chat.0 + 1;
+        // The shell waits at its own `read`, with the terminal to itself,
+        // then runs a command in its group.
+        let terminal = daemon
+            .new_terminal(&NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "read x; sleep 600; :".into(),
+                ]),
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        daemon
+            .place_beside(chat, clackatoo_protocol::PaneTerminal::Existing(terminal))
+            .unwrap();
+        daemon.tools.commanded.insert(
+            terminal,
+            Commanded {
+                owner: Some(chat),
+                ..Commanded::default()
+            },
+        );
+        // The first command ends, as the shell says, and it's back: what
+        // waits for it is told at once.
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;A\x07$ ");
+        typed(&mut daemon, terminal);
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;C\x07");
+        wait(&mut daemon, chat, terminal);
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        daemon.maintain_agent_terminals(Instant::now());
+        assert!(daemon.tools.waiting.is_empty(), "answered");
+        assert!(daemon.agent_terminal(terminal).unwrap().finished);
+        // The second starts a program, which prints the end of its block
+        // alone.
+        typed(&mut daemon, terminal);
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        let hosted = slot.terminal.pty().unwrap();
+        hosted.send_input(b"x\n").unwrap();
+        let pid = hosted.info().pid.unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while crate::ports::children_of(std::path::Path::new("/proc"), pid).is_empty() {
+            assert!(Instant::now() < give_up, "sleep never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;C\x07");
+        wait(&mut daemon, chat, terminal);
+        daemon.maintain_agent_terminals(Instant::now());
+        emulator(&mut daemon, terminal).advance(b"\x1b]133;D;0\x07");
+        daemon.answer_finished(terminal, false);
+        daemon.maintain_agent_terminals(Instant::now());
+        assert_eq!(daemon.tools.waiting.len(), 1, "the wait goes on");
+        assert!(!daemon.agent_terminal(terminal).unwrap().finished);
+        assert_eq!(daemon.tools.commanded[&terminal].close_due, None);
     }
 
     fn assert_countdown_ticks(

@@ -293,30 +293,27 @@ impl Daemon {
             .terminals
             .get(&terminal)
             .and_then(|s| s.terminal.grid());
+        let progress = grid
+            .filter(|g| g.block_renumberings() == record.renumbered)
+            .and_then(|g| record.expect.and_then(|block| g.block_progress(block)));
+        let starting = record.activity.state == ActivityState::Starting;
+        let pane = record.activity.pane;
         let state = if refused.is_some() {
             ActivityState::Refused
-        } else if let Some(Progress::Finished(code)) =
-            grid.and_then(|g| record.expect.and_then(|block| g.block_progress(block)))
-            && grid.is_some_and(|g| g.block_renumberings() == record.renumbered)
+        } else if let Some(Progress::Finished(code)) = progress
             // Not as a program prints the marks of an end: only once the
             // shell is back.
-            && (ended || self.shell_back(terminal))
+            && (ended || self.shell_back(terminal, std::time::Instant::now()))
         {
             code.map_or(ActivityState::Unknown, ActivityState::Exited)
-        } else if ended
-            || (record.activity.state != ActivityState::Starting
-                && self.finished(terminal) == Some(true))
-        {
+        } else if ended || (!starting && self.finished(terminal) == Some(true)) {
             ActivityState::Unknown
         } else {
             return;
         };
         let result = refused.unwrap_or_else(|| {
             self.describe_terminal(
-                record
-                    .activity
-                    .pane
-                    .unwrap_or(clackatoo_protocol::PaneId(0)),
+                pane.unwrap_or(clackatoo_protocol::PaneId(0)),
                 terminal,
                 crate::mcp::DEFAULT_LINES,
             )
