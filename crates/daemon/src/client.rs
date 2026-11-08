@@ -67,6 +67,39 @@ pub(crate) struct Carrying {
     pub(crate) signed: Option<Signed>,
 }
 
+/// Connects to the daemon's socket at `path`: one another user listens on
+/// is refused, with [`io::ErrorKind::PermissionDenied`]. Where there's no
+/// `XDG_RUNTIME_DIR`, the socket is in `/tmp`, where another user could
+/// make the directory first and listen there, to be told what's typed.
+///
+/// # Errors
+///
+/// If nothing listens there, or another user does.
+pub fn connect_socket(path: &Path) -> io::Result<UnixStream> {
+    let stream = UnixStream::connect(path)?;
+    ours(&stream)?;
+    Ok(stream)
+}
+
+/// Refuses `stream` unless what's at its other end runs as this user.
+fn ours(stream: &UnixStream) -> io::Result<()> {
+    let peer = rustix::net::sockopt::socket_peercred(stream)?;
+    same_user(peer.uid, rustix::process::getuid())
+}
+
+fn same_user(peer: rustix::process::Uid, me: rustix::process::Uid) -> io::Result<()> {
+    if peer == me {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "the daemon's socket is another user's (uid {}), so it isn't used",
+            peer.as_raw()
+        ),
+    ))
+}
+
 /// A number for a window to attach to buffers as, chosen at random.
 #[must_use]
 pub fn random_window() -> u64 {
@@ -83,7 +116,7 @@ impl Client {
     ///
     /// If nothing is listening, or the daemon speaks another version.
     pub fn connect(socket_path: &Path) -> Result<Self, ClientError> {
-        let stream = UnixStream::connect(socket_path).map_err(ClientError::Connect)?;
+        let stream = connect_socket(socket_path).map_err(ClientError::Connect)?;
         Self::over(stream)
     }
 
@@ -101,6 +134,7 @@ impl Client {
     /// As [`over`](Self::over), saying it speaks protocol `speaks`, at
     /// most this build's, as an older build would.
     pub(crate) fn over_speaking(stream: UnixStream, speaks: u32) -> Result<Self, ClientError> {
+        ours(&stream).map_err(ClientError::Connect)?;
         let mut client = Self {
             stream,
             decoder: FrameDecoder::new(),
@@ -1275,4 +1309,31 @@ pub enum ClientError {
     /// which began so. The connection goes on.
     #[error("the daemon sent a message this build can't read")]
     Unreadable(Head),
+}
+
+#[cfg(test)]
+mod tests {
+    use rustix::process::Uid;
+
+    use super::*;
+
+    #[test]
+    fn a_socket_another_user_listens_on_is_refused() {
+        // Another user can't be had in a test, so the rule is tried alone.
+        let (them, me) = (Uid::from_raw(1234), Uid::from_raw(1000));
+        let refused = same_user(them, me).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert!(refused.to_string().contains("uid 1234"));
+        assert!(same_user(me, me).is_ok());
+    }
+
+    #[test]
+    fn a_socket_this_user_listens_on_is_connected_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        connect_socket(&path).unwrap();
+        let missing = connect_socket(&dir.path().join("none")).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    }
 }

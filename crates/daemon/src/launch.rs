@@ -85,7 +85,7 @@ pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
 /// If the daemon can't be started or reached.
 pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> {
     let socket = runtime.socket_path();
-    match UnixStream::connect(&socket) {
+    match client::connect_socket(&socket) {
         Ok(stream) => return Ok(stream),
         Err(err) if not_running(&err) => {}
         Err(err) => return Err(ClientError::Connect(err).into()),
@@ -113,7 +113,7 @@ pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> 
 
     let deadline = Instant::now() + DEADLINE;
     loop {
-        match UnixStream::connect(&socket) {
+        match client::connect_socket(&socket) {
             Ok(stream) => return Ok(stream),
             Err(err) if not_running(&err) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(1));
@@ -149,7 +149,7 @@ pub fn can_upgrade(protocol: u32) -> bool {
 ///
 /// If the daemon can't be reached, or doesn't answer.
 pub fn daemon_protocol(runtime: &RuntimeDir) -> Result<Option<u32>, LaunchError> {
-    let mut stream = match UnixStream::connect(runtime.socket_path()) {
+    let mut stream = match client::connect_socket(&runtime.socket_path()) {
         Ok(stream) => stream,
         Err(err) if not_running(&err) => return Ok(None),
         Err(err) => return Err(ClientError::Connect(err).into()),
@@ -185,7 +185,7 @@ pub fn upgrade(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
         Some(_) => {}
     }
     let socket = runtime.socket_path();
-    let mut stream = UnixStream::connect(&socket).map_err(ClientError::Connect)?;
+    let mut stream = client::connect_socket(&socket).map_err(ClientError::Connect)?;
     stream.set_read_timeout(Some(DEADLINE))?;
     let executable = std::env::current_exe()?;
     let upgrade = ClientMessage::Upgrade {

@@ -1758,7 +1758,7 @@ const RECONNECT: [Duration; 5] = [
 fn connect(socket: &Path, chat: TerminalId) -> Result<StdUnixStream, ClientError> {
     let mut waits = RECONNECT.iter();
     loop {
-        let tried = StdUnixStream::connect(socket)
+        let tried = crate::client::connect_socket(socket)
             .map_err(ClientError::Connect)
             .and_then(|mut stream| open(&mut stream, chat).map(|()| stream));
         match tried {
@@ -1769,6 +1769,12 @@ fn connect(socket: &Path, chat: TerminalId) -> Result<StdUnixStream, ClientError
                 | ClientError::VersionMismatch { .. }),
             ) => {
                 return Err(err);
+            }
+            // Another user's socket is no better a moment later.
+            Err(ClientError::Connect(err))
+                if err.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                return Err(ClientError::Connect(err));
             }
             Err(err) => match waits.next() {
                 Some(&wait) => std::thread::sleep(wait),

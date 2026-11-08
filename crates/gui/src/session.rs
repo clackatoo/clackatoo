@@ -283,7 +283,7 @@ impl Session {
     pub(crate) fn daemon_listening(&self) -> bool {
         match &self.location {
             Some(Location::Local(runtime) | Location::Started(runtime)) => {
-                std::os::unix::net::UnixStream::connect(runtime.socket_path()).is_ok()
+                clackatoo_daemon::client::connect_socket(&runtime.socket_path()).is_ok()
             }
             Some(Location::Remote(_)) | None => false,
         }

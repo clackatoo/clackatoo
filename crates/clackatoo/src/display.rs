@@ -14,7 +14,7 @@ pub(crate) fn show() -> anyhow::Result<()> {
     let runtime = RuntimeDir::for_current_user();
     // What a daemon that has stopped wrote is no one's.
     let socket = runtime.socket_path();
-    if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    if clackatoo_daemon::client::connect_socket(&socket).is_err() {
         anyhow::bail!(
             "no daemon is listening on {}; start one with `clackatoo daemon`",
             socket.display()
