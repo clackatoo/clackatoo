@@ -14,10 +14,17 @@
 # file removed at once, and the name taken out of the environment, so no
 # program bash runs from now on can learn it.
 if [[ -n ${CLACKATOO_SECRET_FILE-} ]]; then
+    # Not traced, which would print the secret, as when bash starts with
+    # xtrace in SHELLOPTS; tracing, if it's on, goes on after.
+    { [[ $- == *x* ]] && __clackatoo_x=1; builtin set +x; } 2>/dev/null
     IFS= read -r __clackatoo_secret 2>/dev/null <"$CLACKATOO_SECRET_FILE"
     command rm -f -- "$CLACKATOO_SECRET_FILE"
     unset CLACKATOO_SECRET_FILE
     [[ ${__clackatoo_secret-} =~ ^[0-9a-f]{32}$ ]] || unset __clackatoo_secret
+    if [[ -n ${__clackatoo_x-} ]]; then
+        unset __clackatoo_x
+        builtin set -x
+    fi
 fi
 
 # The display variables clackatoo follows as the desktop logs in and out
@@ -146,8 +153,9 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     fi
     # Shown after a command is read, before it runs (bash 4.4 and later).
     # The command and secret need PS0's `$(…)` expanded, which
-    # `shopt -u promptvars` stops.
-    if [[ -n ${__clackatoo_secret-} ]] && shopt -q promptvars; then
+    # `shopt -u promptvars` stops. Asked so that ~/.bashrc's `set -x`
+    # traces `1`, not the secret.
+    if [[ -n ${__clackatoo_secret:+1} ]] && shopt -q promptvars; then
         PS0=$PS0'$(__clackatoo_command)'
     else
         PS0=$PS0'\e]133;C\a'

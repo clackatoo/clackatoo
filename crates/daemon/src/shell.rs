@@ -32,7 +32,14 @@
 //! reads it first thing, removes the file, unsets the variable, and
 //! keeps the secret in a variable of its own that isn't exported. The
 //! daemon removes the file too once the shell has marked anything, and
-//! when the terminal goes, in case the integration never ran.
+//! when the terminal goes, in case the integration never ran. Reading it
+//! is never traced, by bash's `set -x` or fish's `fish_trace`, which
+//! would print it.
+//!
+//! fish runs its integration only after its startup files (`-C`), so
+//! programs `config.fish` starts, a prompt's daemon or `ssh-agent`, run
+//! while the file is still there and named in their environment. Startup
+//! files are the user's, and trusted; only what they start can read it.
 //!
 //! Not the secret itself in the environment, unset by the integration:
 //! the environment a program started with stays readable in

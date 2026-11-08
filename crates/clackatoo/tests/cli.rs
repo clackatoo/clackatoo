@@ -1254,6 +1254,42 @@ fn shells_mark_what_they_run_with_a_secret_no_program_they_run_learns() {
     }
 }
 
+/// A shell traced from its start, by its startup files or by bash's
+/// `SHELLOPTS` in its environment, never prints the secret as its
+/// integration reads it.
+#[test]
+fn shells_traced_from_their_start_never_print_the_secret() {
+    for (shell, zshenv) in integrated_shells() {
+        let name = shell.file_name().unwrap().to_string_lossy().into_owned();
+        let traced: &[(&str, &str, &[(&str, &Path)])] = match name.as_str() {
+            "fish" => &[(".config/fish/config.fish", "set -g fish_trace 1\n", &[])],
+            "zsh" => &[(".zshrc", "setopt xtrace\n", &[])],
+            _ => &[
+                (".bashrc", "set -x\n", &[]),
+                (".bashrc", "", &[("SHELLOPTS", Path::new("xtrace"))]),
+            ],
+        };
+        for &(file, script, env) in traced {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join(".zshenv"), &zshenv).unwrap();
+            let file = home.path().join(file);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, script).unwrap();
+            let mut user = UserShell::start(&shell, home.path(), env);
+            user.run("echo ran");
+            let text = user.text();
+            assert!(text.contains("echo ran\n"), "{name}: {text}");
+            // fish traces reading its environment, which may hold
+            // secrets of this test's own.
+            let ours: Vec<String> = std::env::vars().map(|(_, value)| value).collect();
+            let hex = |ch: char| ch.is_ascii_hexdigit();
+            let secret = (text.split(|ch: char| !hex(ch)))
+                .find(|run| run.len() >= 32 && !ours.iter().any(|value| value.contains(run)));
+            assert_eq!(secret, None, "{name} {script:?} {env:?}: {text}");
+        }
+    }
+}
+
 /// bash sharing its history with other terminals, which each prompt
 /// reads in, never takes another terminal's line for one kept out of its
 /// own history: only a line with the number the prompt was to give it is

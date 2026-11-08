@@ -18,6 +18,9 @@ set -g __clackatoo_integrated 1
 # the name taken out of the environment, so no program fish runs from
 # now on can learn it.
 if set -q CLACKATOO_SECRET_FILE
+    # Not traced, which would print the secret, as `set -g fish_trace 1`
+    # in config.fish would: empty here, it's off till the block ends.
+    set -l fish_trace
     if test -f "$CLACKATOO_SECRET_FILE"
         read -l secret <$CLACKATOO_SECRET_FILE
         if string match -qr '^[0-9a-f]{32}$' -- $secret
