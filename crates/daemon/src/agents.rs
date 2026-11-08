@@ -730,7 +730,7 @@ fn codex_remote_servers_in(path: &Path) -> Vec<String> {
     const MOST: u64 = 1024 * 1024;
     // Read on the event loop: a FIFO, or anything else that isn't a file,
     // could keep it waiting.
-    let read = crate::find::open_file(path).and_then(|file| {
+    let read = crate::regular::open(path, crate::regular::Links::Follow).and_then(|file| {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::Read::take(file, MOST), &mut text)?;
         Ok(text)

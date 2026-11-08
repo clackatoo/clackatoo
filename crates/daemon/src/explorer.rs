@@ -352,35 +352,20 @@ pub(crate) fn churns(name: &std::ffi::OsStr) -> bool {
 /// Walks `dir`, as [`Workers::walk`] says.
 fn walk(dir: &Path, made: bool, most: usize) -> Walk {
     let mut found = Walk::default();
+    // `.gitignore` says what's left out in a project with no git too.
+    let rules = Arc::new(crate::ignores::Rules::new(false, false));
     // Left out by `.gitignore`, as a walk of the folder it's in has it.
-    let ignored = || {
-        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
-            return false;
-        };
-        let name = name.to_owned();
-        let listed = (ignore::WalkBuilder::new(parent))
-            .hidden(false)
-            .require_git(false)
-            .max_depth(Some(1))
-            .filter_entry(move |entry| entry.depth() == 0 || entry.file_name() == name)
-            .build()
-            .flatten()
-            .any(|entry| entry.path() == dir);
-        !listed
-    };
-    if made && ignored() {
+    if made && rules.ignored(dir, true) {
         return found;
     }
-    let walker = (ignore::WalkBuilder::new(dir))
-        .hidden(false)
+    let walker = crate::ignores::walker(dir)
         .same_file_system(true)
-        // `.gitignore` says what's left out in a project with no git too.
-        .require_git(false)
         .filter_entry(move |entry| {
             let name = entry.file_name();
             name != ".git"
                 && (entry.depth() == 0 || !churns(name))
                 && (made || entry.file_type().is_some_and(|kind| kind.is_dir()))
+                && rules.keeps(entry)
         })
         .build();
     for entry in walker.flatten() {
@@ -424,18 +409,19 @@ impl Ignores {
         let Some(top) = dir.ancestors().find(|dir| dir.join(".git").exists()) else {
             return Self { files: Vec::new() };
         };
+        // Each read as the files naming git directories are: a regular
+        // file, never followed nor waited on, and not too big.
         let mut files: Vec<Gitignore> = dir
             .ancestors()
             .take_while(|ancestor| ancestor.starts_with(top))
             .filter_map(|ancestor| {
                 let file = ancestor.join(".gitignore");
-                file.is_file().then(|| one_file(ancestor, &file))
+                let text = read_regular(&file, MOST_IGNORE)?;
+                Some(lines_of(ancestor, &file, &text))
             })
             .collect();
-        // Read as the files naming git directories are: a regular file,
-        // never followed nor waited on, and not too big.
         let exclude = exclude_file(top);
-        let read = (exclude.as_deref()).and_then(|exclude| read_regular(exclude, MOST_EXCLUDE));
+        let read = (exclude.as_deref()).and_then(|exclude| read_regular(exclude, MOST_IGNORE));
         if let (Some(exclude), Some(text)) = (exclude, read) {
             files.push(lines_of(top, &exclude, &text));
         }
@@ -467,7 +453,7 @@ impl Ignores {
 /// only their first few KiB: a link, a pipe or a huge file put there by a
 /// folder from anyone is passed over, never followed, waited on or read
 /// whole.
-fn exclude_file(top: &Path) -> Option<PathBuf> {
+pub(crate) fn exclude_file(top: &Path) -> Option<PathBuf> {
     let dot_git = top.join(".git");
     let git_dir = if fs::symlink_metadata(&dot_git).ok()?.is_dir() {
         dot_git
@@ -488,9 +474,9 @@ fn exclude_file(top: &Path) -> Option<PathBuf> {
 /// The most of a file naming a git directory that's read.
 const MOST_POINTER: u64 = 4096;
 
-/// The most of a repository's own excludes that's read: far more than
-/// anyone writes.
-const MOST_EXCLUDE: u64 = 64 << 10;
+/// The most of an ignore file, or a repository's own excludes, that's
+/// read: far more than anyone writes.
+pub(crate) const MOST_IGNORE: u64 = 64 << 10;
 
 /// The text of the file at `path`, if it's a regular file, not a link,
 /// of no more than [`MOST_POINTER`] bytes.
@@ -501,24 +487,14 @@ fn read_pointer(path: &Path) -> Option<String> {
 /// The text of the file at `path`, if it's a regular file, not a link,
 /// of no more than `most` bytes.
 fn read_regular(path: &Path, most: u64) -> Option<String> {
-    use rustix::fs::{Mode, OFlags};
-    use std::io::Read;
-    // Not followed if it's a link, nor waited on if it's a pipe.
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let file = fs::File::from(rustix::fs::open(path, flags, Mode::empty()).ok()?);
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > most {
-        return None;
-    }
-    let mut text = String::new();
-    file.take(most).read_to_string(&mut text).ok()?;
-    Some(text)
+    crate::regular::read_small(path, most)
 }
 
 /// The ignore file `file`, read as `text`, whose patterns are from `dir`.
-fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
+/// A byte order mark it starts with is passed over, as git passes it over.
+pub(crate) fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
     let mut builder = GitignoreBuilder::new(dir);
-    for line in text.lines() {
+    for line in text.trim_start_matches('\u{feff}').lines() {
         if let Err(err) = builder.add_line(Some(file.to_owned()), line) {
             log::debug!("{} has a pattern that can't be read: {err}", file.display());
         }
@@ -526,17 +502,8 @@ fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
-/// The ignore file `file`, whose patterns are from `dir`.
-fn one_file(dir: &Path, file: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(dir);
-    if let Some(err) = builder.add(file) {
-        log::debug!("{} has patterns that can't be read: {err}", file.display());
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
-}
-
 /// The user's own ignore file, git's `core.excludesFile`, read once.
-fn global() -> &'static Gitignore {
+pub(crate) fn global() -> &'static Gitignore {
     static GLOBAL: OnceLock<Gitignore> = OnceLock::new();
     GLOBAL.get_or_init(|| Gitignore::global().0)
 }

@@ -20,9 +20,8 @@
 //! text.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,10 +33,12 @@ use clackatoo_protocol::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Symbo
 use clackatoo_syntax::Server;
 use clackatoo_text::{Diagnostic, Highlights, Rope, Severity, Span};
 
-use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
+use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkState};
 use regex::bytes::{Regex, RegexBuilder};
 
+use crate::ignores::Rules;
 use crate::lsp::{self, Encoding, NamedSymbol, Reported};
+use crate::regular::Links;
 
 /// The most files one search lists: far more than a project has, but short
 /// of listing all of a home directory that has no project in it.
@@ -522,9 +523,12 @@ fn root_found(root: &Path, home: &Path) -> Found {
 fn walk<'s, V: ParallelVisitor + 's>(root: &'s Path, visitor: impl FnMut(&'s Path) -> V) {
     let threads =
         thread::available_parallelism().map_or(1, |threads| threads.get().min(MAX_THREADS));
-    let walker = (WalkBuilder::new(root))
+    // What's hidden, and what git ignores in a repository, is left out.
+    let rules = Arc::new(Rules::new(true, true));
+    let walker = crate::ignores::walker(root)
         .threads(threads)
         .same_file_system(true)
+        .filter_entry(move |entry| rules.keeps(entry))
         .build_parallel();
     walker.visit(&mut Visitors { root, visitor });
 }
@@ -774,18 +778,9 @@ fn read_text(path: &Path, into: &mut Vec<u8>) -> Option<()> {
 }
 
 /// Opens the file at `path` to read, if it's a file: not a pipe or a
-/// device, which a read might wait on for ever, or a directory. It's opened
-/// without waiting, as a pipe would have it wait for a writer.
-pub(crate) fn open_file(path: &Path) -> io::Result<File> {
-    let nonblocking = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or_default();
-    let file = (OpenOptions::new())
-        .read(true)
-        .custom_flags(nonblocking)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other("it isn't a file"));
-    }
-    Ok(file)
+/// device, which a read might wait on for ever, or a directory.
+fn open_file(path: &Path) -> io::Result<File> {
+    crate::regular::open(path, Links::Follow)
 }
 
 /// Passes each line of `text` that `regex` matches, with an empty path, to
