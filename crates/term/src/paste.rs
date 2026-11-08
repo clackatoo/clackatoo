@@ -15,14 +15,18 @@
 //! as a yank by lines in a terminal or an editor is, end with one, or
 //! more with blank lines after, and they mustn't run the last line as it
 //! lands. Only the end is kept from running: each line before the last
-//! still runs as Enter types it.
+//! still runs as Enter types it. Other control characters go here too,
+//! as xterm drops them: text a program put on the clipboard could
+//! otherwise act as keys, an escape as an arrow or ^C as a signal, in a
+//! program that takes keys.
 
 use crate::InputModes;
 
-/// What pasting `text` sends to a program in `modes`: bracketed, with
-/// control characters taken out, if the program asked for that;
-/// otherwise as typed, with its newlines as Enter, but for those ending
-/// it, which are dropped, so the paste doesn't run what it ends.
+/// What pasting `text` sends to a program in `modes`: bracketed, if the
+/// program asked for that, otherwise as typed, with its newlines as
+/// Enter, but for those ending it, which are dropped, so the paste doesn't
+/// run what it ends. Either way, control characters but tab, carriage
+/// return and newline are taken out.
 #[must_use]
 pub fn paste(text: &str, modes: InputModes) -> Vec<u8> {
     if modes.bracketed_paste {
@@ -43,10 +47,7 @@ pub fn paste(text: &str, modes: InputModes) -> Vec<u8> {
 pub fn bracketed_paste(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
-    for ch in text.chars() {
-        if ch.is_control() && !matches!(ch, '\t' | '\r' | '\n') {
-            continue;
-        }
+    for ch in text.chars().filter(|&ch| pasted(ch)) {
         let mut buffer = [0; 4];
         bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
     }
@@ -55,11 +56,20 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
 }
 
 /// What of `text` a paste not bracketed types: all but the line breaks
-/// that end it, however many, so it can't run its last line; each line
-/// break before that is still Enter, and runs the line it ends.
+/// that end it, however many, so it can't run its last line, and other
+/// control characters but tab; each line break before that is still
+/// Enter, and runs the line it ends.
 #[must_use]
-pub fn unbracketed(text: &str) -> &str {
-    text.trim_end_matches(['\r', '\n'])
+pub fn unbracketed(text: &str) -> String {
+    let mut typed: String = text.chars().filter(|&ch| pasted(ch)).collect();
+    typed.truncate(typed.trim_end_matches(['\r', '\n']).len());
+    typed
+}
+
+/// Whether a paste keeps `ch`: anything but a control character, other
+/// than tab, carriage return and newline.
+fn pasted(ch: char) -> bool {
+    !ch.is_control() || matches!(ch, '\t' | '\r' | '\n')
 }
 
 #[cfg(test)]
@@ -114,6 +124,22 @@ mod tests {
         assert_eq!(paste("\n\n", plain), b"");
         assert_eq!(paste("ls", plain), b"ls");
         assert_eq!(paste("\n", plain), b"");
+    }
+
+    #[test]
+    fn without_bracketing_controls_go_too() {
+        // As a program can put on the clipboard (OSC 52) for a paste into
+        // one that doesn't mark pastes, as a REPL: escapes would act as
+        // keys, and ^C or ^Z as signals.
+        let plain = InputModes::default();
+        assert_eq!(
+            paste("ls\x1b[201~\nrm x\x03\x1a\n", plain),
+            b"ls[201~\rrm x"
+        );
+        assert_eq!(paste("a\tb\u{9b}c", plain), "a\tbc".as_bytes());
+        // Taken out before the end is, so none can hide a line break there.
+        assert_eq!(paste("ls\n\x03", plain), b"ls");
+        assert_eq!(unbracketed("ls\n\x07\r\n"), "ls");
     }
 
     #[test]
