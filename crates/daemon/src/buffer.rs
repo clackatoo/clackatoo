@@ -13,7 +13,6 @@ use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
 use clackatoo_text::{
@@ -1039,12 +1038,39 @@ pub(crate) struct Placed {
     kept: PathBuf,
 }
 
+/// The most names tried for the new file written beside one, each taken
+/// already.
+const MOST_NAMES: usize = 16;
+
 /// Writes `text` to a new file beside `path`, with the same permissions as
 /// the file there, to be put in its place with [`Staged::commit`].
+///
+/// The new file is always made, never one already there opened: its
+/// directory may be shared, and something put at its name, such as a link
+/// to another of the user's files, would be written instead. So its name
+/// is the file's with a random part after it, which no one else can make
+/// ahead of it, and another is tried if it's taken all the same.
 pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
-    // Each new file's name is its own, though several are written beside
-    // one file at once.
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    stage_as(path, text, |name| {
+        use ring::rand::SecureRandom as _;
+        let mut random = [0; 8];
+        ring::rand::SystemRandom::new()
+            .fill(&mut random)
+            .map_err(|_| io::Error::other("the system's randomness can't be read"))?;
+        let mut temporary = name.to_owned();
+        let random = u64::from_le_bytes(random);
+        temporary.push(format!(".clackatoo-{}-{random:016x}", std::process::id()));
+        Ok(temporary)
+    })
+}
+
+/// As [`stage`], naming the new file, in `path`'s directory, `named` from
+/// `path`'s name, for each try.
+fn stage_as(
+    path: &Path,
+    text: &Rope,
+    mut named: impl FnMut(&std::ffi::OsStr) -> io::Result<OsString>,
+) -> io::Result<Staged> {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1056,17 +1082,34 @@ pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err),
     };
-    let mut temporary = name.to_owned();
-    let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    temporary.push(format!(".clackatoo-{}-{number}", std::process::id()));
-    let temporary = dir.join(temporary);
-    let written = (|| {
-        let mut file = OpenOptions::new()
+    // Only its owner's until it has the file's permissions; a new file's
+    // are as any file made has them.
+    let mode = if permissions.is_some() { 0o600 } else { 0o666 };
+    let mut created = None;
+    for _ in 0..MOST_NAMES {
+        let temporary = dir.join(named(name)?);
+        let opened = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o666)
-            .open(&temporary)?;
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(mode)
+            .open(&temporary);
+        match opened {
+            Ok(file) => {
+                created = Some((temporary, file));
+                break;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+    }
+    let Some((temporary, mut file)) = created else {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "every name tried for the new file beside it was taken",
+        ));
+    };
+    let written = (|| {
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
@@ -1083,6 +1126,7 @@ pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
             stamp,
         }),
         Err(err) => {
+            // It's the one just made.
             let _ = fs::remove_file(&temporary);
             Err(err)
         }
@@ -1293,6 +1337,65 @@ mod tests {
         assert!(!super::links_refused(&io::Error::from(
             io::ErrorKind::StorageFull
         )));
+    }
+
+    #[test]
+    fn a_new_text_is_never_written_through_what_was_put_at_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let victim = elsewhere.path().join(".bashrc");
+        std::fs::write(&victim, "mine").unwrap();
+        // Put where the new file would be by someone else who can write
+        // the directory: a link to another of the user's files, a link to
+        // nothing yet, and a file of their own.
+        let at = |name: &str| dir.path().join(name);
+        std::os::unix::fs::symlink(&victim, at("taken-1")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("new"), at("taken-2")).unwrap();
+        std::fs::write(at("taken-3"), "theirs").unwrap();
+        // Each name in turn, then the last again.
+        let tried = |names: &'static [&'static str]| {
+            let mut next = 0;
+            move |_: &std::ffi::OsStr| {
+                let name = names[next.min(names.len() - 1)];
+                next += 1;
+                Ok(OsString::from(name))
+            }
+        };
+        let names = &["taken-1", "taken-2", "taken-3", "free"];
+        let staged = super::stage_as(&path, &Rope::from_str("new"), tried(names)).unwrap();
+        staged.commit().unwrap();
+        let untouched = || {
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine");
+            assert_eq!(std::fs::read_link(at("taken-1")).unwrap(), victim);
+            assert!(std::fs::symlink_metadata(at("taken-2")).is_ok());
+            assert!(!elsewhere.path().join("new").exists());
+            assert_eq!(std::fs::read_to_string(at("taken-3")).unwrap(), "theirs");
+        };
+        untouched();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        // Every name taken: nothing written, and nothing taken away.
+        let names = &["taken-1", "taken-2", "taken-3"];
+        let mut every = tried(names);
+        let mut cycled = 0;
+        let err = super::stage_as(&path, &Rope::from_str("newer"), |name| {
+            cycled += 1;
+            every(name)
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(cycled, super::MOST_NAMES);
+        untouched();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        // The names a save makes are its own.
+        let one = super::stage(&path, &Rope::from_str("a")).unwrap();
+        let other = super::stage(&path, &Rope::from_str("b")).unwrap();
+        assert_ne!(one.temporary, other.temporary);
     }
 
     #[test]
