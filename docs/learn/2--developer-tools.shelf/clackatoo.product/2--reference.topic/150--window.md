@@ -129,7 +129,7 @@ The window shows your work at three levels:
 
 - **Workspaces**, one for each piece of distinct work, such as a project. Their names run along the [top bar](#the-frame). Often there's just one.
 - **Tabs**, inside a workspace. They run along the bottom bar, numbered, and named after the title of their focused pane's program, or, for a terminal whose program set none, the folder its shell is in (`~` for your home), unless you've named them.
-- **Panes**, which a tab is split into, side by side or stacked. Each shows a terminal, a [chat with an agent](~clackatoo/reference/agents), or a [file being edited](~clackatoo/reference/editor). A split shares its space equally until you [resize it](#resizing-panes).
+- **Panes**, which a tab is split into, side by side or stacked. Each shows a terminal, a [chat with an agent](~clackatoo/reference/agents), a [file being edited](~clackatoo/reference/editor), or one of the other kinds: an [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boards), a [review](~clackatoo/reference/agents#reviewing-its-changes) or a chat's browser page. A split shares its space equally until you [resize it](#resizing-panes).
 
 Workspace names are unique on each machine, so one from another machine may share a name with one of yours. It then shows its machine after its name, as `notes@desk`; [`showhost`](~clackatoo/reference/config#options) changes when. `:workspace notes@desk` switches to it by its machine, and `:workspace notes` alone to your own.
 
@@ -309,6 +309,7 @@ Ctrl+B and one more key work in either mode, as tmux's prefix does. While Ctrl+B
 | `x` | Closes the pane; a subagent's goes back to the background. |
 | `u` | From a [subagent's](~clackatoo/reference/agents#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
+| `r` | Opens the [machine picker](~clackatoo/reference/remote#picking-a-machine), to open a window on another machine, as `:connect` does. |
 | `o` `i` | Back and forward through the tab's places, as Ctrl+O and Ctrl+I do in normal mode. |
 | `b`, then `t` `p` `l` | Sends the tab or the pane to the [background](#background-tabs), or lists the background tabs. |
 | Ctrl+B | Sends Ctrl+B to the program. |
@@ -546,7 +547,7 @@ A flag (🇬🇧) or an emoji with a skin tone (👍🏽) is drawn as one emoji,
 
 ## Learning clackatoo
 
-`:Tutor` teaches clackatoo a lesson at a time, as vimtutor teaches Vim. It opens the finder on the lessons, each with how far you've got; Enter opens the one picked, and `:Tutor NAME` opens one by name, such as `:Tutor text-objects`. The lessons are basics, text objects, registers, substitute, wrap, indenting, snippets, explorer, shell, finder, agents and remote.
+`:Tutor` teaches clackatoo a lesson at a time, as vimtutor teaches Vim. It opens the finder on the lessons, each with how far you've got; Enter opens the one picked, and `:Tutor NAME` opens one by name, such as `:Tutor text-objects`. The lessons are basics, text-objects, words, registers, mouse, blocks, substitute, wrap, markdown, font, indenting, snippets, explorer, shell, finder, agents, remote and background.
 
 A lesson opens in a tab of its own: the lesson on the left, and on the right a practice pane, an editor on a file made for it or a terminal running your shell. Do what the step says in the practice pane: once it's done, its heading lights up, then stays green with a ✓ beside it, and the next step is lit and scrolled to. A step with nothing to do is to read. Lessons draw code as chats do, on a background of its own and never split between rows, with step titles in bold, and a lesson's explorer is headed with the lesson's name.
 
