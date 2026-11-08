@@ -36,6 +36,11 @@ const MOST_PORTS: usize = 64;
 /// another daemon, in characters: as long as one here is called.
 const LONGEST_PROGRAM: usize = 15;
 
+/// The most of another daemon's background tabs looked at in what it says
+/// they listen on: it lists each of its own once, and far fewer than this
+/// even past the [`MOST_PANES`](super::mirror::MOST_PANES) shown here.
+const MOST_LISTED: usize = super::mirror::MOST_PANES * 8;
+
 impl Daemon {
     /// `keep`, marking `local`, a pane of a workspace of the connection at
     /// `at`, to keep running, renumbered for the daemon there, if the
@@ -325,7 +330,8 @@ impl Daemon {
     /// of the connection at `at` listen on, as it found them: those of the
     /// background tabs shown here alone, renumbered, so many of each, and
     /// their programs' names made safe. The clients that asked are told
-    /// them, with the rest.
+    /// them, with the rest. The list is looked at only until every tab
+    /// shown is found, and no further than [`MOST_LISTED`].
     pub(super) fn take_relayed_ports(&mut self, at: usize, listening: Vec<Listening>) {
         let mirror = &self.links.list[at].relayed.mirror;
         let shown: BTreeSet<TabId> = (mirror.workspaces.iter())
@@ -333,11 +339,15 @@ impl Daemon {
             .map(|background| background.tab.id)
             .collect();
         let mut taken: Vec<Listening> = Vec::new();
-        for one in listening {
+        let mut found = BTreeSet::new();
+        for one in listening.into_iter().take(MOST_LISTED) {
+            if found.len() == shown.len() {
+                break;
+            }
             let Some(tab) = mirror.tab_numbers.local(one.tab.0).map(TabId) else {
                 continue;
             };
-            if !shown.contains(&tab) || taken.iter().any(|known| known.tab == tab) {
+            if !shown.contains(&tab) || !found.insert(tab) {
                 continue;
             }
             let mut ports: Vec<ListeningPort> = (one.ports.into_iter())
@@ -914,5 +924,70 @@ mod tests {
             shown.ports[0],
             port(1001 - u16::try_from(MOST_PORTS).unwrap(), "python3")
         );
+    }
+
+    /// The ports of another daemon's background tabs, as `there` says
+    /// `listening`, as this daemon tells a window that asks.
+    fn ports_told(
+        daemon: &mut Daemon,
+        link: Token,
+        there: &mut UnixStream,
+        listening: Vec<Listening>,
+    ) -> Vec<Listening> {
+        let (window, mut from_daemon) = client(daemon);
+        let ports = Request::Background(BackgroundAction::Ports);
+        assert!(matches!(
+            daemon.route_request(window, ports.clone()),
+            Routed::Here(_)
+        ));
+        assert_eq!(heard(there), [ClientMessage::Request(ports)]);
+        say(there, &ServerMessage::Response(Response::Done));
+        say(there, &ServerMessage::Event(Event::Listening(listening)));
+        daemon.read_reached(link, Reading::Last);
+        let mut told: Vec<Vec<Listening>> = (read::<ServerMessage>(&mut from_daemon).into_iter())
+            .filter_map(|message| match message {
+                ServerMessage::Event(Event::Listening(listening)) => Some(listening),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+        told.remove(0)
+    }
+
+    /// Another daemon's list of what its background tabs listen on is
+    /// looked at no further than a list it would send: a tab named after
+    /// so many others isn't, nor one named twice; one named after a few
+    /// hundred is.
+    #[test]
+    fn ports_are_looked_for_no_further_than_another_daemon_would_list_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = with_background(dir.path());
+        let (_, _, tab, _) = numbers(&daemon);
+        let listing = |before: usize, port: u16| {
+            let mut listing: Vec<Listening> = (0..before)
+                .map(|_| Listening {
+                    tab: TabId(99),
+                    ports: Vec::new(),
+                })
+                .collect();
+            listing.push(Listening {
+                tab: TabId(5),
+                ports: vec![ListeningPort {
+                    port,
+                    program: "trail".into(),
+                }],
+            });
+            listing
+        };
+        let told = ports_told(&mut daemon, link, &mut there, listing(MOST_LISTED, 4000));
+        assert!(told.is_empty(), "{told:?}");
+        // Asked again once the answer is in.
+        let mut twice = listing(300, 4000);
+        twice.extend(listing(0, 4001));
+        let told = ports_told(&mut daemon, link, &mut there, twice);
+        let [one] = &told[..] else {
+            panic!("told {told:?}");
+        };
+        assert_eq!((one.tab, one.ports[0].port), (tab, 4000));
     }
 }
