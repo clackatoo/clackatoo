@@ -429,6 +429,15 @@ mod tests {
     /// A daemon connected to desk, as [`linked`], whose workspace has a
     /// background tab too: its tab 5, its pane 6, its terminal 8.
     fn with_background(dir: &std::path::Path) -> (Daemon, Token, UnixStream) {
+        with_backgrounds(dir, &[(5, 6, 8)])
+    }
+
+    /// A daemon connected to desk, as [`linked`], whose workspace has
+    /// these background tabs too: each desk's tab, pane and terminal.
+    fn with_backgrounds(
+        dir: &std::path::Path,
+        tabs: &[(u32, u32, u32)],
+    ) -> (Daemon, Token, UnixStream) {
         let (mut daemon, link, mut there) = linked(dir);
         let pane = |id, terminal| {
             Layout::Pane(Pane {
@@ -450,17 +459,19 @@ mod tests {
             active_tab: TabId(1),
             home: None,
             lent: None,
-            background: vec![Background {
-                tab: Tab {
-                    id: TabId(5),
-                    layout: pane(6, 8),
-                    focused: PaneId(6),
-                    name: None,
-                },
-                state: BackgroundState::Running,
-                failed: None,
-                name: "trail serve".into(),
-            }],
+            background: (tabs.iter())
+                .map(|&(tab, id, terminal)| Background {
+                    tab: Tab {
+                        id: TabId(tab),
+                        layout: pane(id, terminal),
+                        focused: PaneId(id),
+                        name: None,
+                    },
+                    state: BackgroundState::Running,
+                    failed: None,
+                    name: "trail serve".into(),
+                })
+                .collect(),
         };
         say(
             &mut there,
@@ -956,38 +967,30 @@ mod tests {
 
     /// Another daemon's list of what its background tabs listen on is
     /// looked at no further than a list it would send: a tab named after
-    /// so many others isn't, nor one named twice; one named after a few
+    /// so many others isn't, nor one named again; one named after a few
     /// hundred is.
     #[test]
     fn ports_are_looked_for_no_further_than_another_daemon_would_list_them() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut daemon, link, mut there) = with_background(dir.path());
-        let (_, _, tab, _) = numbers(&daemon);
-        let listing = |before: usize, port: u16| {
-            let mut listing: Vec<Listening> = (0..before)
-                .map(|_| Listening {
-                    tab: TabId(99),
-                    ports: Vec::new(),
-                })
-                .collect();
-            listing.push(Listening {
-                tab: TabId(5),
-                ports: vec![ListeningPort {
-                    port,
-                    program: "trail".into(),
-                }],
-            });
-            listing
+        let (mut daemon, link, mut there) = with_backgrounds(dir.path(), &[(5, 6, 8), (9, 10, 11)]);
+        let one = |tab, port| Listening {
+            tab: TabId(tab),
+            ports: vec![ListeningPort {
+                port,
+                program: "trail".into(),
+            }],
         };
-        let told = ports_told(&mut daemon, link, &mut there, listing(MOST_LISTED, 4000));
+        let others = |many| (0..many).map(move |_| one(99, 80));
+        let listing: Vec<Listening> = others(MOST_LISTED).chain([one(5, 4000)]).collect();
+        let told = ports_told(&mut daemon, link, &mut there, listing);
         assert!(told.is_empty(), "{told:?}");
-        // Asked again once the answer is in.
-        let mut twice = listing(300, 4000);
-        twice.extend(listing(0, 4001));
-        let told = ports_told(&mut daemon, link, &mut there, twice);
-        let [one] = &told[..] else {
-            panic!("told {told:?}");
-        };
-        assert_eq!((one.tab, one.ports[0].port), (tab, 4000));
+        // Asked again once the answer is in: tab 5 named twice, then 9.
+        let listing = (others(300).chain([one(5, 4000), one(5, 4001), one(9, 5000)])).collect();
+        let told = ports_told(&mut daemon, link, &mut there, listing);
+        let ports: Vec<u16> = (told.iter())
+            .flat_map(|listening| &listening.ports)
+            .map(|port| port.port)
+            .collect();
+        assert_eq!(ports, [4000, 5000], "{told:?}");
     }
 }
