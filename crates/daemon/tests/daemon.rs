@@ -13837,6 +13837,59 @@ fn a_chat_in_a_read_only_mode_runs_no_commands_through_clackatoos_tools() {
 }
 
 #[test]
+fn a_tools_question_goes_once_tools_are_off_or_the_mode_rules_it_out() {
+    let daemon = TestDaemon::with_tools_and_agents(vec![
+        custom_agent("claude", vec![fake_agent().into()]),
+        custom_agent("codex", vec![fake_agent().into(), "--codex".into()]),
+    ]);
+    let mut client = daemon.client();
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    for (agent, setting, value, why) in [
+        (
+            "claude",
+            "clackatoo.tools",
+            "off",
+            "the user has turned this chat's tools off",
+        ),
+        ("codex", "mode", "read-only", "this chat is read-only"),
+    ] {
+        let chat = start_new_chat(
+            &mut client,
+            NewAgent {
+                size: Size::new(40, 10).unwrap(),
+                cwd: None,
+                agent: Some(agent.to_owned()),
+                tools: AgentTools::Ask,
+                task: true,
+                browser: false,
+                model: None,
+                resume: None,
+            },
+        );
+        client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+        wait_for_chat(&mut client, chat, |node| node.question.is_some());
+        // The user changes their mind: what was asked can't be allowed now.
+        let set = ChatAction::Set {
+            setting: setting.to_owned(),
+            value: value.to_owned(),
+        };
+        client.chat(chat, set).unwrap();
+        let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+        assert_eq!(node.question, None, "{agent}");
+        let words = last_words(&node);
+        assert!(
+            words.contains(&format!("run_in_terminal: failed: {why}")),
+            "{words}"
+        );
+    }
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes: usize = (workspaces.list.iter())
+        .map(|workspace| workspace.tabs[0].layout.panes().len())
+        .sum();
+    assert_eq!(panes, 2, "no terminal opened");
+}
+
+#[test]
 fn typing_into_the_users_own_terminal_always_asks_and_the_setting_takes_it_back() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();

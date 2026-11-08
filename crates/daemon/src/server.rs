@@ -3951,6 +3951,9 @@ impl Daemon {
         }
         let actions = chat.act(action);
         self.act(id, actions);
+        // Its Tools or mode may have changed: what it asked that they now
+        // rule out goes.
+        self.withdraw_refused(id);
         self.collect_damage(id);
         Ok(())
     }

@@ -532,6 +532,43 @@ impl Daemon {
         }
     }
 
+    /// Takes back the chat `chat`'s questions about calls it may no
+    /// longer make, refusing them, as after the user turns its Tools off
+    /// or picks a mode that runs nothing: an answer to them can't let
+    /// them now.
+    pub(super) fn withdraw_refused(&mut self, chat: TerminalId) {
+        let mut refused = Vec::new();
+        for (at, waiting) in self.tools.waiting.iter().enumerate() {
+            if let Wait::Permission { tool, .. } = &waiting.what
+                && waiting.chat == chat
+                && let Some(why) = self.refused_now(chat, tool)
+            {
+                refused.push((at, why));
+            }
+        }
+        for (at, why) in refused.into_iter().rev() {
+            let waiting = self.tools.waiting.remove(at);
+            self.forget_call(&waiting);
+            self.answer_tool(waiting.token, &waiting.id, Err(why));
+        }
+    }
+
+    /// Why the chat `chat`'s agent may no longer make `tool`, which the
+    /// user was asked about, if it may not: the chat has gone, its Tools
+    /// are off, its browser is, or its limits or mode now rule it out.
+    fn refused_now(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
+        let Some(hosted) = self.chat_ref(chat) else {
+            return Some("the chat has closed".to_owned());
+        };
+        if hosted.tools() == AgentTools::Off {
+            return Some("the user has turned this chat's tools off".to_owned());
+        }
+        if matches!(tool, Tool::Browser(_)) && !hosted.browser() {
+            return Some("the user turned this chat's browser off".to_owned());
+        }
+        self.limits_refused(chat, tool)
+    }
+
     /// Keeps the call `id` on the connection at `token`, from the chat
     /// `chat`'s agent, waiting for the browser's answer to `call`.
     pub(super) fn wait_for_browser(
@@ -953,7 +990,10 @@ impl Daemon {
         let Wait::Permission { tool, raw, .. } = what else {
             return;
         };
-        if allow {
+        // What it may do may have changed since it asked, as its mode.
+        if allow && let Some(why) = self.refused_now(chat, &tool) {
+            self.answer_tool(token, &id, Err(why));
+        } else if allow {
             self.carry_out(token, chat, id, tool, raw);
         } else {
             let refused =
