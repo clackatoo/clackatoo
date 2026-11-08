@@ -545,13 +545,13 @@ impl State {
         self.run = Some(run);
     }
 
-    /// The daemon started afresh while the page was open, as after the
+    /// The daemon started afresh since the page last knew it, as after the
     /// computer restarted: its chats and terminals are numbered from 1
     /// again, so what the page holds by their numbers is of others now.
     /// The chat or terminal shown is let go, whatever its attach sent
     /// before this was known comes to, and every draft and photo goes, so
     /// none is sent to, or told as the draft of, a chat it wasn't for.
-    fn started_afresh(&mut self) {
+    pub fn started_afresh(&mut self) {
         let shown = self.open.is_some() || self.term.is_some();
         self.close_chat();
         self.close_terminal();

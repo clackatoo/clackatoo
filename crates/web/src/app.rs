@@ -68,6 +68,11 @@ const DRAFT_PAUSE: i32 = 600;
 /// run, and the chat, as `clackatoo.draft.RUN.CHAT`.
 const DRAFT_KEY: &str = "clackatoo.draft.";
 
+/// The page's storage key for the daemon's run the page last knew, so a
+/// reload shows its draft before it connects, and drops it once it finds
+/// the daemon started afresh.
+const RUN_KEY: &str = "clackatoo.run";
+
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
@@ -1388,7 +1393,18 @@ impl App {
         let Some(run) = self.state.run() else {
             return;
         };
+        // The page loaded with drafts of a run before this one: those it
+        // took in are of other chats now, as after a restart it saw.
+        let stored = self.stored_run();
+        let restarted = news == RunNews::Restarted
+            || stored
+                .as_ref()
+                .is_some_and(|stored| *stored != run.to_string());
+        if restarted && news == RunNews::Known {
+            self.state.started_afresh();
+        }
         if let Ok(Some(storage)) = self.window.session_storage() {
+            let _ = storage.set_item(RUN_KEY, &run.to_string());
             let ours = format!("{DRAFT_KEY}{run}.");
             let length = storage.length().unwrap_or(0);
             let keys: Vec<String> = (0..length)
@@ -1399,7 +1415,7 @@ impl App {
                 let _ = storage.remove_item(&key);
             }
         }
-        if news == RunNews::Restarted {
+        if restarted {
             self.go("");
             return;
         }
@@ -2327,8 +2343,19 @@ impl App {
 
     /// The page's storage key for chat `chat`'s draft, once the daemon's
     /// run is known: chat numbers are only the daemon's run's.
+    /// Until the app has connected, the run the page last knew is taken.
     fn draft_key(&self, chat: TerminalId) -> Option<String> {
-        Some(format!("{DRAFT_KEY}{}.{chat}", self.state.run()?))
+        let run = (self.state.run().map(|run| run.to_string())).or_else(|| self.stored_run())?;
+        Some(format!("{DRAFT_KEY}{run}.{chat}"))
+    }
+
+    /// The daemon's run the page last knew, kept in its storage.
+    fn stored_run(&self) -> Option<String> {
+        self.window
+            .session_storage()
+            .ok()??
+            .get_item(RUN_KEY)
+            .ok()?
     }
 
     /// The draft kept in the page's storage for chat `chat`, if one is.
