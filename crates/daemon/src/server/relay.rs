@@ -484,9 +484,17 @@ impl Counters<'_> {
     }
 }
 
-/// Each never runs out, as [`Counters::have_room`] is asked first: if one
-/// ever did, it would give its last number again rather than wrap round
-/// to one in use.
+/// Each never runs out, as [`Counters::have_room`] is asked first. If one
+/// ever did, it would give its last number, `u32::MAX`, again and again,
+/// rather than wrap round to the first: two things would share it.
+///
+/// The room is shared with this daemon's own, and numbers are never given
+/// back, so another daemon naming new things without end could use it up
+/// (for terminals, about 2 million messages of its chats, some 10^11
+/// bytes). Each connection is then stopped as it next sends something, as
+/// [`out_of_numbers`](Daemon::out_of_numbers) says, until the daemon
+/// restarts, while what it makes itself still has [`NUMBERS_ROOM`]: no
+/// number is ever given twice.
 impl Fresh for Counters<'_> {
     fn workspace(&mut self) -> u32 {
         (self.workspaces.fresh_workspace()).map_or(u32::MAX, |id| id.0)
@@ -2920,7 +2928,8 @@ impl Daemon {
     /// daemon of the connection at `at` shows: the connection ends, and
     /// waits to be asked for again, as taking in more could give a number
     /// twice. Only a daemon that has run for a very long time gets here,
-    /// and a restart starts its counters again.
+    /// or one another daemon has sent new things without end (see
+    /// [`Counters`]'s `Fresh`), and a restart starts its counters again.
     pub(super) fn out_of_numbers(&mut self, at: usize) {
         log::error!(
             "this daemon's numbers are nearly used up: no more is taken from other machines"
