@@ -68,6 +68,7 @@ mod machines;
 mod mention;
 mod native;
 mod review;
+mod shown;
 mod view;
 pub mod wire;
 mod workspace;
@@ -133,6 +134,7 @@ pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
+pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
     LinkTarget, Links, Node, NodeId, Patch, Run, View, ViewUpdate,

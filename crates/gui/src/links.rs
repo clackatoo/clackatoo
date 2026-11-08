@@ -108,30 +108,30 @@ pub(crate) fn opens_unasked(url: &str) -> bool {
         return false;
     };
     // No more than whom to write to: what follows a `?` can fill a mail
-    // in, or, in some mail programs, attach a file to it.
+    // in, or, in some mail programs, attach a file to it, and a `%` can
+    // spell a `?` the mail program reads.
     !address.is_empty()
         && address.len() <= clackatoo_protocol::MOST_URL
         && address
             .bytes()
-            .all(|byte| byte.is_ascii_graphic() && byte != b'?')
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'?' | b'%'))
 }
 
 /// `url` as the bar shows it to ask whether to open it: whole, with what
-/// wouldn't show as itself, such as a control or a mark that turns text
-/// round, written as its escape.
+/// wouldn't show as itself, a control or a character that hides or moves
+/// text ([`clackatoo_protocol::invisible`], as the daemon has them),
+/// written as `<U+202E>`.
 pub(crate) fn shown_whole(url: &str) -> String {
-    url.chars()
-        .map(|ch| {
-            let hidden = ch.is_control()
-                || matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}')
-                || matches!(ch, '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}');
-            if hidden {
-                ch.escape_unicode().to_string()
-            } else {
-                ch.to_string()
-            }
-        })
-        .collect()
+    let mut shown = String::with_capacity(url.len());
+    for ch in url.chars() {
+        if ch.is_control() || clackatoo_protocol::invisible(ch) {
+            let _ =
+                std::fmt::Write::write_fmt(&mut shown, format_args!("<U+{:04X}>", u32::from(ch)));
+        } else {
+            shown.push(ch);
+        }
+    }
+    shown
 }
 
 /// The link in `text` that covers byte `at`, if any.
@@ -414,12 +414,13 @@ mod tests {
             "mailto:a@x.org?attach=/etc/passwd",
             "mailto:",
             "mailto:a b@x.org",
+            "mailto:a@x.org%3Fattach=/etc/passwd",
         ] {
             assert!(!opens_unasked(asked), "{asked}");
         }
         assert_eq!(
-            shown_whole("ssh://a\u{202e}b\n\u{200b}c/é"),
-            "ssh://a\\u{202e}b\\u{a}\\u{200b}c/é"
+            shown_whole("ssh://a\u{202e}b\n\u{200b}c/é\u{2028}\u{ad}\u{e0041}\u{fe0f}\u{3164}"),
+            "ssh://a<U+202E>b<U+000A><U+200B>c/é<U+2028><U+00AD><U+E0041><U+FE0F><U+3164>"
         );
     }
 
