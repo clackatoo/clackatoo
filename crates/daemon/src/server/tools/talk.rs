@@ -780,8 +780,10 @@ impl Daemon {
     /// if it can't: it isn't another chat, it's out of sight, it isn't of
     /// this one's family and works outside its project, or its agent may
     /// do more, which this one's would gain through it. More is a looser
-    /// Tools setting, fewer limits, its mode's included, or a mode later
-    /// among those its agent offers, the first being the safest. Ranks
+    /// Tools setting, fewer limits, its mode's included, a mode later
+    /// among those its agent offers, the first being the safest, a larger
+    /// Subagents cap, the browser where this one has none (or has yet to
+    /// be let open pages), or access to a window of the user's. Ranks
     /// compare only within one agent's modes: a chat with another agent is
     /// no looser only in its first. An agent offering no modes is no
     /// looser only if it's this one's, and this one's offers none either.
@@ -833,10 +835,18 @@ impl Daemon {
         // user set: one messaging another at no more than its own uses
         // that one's, as the user allowed, and `working` bounds them all.
         let more_subagents = self.subagents_cap(to) > self.subagents_cap(chat);
+        // The browser on, or let open pages without asking, where this
+        // one's isn't; or access to a window, which a window gives one
+        // chat at a time, so never this one too.
+        let more_browser =
+            target.browser() && (!own.browser() || (target.browsing() && !own.browsing()));
+        let window = self.tools.native.contains_key(&to);
         (reach(target.tools()) > reach(own.tools())
             || limits(target) < limits(own)
             || mode_looser
-            || more_subagents)
+            || more_subagents
+            || more_browser
+            || window)
             .then(|| {
                 format!(
                     "chat {to}'s agent may do more than this one, so this chat can't message \
@@ -2417,6 +2427,52 @@ mod tests {
         let builder = answered_chat(&mut daemon, 3, (pm, pm, 1));
         assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
         daemon.set_subagents(builder, "2");
+        let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
+        assert!(refused.contains("may do more than this one"), "{refused}");
+        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+    }
+
+    /// A chat with the browser on, or let open pages without asking, may
+    /// do more than one without, and so may one a window gave access to:
+    /// no chat gains them through another (CLACKA-220).
+    #[test]
+    fn a_chat_with_the_browser_or_a_window_may_do_more() {
+        use clackatoo_protocol::{ChatAction, NativeAccess};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let pm = idle_chat(&mut daemon, 2);
+        let builder = answered_chat(&mut daemon, 3, (pm, pm, 1));
+        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        let browser = |on: &str| ChatAction::Set {
+            setting: "clackatoo.browser".into(),
+            value: on.into(),
+        };
+        drop(daemon.chat(pm).unwrap().act(browser("on")));
+        let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
+        assert!(refused.contains("may do more than this one"), "{refused}");
+        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+        // Both on, but one let open pages without asking.
+        drop(daemon.chat(builder).unwrap().act(browser("on")));
+        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        let chat = daemon.chat(pm).unwrap();
+        chat.ask_for_tool(
+            4,
+            "open https://example.com",
+            None,
+            crate::chat::Choices::Browser,
+        );
+        let question = chat.node().question.clone().unwrap().id;
+        drop(chat.act(ChatAction::Answer {
+            question,
+            option: Some("browse".into()),
+        }));
+        assert!(daemon.chat_ref(pm).unwrap().browsing());
+        assert!(daemon.talk_refused(builder, &send(pm)).is_some());
+        // A window's access, which only one chat has.
+        drop(daemon.chat(pm).unwrap().act(browser("off")));
+        drop(daemon.chat(builder).unwrap().act(browser("off")));
+        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        (daemon.tools.native).insert(pm, (mio::Token(7), NativeAccess::Inspect));
         let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
         assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
