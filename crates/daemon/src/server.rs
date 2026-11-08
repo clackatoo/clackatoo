@@ -1968,13 +1968,15 @@ impl Daemon {
         self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
         self.wait_for_stopping(servers_until);
-        // Only now what waits for the disk, as an upgrade does it: a slow
-        // fsync takes none of the time the servers have to stop.
-        self.kept_last();
-        self.end_links();
         self.wait_for_file_ops(until);
         self.finish_stopping_boards(until);
         drop(self.finish_stopping_recovery(until));
+        // Only now what waits for the workspaces' and the keys' writes, and
+        // the connections' threads, which aren't bound by `until`: a slow
+        // fsync takes none of the time the servers, the boards and the
+        // recovery files have, within the 5 s `clackatoo stop` gives.
+        self.kept_last();
+        self.end_links();
         self.stop_browser();
         log::info!("stopped in {} ms", started.elapsed().as_millis());
     }
