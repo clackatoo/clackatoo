@@ -75,7 +75,7 @@ impl Conn {
 impl Read for Conn {
     /// A read that a signal interrupts is made again, as the daemon's own
     /// clients do: with a read timeout set, a socket's read fails with
-    /// EINTR on any signal handled, SA_RESTART or not, and tungstenite
+    /// EINTR on any signal handled, `SA_RESTART` or not, and tungstenite
     /// passes that on as an error.
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         loop {
