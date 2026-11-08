@@ -2749,7 +2749,7 @@ mod keeping_whose {
         let first = looked(&daemon);
         assert!(!first.back);
         assert_eq!(daemon.next_tool_due(), Some(first.again));
-        daemon.maintain_agent_terminals(first.again - Duration::from_millis(1));
+        daemon.maintain_agent_terminals(first.again.checked_sub(Duration::from_millis(1)).unwrap());
         assert_eq!(looked(&daemon).again, first.again);
         daemon.maintain_agent_terminals(first.again);
         assert_eq!(looked(&daemon).wait, first.wait * 2);
