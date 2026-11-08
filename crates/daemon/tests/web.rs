@@ -1485,7 +1485,10 @@ fn a_device_follows_a_terminal_types_into_it_and_reads_its_history() {
             Response::Done
         );
     }
-    phone.grid_until(|grid| grid_text(grid).contains("ZtypedZ").then_some(()));
+    // And the prompt after it: typed before the shell prints it, the next
+    // line would be echoed first, and its first line of output put after
+    // the prompt.
+    phone.grid_until(|grid| grid_text(grid).contains("ZtypedZ\n$").then_some(()));
 
     // Enough to scroll lines into history, read back as the app reads it.
     let typed = b"i=0; while [ $i -lt 30 ]; do echo line$i; i=$((i+1)); done\r";
