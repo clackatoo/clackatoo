@@ -215,7 +215,8 @@ impl Slash {
 
     /// Makes the items again from `offered`, the agent's commands, then
     /// those of the window's own the agent doesn't offer one of the name
-    /// of.
+    /// of, in any case, as sending one goes to the agent's (see
+    /// [`interface_command`]).
     fn offer(&mut self, offered: &[AgentCommand]) {
         offered.clone_into(&mut self.from);
         self.items = (offered.iter())
@@ -227,7 +228,7 @@ impl Slash {
             })
             .collect();
         for &(name, description, _) in OURS {
-            if !offered.iter().any(|command| command.name == name) {
+            if !(offered.iter()).any(|command| command.name.eq_ignore_ascii_case(name)) {
                 self.items.push(Item {
                     name: name.to_owned(),
                     description: description.to_owned(),
@@ -553,6 +554,10 @@ mod tests {
         );
         assert!(!rows[1].0.ours && rows[2].0.ours);
         assert_eq!(count, OURS.len() + 1);
+        // Whatever its case, as sending it goes to the agent's.
+        let offered = [command("Clear", None)];
+        slash.typed("/cle", &offered, true);
+        assert_eq!(names(&mut slash), ["Clear"]);
     }
 
     #[test]
