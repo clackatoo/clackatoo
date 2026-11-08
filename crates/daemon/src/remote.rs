@@ -457,7 +457,9 @@ pub struct Askpass {
 impl Askpass {
     /// Starts answering questions on a socket in `runtime`, on a thread of
     /// its own, one question at a time. `answer` gets the question and
-    /// returns the answer, or `None` to turn it down.
+    /// returns the answer, or `None` to turn it down. Each has a socket of
+    /// its own, as one process may hold a window on each of several
+    /// machines.
     ///
     /// # Errors
     ///
@@ -466,10 +468,13 @@ impl Askpass {
         runtime: &RuntimeDir,
         answer: impl Fn(String) -> Option<String> + Send + 'static,
     ) -> io::Result<Self> {
+        static SERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         runtime.create_private().map_err(io::Error::other)?;
-        let path = runtime
-            .path()
-            .join(format!("askpass-{}.sock", std::process::id()));
+        let path = runtime.path().join(format!(
+            "askpass-{}-{}.sock",
+            std::process::id(),
+            SERVED.fetch_add(1, Ordering::Relaxed)
+        ));
         Self::serve_at(path, move |question, _| answer(question))
     }
 

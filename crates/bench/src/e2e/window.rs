@@ -1,5 +1,6 @@
-//! The window: how soon it shows a terminal, how long it takes to draw,
-//! and that it sleeps when nothing happens.
+//! The window: how soon it shows a terminal, alone or beside another
+//! window, how long it takes to draw, and that it sleeps when nothing
+//! happens.
 //!
 //! These need a display to open a window on, so they're skipped without
 //! one. The window opens on a daemon of the harness's own, through
@@ -44,6 +45,7 @@ pub(crate) fn measure(binary: &Path, report: &mut Report) -> anyhow::Result<()> 
         return Ok(());
     };
     first_frame(binary, &display, report)?;
+    another_window(binary, &display, report)?;
     frame_time(binary, &display, report)?;
     idle(binary, &display, report)
 }
@@ -64,6 +66,35 @@ fn first_frame(binary: &Path, display: &Display, report: &mut Report) -> anyhow:
     report.record(
         "window/open",
         "start to first frame",
+        Unit::Seconds,
+        &seconds(&samples),
+    );
+    Ok(())
+}
+
+/// From starting `clackatoo` to the first frame of the window it asks
+/// the process with a window open for, which opens it with the GPU it set
+/// up already.
+fn another_window(binary: &Path, display: &Display, report: &mut Report) -> anyhow::Result<()> {
+    let (daemon, _) = DaemonProcess::start(binary)?;
+    let mut client = daemon.connect()?;
+    new_terminal(&mut client, workloads::generated_size(), &["cat"])?;
+    let host = Window::open(binary, &daemon, display, "clackatoo_gui=info")?;
+    host.wait_for("first frame")?;
+    let mut samples = Vec::new();
+    for _ in 0..OPEN_RUNS {
+        let started = Instant::now();
+        let asked = Window::command(binary, &daemon, display, "clackatoo_gui=info")
+            .stderr(Stdio::null())
+            .status()
+            .context("could not ask for a window")?;
+        anyhow::ensure!(asked.success(), "asking for a window failed: {asked}");
+        host.wait_for("first frame")?;
+        samples.push(started.elapsed());
+    }
+    report.record(
+        "window/another",
+        "start to first frame, another window",
         Unit::Seconds,
         &seconds(&samples),
     );
@@ -198,16 +229,7 @@ impl Window {
         display: &Display,
         log: &str,
     ) -> anyhow::Result<Self> {
-        let mut child = Command::new(binary)
-            .env("CLACKATOO_BOARDS", "off")
-            .env("CLACKATOO_RECOVERY", "off")
-            .env("CLACKATOO_MACHINE", "off")
-            .env("CLACKATOO_DISPLAY", "off")
-            .env("XDG_RUNTIME_DIR", daemon.runtime_dir())
-            .envs(display.vars.iter().map(|(name, value)| (name, value)))
-            .env("RUST_LOG", log)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+        let mut child = Self::command(binary, daemon, display, log)
             .stderr(Stdio::piped())
             .spawn()
             .context("could not open a window")?;
@@ -226,6 +248,22 @@ impl Window {
             lines,
             seen: std::cell::RefCell::new(Vec::new()),
         })
+    }
+
+    /// `clackatoo`, opening a window on `daemon`, logging at `log`.
+    fn command(binary: &Path, daemon: &DaemonProcess, display: &Display, log: &str) -> Command {
+        let mut command = Command::new(binary);
+        command
+            .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
+            .env("XDG_RUNTIME_DIR", daemon.runtime_dir())
+            .envs(display.vars.iter().map(|(name, value)| (name, value)))
+            .env("RUST_LOG", log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
+        command
     }
 
     /// Waits until the window logs a line containing `text`.

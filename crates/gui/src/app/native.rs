@@ -356,7 +356,13 @@ mod tests {
             &runtime,
             crate::session::Proxy::Channel(std::sync::mpsc::channel().0),
         );
-        let mut app = App::new(std::time::Instant::now(), None, session, String::new());
+        let mut app = App::new(
+            std::time::Instant::now(),
+            None,
+            session,
+            crate::app::host::Spec::default(),
+            crate::app::host::Link::default(),
+        );
         app.notice = None;
         app.native.focus = "None".into();
         app

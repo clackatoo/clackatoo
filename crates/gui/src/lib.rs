@@ -36,6 +36,7 @@ mod fonts;
 mod form;
 mod forwards;
 mod glyphs;
+mod handoff;
 mod history;
 mod hlsearch;
 pub mod hosts;
@@ -165,8 +166,12 @@ pub fn take_launch_token() -> LaunchToken {
     launch::LaunchToken::take()
 }
 
-/// Opens a window on the daemon's workspaces, making one if there are none,
-/// and runs until the window closes or every workspace has.
+/// Opens a window on the daemon's workspaces, making one if there are none.
+/// If a process of this build already has windows open, it's asked to open
+/// this one, which it does in a few milliseconds, sharing its GPU, and this
+/// returns once it's open. Otherwise the window opens in this process,
+/// which runs until its last window closes, and opens the windows asked of
+/// it until then (see [`app::host`]).
 ///
 /// It takes the desktop's launch token out of the environment first, so
 /// it must be called before this process starts any thread.
@@ -183,7 +188,32 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     if launch.token().is_some() {
         log::debug!("launched with the desktop's activation token");
     }
-    let start = options::Options::drawing_with(&options.font);
+    let spec = app::host::Spec {
+        remote: options.remote,
+        pick_remote: options.pick_remote,
+        remote_command: options.remote_command,
+        font: options.font,
+        font_fixed: options.font_fixed,
+    };
+    let request = handoff::Request {
+        spec: &spec,
+        graphics_api: options.graphics_api,
+        runtime: &options.runtime,
+    };
+    let (launch, hosting) = match handoff::ask(&request, launch) {
+        Ok(()) => {
+            log::info!(
+                "window opened by the process with windows open, after {:.1?}",
+                started.elapsed()
+            );
+            return Ok(());
+        }
+        Err(not) => {
+            log::debug!("opening the window in this process: {}", not.why);
+            (not.launch, not.host)
+        }
+    };
+    let start = options::Options::drawing_with(&spec.font);
     let fonts = {
         let options = start.font_options();
         std::thread::Builder::new()
@@ -204,52 +234,24 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let gpu = std::thread::Builder::new()
         .name("gpu".into())
         .spawn(move || app::Gpu::new(graphics_api, &display_received))?;
-    let event_loop = EventLoop::with_user_event()
+    let event_loop = EventLoop::<app::host::Wake>::with_user_event()
         .build()
         .context("could not open a window")?;
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
-    // Two small files read, and a directory or so looked at.
-    let tutor = tutor::Start::read(options.remote.is_some() || options.pick_remote);
-    let recall = cmdline::recall::Start::read();
-    let location = match options.remote {
-        Some(remote) => session::Location::Remote(remote),
-        None => session::Location::Local(options.runtime.clone()),
+    let process = app::host::Process {
+        runtime: options.runtime,
+        config: options.config,
+        graphics_api,
+        hosting,
     };
-    // The config runs alongside everything else starting.
-    let lua_start = options.config.map(|dir| {
-        let proxy = event_loop.create_proxy();
-        desk::LuaStart(Box::new(move |options| {
-            let proxy = proxy.clone();
-            let wake: lua::Wake = Box::new(move || {
-                let _ = proxy.send_event(session::SessionEvent::Lua);
-            });
-            lua::Lua::start(lua::Source::Dir(dir.clone()), options.clone(), wake)
-        }))
-    });
-    let proxy = session::Proxy::EventLoop(event_loop.create_proxy());
-    let session = if options.pick_remote {
-        session::Session::waiting(&options.runtime, proxy)
-    } else {
-        session::Session::start(location, &options.runtime, proxy)
+    let mut host = app::host::Host::new(process, event_loop.create_proxy());
+    let startup = app::Startup {
+        fonts: app::Pending::Thread(fonts),
+        gpu: app::Pending::Thread(gpu),
+        launch,
     };
-    updates::after_opening(session::Proxy::EventLoop(event_loop.create_proxy()));
-    let mut app = app::App::new(
-        started,
-        Some(app::Startup { fonts, gpu, launch }),
-        session,
-        options.remote_command,
-    );
-    // Before config runs, which starts from them.
-    app.start_options(start, options.font_fixed.options());
-    if options.pick_remote {
-        app.pick_machine();
-    }
-    if let Some(start) = lua_start {
-        app.start_lua(start);
-    }
-    app.start_tutor(tutor);
-    app.start_recall(recall);
-    event_loop.run_app(&mut app)?;
-    app.result
+    host.add(spec, start, started, startup);
+    event_loop.run_app(&mut host)?;
+    host.result
 }

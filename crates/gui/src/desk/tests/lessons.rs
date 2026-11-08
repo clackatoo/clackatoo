@@ -398,11 +398,14 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     // What the bar has said.
     command(&mut desk, "messages");
     assert_eq!(step(&desk), 16);
-    // The last step is to read: `]s` goes on, to the end.
+    // The last steps are to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
     assert!(lesson.steps[16].checks.is_empty());
+    assert!(lesson.steps[17].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
+    type_keys(&mut desk, "]s");
+    assert_eq!(step(&desk), 17);
     type_keys(&mut desk, "]s");
     assert_eq!(step(&desk), lesson.steps.len());
     assert!(

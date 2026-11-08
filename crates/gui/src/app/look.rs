@@ -232,7 +232,13 @@ impl Window {
             &runtime,
             Proxy::Channel(sender.clone()),
         );
-        let mut app = App::new(started, None, session, String::new());
+        let mut app = App::new(
+            started,
+            None,
+            session,
+            super::host::Spec::default(),
+            super::host::Link::default(),
+        );
         let start = crate::options::Options::drawing_with(&crate::FontOptions::default());
         let font = start.font_options();
         app.start_options(start, Vec::new());
@@ -255,7 +261,7 @@ impl Window {
         // As `run` does.
         crate::chat::warm_fonts(&fonts);
         app.desk.use_font(&mut fonts);
-        app.buttons = desktop.buttons;
+        app.buttons = desktop.buttons.clone();
         fonts.set_scale(scale);
         let gpu = gpu()?;
         let renderer = Renderer::new(&gpu.device, FORMAT);
@@ -265,6 +271,7 @@ impl Window {
             gpu,
             renderer,
             fonts,
+            desktop,
             transparent: false,
             capture: false,
             captured: None,

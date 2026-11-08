@@ -129,7 +129,16 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 unicode-width = "0.2"
 vte = { version = "0.15", default-features = false, features = ["std"] }
 wgpu = "30"
-winit = "0.30"
+# Without the Adwaita frame for Wayland: the window draws its own, yet
+# winit makes that frame anyway on every window's first configure, hidden,
+# and asking the desktop's settings portal for its theme and buttons runs
+# `dbus-send` twice, waiting up to 100 ms each, as the window opens.
+winit = { version = "0.30", default-features = false, features = [
+    "rwh_06",
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+] }
 # Decodes the pictures of chats' pages a browser pane shows, which
 # Chromium sends as JPEGs. Pure Rust, and fast; zune-core is its options.
 zune-core = "0.5"

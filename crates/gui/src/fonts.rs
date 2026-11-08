@@ -212,9 +212,19 @@ impl std::fmt::Debug for Fonts {
 impl Fonts {
     /// Loads the configured family at `options.size` points, on a display
     /// with `scale` physical pixels per logical pixel.
+    #[cfg(test)]
     pub(crate) fn load(options: &FontOptions, scale: f64) -> anyhow::Result<Self> {
+        Self::load_in(
+            Collection::new(CollectionOptions::default()),
+            options,
+            scale,
+        )
+    }
+
+    /// As [`load`](Self::load), finding fonts in `collection`.
+    fn load_in(collection: Collection, options: &FontOptions, scale: f64) -> anyhow::Result<Self> {
         let mut font_cx = parley::FontContext {
-            collection: Collection::new(CollectionOptions::default()),
+            collection,
             source_cache: SourceCache::default(),
         };
         let mut faces = Vec::new();
@@ -311,7 +321,22 @@ impl Fonts {
         options: &FontOptions,
         desktop: &crate::desktop::Desktop,
     ) -> anyhow::Result<Self> {
-        let mut fonts = Self::load(options, 1.0)?;
+        Self::for_window_in(
+            Collection::new(CollectionOptions::default()),
+            options,
+            desktop,
+        )
+    }
+
+    /// As [`for_window`](Self::for_window), finding fonts in
+    /// `collection`: a copy of another window's, which shares the fonts
+    /// that one found, so it finds them again in no time.
+    pub(crate) fn for_window_in(
+        collection: Collection,
+        options: &FontOptions,
+        desktop: &crate::desktop::Desktop,
+    ) -> anyhow::Result<Self> {
+        let mut fonts = Self::load_in(collection, options, 1.0)?;
         let (family, points) = match &desktop.font {
             Some((family, points)) => (Some(family.as_str()), *points),
             None => (None, 11.0),

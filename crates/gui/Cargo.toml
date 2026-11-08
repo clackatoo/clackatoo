@@ -14,6 +14,7 @@ bench = false
 
 [dependencies]
 parley.workspace = true
+rustix.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
 fancy-regex.workspace = true

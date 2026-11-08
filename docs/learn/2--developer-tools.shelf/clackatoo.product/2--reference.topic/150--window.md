@@ -19,6 +19,22 @@ clackatoo
 
 With no command, `clackatoo` opens a window on your [workspaces](#workspaces-tabs-and-panes): the one last used, at the tab and pane last used. If there are none, it makes one, showing your newest running terminal, such as one started with `clackatoo new`, or else a new terminal running your `$SHELL`. If no daemon is running, it starts one in the background first. Until the daemon answers, the window says it's connecting, and Esc quits. That daemon logs to `daemon.log` in the [runtime directory](~clackatoo/reference/cli), and keeps running after the window closes.
 
+### Another window
+
+Run `clackatoo` again, or pick clackatoo in your app launcher again, for another window. It opens at once, without the few hundred milliseconds of setting up the GPU: every window shares one process, and only the first window sets up the GPU, which is most of the time a first window takes to open. What's left is mostly your desktop making the window. The `clackatoo` you ran hands the window to that process over a socket only you can reach, `window.sock` in the [runtime directory](~clackatoo/reference/cli#daemon), and returns as soon as the window is open, rather than staying until it closes. The launcher's token goes with it, so the new window takes focus. A window opened from another, as the [machine picker](~clackatoo/reference/remote#picking-a-machine) opens one, opens in the same process too.
+
+Each window is its own as before: its own view, mode and focus, its own connection to its daemon, on this machine or another, and its own run of `init.lua`. If one window fails, it closes and the others stay open; the process ends with its last window.
+
+The window opens in a process of its own, as the first does, when:
+
+- no window is open, or the process with windows open doesn't take it within half a second;
+- that process is another build of clackatoo, as after `clackatoo update` or a new build put in place of the old. A newer build's process is asked for windows from then on, and the old one ends with its last window; an older build's window keeps to itself. The build is the program's file, so a build of your own counts as new even at the same version. `:update` in a window with others beside it reopens just that window, in the new build;
+- the window would differ: another display (`WAYLAND_DISPLAY`, `DISPLAY`), config or state directory (`HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`), `SSH_AUTH_SOCK`, `CLACKATOO_SSH`, desktop bus, GPU choice (`WGPU_*`) or [renderer](#drawing). It keeps to itself, and the windows after it still go to the process with windows open;
+- the daemon on this machine isn't running, for a window on this machine: the window starts it, with your environment;
+- `CLACKATOO_WINDOW_HOST=off`, which also keeps a window from taking others.
+
+Every window logs to `window.log` in clackatoo's state directory (see [logs](~clackatoo/reference/remote#logs)), each line with its process's ID, which windows in one process share.
+
 The window sizes itself so that its one pane holds 100×30 cells. Resizing the window resizes each pane's terminal to fit, and its program is told the new size. When several windows show one terminal, the terminal takes the size of whichever was last opened on it, resized or focused.
 
 With `--remote <HOST>`, the window shows the workspaces on another machine, through ssh. See [another machine](~clackatoo/reference/remote).

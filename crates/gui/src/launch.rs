@@ -79,6 +79,32 @@ impl LaunchToken {
             .filter_map(|(name, token)| Some((name, token.as_deref()?)))
     }
 
+    /// A token the desktop gave a window of this process, for another it
+    /// opens, on whichever display both are on.
+    pub(crate) fn given(token: ActivationToken) -> Self {
+        let token = token.into_raw();
+        Self {
+            wayland: Some(token.clone()),
+            x11: Some(token),
+        }
+    }
+
+    /// The tokens as they were in the environment, to hand to the process
+    /// that opens the window instead (see [`crate::handoff`]): Wayland's,
+    /// then X11's.
+    pub(crate) fn raw(&self) -> (Option<&str>, Option<&str>) {
+        (self.wayland.as_deref(), self.x11.as_deref())
+    }
+
+    /// Tokens handed over by [`raw`](Self::raw).
+    pub(crate) fn from_raw(wayland: Option<String>, x11: Option<String>) -> Self {
+        let token = |token: Option<String>| token.filter(|token| !token.is_empty());
+        Self {
+            wayland: token(wayland),
+            x11: token(x11),
+        }
+    }
+
     /// The token for a window on Wayland or on X11, as winit itself picks:
     /// only the variable for the display the window is on counts.
     pub(crate) fn for_window(self, wayland: bool) -> Option<ActivationToken> {

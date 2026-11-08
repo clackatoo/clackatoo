@@ -180,3 +180,7 @@ messages
 Ctrl+O and Ctrl+I go back and forward through the places you've been in the tab, panes and places in files alike, as Vim's jump list does; Ctrl+Shift+O and Ctrl+Shift+I through everywhere: panes, tabs and workspaces. A count goes that many places: `3` and Ctrl+O goes back three, or nowhere if there aren't three.
 
 Everything here is kept by the daemon, so closing the window closes nothing: the next window opens where you left off. A lesson is the exception, and closes with the window.
+
+## Another window
+
+Run `clackatoo` again, from a terminal or your app launcher, for another window on your workspaces. It opens at once: your windows share one process, and only the first sets up the GPU, which is most of the time a window takes to open. `clackatoo` returns as soon as the window is open. Each window has its own view, mode and focus, and closing one leaves the others open.

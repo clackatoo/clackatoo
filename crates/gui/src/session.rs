@@ -25,6 +25,8 @@ use clackatoo_protocol::{
 };
 use winit::event_loop::EventLoopProxy;
 
+use crate::app::host::{Wake, WindowKey};
+
 /// How long the daemon may take to answer while the window opens.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -160,20 +162,28 @@ pub(crate) enum SessionEvent {
 }
 
 /// A way to wake the window with a [`SessionEvent`], from another thread:
-/// through its event loop, or for a window drawn offscreen, with no event
-/// loop (see [`crate::look`]), through a channel its own loop waits on.
+/// through the event loop of the process it's in, addressed to it among
+/// the others there (see [`crate::host`]), or for a window drawn
+/// offscreen, with no event loop (see [`crate::look`]), through a channel
+/// its own loop waits on.
 #[derive(Clone, Debug)]
 pub(crate) enum Proxy {
-    EventLoop(EventLoopProxy<SessionEvent>),
+    EventLoop {
+        proxy: EventLoopProxy<Wake>,
+        window: WindowKey,
+    },
     Channel(mpsc::Sender<SessionEvent>),
 }
 
 impl Proxy {
-    /// Sends `event` to the window. It fails only once the window has
-    /// closed.
+    /// Sends `event` to the window. It fails only once the window's
+    /// process is ending; to a window that has closed while others stay
+    /// open, it's dropped unheard.
     pub(crate) fn send_event(&self, event: SessionEvent) -> Result<(), Closed> {
         match self {
-            Self::EventLoop(proxy) => proxy.send_event(event).map_err(|_| Closed),
+            Self::EventLoop { proxy, window } => proxy
+                .send_event(Wake::Window(*window, event))
+                .map_err(|_| Closed),
             Self::Channel(sender) => sender.send(event).map_err(|_| Closed),
         }
     }

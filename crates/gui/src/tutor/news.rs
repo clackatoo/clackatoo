@@ -1241,6 +1241,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat's access to the window shows as a teal badge in the top bar: click to go to the chat, × to revoke",
     },
+    News {
+        id: "one-window-process",
+        date: "2026-11-08",
+        lesson: "basics",
+        what: "New windows open at once: every window shares one process, and only the first sets up the GPU",
+    },
 ];
 
 impl News {

@@ -1,6 +1,7 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
+pub(crate) mod host;
 mod native;
 
 use crate::shortcuts::bindings::Hint;
@@ -20,11 +21,10 @@ use clackatoo_protocol::{
 };
 use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
-use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::ExternalError;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, KeyLocation, NamedKey};
 use winit::window::{
     ActivationToken, CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId,
@@ -207,6 +207,7 @@ impl Gpu {
         backends: wgpu::Backends,
         display: Option<OwnedDisplayHandle>,
     ) -> anyhow::Result<Self> {
+        let started = Instant::now();
         let instance = instance(
             backends,
             display.map(|display| Box::new(display) as Box<dyn wgpu::wgt::WgpuHasDisplayHandle>),
@@ -226,15 +227,18 @@ impl Gpu {
             ..Default::default()
         }))
         .context("no GPU found")?;
+        log::debug!("GPU instance and adapter made in {:.1?}", started.elapsed());
         Self::open(instance, adapter)
     }
 
     fn open(instance: wgpu::Instance, adapter: wgpu::Adapter) -> anyhow::Result<Self> {
+        let started = Instant::now();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("clackatoo"),
             ..Default::default()
         }))
         .context("could not open the GPU")?;
+        log::debug!("GPU device made in {:.1?}", started.elapsed());
         // A GPU error is a bug in how we drive it, but the window can often
         // carry on, so it's logged rather than fatal.
         device.on_uncaptured_error(Arc::new(|error| log::error!("GPU error: {error}")));
@@ -301,14 +305,35 @@ impl Gpu {
     }
 }
 
-/// Work started before the window opened, and what the window opens
-/// with.
+/// What the window opens with: fonts and the GPU, being made on threads
+/// of their own as the first window of a process opens, or made already,
+/// for the windows after it (see [`host`]).
 #[derive(Debug)]
 pub(crate) struct Startup {
-    pub(crate) fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
-    pub(crate) gpu: JoinHandle<anyhow::Result<Gpu>>,
+    pub(crate) fonts: Pending<(Fonts, Desktop)>,
+    pub(crate) gpu: Pending<Gpu>,
     /// The token the desktop launched the window with, if it did.
     pub(crate) launch: LaunchToken,
+}
+
+/// Something being made on a thread of its own, or made already.
+#[derive(Debug)]
+pub(crate) enum Pending<T> {
+    Thread(JoinHandle<anyhow::Result<T>>),
+    Ready(T),
+}
+
+impl<T> Pending<T> {
+    /// Waits for it, if it's still being made. `name` says what it is, if
+    /// its thread panicked.
+    fn wait(self, name: &str) -> anyhow::Result<T> {
+        match self {
+            Self::Thread(thread) => thread
+                .join()
+                .map_err(|_| anyhow!("{name} thread panicked"))?,
+            Self::Ready(made) => Ok(made),
+        }
+    }
 }
 
 /// The open window, or the picture drawn in its place, and what draws
@@ -319,6 +344,9 @@ struct Frame {
     gpu: Gpu,
     renderer: Renderer,
     fonts: Fonts,
+    /// The desktop's preferences, as they were read for the process's
+    /// first window: later windows open with them too.
+    desktop: Desktop,
     /// Whether the compositor shows what's behind the window where it's
     /// see-through, which lets the window round its corners.
     transparent: bool,
@@ -488,8 +516,16 @@ pub(crate) struct App {
     /// reconnection (see [`crate::forwards`]).
     forwards: Forwards,
     /// Whether something asked the window to close, as its close button
-    /// does. The event loop ends once the event that asked is handled.
+    /// does. It closes once the event that asked is handled.
     closing: bool,
+    /// The process the window is in, and the other windows there.
+    link: host::Link,
+    /// What the window was opened with, which a window it opens on another
+    /// machine copies.
+    spec: host::Spec,
+    /// A window to open on another machine, waiting for the token the
+    /// desktop gives this one to hand it, so it takes focus.
+    opening: Option<host::Opening>,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -501,16 +537,23 @@ impl App {
         started: Instant,
         startup: Option<Startup>,
         session: Session,
-        remote_command: String,
+        spec: host::Spec,
+        link: host::Link,
     ) -> Self {
         let proxy = session.proxy();
         let mut desk = Desk::default();
         // A window on the desktop tells the desktop of chats it can't see;
         // one drawn offscreen, to look at (see `look`), doesn't.
-        if matches!(proxy, crate::session::Proxy::EventLoop(_)) {
+        if matches!(proxy, crate::session::Proxy::EventLoop { .. }) {
             desk.set_notifier(Box::new(crate::notify::Desktop::new(proxy.clone())));
         }
         let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
+        let mut updates = updates::Known::new();
+        // Found as the process started: by the time a later window opens,
+        // the program may have been updated, and this one renamed away.
+        if let Some(program) = link.program() {
+            updates.program = Some(program.to_owned());
+        }
         Self {
             native: native::Native::default(),
             started,
@@ -545,32 +588,35 @@ impl App {
             ime: InputMethod::default(),
             ime_area: None,
             composing_in_chat: false,
-            updates: updates::Known::new(),
+            updates,
             picker: None,
             recall_writer: crate::cmdline::recall::Writer::default(),
             pickers: 0,
             picked: None,
-            remote_command,
+            remote_command: spec.remote_command.clone(),
             forwards,
             closing: false,
+            link,
+            spec,
+            opening: None,
             result: Ok(()),
         }
     }
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
+    /// Closes the window, which went wrong as `error` says.
+    fn fail(&mut self, error: anyhow::Error) {
         self.result = Err(error);
-        event_loop.exit();
+        self.closing = true;
     }
 
     /// Opens the window once fonts and the GPU are ready.
     fn open(&mut self, event_loop: &ActiveEventLoop, startup: Startup) -> anyhow::Result<Frame> {
-        let join = |name| move |_| anyhow!("{name} thread panicked");
-        let (mut fonts, desktop) = startup.fonts.join().map_err(join("font"))??;
+        let (mut fonts, desktop) = startup.fonts.wait("font")?;
         let fonts_ready = self.started.elapsed();
         // In config's font, if it's run, so the window opens at the size
         // that font makes.
         self.desk.use_font(&mut fonts);
-        self.buttons = desktop.buttons;
+        self.buttons = desktop.buttons.clone();
         // Fonts were loaded at one pixel per point; the window's display
         // may have more.
         let (cols, rows) = INITIAL_GRID;
@@ -581,13 +627,14 @@ impl App {
         let window = Arc::new(event_loop.create_window(window_attributes(size, token))?);
         window.set_ime_purpose(ImePurpose::Terminal);
         log::debug!(
-            "asked for a {size:?} window; got {:?} at scale {}",
+            "asked for a {size:?} window; got {:?} at scale {}, after {:.1?}",
             window.inner_size(),
-            window.scale_factor()
+            window.scale_factor(),
+            self.started.elapsed()
         );
         fonts.set_scale(window.scale_factor());
 
-        let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
+        let mut gpu = startup.gpu.wait("GPU")?;
         let gpu_ready = self.started.elapsed();
         let mut surface = gpu.instance.create_surface(Arc::clone(&window))?;
         let config = match gpu.configure(&surface, window.inner_size()) {
@@ -610,7 +657,12 @@ impl App {
             }
         };
         let (format, present_mode) = (config.format, config.present_mode);
+        let configured = self.started.elapsed();
         let renderer = Renderer::new(&gpu.device, format);
+        log::debug!(
+            "surface ready after {configured:.1?}, renderer after {:.1?}",
+            self.started.elapsed()
+        );
         log::info!(
             "window open after {:.1?} (fonts ready after {fonts_ready:.1?}, GPU after \
              {gpu_ready:.1?}): {} adapter, {format:?}, {present_mode:?}",
@@ -627,6 +679,7 @@ impl App {
             gpu,
             renderer,
             fonts,
+            desktop,
             transparent,
             capture: false,
             captured: None,
@@ -1634,10 +1687,40 @@ impl App {
         format!("updated, but the window couldn't reopen ({err}): open it again yourself")
     }
 
+    /// Opens the build `clackatoo update` just put in place of this one, in
+    /// a process of its own, for a window connected where this one is,
+    /// then closes this one: the other windows in this process stay open.
+    /// Returns only if it couldn't, saying why.
+    fn open_as_new_build(&mut self) -> String {
+        let Some(program) = &self.updates.program else {
+            return "this program can't be found, to open it again".into();
+        };
+        let program = clackatoo_update::install::installed(program);
+        let mut args = reopen_args(std::iter::empty(), self.session.host());
+        if self.session.host().is_some() {
+            args.extend([
+                "--remote-command".into(),
+                self.remote_command.clone().into(),
+            ]);
+        }
+        log::info!("opening this window again as the new build, in a process of its own");
+        match spawn_window(&program, &args) {
+            Ok(()) => {
+                self.closing = true;
+                String::new()
+            }
+            Err(err) => {
+                format!("updated, but the window couldn't reopen ({err}): open it again yourself")
+            }
+        }
+    }
+
     /// Opens a new window on the daemon on `host`, as `clackatoo --remote
-    /// HOST` does, in a process of its own that outlives this window.
+    /// HOST` does: in this process, once the desktop has given this window
+    /// a token to hand it, so it takes focus. If this process's program
+    /// has been replaced since it started, in a process of the new build,
+    /// which outlives this window.
     fn open_window_on(&mut self, host: &str) {
-        use std::os::unix::process::CommandExt as _;
         if self.native.automating {
             self.native.refused = true;
             return;
@@ -1647,29 +1730,68 @@ impl App {
                 .say("this program can't be found, to open a window with".into());
             return;
         };
-        let spawned = std::process::Command::new(program)
-            .args(["--remote", host, "--remote-command", &self.remote_command])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            // Not hung up with this window's terminal, if it has one.
-            .process_group(0)
-            .spawn();
-        match spawned {
-            Ok(mut child) => {
-                // Waited for, so it doesn't linger once it's closed.
-                let waited = std::thread::Builder::new()
-                    .name("window".into())
-                    .spawn(move || drop(child.wait()));
-                if let Err(err) = waited {
-                    log::warn!("nothing waits for the window on {host}: {err}");
+        if !self.link.hosting() || self.link.replaced(program) {
+            let args = ["--remote", host, "--remote-command", &self.remote_command];
+            match spawn_window(program, &args.map(Into::into)) {
+                Ok(()) => self.desk.say(format!("opening a window on {host}…")),
+                Err(err) => {
+                    self.desk
+                        .warn(format!("couldn't open a window on {host}: {err}"));
                 }
-                self.desk.say(format!("opening a window on {host}…"));
             }
-            Err(err) => {
-                self.desk
-                    .warn(format!("couldn't open a window on {host}: {err}"));
+            return;
+        }
+        let spec = host::Spec {
+            remote: Some(clackatoo_daemon::remote::Remote {
+                host: host.to_owned(),
+                command: self.remote_command.clone(),
+            }),
+            pick_remote: false,
+            ..self.spec.clone()
+        };
+        let asked = self.frame.as_ref().and_then(Frame::window).map(|window| {
+            winit::platform::startup_notify::WindowExtStartupNotify::request_activation_token(
+                &**window,
+            )
+        });
+        match asked {
+            Some(Ok(serial)) => {
+                self.opening = Some(host::Opening::new(serial, spec));
             }
+            // The desktop gives no tokens.
+            _ => self.link.open(spec, LaunchToken::default()),
+        }
+        self.desk.say(format!("opening a window on {host}…"));
+    }
+
+    /// The desktop gave this window `token`, as asked with `serial`, for a
+    /// window it's opening.
+    fn token_given(
+        &mut self,
+        serial: winit::event_loop::AsyncRequestSerial,
+        token: ActivationToken,
+    ) {
+        if self
+            .opening
+            .as_ref()
+            .is_some_and(|opening| opening.serial == serial)
+            && let Some(opening) = self.opening.take()
+        {
+            self.link.open(opening.spec, LaunchToken::given(token));
+        }
+    }
+
+    /// Opens the window waiting for a token without one, if the desktop
+    /// has taken too long to give it by `now`.
+    fn stop_waiting_for_token(&mut self, now: Instant) {
+        if self
+            .opening
+            .as_ref()
+            .is_some_and(|opening| opening.until <= now)
+            && let Some(opening) = self.opening.take()
+        {
+            log::info!("the desktop gave no token for a new window in time");
+            self.link.open(opening.spec, LaunchToken::default());
         }
     }
 
@@ -3184,6 +3306,27 @@ fn reopen_args(
     kept
 }
 
+/// Starts `program` with `args`, as a window's process of its own that
+/// outlives this one: not hung up with this window's terminal, if it has
+/// one, and waited for on a thread, so it doesn't linger once it's closed.
+fn spawn_window(program: &std::path::Path, args: &[std::ffi::OsString]) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let waited = std::thread::Builder::new()
+        .name("window".into())
+        .spawn(move || drop(child.wait()));
+    if let Err(err) = waited {
+        log::warn!("nothing waits for the window opened: {err}");
+    }
+    Ok(())
+}
+
 /// `text` in lines of at most `width` characters, each after `indent`. Text
 /// that fits is kept as it is; text that doesn't is broken between words.
 fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
@@ -3302,8 +3445,9 @@ fn padding(scale: f64) -> u32 {
     padding
 }
 
-impl ApplicationHandler<SessionEvent> for App {
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+impl App {
+    /// What's left to do as the window closes, alone or with its process.
+    fn closed(&mut self) {
         // A lesson goes with the window, and its scratch files with it.
         self.desk.tutor_exiting();
         // What's typed in chats' boxes, for the window opened next.
@@ -3314,7 +3458,9 @@ impl ApplicationHandler<SessionEvent> for App {
             .finish(std::time::Duration::from_millis(500));
     }
 
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    /// Opens the window with what it was made with, once the event loop
+    /// can make windows.
+    fn resume(&mut self, event_loop: &ActiveEventLoop) {
         let Some(startup) = self.startup.take() else {
             return;
         };
@@ -3335,36 +3481,13 @@ impl ApplicationHandler<SessionEvent> for App {
                     self.update_title();
                 }
             }
-            Err(err) => self.fail(event_loop, err),
+            Err(err) => self.fail(err),
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        self.handle_window_event(event_loop, event);
-        self.send_outbox();
-        if self.closing {
-            event_loop.exit();
-        }
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
-        if self.session_event(event) {
-            event_loop.exit();
-        }
-    }
-
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        if let StartCause::ResumeTimeReached { .. } = cause {
-            self.woke(Instant::now());
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let flow = match self.idle() {
-            Some(wake) => ControlFlow::WaitUntil(wake),
-            None => ControlFlow::Wait,
-        };
-        event_loop.set_control_flow(flow);
+    /// The window on the desktop, once it's open.
+    fn window_id(&self) -> Option<WindowId> {
+        Some(self.frame.as_ref()?.window()?.id())
     }
 }
 
@@ -3385,6 +3508,7 @@ impl App {
             self.send_outbox();
         }
         self.retry_if_due(now);
+        self.stop_waiting_for_token(now);
         self.request_redraw();
     }
 
@@ -3448,19 +3572,23 @@ impl App {
             .chain(self.desk.pane_wakes())
             .chain(self.desk.scroll_wakes())
             .chain(self.desk.config_ends())
+            .chain(self.opening.as_ref().map(|opening| opening.until))
             .min()
     }
 }
 
 impl App {
-    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+    fn handle_window_event(&mut self, event: WindowEvent) {
         if !matches!(&event, WindowEvent::RedrawRequested) {
             self.native
                 .revision
                 .set(self.native.revision.get().wrapping_add(1));
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.closing = true,
+            WindowEvent::ActivationTokenDone { serial, token } => {
+                self.token_given(serial, token);
+            }
             WindowEvent::Resized(size) => {
                 log::debug!("resized to {size:?}");
                 if let Some(frame) = &mut self.frame
@@ -3672,10 +3800,21 @@ impl App {
                 if let (true, Err(after)) = (updated.installed, &updated.said) {
                     log::warn!("clackatoo is updated, but: {after}");
                 }
-                // Installed: this window opens again as the new build, in
-                // this process, connecting where it did, even if moving this
-                // machine's daemon onto it failed, as it may have; it's logged.
-                let why = why.unwrap_or_else(|| self.reopen_as_new_build());
+                // Installed: this window opens again as the new build,
+                // connecting where it did, even if moving this machine's
+                // daemon onto it failed, as it may have; it's logged. Alone,
+                // in this process; with other windows here, which would go
+                // with it, in a process of its own, closing this one.
+                let why = why.unwrap_or_else(|| {
+                    if self.link.alone() {
+                        self.reopen_as_new_build()
+                    } else {
+                        self.open_as_new_build()
+                    }
+                });
+                if self.closing {
+                    return;
+                }
                 self.notice = Some(Notice::Updating { failed: Some(why) });
                 self.request_redraw();
             }
@@ -4263,7 +4402,13 @@ mod shortcut_tests {
             &runtime,
             crate::session::Proxy::Channel(std::sync::mpsc::channel().0),
         );
-        let mut app = App::new(Instant::now(), None, session, String::new());
+        let mut app = App::new(
+            Instant::now(),
+            None,
+            session,
+            host::Spec::default(),
+            host::Link::default(),
+        );
         app.notice = None;
         app
     }
