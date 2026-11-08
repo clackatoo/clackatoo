@@ -44,7 +44,8 @@ impl Daemon {
                     command: linked.remote.command.clone(),
                     asked: linked.asked,
                     unshared: linked.unshared,
-                    expected: linked.machine_id().map(|id| id.0),
+                    // Never what the daemon there only said it was.
+                    expected: linked.proved_id().map(|id| id.0),
                     wire: linked.wire,
                     view,
                     buffers: linked
@@ -107,7 +108,12 @@ impl Daemon {
             );
             linked.unshared = peer.unshared;
             linked.expected = peer.expected.map(MachineId);
-            linked.machine = view.machine;
+            // A machine the daemon there said it was without proving it,
+            // or another than it proved, comes back unsaid: it's checked
+            // again as it connects, as anything it says is.
+            linked.machine = view
+                .machine
+                .filter(|machine| linked.expected == Some(machine.id));
             linked.passed = view.passed;
             linked.wire = peer.wire;
             linked.relayed.relays = view.relays;
@@ -189,6 +195,42 @@ mod tests {
         daemon.read_reached(link, Reading::Look);
         assert_eq!(daemon.relay_keys_hold_upgrade(now, now), Ok(false));
         assert!(heard(&mut there).is_empty());
+    }
+
+    /// What a daemon there said it was without proving it, as from a
+    /// clackatoo too old to sign, comes back unsaid from an upgrade, never
+    /// expected nor kept: one it proved comes back as it was.
+    #[test]
+    fn a_machine_said_but_not_proved_comes_back_unsaid_through_an_upgrade() {
+        for proved in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, _link, _there) = linked(dir.path());
+            // Made as one too old to sign would be.
+            assert!(daemon.links.list[0].unproved);
+            daemon.links.list[0].unproved = !proved;
+            let kept = daemon.hand_over_federation().unwrap();
+            let next_dir = tempfile::tempdir().unwrap();
+            let (mut next, _) =
+                crate::server::agent_files::tests::daemon_with_chat(next_dir.path());
+            next.config.links = Some(crate::LinkConfig {
+                ssh: "false".into(),
+                askpass: None,
+                better_every: crate::DEFAULT_BETTER_EVERY,
+                speaks: None,
+                impostor: false,
+                lies: crate::Lies::default(),
+            });
+            next.resume_federation(&kept).unwrap();
+            let desk = crate::server::relay::tests::desk();
+            let linked = &next.links.list[0];
+            assert_eq!(
+                linked.machine.as_ref().map(|machine| machine.id),
+                proved.then_some(desk.id)
+            );
+            assert_eq!(linked.proved_id(), proved.then_some(desk.id));
+            assert_eq!(next.links.kept()[0].machine, proved.then_some(desk.id));
+            next.end_links();
+        }
     }
 
     #[test]

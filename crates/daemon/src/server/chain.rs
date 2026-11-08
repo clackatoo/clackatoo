@@ -121,8 +121,9 @@ impl Daemon {
     /// the connection to `host` is known by, and tries that connection
     /// again at once if it was stopped, as by a key it didn't know. That's
     /// the machine it last proved it was, or was expected to be, never one
-    /// it only said it was. With no connection by that name, `host` may be
-    /// the machine's ID.
+    /// it only said it was, and the connection, tried again, takes
+    /// whatever machine is there now, as `:connect` would. `host` may be a
+    /// machine's ID instead, which is taken as one first.
     pub(super) fn serve_forget(&mut self, token: Token, host: &str) -> Result<Response, Error> {
         // Only this machine's own clients: a device on the web app, or a
         // daemon relaying, never.
@@ -135,19 +136,20 @@ impl Daemon {
                 "only this machine's own windows and commands forget a machine's key".to_owned(),
             ));
         }
-        let Some(at) = self.links.find(host) else {
-            // A machine known by its key, by its ID, with no connection.
-            if let Ok(machine) = host.parse::<MachineId>() {
-                let forgot = self.links.forget_pin(machine);
-                if forgot {
-                    log::info!("{machine}'s identity key is forgotten, as asked");
-                }
-                return Ok(Response::Text(if forgot {
-                    format!("forgot {machine}'s identity key")
-                } else {
-                    format!("no key was known for {machine}")
-                }));
+        // A machine's ID first: the key it's known by, whatever connection
+        // proved it, or none.
+        if let Ok(machine) = host.parse::<MachineId>() {
+            let forgot = self.links.forget_pin(machine);
+            if forgot {
+                log::info!("{machine}'s identity key is forgotten, as asked");
             }
+            return Ok(Response::Text(if forgot {
+                format!("forgot the identity key of machine {machine}")
+            } else {
+                format!("no key was known for machine {machine}")
+            }));
+        }
+        let Some(at) = self.links.find(host) else {
             return Err(Error::Other(format!(
                 "there's no connection to ‘{}’",
                 host.escape_debug()
@@ -164,6 +166,9 @@ impl Daemon {
         }
         let linked = &mut self.links.list[at];
         if matches!(linked.state, ConnectionState::Stopped { .. }) && linked.trying.is_none() {
+            // Whatever's there now, as `:connect` takes it: a machine whose
+            // state was wiped has a new ID as well as a new key.
+            linked.asked_anew = linked.asked;
             self.try_link_now(at);
             self.tell_connections();
         }
@@ -252,9 +257,7 @@ impl Daemon {
         }
         // Those newly passed on.
         for (&machine, offers) in &offered {
-            // One that only said it's that machine gives way to it, once
-            // it proves it is (see `displace_unproved`).
-            if machine == own || self.links.proved_to(machine).is_some() {
+            if machine == own || self.links.to(machine).is_some() {
                 continue;
             }
             let host = self.unique_host(&offers[0].1.name);
@@ -326,12 +329,10 @@ impl Daemon {
                 let Some(machine) = linked.machine_id() else {
                     return true;
                 };
-                // Never for one that only said it's that machine.
                 let other = (list.iter().enumerate()).any(|(other, linked)| {
                     other != at
                         && linked.machine_id() == Some(machine)
                         && (linked.asked || other < at)
-                        && !linked.unproved
                 });
                 machine == own || other || !offered.contains_key(&machine)
             })
@@ -806,7 +807,7 @@ impl Daemon {
 /// `host`, a connection's, as the machine is named when it's passed on:
 /// without the user ssh logs in as or a port, which are this machine's
 /// business (`jack@server:2222` is `server`).
-fn bare_host(host: &str) -> String {
+pub(super) fn bare_host(host: &str) -> String {
     let machine = host.rsplit_once('@').map_or(host, |(_, machine)| machine);
     if let Some(inner) = machine.strip_prefix('[') {
         return inner.split(']').next().unwrap_or(inner).to_owned();

@@ -127,8 +127,12 @@ impl Daemon {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return Ok(done);
         };
+        let id = machine.id;
         client.machine = Some(machine);
         let watching = client.watching_workspaces;
+        // A connection that only said it's this machine, by another name,
+        // can't be it.
+        self.relaying_machine_came(id);
         // What's lent it and parked here is in its layouts again.
         self.held_reach_changed();
         // It watches the workspaces already, as it learned which machine

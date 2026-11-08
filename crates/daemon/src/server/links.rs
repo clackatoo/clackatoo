@@ -296,8 +296,11 @@ pub(super) struct Linked {
     /// as from a clackatoo too old to sign: a connection that proves it's
     /// that machine takes its place (see `Daemon::displace_unproved`).
     pub(super) unproved: bool,
-    /// Asked for by a client since it was last made: it may reach another
-    /// machine than it did, as whatever's there now is what was asked for.
+    /// Asked for by one of this machine's own clients, never a daemon
+    /// relaying, with `:connect` or `forget`, since its last try began:
+    /// its next try may reach another machine than it did, as whatever's
+    /// there now is what was asked for. That try takes it, whatever it
+    /// comes to.
     pub(super) asked_anew: bool,
     /// When each key new here that the daemon there vouched for, as it
     /// passed a machine on, was kept, in the last [`VOUCHED_FOR`].
@@ -595,14 +598,6 @@ impl Links {
         (self.list.iter()).position(|linked| linked.machine_id() == Some(machine))
     }
 
-    /// Where the connection to `machine` is in the list, as
-    /// [`to`](Self::to) finds it, but for one whose daemon said it's that
-    /// machine without proving it, which gives way to one that proves it.
-    pub(super) fn proved_to(&self, machine: MachineId) -> Option<usize> {
-        (self.list.iter())
-            .position(|linked| linked.machine_id() == Some(machine) && !linked.unproved)
-    }
-
     /// Where the connection to `host` is in the list.
     pub(super) fn find(&self, host: &str) -> Option<usize> {
         (self.list.iter()).position(|linked| linked.remote.host == host)
@@ -656,6 +651,17 @@ impl Daemon {
         if self.is_web_device(token) {
             return Err(Error::Other(
                 "a device on the web app can't connect the daemon to another machine".to_owned(),
+            ));
+        }
+        // Nor a daemon relaying, which could have a connection take another
+        // machine as asked for anew.
+        if matches!(
+            self.sources.get(token.0),
+            Some(Source::Client(client)) if client.relays || client.machine.is_some()
+        ) {
+            return Err(Error::Other(
+                "only this machine's own windows and commands connect it to other machines"
+                    .to_owned(),
             ));
         }
         if host.trim().is_empty() || host.chars().any(char::is_control) {
@@ -1127,10 +1133,12 @@ impl Daemon {
             return;
         };
         self.links.list[at].trying = None;
+        // A client asking for it again counts for this try alone.
+        let anew = std::mem::take(&mut self.links.list[at].asked_anew);
         // What ssh asked as it logged in can't be answered now.
         self.take_back_asks(host);
         match outcome {
-            Outcome::Made(made) => self.made(at, *made),
+            Outcome::Made(made) => self.made(at, *made, anew),
             Outcome::Failed(reason) => match self.links.list[at].answered {
                 Some(Answered::NoOne) => {
                     log::info!(
@@ -1165,8 +1173,9 @@ impl Daemon {
     }
 
     /// Reads the connection `made` for the connection at `at` in the list
-    /// from now on, unless it's to this daemon itself.
-    fn made(&mut self, at: usize, made: Made) {
+    /// from now on, unless it's to this daemon itself: tried as a client
+    /// asked for it `anew` (see [`Linked::asked_anew`]).
+    fn made(&mut self, at: usize, made: Made, anew: bool) {
         let Made {
             stream,
             decoder,
@@ -1178,8 +1187,7 @@ impl Daemon {
         } = made;
         let host = self.links.list[at].remote.host.clone();
         let machine = (workspaces.machine.as_ref()).map(|machine| shown_machine(machine, &host));
-        let proved = pin.map(|(proved, pin)| (proved, pin.key));
-        if let Some(reason) = self.claim_refused(at, machine.as_ref(), proved) {
+        if let Some(reason) = self.claim_refused(at, machine.as_ref(), pin, anew) {
             // What it said is kept only if it's this daemon itself, to
             // show: anything else refused would hold the place of the
             // machine it names (see `refused`).
@@ -1196,15 +1204,17 @@ impl Daemon {
         let linked = &mut self.links.list[at];
         linked.machine.clone_from(&machine);
         linked.unproved = machine.is_some() && pin.is_none();
-        linked.asked_anew = false;
         linked.suspected = None;
         // Known by its key from now on.
         if let Some((proved, pin)) = pin {
             self.keep_pin(proved, pin, &through);
         }
-        // What said it's that machine without proving it gives way.
-        if let Some(proved) = proved {
-            self.displace_unproved(at, proved.0);
+        // What said it's that machine without proving it gives way to a
+        // proof as good as the user's own.
+        if let Some((proved, pin)) = pin
+            && self.displaces(at, pin, anew)
+        {
+            self.displace_unproved(at, proved, &through);
         }
         // A machine passed on, reached straight now: its connection through
         // the daemon passing it on gives way, and what it showed is shown
@@ -1278,7 +1288,8 @@ impl Daemon {
     }
 
     /// The connection at `at` in the list isn't tried again until asked
-    /// for again, for `reason`.
+    /// for again, for `reason`: what its daemon passed on goes, as it
+    /// vouches for nothing now.
     fn link_stopped(&mut self, at: usize, reason: &str) {
         let linked = &mut self.links.list[at];
         log::info!(
@@ -1289,6 +1300,9 @@ impl Daemon {
         linked.state = ConnectionState::Stopped {
             reason: reason.to_owned(),
         };
+        if !std::mem::take(&mut linked.passed).is_empty() {
+            self.sync_chained();
+        }
     }
 
     /// Ends the connection made for the connection at `at` in the list, if
@@ -1401,11 +1415,10 @@ impl Daemon {
     /// the last run before they've said: a machine asked for here that
     /// can't be reached yet keeps its place. A claim refused is never
     /// kept (see [`made`](Self::made)), so no connection holds a place
-    /// for what another said. One `proved` by the machine's key isn't
+    /// for what another said. One that `displaces` such a claim isn't
     /// refused for another that said it's that machine without proving
-    /// it, which gives way to it (see
-    /// [`displace_unproved`](Self::displace_unproved)).
-    fn refused(&self, at: usize, machine: &Machine, proved: bool) -> Option<String> {
+    /// it, which gives way to it (see [`displaces`](Self::displaces)).
+    fn refused(&self, at: usize, machine: &Machine, displaces: bool) -> Option<String> {
         if let Some(reason) = self.same_machine(machine) {
             return Some(reason.to_owned());
         }
@@ -1422,7 +1435,7 @@ impl Daemon {
             other != at
                 && (linked.asked || !asked)
                 && to == Some(machine.id)
-                && !(proved && linked.unproved)
+                && !(displaces && linked.unproved)
         });
         other.map(|(_, linked)| {
             if asked {
@@ -1439,49 +1452,59 @@ impl Daemon {
         })
     }
 
-    /// Why the connection at `at` won't take the daemon it reached, which
-    /// says it's `claim`, and whose key proved it's `proved`, if it proved
-    /// anything, as signed with that key: as [`refused`](Self::refused)
-    /// says, or as its key proves it's another machine. Only a proof of a
-    /// machine's key may put a connection in that machine's place:
+    /// Why the connection at `at`, tried as a client asked for it `anew`,
+    /// won't take the daemon it reached, which says it's `claim`, and whose
+    /// key proved it's a machine, to be known by `pin`, if it proved
+    /// anything: as [`refused`](Self::refused) says, or as its key proves
+    /// it's another machine. Only a proof of a machine's key may put a
+    /// connection in that machine's place:
     ///
     /// - A connection reaches the machine it reached before, unless a
-    ///   client has asked for it since: the user may connect to whatever's
-    ///   there now, but a daemon can't choose to be another machine.
+    ///   client asked for it anew: the user may connect to whatever's there
+    ///   now, but a daemon can't choose to be another machine.
+    /// - A key that isn't the one the machine is known by now, as another
+    ///   connection learned it since this one's was checked, proves nothing.
     /// - One proving it's a machine passed on, and not known by its key
     ///   yet, proves it with the key a machine passing it on vouches for.
     /// - One too old to prove anything may say it's only a machine nothing
     ///   else here can tell apart: not one known by its key, nor one
-    ///   passed on, nor one connected to this one.
+    ///   passed on, nor one connected to this one by another name.
     fn claim_refused(
         &self,
         at: usize,
         claim: Option<&Machine>,
-        proved: Option<(MachineId, [u8; 32])>,
+        pin: Option<(MachineId, Pin)>,
+        anew: bool,
     ) -> Option<String> {
-        if let Some(reason) = claim.and_then(|machine| self.refused(at, machine, proved.is_some()))
-        {
+        let displaces = pin.is_some_and(|(_, pin)| self.displaces(at, pin, anew));
+        if let Some(reason) = claim.and_then(|machine| self.refused(at, machine, displaces)) {
             return Some(reason);
         }
         let linked = &self.links.list[at];
         let host = &linked.remote.host;
         let said = claim.map(|machine| machine.id);
-        match (proved, said) {
+        match (pin, said) {
             (Some((proved, _)), said) if said != Some(proved) => {
                 Some("it says it's another machine than the one its key proves".to_owned())
             }
-            (_, Some(said))
-                if !linked.asked_anew && linked.machine_id().is_some_and(|was| was != said) =>
-            {
+            (_, Some(said)) if !anew && linked.machine_id().is_some_and(|was| was != said) => {
                 Some(format!(
                     "it's another machine than the one ‘{host}’ reached before: `:connect \
                      {host}` takes it, if it's meant to be"
                 ))
             }
-            (Some((proved, key)), _)
+            (Some((proved, pin)), _)
+                if self
+                    .links
+                    .pin(proved)
+                    .is_some_and(|known| known.key != pin.key) =>
+            {
+                Some("its key isn't the one the machine it says it is is known by now".to_owned())
+            }
+            (Some((proved, pin)), _)
                 if self.links.pin(proved).is_none()
                     && self.passed_here(at, proved)
-                    && !self.vouched_here(at, proved, key) =>
+                    && !self.vouched_here(at, proved, pin.key) =>
             {
                 Some(
                     "it says it's a machine passed on to this one, and its key isn't the one \
@@ -1499,39 +1522,91 @@ impl Daemon {
                  prove it"
                     .to_owned(),
             ),
-            (None, Some(said)) if self.connected_here(said) => Some(
-                "it says it's a machine connected to this one, and its clackatoo is too old to \
-                 prove it"
-                    .to_owned(),
-            ),
+            (None, Some(said)) => (self.connected_as(at, said)).map(|name| {
+                format!(
+                    "it says it's the machine connected to this one as ‘{name}’, and its \
+                     clackatoo is too old to prove it: update clackatoo on ‘{host}’"
+                )
+            }),
             _ => None,
         }
     }
 
-    /// Whether `machine` is connected to this daemon, as a daemon relaying
-    /// for clients of its own, or was lent workspaces here.
-    fn connected_here(&self, machine: MachineId) -> bool {
-        self.workspaces.borrowers().contains_key(&machine)
-            || (self.sources.iter()).any(|(_, source)| {
-                matches!(source, Source::Client(client)
-                    if client.machine.as_ref().is_some_and(|known| known.id == machine))
-            })
+    /// The name `machine` is connected to this daemon by, as a daemon
+    /// relaying for clients of its own, or lent workspaces here, if it is,
+    /// and by another name than the connection at `at` is to: the same
+    /// name is taken as the two ways of daemons connected both ways, one
+    /// too old to prove which machine it is.
+    fn connected_as(&self, at: usize, machine: MachineId) -> Option<String> {
+        let host = super::chain::bare_host(&self.links.list[at].remote.host);
+        let relaying = (self.sources.iter()).find_map(|(_, source)| match source {
+            Source::Client(client) => (client.machine.as_ref())
+                .filter(|known| known.id == machine)
+                .map(|known| known.name.clone()),
+            _ => None,
+        });
+        let lent = (self.workspaces.borrowers().get(&machine)).map(|lent| lent.name.clone());
+        (relaying.into_iter().chain(lent)).find(|name| !name.eq_ignore_ascii_case(&host))
     }
 
-    /// Makes way for the connection at `at`, which has just proved it's
-    /// `machine`: each other connection whose daemon said it's that
-    /// machine, without proving it, ends, and isn't tried again until
-    /// asked for, its claim forgotten.
-    fn displace_unproved(&mut self, at: usize, machine: MachineId) {
-        let host = self.links.list[at].remote.host.clone();
-        let unproved: Vec<usize> = (self.links.list.iter().enumerate())
-            .filter(|&(other, linked)| {
-                other != at
-                    && linked.unproved
+    /// Stops each connection whose daemon said it's `machine` without
+    /// proving it, by another name than `machine` is connected to this one
+    /// by, as a daemon relaying, now it is (see [`claim_refused`](Self::claim_refused)):
+    /// so it comes to the same whichever came first.
+    pub(super) fn relaying_machine_came(&mut self, machine: MachineId) {
+        let named: Vec<(usize, String)> = (self.links.list.iter().enumerate())
+            .filter(|(_, linked)| {
+                linked.unproved
                     && linked
                         .machine
                         .as_ref()
                         .is_some_and(|known| known.id == machine)
+            })
+            .filter_map(|(at, _)| Some((at, self.connected_as(at, machine)?)))
+            .collect();
+        for (at, name) in named {
+            let host = self.links.list[at].remote.host.clone();
+            let linked = &mut self.links.list[at];
+            linked.machine = None;
+            linked.unproved = false;
+            self.take_back_asks(&host);
+            self.end_connection(at);
+            self.link_stopped(
+                at,
+                &format!(
+                    "it says it's the machine connected to this one as ‘{name}’, and its \
+                     clackatoo is too old to prove it: update clackatoo on ‘{host}’"
+                ),
+            );
+            self.tell_connections();
+        }
+    }
+
+    /// Whether the connection at `at`, which proved its machine's key, to
+    /// be known by `pin`, tried as a client asked for it `anew`, takes the
+    /// place of another whose daemon only said it's that machine: when it
+    /// was asked for here, and proved as well as the user's own
+    /// connection, by a key met straight, or by the user asking for it
+    /// anew. A key only vouched for by a machine passing it on never puts
+    /// it before what the user asked for.
+    fn displaces(&self, at: usize, pin: Pin, anew: bool) -> bool {
+        self.links.list[at].asked && (pin.met || anew)
+    }
+
+    /// Makes way for the connection at `at`, which has just proved it's
+    /// `machine`, going `through` those machines: each other connection
+    /// whose daemon said it's that machine, without proving it, ends, and
+    /// isn't tried again until asked for, its claim forgotten.
+    fn displace_unproved(&mut self, at: usize, machine: MachineId, through: &[MachineId]) {
+        let mut by = format!("‘{}’", self.links.list[at].remote.host);
+        if let Some(&via) = through.first() {
+            by = format!("{by}, reached through ‘{}’,", self.links.called(via));
+        }
+        let unproved: Vec<usize> = (self.links.list.iter().enumerate())
+            .filter(|&(other, linked)| {
+                other != at
+                    && linked.unproved
+                    && (linked.machine.as_ref()).is_some_and(|known| known.id == machine)
             })
             .map(|(other, _)| other)
             .collect();
@@ -1541,13 +1616,13 @@ impl Daemon {
             linked.unproved = false;
             linked.expected.take_if(|expected| *expected == machine);
             let there = linked.remote.host.clone();
-            log::warn!("{there} said it's the machine {host} proves it is, and gives way to it");
+            log::warn!("{there} said it's the machine {by} proved it is, and gives way to it");
             self.take_back_asks(&there);
             self.end_connection(other);
             self.link_stopped(
                 other,
                 &format!(
-                    "‘{host}’ proved it's the machine this one said it was, which this one's \
+                    "{by} proved it's the machine this one said it was, which this one's \
                      clackatoo is too old to prove"
                 ),
             );
@@ -1572,8 +1647,8 @@ impl Daemon {
             lately.retain(|&at| now.duration_since(at) < VOUCHED_FOR);
             if lately.len() >= MOST_VOUCHED {
                 log::warn!(
-                    "{} has vouched for {MOST_VOUCHED} machines' keys new here lately: \
-                     {machine}'s isn't kept, and it's vouched for again next time",
+                    "{} has vouched for the keys of {MOST_VOUCHED} machines new here in the \
+                     last hour: {machine}'s isn't kept, and is checked as new next time",
                     self.links.list[by].remote.host
                 );
                 return;
@@ -1584,13 +1659,19 @@ impl Daemon {
     }
 
     /// Tells the keys known which are in use, so none of them is forgotten
-    /// to make room: those of the machines connected to, passed on, or
-    /// kept connections to.
+    /// to make room for another only vouched for: those of the machines
+    /// asked for here, and of those they pass on, so many each, as a
+    /// daemon can't have more of its own kept that way than it passes on
+    /// at once.
     pub(super) fn pins_in_use(&self) {
         let in_use = (self.links.list.iter())
+            .filter(|linked| linked.asked)
             .flat_map(|linked| {
-                (linked.machine_id().into_iter())
-                    .chain(linked.passed.iter().map(|passed| passed.id))
+                (linked.proved_id().into_iter()).chain(
+                    (linked.passed.iter())
+                        .take(MOST_VOUCHED)
+                        .map(|passed| passed.id),
+                )
             })
             .collect();
         self.links.pins.in_use(in_use);
@@ -1614,10 +1695,9 @@ impl Daemon {
         let refused = if linked.connected.is_some() && id(&linked.machine) != id(&machine) {
             Some("it says it's another machine than it did".to_owned())
         } else {
-            let proved = !linked.unproved;
             machine
                 .as_ref()
-                .and_then(|machine| self.refused(at, machine, proved))
+                .and_then(|machine| self.refused(at, machine, false))
         };
         if let Some(reason) = refused {
             // What it said is never kept (see `made`).
@@ -2154,6 +2234,7 @@ impl Daemon {
                 through: Vec::new(),
                 pin: None,
             },
+            false,
         );
         let token = self.links.list[at].connected.unwrap().0;
         theirs.set_nonblocking(true).unwrap();
@@ -2185,6 +2266,7 @@ impl Daemon {
                 through: Vec::new(),
                 pin: None,
             },
+            false,
         );
         let token = self.links.list[at].connected.unwrap().0;
         theirs.set_nonblocking(true).unwrap();
@@ -2229,19 +2311,24 @@ mod tests {
             key: Some(vouched.key),
         }];
         daemon.keep_pin(server, vouched, &[desk.id]);
-        // So many new keys in a while, and no more.
-        for n in 1..=MOST_VOUCHED {
+        // So many new keys in a while: those known already, kept again,
+        // aren't counted.
+        for n in 1..MOST_VOUCHED - 1 {
             daemon.keep_pin(nth(n), vouched, &[desk.id]);
+            daemon.keep_pin(server, vouched, &[desk.id]);
         }
+        daemon.keep_pin(nth(MOST_VOUCHED - 1), vouched, &[desk.id]);
         assert!(daemon.links.pin(nth(MOST_VOUCHED - 1)).is_some());
+        // And no more.
+        daemon.keep_pin(nth(MOST_VOUCHED), vouched, &[desk.id]);
         assert!(daemon.links.pin(nth(MOST_VOUCHED)).is_none());
-        // Keys a known one again, or met, aren't counted.
-        daemon.keep_pin(server, vouched, &[desk.id]);
+        // But a key met straight, through desk or not, as it's no key
+        // desk vouches for.
         let met = Pin {
             met: true,
             ..vouched
         };
-        daemon.keep_pin(nth(MOST_VOUCHED), met, &[]);
+        daemon.keep_pin(nth(MOST_VOUCHED), met, &[desk.id]);
         assert_eq!(daemon.links.pin(nth(MOST_VOUCHED)), Some(met));
         // Room made for many more, the key of the machine passed on stays.
         for n in 1000..3000 {

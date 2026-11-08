@@ -4396,10 +4396,10 @@ fn unsigned() -> Lies {
 }
 
 /// Starts the daemon on `host`, telling the daemons connecting to it what
-/// `lies` says, as a modified build could.
+/// `lies` says, as a modified build could, with the workspaces it kept.
 fn start_lying(world: &World, host: &str, lies: &Lies) -> TestDaemon {
     let lies = lies.clone();
-    world.start_configured(host, false, move |config| {
+    world.start_configured(host, true, move |config| {
         if let Some(links) = &mut config.links {
             links.lies = lies;
         }
@@ -4607,41 +4607,112 @@ fn a_daemon_that_comes_back_as_another_machine_is_taken_only_once_asked_for_agai
         forges: true,
         ..lying()
     };
-    let bad = start_lying(&world, "bad", &lies);
+    let mut bad = start_lying(&world, "bad", &lies);
+    bad.client()
+        .new_workspace(Some("lure".into()), shell())
+        .unwrap();
     let laptop = world.start("laptop");
     let mut window = laptop.client();
     window.watch_connections(false).unwrap();
     connect(&mut window, "bad");
     going(&mut window, "bad", &[]);
-    // It comes back as a machine never met, signing as it.
-    let other = clackatoo_protocol::Machine {
-        id: MachineId([0x0b; 16]),
-        name: "other".into(),
-        run: 7,
-    };
-    say_its(&lies, other.clone());
+    for (n, again) in [(0x0b, "connect"), (0x0c, "forget")] {
+        // It comes back as a machine never met, signing as it.
+        let other = clackatoo_protocol::Machine {
+            id: MachineId([n; 16]),
+            name: "other".into(),
+            run: 7,
+        };
+        drop(bad);
+        say_its(&lies, other.clone());
+        bad = start_lying(&world, "bad", &lies);
+        let why = stopped_for(&mut window, "bad");
+        assert!(why.contains("reached before"), "{why}");
+        // Nor is its key kept as that machine's.
+        let forget = Request::Forget {
+            host: other.id.to_string(),
+        };
+        let Response::Text(said) = window.request(&forget).unwrap() else {
+            panic!("not answered");
+        };
+        assert_eq!(said, format!("no key was known for machine {}", other.id));
+        // Asked for again, or its key forgotten, it's taken, and what it
+        // shows is the new machine's.
+        if again == "connect" {
+            connect(&mut window, "bad");
+        } else {
+            // The key it was known by was forgotten by its ID already.
+            let host = Request::Forget { host: "bad".into() };
+            let Response::Text(said) = window.request(&host).unwrap() else {
+                panic!("not answered");
+            };
+            assert_eq!(said, "no key was known for ‘bad’");
+        }
+        let link = going(&mut window, "bad", &[]);
+        assert_eq!(link.machine.map(|machine| machine.id), Some(other.id));
+        let shown = wait_for_workspaces(&mut window, |shown| {
+            theirs(shown, "lure").is_some_and(|lure| lure.home == Some(other.id))
+        });
+        assert_eq!(
+            (shown.list.iter())
+                .filter(|workspace| workspace.name == "lure")
+                .count(),
+            1,
+            "{shown:?}"
+        );
+        // Known by its key now, which is forgotten by the machine's ID.
+        let Response::Text(said) = window.request(&forget).unwrap() else {
+            panic!("not answered");
+        };
+        assert_eq!(
+            said,
+            format!("forgot the identity key of machine {}", other.id)
+        );
+    }
     drop(bad);
-    let bad = start_lying(&world, "bad", &lies);
-    let why = stopped_for(&mut window, "bad");
-    assert!(why.contains("reached before"), "{why}");
-    // Nor is its key kept as that machine's.
-    let forget = Request::Forget {
-        host: other.id.to_string(),
-    };
-    let Response::Text(said) = window.request(&forget).unwrap() else {
-        panic!("not answered");
-    };
-    assert!(said.contains("no key was known"), "{said}");
-    // Asked for again, it's taken, and known by its key, which is
-    // forgotten by the machine's ID.
-    connect(&mut window, "bad");
-    let link = going(&mut window, "bad", &[]);
-    assert_eq!(link.machine.map(|machine| machine.id), Some(other.id));
-    let Response::Text(said) = window.request(&forget).unwrap() else {
-        panic!("not answered");
-    };
-    assert!(said.contains("forgot"), "{said}");
-    drop(bad);
+}
+
+#[test]
+fn daemons_connected_both_ways_at_protocol_94_take_each_other_whichever_connects_first() {
+    for (host, desk_first) in [("desk", true), ("desk", false), ("d2", true), ("d2", false)] {
+        let world = World::new();
+        // Desk, too old to prove which machine it is, as laptop talks to it.
+        let lies = unsigned();
+        let desk = world.start_configured("desk", false, move |config| {
+            if let Some(links) = &mut config.links {
+                links.lies = lies;
+                links.speaks = Some(94);
+            }
+        });
+        std::os::unix::fs::symlink(world.host("desk"), world.host("d2")).unwrap();
+        let laptop = world.start_configured("laptop", false, at_94);
+        let mut window = laptop.client();
+        window.watch_connections(false).unwrap();
+        let mut at_desk = desk.client();
+        at_desk.watch_connections(false).unwrap();
+        if desk_first {
+            connect(&mut at_desk, "laptop");
+            going(&mut at_desk, "laptop", &[]);
+        }
+        connect(&mut window, host);
+        // Taken while nothing here says otherwise.
+        if host == "desk" || !desk_first {
+            going(&mut window, host, &[]);
+        }
+        if !desk_first {
+            connect(&mut at_desk, "laptop");
+            going(&mut at_desk, "laptop", &[]);
+        }
+        if host == "desk" {
+            let link = connection_now(&mut window, host).unwrap();
+            assert!(connected(&link.state), "{link:?}");
+        } else {
+            // By another name than desk's, it can't be told from a
+            // daemon saying it's desk: desk is to be updated.
+            let why = stopped_for(&mut window, host);
+            assert!(why.contains("update clackatoo on ‘d2’"), "{why}");
+        }
+    }
 }
 
 #[test]
