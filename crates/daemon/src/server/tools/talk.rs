@@ -101,8 +101,11 @@ const MAX_READ: usize = 16 * 1024;
 /// all together: each gets its share.
 const MOST_NOTICE: usize = 64 * 1024;
 
-/// What text cut short ends with.
+/// What text cut short ends with, on a line of its own.
 const CUT: &str = "\n[the rest is cut off]";
+
+/// [`CUT`]'s words, which an answer cut short holds however it's quoted.
+const CUT_WORDS: &str = "[the rest is cut off]";
 
 /// The most of each message `read_chat` shows, in bytes.
 const MAX_PROMPT: usize = 2048;
@@ -1428,7 +1431,7 @@ impl Daemon {
             };
             self.forget_cut_wait(id, child);
             let tag = crate::chat::fence_tag();
-            let whole = if answer.contains(CUT) {
+            let whole = if answer.contains(CUT_WORDS) {
                 format!(" Cut off here: read_chat {child} reads it whole.")
             } else {
                 String::new()
@@ -3236,6 +3239,24 @@ mod tests {
     /// A asks B, which starts C and ends its turn. C finishes, and the
     /// notice wakes B, which reports what C found: that answers A too, as
     /// what B went on to do by itself would, so A hears it.
+    #[test]
+    fn a_finished_notice_says_where_an_answer_was_cut_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        finishes(&mut daemon, b, &"long line\n".repeat(MAX_READ / 5));
+        relay(&mut daemon);
+        answers(&mut daemon, a, "done");
+        relay(&mut daemon);
+        let node = daemon.chat_ref(a).unwrap().node();
+        let told = &node.turns.last().unwrap().prompt;
+        assert!(told.contains("\n| [the rest is cut off]\n"), "{told}");
+        assert!(
+            told.contains(&format!("Cut off here: read_chat {b} reads it whole.")),
+            "{told}"
+        );
+    }
+
     #[test]
     fn what_a_subagents_own_subagent_found_reaches_the_chat_above() {
         let dir = tempfile::tempdir().unwrap();

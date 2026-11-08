@@ -613,7 +613,7 @@ When the daemon supports browsing, the tools are advertised from the start, even
 | `browser_click`, `browser_type`, `browser_press_key` | Click or type into a thing by its ref, or press a key. |
 | `browser_screenshot`, `browser_read` | A picture of the page, or its text. |
 
-Before its first page, the chat asks: Allow for this chat, or Reject. The browser is clackatoo's own headless Chromium, with a profile of its own, never yours, so nothing is logged in, and each chat's page is kept apart from the others'. Downloads are turned off. A chat whose [limits](#profiles) are read-only or no commands, as `explore` and `plan` are, reads pages but clicks, types and presses keys in none, and opens no `data:` page. What the agent reads of a page reaches it marked as the page's, not as anything you asked.
+Before its first page, the chat asks: Allow for this chat, or Reject. The browser is clackatoo's own headless Chromium, with a profile of its own, never yours, so nothing is logged in, and each chat's page is kept apart from the others'. Downloads are turned off. A chat whose [limits](#profiles) are read-only or no commands, as `explore` and `plan` are, or whose agent's mode is Plan or Read-only, reads pages but clicks, types and presses keys in none, and opens no `data:` page. What the agent reads of a page reaches it marked as the page's, not as anything you asked.
 
 A snap of Chromium can only use a profile in its own folder under `~/snap`, and anywhere else it would use yours: clackatoo puts its profile there, checks once the browser has started that it's using it, and stops it at once, and never starts it again, if it isn't.
 
