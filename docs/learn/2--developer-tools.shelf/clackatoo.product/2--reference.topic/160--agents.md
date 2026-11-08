@@ -598,7 +598,7 @@ A command is typed only while the shell has the terminal to itself, as for a ter
 
 A command typed while the shell is still drawing its next prompt is waited for from that prompt on, and a command that clears the screen and scrollback, as `clear` does, doesn't end the wait.
 
-The tools are an MCP server (the [Model Context Protocol](https://modelcontextprotocol.io)), which the agent starts as `clackatoo mcp`, for Claude Code and Codex alike. It talks to the daemon for the one chat it was started for. The same server has the tools for [the browser](#the-browser), [chats working together](#chats-working-together), [native window access](#native-window-access), [managed activities](#managed-activities-and-recovery), [boards](~clackatoo/reference/boards) and `harness_capabilities` ([below](#inspecting-capabilities)).
+The tools are an MCP server (the [Model Context Protocol](https://modelcontextprotocol.io)), which the agent starts as `clackatoo mcp`, for Claude Code and Codex alike. It talks to the daemon for the one chat it was started for. Each time the chat's session opens, the daemon gives that server a new secret, in its environment rather than its arguments, and serves the chat's tools only to a server showing one: `clackatoo mcp` run by hand, or by anything the agent wasn't told to start, is refused. A secret is the session's, so only that session's server counts as clackatoo's. The same server has the tools for [the browser](#the-browser), [chats working together](#chats-working-together), [native window access](#native-window-access), [managed activities](#managed-activities-and-recovery), [boards](~clackatoo/reference/boards) and `harness_capabilities` ([below](#inspecting-capabilities)).
 
 ## The browser
 
