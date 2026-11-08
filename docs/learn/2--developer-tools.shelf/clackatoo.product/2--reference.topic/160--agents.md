@@ -629,6 +629,8 @@ When the daemon supports browsing, the tools are advertised from the start, even
 
 Before its first page, the chat asks: Allow for this chat, or Reject. The browser is clackatoo's own headless Chromium, with a profile of its own, never yours, so nothing is logged in, and each chat's page is kept apart from the others'. Downloads are turned off. A chat whose [limits](#profiles) are read-only or no commands, as `explore` and `plan` are, or whose agent's mode is Plan or Read-only, reads pages but clicks, types and presses keys in none, and opens no `data:` page. What the agent reads of a page reaches it marked as the page's, not as anything you asked.
 
+Turning Browser or Tools off, stopping the chat, or closing it stops what its agent asked the browser to do: what's waiting is never done, the click, typing or load under way stops at its next step, and the agent is told why at once. A chat may have 4 browser calls under way at a time; one browser serves every chat, so more would hold up other chats' pages.
+
 A page's alerts, confirms and prompts are turned down as they open. The agent hears of the first 8 since it last used the browser, and how many more there were. A page's address and title are cut to 2 KiB wherever they're kept, shown or sent, as a page can make its address megabytes long, many times a second.
 
 A snap of Chromium can only use a profile in its own folder under `~/snap`, and anywhere else it would use yours: clackatoo puts its profile there, checks once the browser has started that it's using it, and stops it at once, and never starts it again, if it isn't.

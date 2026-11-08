@@ -26,6 +26,9 @@ use serde_json::Value;
 use super::{Daemon, Source};
 use crate::browser::{Act, Answer, Browser, Job};
 
+/// The most of a chat's calls to the browser under way at once.
+const MOST_CALLS: usize = 4;
+
 /// Chats' pages, as the event loop keeps them.
 #[derive(Debug, Default)]
 pub(super) struct Browsing {
@@ -83,6 +86,15 @@ impl Daemon {
             self.answer_tool(token, &id, refused);
             return;
         }
+        // One thread serves every chat's page: a chat's calls queue
+        // behind each other, and so would every other chat's.
+        if self.browsing_calls(chat) >= MOST_CALLS {
+            let refused = Err(format!(
+                "{MOST_CALLS} browser calls of this chat's are under way already: wait for them"
+            ));
+            self.answer_tool(token, &id, refused);
+            return;
+        }
         if matches!(act, Act::Navigate { .. })
             && !self.browser_shown(chat)
             && let Err(why) = self.place_beside(chat, PaneTerminal::Browser(chat))
@@ -93,6 +105,14 @@ impl Daemon {
         self.browsing.next_call += 1;
         self.wait_for_browser(token, id, chat, call);
         self.browser_job(Job::Act { call, chat, act });
+    }
+
+    /// Has the browser's thread drop every act the chat's agent has asked
+    /// for so far (see [`Browser::drop_acts`]).
+    pub(super) fn drop_acts_asked(&self, chat: TerminalId) {
+        if let Some(browser) = &self.browsing.browser {
+            browser.drop_acts(chat, self.browsing.next_call);
+        }
     }
 
     /// Whether a pane shows the chat's page.

@@ -4164,7 +4164,20 @@ impl Daemon {
             }
             _ => {}
         }
+        let stop = matches!(action, ChatAction::Stop);
+        let had_tools = chat.tools() != clackatoo_protocol::AgentTools::Off;
         let actions = chat.act(action);
+        // What the agent asked the browser to do stops with it, and with
+        // its tools.
+        let tools_off = had_tools && chat.tools() == clackatoo_protocol::AgentTools::Off;
+        if stop || tools_off {
+            let why = if stop {
+                "the user stopped this chat"
+            } else {
+                "the user turned this chat's tools off"
+            };
+            self.drop_browser_acts(id, why);
+        }
         self.act(id, actions);
         // Its Tools or mode may have changed: what it asked that they now
         // rule out goes.

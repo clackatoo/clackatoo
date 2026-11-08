@@ -184,6 +184,8 @@ enum Input {
     /// The browser started as this number closed its pipe: it has
     /// stopped.
     Gone(u64),
+    /// The user dropped a chat's acts (see [`Browser::drop_acts`]).
+    Dropped,
 }
 
 /// The daemon's side of the browser's thread.
@@ -210,6 +212,11 @@ struct Running {
     /// but passes on no more, so a page opening thousands a second while
     /// the thread waits fills nothing.
     dialogs: AtomicUsize,
+    /// For each chat, the number of the first of its acts still to be
+    /// carried out: those before it the user stopped, by turning its
+    /// browser or tools off, stopping it, or closing it. The thread drops
+    /// them unanswered, the one under way included, at its next step.
+    dropped: Mutex<BTreeMap<TerminalId, u64>>,
 }
 
 impl Running {
@@ -232,6 +239,12 @@ impl Running {
         if let Some(process) = process.as_ref() {
             crate::group::signal_group(process.as_fd(), signal);
         }
+    }
+
+    /// Whether the act `call` of the chat `chat`'s was dropped.
+    fn dropped(&self, chat: TerminalId, call: u64) -> bool {
+        let dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
+        dropped.get(&chat).is_some_and(|&below| call < below)
     }
 }
 
@@ -257,6 +270,7 @@ impl Browser {
             deferred: VecDeque::new(),
             idle_since: None,
             refused: None,
+            acting: None,
         };
         let thread = std::thread::Builder::new()
             .name("browser".to_owned())
@@ -277,6 +291,18 @@ impl Browser {
         if self.inputs.send(Input::Job(job)).is_err() {
             log::warn!("the browser's thread has gone");
         }
+    }
+
+    /// Drops the chat `chat`'s acts numbered below `below`: those waiting
+    /// aren't carried out, and the one under way stops at its next step.
+    pub(crate) fn drop_acts(&self, chat: TerminalId, below: u64) {
+        {
+            let mut dropped = (self.running.dropped.lock()).unwrap_or_else(PoisonError::into_inner);
+            let floor = dropped.entry(chat).or_default();
+            *floor = (*floor).max(below);
+        }
+        // An act waiting for its page to load looks again.
+        let _ = self.inputs.send(Input::Dropped);
     }
 
     /// Takes everything in the outbox.
@@ -419,6 +445,9 @@ struct Worker {
     /// A browser and profile that failed the check of which profile it
     /// uses, and why: never started again by this daemon.
     refused: Option<((PathBuf, PathBuf), String)>,
+    /// The act under way, by its chat and number: it stops at its next
+    /// step once the user drops it.
+    acting: Option<(TerminalId, u64)>,
 }
 
 impl Worker {
@@ -453,6 +482,7 @@ impl Worker {
                     session,
                 } => self.event(&method, &params, session.as_deref()),
                 Input::Gone(launch) => self.gone(launch),
+                Input::Dropped => {}
             }
             self.chores();
         }
@@ -475,8 +505,13 @@ impl Worker {
 
     fn job(&mut self, job: Job) {
         match job {
+            // One the user dropped as it waited isn't carried out, and its
+            // call was answered as it was dropped.
+            Job::Act { call, chat, .. } if self.running.dropped(chat, call) => {}
             Job::Act { call, chat, act } => {
+                self.acting = Some((chat, call));
                 let answer = self.act(chat, act);
+                self.acting = None;
                 self.lock().answers.push((call, answer));
                 (self.wake)();
             }
@@ -1236,7 +1271,8 @@ impl Worker {
     ) -> bool {
         loop {
             let now = Instant::now();
-            if now >= until {
+            // Nor once the user has dropped the act it's for.
+            if now >= until || self.act_dropped() {
                 return false;
             }
             match self.heard.recv_timeout(until - now) {
@@ -1245,6 +1281,7 @@ impl Worker {
                     self.deferred.push_back(Job::Stop);
                     return false;
                 }
+                Ok(Input::Dropped) => {}
                 Ok(Input::Job(job)) => self.deferred.push_back(job),
                 Ok(Input::Event {
                     method,
@@ -1319,8 +1356,18 @@ impl Worker {
     /// Sends `method` to the page attached as `session`, and waits for the
     /// answer.
     fn call(&mut self, session: &str, method: &str, params: Value) -> Result<Value, String> {
+        if self.act_dropped() {
+            return Err("the user stopped it".to_owned());
+        }
         let cdp = self.cdp.as_mut().ok_or("the browser isn't running")?;
-        cdp.call(Some(session), method, params, cdp::ANSWER_WAIT)
+        let (running, acting) = (&self.running, self.acting);
+        let dropped = || acting.is_some_and(|(chat, call)| running.dropped(chat, call));
+        cdp.call_unless(Some(session), method, params, cdp::ANSWER_WAIT, dropped)
+    }
+
+    /// Whether the user dropped the act under way.
+    fn act_dropped(&self) -> bool {
+        (self.acting).is_some_and(|(chat, call)| self.running.dropped(chat, call))
     }
 
     /// Sends `method` to the browser itself, and waits for the answer.
@@ -1630,6 +1677,7 @@ mod tests {
             deferred: VecDeque::new(),
             idle_since: None,
             refused: None,
+            acting: None,
         };
         let page = Page {
             context: "c".to_owned(),
@@ -1674,6 +1722,37 @@ mod tests {
         assert!(said.len() < 4 * 1024, "{}", said.len());
         assert!(said.ends_with(&format!("at least {} more like these.", 10_000 - MAX_NOTES)));
         assert_eq!(cut("https://a/"), "https://a/");
+    }
+
+    /// Acts the user dropped, by stopping the chat or turning its browser
+    /// or tools off, aren't carried out, however long they waited; those
+    /// asked for after are (CLACKA-220).
+    #[test]
+    fn acts_the_user_dropped_are_never_carried_out() {
+        let mut worker = worker_with_a_page();
+        let chat = TerminalId(1);
+        let act = |call| Job::Act {
+            call,
+            chat,
+            act: Act::Snapshot,
+        };
+        *(worker.running.dropped.lock().unwrap())
+            .entry(chat)
+            .or_default() = 3;
+        worker.job(act(1));
+        worker.job(act(2));
+        assert!(worker.lock().answers.is_empty(), "not carried out");
+        // Another chat's, and a later one, are: here, with no browser, to
+        // fail.
+        worker.job(act(3));
+        let answers = std::mem::take(&mut worker.lock().answers);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].0, 3);
+        // One under way stops at its next step.
+        worker.acting = Some((chat, 2));
+        assert!(worker.act_dropped());
+        let stopped = worker.call("s", "Page.enable", json!({}));
+        assert_eq!(stopped.unwrap_err(), "the user stopped it");
     }
 
     #[test]

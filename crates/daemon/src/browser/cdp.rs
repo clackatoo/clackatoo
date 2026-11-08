@@ -25,7 +25,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -34,6 +34,10 @@ use crate::group::Group;
 
 /// How long a command waits for its answer, unless it says otherwise.
 pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(30);
+
+/// How often a command waiting for its answer looks whether it's been
+/// given up on.
+const GIVE_UP_GAP: Duration = Duration::from_millis(50);
 
 /// How long the browser has to start and answer its first command.
 const START_WAIT: Duration = Duration::from_secs(20);
@@ -155,6 +159,19 @@ impl Cdp {
         params: Value,
         wait: Duration,
     ) -> Answer {
+        self.call_unless(session, method, params, wait, || false)
+    }
+
+    /// As [`call`](Self::call), but stops waiting as soon as `given_up`
+    /// says so, looking every [`GIVE_UP_GAP`].
+    pub(super) fn call_unless(
+        &mut self,
+        session: Option<&str>,
+        method: &str,
+        params: Value,
+        wait: Duration,
+        given_up: impl Fn() -> bool,
+    ) -> Answer {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = mpsc::channel();
         (self.waiting.lock().unwrap_or_else(PoisonError::into_inner)).insert(id, answer);
@@ -167,16 +184,27 @@ impl Cdp {
             self.forget(id);
             return Err(format!("the browser's pipe broke: {err}"));
         }
-        match answered.recv_timeout(wait) {
-            Ok(answer) => answer,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.forget(id);
-                Err(format!(
-                    "the browser didn't answer {method} within {} s",
-                    wait.as_secs()
-                ))
+        let until = Instant::now() + wait;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            match answered.recv_timeout(left.min(GIVE_UP_GAP)) {
+                Ok(answer) => return answer,
+                Err(mpsc::RecvTimeoutError::Timeout) if given_up() => {
+                    self.forget(id);
+                    return Err("the user stopped it".to_owned());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
+                    self.forget(id);
+                    return Err(format!(
+                        "the browser didn't answer {method} within {} s",
+                        wait.as_secs()
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the browser has stopped".to_owned());
+                }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the browser has stopped".to_owned()),
         }
     }
 

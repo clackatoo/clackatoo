@@ -618,6 +618,10 @@ impl Daemon {
     /// lose permission immediately.
     pub(super) fn browser_turned(&mut self, chat: TerminalId, on: bool) {
         if !on {
+            let off = "the user turned this chat's browser off";
+            // What it asked the browser to do goes undone, before the
+            // page closes behind it.
+            self.drop_browser_acts(chat, off);
             self.close_page(chat);
             // Its questions about the browser go: the answer can't let it.
             let (asked, kept) = std::mem::take(&mut self.tools.waiting)
@@ -635,8 +639,7 @@ impl Daemon {
             self.tools.waiting = kept;
             for waiting in asked {
                 self.forget_call(&waiting);
-                let refused = Err("the user turned this chat's browser off".to_owned());
-                self.answer_tool(waiting.token, &waiting.id, refused);
+                self.answer_tool(waiting.token, &waiting.id, Err(off.to_owned()));
             }
         }
     }
@@ -676,6 +679,31 @@ impl Daemon {
             return Some("the user turned this chat's browser off".to_owned());
         }
         self.limits_refused(chat, tool)
+    }
+
+    /// Drops what the chat `chat`'s agent asked the browser to do and it
+    /// hasn't done, as the user stopped the chat, turned its browser or
+    /// tools off, or closed it: none of it is done after, the act under
+    /// way stops at its next step, and each call waiting is answered with
+    /// `why`.
+    pub(super) fn drop_browser_acts(&mut self, chat: TerminalId, why: &str) {
+        self.drop_acts_asked(chat);
+        let (dropped, kept) = std::mem::take(&mut self.tools.waiting)
+            .into_iter()
+            .partition(|waiting| {
+                waiting.chat == chat && matches!(waiting.what, Wait::Browser { .. })
+            });
+        self.tools.waiting = kept;
+        for waiting in dropped {
+            self.answer_tool(waiting.token, &waiting.id, Err(why.to_owned()));
+        }
+    }
+
+    /// How many of the chat `chat`'s calls wait for the browser.
+    pub(super) fn browsing_calls(&self, chat: TerminalId) -> usize {
+        (self.tools.waiting.iter())
+            .filter(|waiting| waiting.chat == chat && matches!(waiting.what, Wait::Browser { .. }))
+            .count()
     }
 
     /// Keeps the call `id` on the connection at `token`, from the chat
@@ -2072,6 +2100,7 @@ impl Daemon {
         self.tools.talk.forget(terminal);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
+        self.drop_browser_acts(terminal, "the chat has closed");
         self.chat_left_browser(terminal);
         if let Some((window, _)) = self.tools.native.remove(&terminal) {
             self.send_event(

@@ -18409,6 +18409,63 @@ fn a_browser_that_ignores_being_told_to_stop_is_killed() {
     );
 }
 
+/// Turning a chat's browser off, or stopping the chat, stops what its
+/// agent asked the browser to do: the call under way is answered at once,
+/// not once the page gives up, and the page closes without waiting for
+/// it (CLACKA-220).
+#[test]
+fn turning_the_browser_off_or_stopping_stops_what_it_was_doing() {
+    let plan = serde_json::json!({ "hang": ["Runtime.evaluate"] });
+    let daemon = with_fake_browser(&plan, None, Duration::from_mins(1));
+    let mut client = daemon.client();
+    let chat = chat_with_a_page(&daemon, &mut client);
+    let reading = |client: &mut Client, daemon: &TestDaemon| {
+        let before = browser_calls(daemon).matches("Runtime.evaluate").count();
+        client
+            .chat(chat, ChatAction::Send("mcp browser_read".to_owned()))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while browser_calls(daemon).matches("Runtime.evaluate").count() == before {
+            assert!(Instant::now() < deadline, "never read");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let stopped = |client: &mut Client, why: &str| {
+        let asked = Instant::now();
+        let node = wait_for_chat(client, chat, |node| {
+            node.turns
+                .last()
+                .is_some_and(|turn| turn.prompt == "mcp browser_read")
+                && last_outcome(node).is_some()
+        });
+        assert!(
+            asked.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            asked.elapsed()
+        );
+        let words = last_words(&node);
+        assert!(words.contains(why), "{words}");
+    };
+    // Stopped: the agent hears at once, and the page stays.
+    reading(&mut client, &daemon);
+    client.chat(chat, ChatAction::Stop).unwrap();
+    stopped(&mut client, "the user stopped this chat");
+    // Turned off: the call under way is answered at once, and the page
+    // closes long before the browser would have given up on it.
+    reading(&mut client, &daemon);
+    let off = Instant::now();
+    let browser_off = ChatAction::Set {
+        setting: "clackatoo.browser".to_owned(),
+        value: "off".to_owned(),
+    };
+    client.chat(chat, browser_off).unwrap();
+    stopped(&mut client, "turned this chat's browser off");
+    while !browser_calls(&daemon).contains("Target.disposeBrowserContext") {
+        assert!(off.elapsed() < Duration::from_secs(10), "the page stayed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn the_browser_stops_when_idle_even_after_a_page_couldnt_be_made() {
     let plan = serde_json::json!({ "fail": ["Target.createTarget"] });
