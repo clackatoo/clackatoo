@@ -506,6 +506,12 @@ impl Explorer {
         self.message = Some(message);
     }
 
+    /// Asks `question` in the bar: `y` does `op`, and any other key
+    /// doesn't, as for the explorer's own questions.
+    pub(crate) fn ask_to(&mut self, question: String, op: FileOp) {
+        self.prompt = Some(confirm(question, op));
+    }
+
     /// What the bar says: what's being typed, a message, or the root and
     /// the path at the cursor, from it, and that `g?` lists the keys.
     pub(crate) fn label(&self) -> String {

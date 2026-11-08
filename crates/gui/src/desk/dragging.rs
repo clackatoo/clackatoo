@@ -9,7 +9,9 @@
 //!   into the folder there, or with Ctrl held copies it, as `x` or `y`
 //!   then `p` would, so nothing is written over without asking: on a
 //!   folder, into it; on a file, into the folder it's in; on `..`, into
-//!   the folder above; on the heading or below the tree, into the root;
+//!   the folder above, out of the explorer's root, which the bar asks
+//!   about first, `y` doing it; on the heading or below the tree, into
+//!   the root;
 //! - on an editor, opens it there, as `:e` would;
 //! - on a terminal, types its path at the cursor, quoted so bash, zsh
 //!   and fish each read it as one word, with a space after, as file
@@ -277,7 +279,8 @@ impl Desk {
     fn drop_file(&mut self, from: PaneId, path: String, drop: Drop, copy: bool) {
         match drop {
             Drop::Into { pane, dir } => {
-                let to = join(&dir, name_of(&path));
+                let name = name_of(&path).to_owned();
+                let to = join(&dir, &name);
                 let op = if copy {
                     FileOp::Copy {
                         from: path,
@@ -297,6 +300,17 @@ impl Desk {
                 // went, or asks before writing over what's there, with the
                 // focus, so the answer goes to it.
                 self.show_pane(pane);
+                // Out of its root, which it no longer shows, only once the
+                // bar has asked.
+                if let Some(explorer) = self.explorers.panes.get_mut(&pane)
+                    && let Some(root) = explorer.root().map(str::to_owned)
+                    && !within(&dir, &root)
+                {
+                    let how = if copy { "copy" } else { "move" };
+                    let (root, dir) = (explorer.shown(&root), explorer.shown(&dir));
+                    explorer.ask_to(format!("{how} {name} out of {root}, into {dir}? (y/n)"), op);
+                    return;
+                }
                 self.file_op(pane, op);
             }
             Drop::Open(pane) => {
@@ -342,6 +356,12 @@ fn parent_of(path: &str) -> &str {
         Some(slash) => &path[..slash],
         None => path,
     }
+}
+
+/// Whether the folder `dir` is `root` or in it.
+fn within(dir: &str, root: &str) -> bool {
+    (dir.strip_prefix(root))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || root.ends_with('/'))
 }
 
 /// The path of `name` in the folder `dir`.

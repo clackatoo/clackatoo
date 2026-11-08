@@ -46,6 +46,11 @@ fn drag(desk: &mut Desk, row: u16, to: [f32; 2], modifiers: Modifiers) -> String
     said
 }
 
+/// What the explorer's bar says, as a question it asks.
+fn asked(desk: &Desk) -> String {
+    desk.explorer(PaneId(2)).unwrap().label()
+}
+
 #[test]
 fn a_file_dragged_onto_a_folder_moves_there_or_with_ctrl_is_copied() {
     let mut desk = three_panes();
@@ -73,10 +78,25 @@ fn a_file_dragged_onto_a_folder_moves_there_or_with_ctrl_is_copied() {
     let root = at(&desk, 2, 0);
     let said = drag(&mut desk, 3, root, Modifiers::default());
     assert_eq!(said, "a.txt is in that folder already");
+    // On `..`, out of the root, only once the bar has asked: `y` moves it,
+    // any other key doesn't.
     let up = at(&desk, 2, 1);
     let said = drag(&mut desk, 3, up, Modifiers::default());
     assert_eq!(said, "move a.txt into /  (Ctrl copies, Esc stops)");
-    file_ops(&mut desk);
+    assert_eq!(file_ops(&mut desk), []);
+    assert_eq!(asked(&desk), "move a.txt out of ~/p, into /? (y/n)");
+    type_keys(&mut desk, "n");
+    assert_eq!(file_ops(&mut desk), []);
+    drag(&mut desk, 3, up, CTRL);
+    assert_eq!(asked(&desk), "copy a.txt out of ~/p, into /? (y/n)");
+    type_keys(&mut desk, "y");
+    let copied = FileOp::Copy {
+        from: "/p/a.txt".into(),
+        to: "/a.txt".into(),
+        overwrite: None,
+        expect: None,
+    };
+    assert_eq!(file_ops(&mut desk), [(2, copied)]);
     // Dragged off and back onto itself.
     desk.mouse(src, MouseAction::Press(LEFT), 1, Modifiers::default());
     let away = at(&desk, 2, 5);

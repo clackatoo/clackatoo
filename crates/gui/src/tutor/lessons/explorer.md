@@ -190,7 +190,7 @@ listed "later.txt"
 
 ## Drag it with the mouse
 
-Press on a file or a folder in the explorer and move the mouse, holding the button, to drag it. The bar says what letting go would do, and the folder it would go into is lit. Let go on a folder to move it there, or hold Ctrl as you let go to copy it. On a file it goes into that file's folder. On an editor it opens there, and on a terminal its path is typed at the prompt, quoted, with nothing run. Esc stops the drag. As with `p`, nothing is written over without asking. With the keys, `x` on it and `p` on the folder does the same move.
+Press on a file or a folder in the explorer and move the mouse, holding the button, to drag it. The bar says what letting go would do, and the folder it would go into is lit. Let go on a folder to move it there, or hold Ctrl as you let go to copy it. On a file it goes into that file's folder; on `..`, out of the folder the explorer shows, the bar asks first. On an editor it opens there, and on a terminal its path is typed at the prompt, quoted, with nothing run. Esc stops the drag. As with `p`, nothing is written over without asking. With the keys, `x` on it and `p` on the folder does the same move.
 
 Drag `later.txt` onto `drafts`, or move it there with `x` and `p`.
 

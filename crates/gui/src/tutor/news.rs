@@ -1265,6 +1265,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "text-objects",
         what: "Y copies to the line's end, as Neovim's, in every pane; map Y to yy for Vim's whole line",
     },
+    News {
+        id: "explorer-drag-up",
+        date: "2026-11-08",
+        lesson: "explorer",
+        what: "A file dragged onto an explorer's .. row, out of what it shows, is moved only once you say y",
+    },
 ];
 
 impl News {
