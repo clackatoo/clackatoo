@@ -896,6 +896,33 @@ fn a_device_is_allowed_from_a_window_by_its_code() {
 }
 
 #[test]
+fn only_the_last_connection_to_wait_for_an_answer_waits() {
+    let daemon = TestDaemon::start();
+    let asked = daemon
+        .post("/pair", r#"{"name":"phone","ask":true}"#, |_| {})
+        .json();
+    let body = format!(r#"{{"wait":"{}"}}"#, asked["wait"].as_str().unwrap());
+    let wait = |body: String| {
+        let (target, headers) = (daemon.web.clone(), daemon.app());
+        std::thread::spawn(move || http(&target, "POST", "/pair/wait", &headers, &body))
+    };
+    let first = wait(body.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    let second = wait(body);
+    // The first is let go at once, not held for the two minutes.
+    let first = first.join().unwrap();
+    assert_eq!(first.status, 409, "{}", first.text());
+    daemon
+        .window()
+        .request(&Request::AnswerPairing {
+            code: Some(asked["code"].as_str().unwrap().to_owned()),
+        })
+        .unwrap();
+    let second = second.join().unwrap();
+    assert_eq!(second.status, 200, "{}", second.text());
+}
+
+#[test]
 fn a_device_turned_down_gets_nothing() {
     let daemon = TestDaemon::start();
     let mut window = daemon.window();
