@@ -1669,13 +1669,19 @@ mod tests {
             .split_once("\n## Options\n")
             .and_then(|(_, rest)| rest.split("\n## ").next())
             .expect("the page has its options");
-        // The table of what `:set` takes comes before the first heading.
+        // Only the rows of the tables of options, under a heading each: not
+        // those of what `:set` takes, nor of any other table.
+        const TABLE: &str = "| Option | Short | Is | Starts |";
         let mut heading = "";
+        let mut in_table = false;
         let mut listed = Vec::new();
         for line in section.lines() {
             if let Some(title) = line.strip_prefix("### ") {
                 heading = title;
-            } else if line.starts_with("| `") && !heading.is_empty() {
+            }
+            in_table = (in_table && line.starts_with('|')) || line == TABLE;
+            if in_table && line.starts_with("| `") {
+                assert!(!heading.is_empty(), "a table of options under no heading");
                 let cells: Vec<&str> = line.split('|').map(str::trim).collect();
                 let [_, name, short, .., starts, _] = cells[..] else {
                     panic!("a row of four cells: {line}");
