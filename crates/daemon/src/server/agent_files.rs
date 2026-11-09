@@ -238,26 +238,21 @@ impl AgentFiles {
                 Seen::Absent | Seen::Unreadable => 0,
             })
             .sum();
-        let not_found = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
-        // Its size first, so a big file or a device isn't read at all.
-        let text = match std::fs::metadata(path) {
-            Err(err) if not_found(&err) => Seen::Absent,
-            Ok(metadata)
-                if metadata.is_file()
-                    && kept
-                        .saturating_add(usize::try_from(metadata.len()).unwrap_or(usize::MAX))
-                        <= CAPTURE_BYTES =>
-            {
-                match buffer::read(path) {
-                    Ok((text, _)) => Seen::Text(buffer::lf(text)),
-                    Err(err) if not_found(&err) => Seen::Absent,
-                    Err(err) => {
-                        log::debug!("{}: {err}", path.display());
-                        Seen::Unreadable
-                    }
-                }
+        // Read now, on the loop, as the tool may write it as soon as it's
+        // let: opened only if it's a regular file, without waiting, and
+        // read no further than what's kept allows, so a big file, or one
+        // the kernel makes up as it's read, isn't read whole.
+        let room = CAPTURE_BYTES.saturating_sub(kept) as u64;
+        let read = (regular::open(path, Links::Follow))
+            .and_then(|file| buffer::read_file_within(file, room));
+        let text = match read {
+            Ok(Ok((text, _))) => Seen::Text(buffer::lf(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Seen::Absent,
+            Ok(Err(_)) => Seen::Unreadable,
+            Err(err) => {
+                log::debug!("{}: {err}", path.display());
+                Seen::Unreadable
             }
-            Ok(_) | Err(_) => Seen::Unreadable,
         };
         self.captures.push(Capture {
             chat,
@@ -1395,11 +1390,18 @@ impl Daemon {
             last,
             size: 0,
         };
-        // A big file is read off the loop, as a file system that hangs
-        // would hang the daemon (CLACKA-220), and checked once it's read.
-        let size = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+        // Opened only if it's a regular file, without waiting, and read
+        // here only so far: a bigger file is read off the loop, and checked
+        // once it's read (CLACKA-220).
+        let read = (regular::open(path, Links::Follow))
+            .and_then(|file| buffer::read_file_within(file, ON_LOOP as u64));
+        let size = match read {
+            Ok(Ok(read)) => return self.settle_read(reading, Ok(read)),
+            Ok(Err(size)) => size,
+            Err(err) => return self.settle_read(reading, Err(err)),
+        };
         reading.size = usize::try_from(size).unwrap_or(usize::MAX);
-        if reading.size > ON_LOOP {
+        {
             let maker = reading.maker.clone();
             match (self.agent_files.settler).submit(Job::Read(reading), &self.waker) {
                 None => {
@@ -2066,6 +2068,36 @@ pub(super) mod tests {
         buffer.reverse(Author::Agent(chat), false).unwrap().unwrap();
         assert_eq!(buffer.text().to_string(), "ONE\ntwo\n");
         assert_eq!(buffer.check_modified(), Some(true));
+    }
+
+    /// What a tool is about to change is read without waiting on a pipe
+    /// swapped in, and no further than what's kept allows, a file the
+    /// kernel makes up as it's read included (CLACKA-220).
+    #[test]
+    fn a_capture_waits_on_no_pipe_and_reads_no_more_than_it_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, rustix::fs::Mode::RWXU).unwrap();
+        let big = dir.path().join("big");
+        std::fs::write(&big, vec![b'x'; CAPTURE_BYTES + 1]).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let paths = (fifo.clone(), big.clone());
+        std::thread::spawn(move || {
+            let mut files = AgentFiles::default();
+            files.capture(TerminalId(1), &paths.0);
+            files.capture(TerminalId(1), &paths.1);
+            files.capture(TerminalId(1), Path::new("/proc/self/stat"));
+            let seen: Vec<bool> = (files.captures.iter())
+                .map(|capture| matches!(capture.text, Seen::Unreadable))
+                .collect();
+            let _ = done.send(seen);
+        });
+        let seen = finished.recv_timeout(std::time::Duration::from_secs(10));
+        if seen.is_err() {
+            // Let the thread go, if it waits on the pipe.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        assert_eq!(seen.unwrap(), [true, true, false]);
     }
 
     #[test]

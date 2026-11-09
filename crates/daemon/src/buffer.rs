@@ -1121,6 +1121,33 @@ pub(crate) fn read_file(mut file: File) -> io::Result<(String, DiskStamp)> {
     Ok((text, DiskStamp::of(&metadata)))
 }
 
+/// Reads the regular file open as `file`, as [`read_file`] does, if it
+/// holds at most `most` bytes: else `Err` with how big it said it is, or
+/// `most + 1` if it grew past that as it was read, having read no more.
+pub(crate) fn read_file_within(
+    mut file: File,
+    most: u64,
+) -> io::Result<Result<(String, DiskStamp), u64>> {
+    let metadata = file.metadata()?;
+    if metadata.len() > most {
+        return Ok(Err(metadata.len()));
+    }
+    // One that says it's empty may be a file the kernel makes as it's
+    // read, of any size.
+    let most = if metadata.len() == 0 {
+        most.min(MAX_SAID_EMPTY)
+    } else {
+        most
+    };
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    (&mut file).take(most + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > most {
+        return Ok(Err(most + 1));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok(Ok((text, DiskStamp::of(&metadata))))
+}
+
 /// A file's new text, written and synced beside it, but not yet in its
 /// place: what can go wrong in writing it, such as the disk being full,
 /// has gone right. Dropped without being put in place, the new file is
