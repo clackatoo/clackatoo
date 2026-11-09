@@ -124,7 +124,9 @@ pub enum Forked {
 ///
 /// Refused while this process has more than one thread: only the thread
 /// that forks goes on in the child, and anything another held, a lock
-/// say, would stay held there for ever.
+/// say, would stay held there for ever. A child that can't be set apart
+/// ends at once, as [`exit_now`] does: it never returns as the parent
+/// would, to do what the parent does.
 ///
 /// # Errors
 ///
@@ -145,20 +147,45 @@ pub fn fork_apart() -> std::io::Result<Forked> {
     match pid {
         -1 => Err(std::io::Error::last_os_error()),
         0 => {
-            rustix::process::setsid()?;
-            std::env::set_current_dir("/")?;
-            let null = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/null")?;
-            rustix::stdio::dup2_stdin(&null)?;
-            rustix::stdio::dup2_stdout(&null)?;
-            rustix::stdio::dup2_stderr(&null)?;
+            let apart = || -> std::io::Result<()> {
+                rustix::process::setsid()?;
+                std::env::set_current_dir("/")?;
+                let null = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/null")?;
+                rustix::stdio::dup2_stdin(&null)?;
+                rustix::stdio::dup2_stdout(&null)?;
+                rustix::stdio::dup2_stderr(&null)?;
+                Ok(())
+            };
+            if let Err(err) = apart() {
+                log::error!("the process forked couldn't be set apart: {err}");
+                exit_now(1);
+            }
             Ok(Forked::Child)
         }
         pid => Ok(Forked::Parent(
             rustix::process::Pid::from_raw(pid).ok_or_else(std::io::Error::last_os_error)?,
         )),
+    }
+}
+
+/// Ends this process at once with `code`, running nothing more of it: no
+/// exit handlers, no buffers flushed. For a process [`fork_apart`] made,
+/// which mustn't run what its parent would on the way out.
+#[allow(unsafe_code)]
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: `_exit` takes a status and ends the process; it touches no
+    // memory of ours.
+    unsafe { libc::_exit(code) }
+}
+
+/// Names this process `name`, as `ps` and `top` show it, as far as the
+/// system keeps (15 bytes).
+pub fn name_this_process(name: &std::ffi::CStr) {
+    if let Err(err) = rustix::thread::set_name(name) {
+        log::info!("this process keeps its name: {err}");
     }
 }
 
