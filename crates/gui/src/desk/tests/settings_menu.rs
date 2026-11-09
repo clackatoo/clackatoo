@@ -370,3 +370,37 @@ fn undoing_keys_recorded_over_saved_ones_binds_those_again() {
     );
     assert!(bindings.get(KeyMode::Insert, &keys).is_none());
 }
+
+#[test]
+fn an_option_read_as_a_window_opens_steps_from_what_is_saved() {
+    let (mut desk, dir) = configured("");
+    // Nothing to change changes nothing, and leaves nothing to undo.
+    command(&mut desk, "Settings priority");
+    type_keys(&mut desk, "ru");
+    assert_eq!(menu(&mut desk).1, "the menu hasn't changed priority");
+    named(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, "/renderer");
+    named(&mut desk, NamedKey::Enter);
+    type_keys(&mut desk, "l");
+    saved(&mut desk, 1);
+    assert_eq!(desk.options.renderer, crate::options::Renderer::Vulkan);
+    assert_eq!(read(&dir, "client/startup.toml"), "renderer = \"opengl\"\n");
+    let (picked, _, _) = menu(&mut desk);
+    assert!(picked.starts_with("renderer"), "{picked}");
+    assert!(
+        picked.contains(" opengl ") && picked.ends_with("for windows opened after"),
+        "{picked}"
+    );
+    // And back, from what's saved, not from what this window runs on.
+    type_keys(&mut desk, "l");
+    saved(&mut desk, 1);
+    assert_eq!(read(&dir, "client/startup.toml"), "renderer = \"vulkan\"\n");
+    let (picked, _, _) = menu(&mut desk);
+    assert!(
+        picked.contains(" vulkan") && !picked.ends_with("after"),
+        "{picked}"
+    );
+    type_keys(&mut desk, "u");
+    saved(&mut desk, 1);
+    assert_eq!(read(&dir, "client/startup.toml"), "renderer = \"opengl\"\n");
+}

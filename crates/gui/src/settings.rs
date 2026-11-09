@@ -77,6 +77,17 @@ impl Facts<'_> {
         }
     }
 
+    /// `info`'s option as the menu shows and changes it: as this window
+    /// has it, or for one read only as a window opens, as it's saved, for
+    /// windows opened after.
+    fn value(&self, info: &Info) -> Value {
+        if info.restart {
+            self.store.configured_value(info)
+        } else {
+            self.shown(info)
+        }
+    }
+
     /// Where the user's own config sets `info`'s option as it loads, if
     /// it does: then it's locked.
     fn locked(&self, info: &Info) -> Option<&SetBy> {
@@ -749,9 +760,12 @@ impl SettingsMenu {
             live: facts.store.get(info),
             saved: facts.saved(info),
         };
-        let unchanged = facts.store.get(info) == live
-            && facts.saved(info) == saved
-            && facts.store.local(facts.window, info).is_none();
+        // One read only as a window opens is only saved, so it's as it was
+        // if what's saved is.
+        let unchanged = facts.saved(info) == saved
+            && (info.restart
+                || facts.store.get(info) == live
+                    && facts.store.local(facts.window, info).is_none());
         if unchanged {
             return Outcome::Nothing;
         }
@@ -769,7 +783,7 @@ impl SettingsMenu {
         let Some(Entry::Option(info)) = self.picked() else {
             return Outcome::Nothing;
         };
-        let now = facts.shown(info);
+        let now = facts.value(info);
         let next = match (info.kind, &now) {
             (Kind::Bool, Value::Bool(on)) => Value::Bool(!on),
             (Kind::Choice(words), Value::Choice(word)) => {
@@ -1179,12 +1193,12 @@ impl SettingsMenu {
         let mut lit: Vec<bool> = Vec::new();
         match &self.entries[index] {
             Entry::Option(info) => {
-                let changed = facts.shown(info) != info.default_value();
+                let changed = facts.value(info) != info.default_value();
                 let name = format!("{:<width$}", info.name, width = self.name_cols + 2);
                 lit.extend(matched_in(info.name, 0));
                 lit.resize(name.chars().count(), false);
                 pieces.push((name, if changed { Ink::Bold } else { Ink::Plain }));
-                pieces.push((shown_value(info, &facts.shown(info)), Ink::Plain));
+                pieces.push((shown_value(info, &facts.value(info)), Ink::Plain));
                 tag = if let Some(by) = facts.locked(info) {
                     Some((short_place(by), Ink::Muted))
                 } else if facts.store.local(facts.window, info).is_some() {
@@ -1386,7 +1400,7 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
         title,
         vec![(info.description.to_owned(), Ink::Plain)],
         Vec::new(),
-        labelled("Value", shown_value(info, &facts.shown(info)), Ink::Plain),
+        labelled("Value", shown_value(info, &facts.value(info)), Ink::Plain),
         labelled(
             "Default",
             shown_value(info, &info.default_value()),
