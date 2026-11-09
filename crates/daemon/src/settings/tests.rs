@@ -400,6 +400,19 @@ fn a_private_file_is_written_whole_and_never_through_a_link() {
     assert!(!temp.path().join("web-password.partial").exists());
 }
 
+/// The folder a private file is written in is made only for the user.
+#[test]
+fn the_state_directory_is_made_only_for_the_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state/clackatoo");
+    set_password(&state, Some("$argon2id$x")).unwrap();
+    for dir in [&state, &temp.path().join("state")] {
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+    }
+}
+
 /// What's kept as last good sets the same again.
 #[test]
 fn the_last_good_settings_read_back_the_same() {

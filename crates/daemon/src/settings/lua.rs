@@ -565,16 +565,32 @@ pub fn module_name(name: &str) -> bool {
 ///
 /// What's wrong with it, or reading it.
 pub fn read(path: &Path) -> Result<Option<String>, String> {
+    read_text(path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::InvalidData => format!("{} isn't UTF-8 text", path.display()),
+        _ => format!("{} couldn't be read: {err}", path.display()),
+    })
+}
+
+/// The text of the file at `path`, as [`read`] reads it, or `None` if it
+/// isn't there.
+///
+/// # Errors
+///
+/// Reading it, `InvalidData` if it isn't UTF-8 text, or `FileTooLarge`
+/// past [`MOST_FILE`].
+pub fn read_text(path: &Path) -> std::io::Result<Option<String>> {
     let file = match crate::regular::open(path, crate::regular::Links::Follow) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(format!("{} couldn't be read: {err}", path.display())),
+        Err(err) => return Err(err),
     };
     let mut text = String::new();
-    (file.take(MOST_FILE + 1).read_to_string(&mut text))
-        .map_err(|err| format!("{} couldn't be read: {err}", path.display()))?;
+    file.take(MOST_FILE + 1).read_to_string(&mut text)?;
     if text.len() as u64 > MOST_FILE {
-        return Err(format!("{} is over 1 MiB", path.display()));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            "it's over 1 MiB",
+        ));
     }
     Ok(Some(text))
 }

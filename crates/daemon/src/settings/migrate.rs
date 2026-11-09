@@ -26,6 +26,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::literal::{self, Literal};
 use super::lua::{self, AGENT_FIELDS, Chunk, PROFILE_FIELDS};
@@ -95,22 +96,10 @@ pub(crate) struct Converted {
 pub(crate) fn once(dirs: &Dirs, notes: &mut Vec<String>) -> Option<String> {
     let settings = dirs.daemon.join("settings.lua");
     if settings.exists() {
-        let stray: Vec<&str> = (FILES.iter())
-            .map(|(name, _)| *name)
-            .filter(|name| dirs.daemon.join(name).exists())
-            .collect();
-        if !stray.is_empty() {
-            let said = format!(
-                "the daemon passes over {}: its settings are in daemon/settings.lua and \
-                 daemon/init.lua now",
-                named(&stray)
-            );
-            log::warn!("{said}");
-            notes.push(said);
-        }
+        pass_over(dirs, notes);
         return None;
     }
-    let converted = convert(dirs)?;
+    let converted = convert(dirs, lua::TIME)?;
     for why in &converted.left_out {
         log::warn!("daemon/settings.lua: left out {why}");
     }
@@ -129,7 +118,14 @@ pub(crate) fn once(dirs: &Dirs, notes: &mut Vec<String>) -> Option<String> {
     };
     // Never written unless it compiles, whatever was in the old files.
     if let Err(why) = lua::compiles(&converted.text) {
-        failed(format!("what they came to doesn't compile ({why})"));
+        let said = format!(
+            "kept your TOML files, {}, as moving them came to something that doesn't \
+             compile ({}); the daemon goes by its defaults until that's put right",
+            named(&names),
+            one_line(&why)
+        );
+        log::error!("{said}");
+        notes.push(said);
         return None;
     }
     // The password first: with it nowhere, the old file keeps it.
@@ -196,6 +192,24 @@ pub(crate) fn once(dirs: &Dirs, notes: &mut Vec<String>) -> Option<String> {
     None
 }
 
+/// Says, in `notes`, which of the old files are there beside
+/// `settings.lua`, passed over.
+fn pass_over(dirs: &Dirs, notes: &mut Vec<String>) {
+    let stray: Vec<&str> = (FILES.iter())
+        .map(|(name, _)| *name)
+        .filter(|name| dirs.daemon.join(name).exists())
+        .collect();
+    if !stray.is_empty() {
+        let said = format!(
+            "the daemon passes over {}: its settings are in daemon/settings.lua and \
+             daemon/init.lua now",
+            named(&stray)
+        );
+        log::warn!("{said}");
+        notes.push(said);
+    }
+}
+
 /// Keeps `file` as `kept`: renamed, but for a `web.toml` with a password,
 /// whose copy is written without it, so no hash stays in the config.
 fn keep(file: &Path, kept: &Path) -> std::io::Result<()> {
@@ -211,12 +225,13 @@ fn keep(file: &Path, kept: &Path) -> std::io::Result<()> {
 }
 
 /// What `settings.lua` would be, moved from the old files, if they're
-/// there and it isn't, writing nothing.
-pub(crate) fn text(dirs: &Dirs) -> Option<String> {
+/// there and it isn't, writing nothing, each run of it to check it taking
+/// `limit` at most.
+pub(crate) fn text(dirs: &Dirs, limit: Duration) -> Option<String> {
     if dirs.daemon.join("settings.lua").exists() {
         return None;
     }
-    Some(convert(dirs)?.text)
+    Some(convert(dirs, limit)?.text)
 }
 
 /// `names`, as a list: `a`, `a and b`, `a, b and c`, each in `daemon/`.
@@ -242,9 +257,9 @@ fn backup(file: &Path) -> PathBuf {
     kept
 }
 
-/// The old files in `dirs`, moved into `settings.lua`'s text: `None` if
-/// none is there.
-pub(crate) fn convert(dirs: &Dirs) -> Option<Converted> {
+/// The old files in `dirs`, moved into `settings.lua`'s text, each run of
+/// it to check it taking `limit` at most: `None` if none is there.
+pub(crate) fn convert(dirs: &Dirs, limit: Duration) -> Option<Converted> {
     let mut converted = Converted::default();
     let mut sections = Vec::new();
     for (name, group) in FILES {
@@ -260,10 +275,14 @@ pub(crate) fn convert(dirs: &Dirs) -> Option<Converted> {
             }
         };
         converted.files.push(path);
-        sections.push((
+        let statements = statements(
             name,
-            statements(name, group, &text, &mut converted.password),
-        ));
+            group,
+            &text,
+            &mut converted.password,
+            &mut converted.left_out,
+        );
+        sections.push((name, statements));
     }
     if converted.files.is_empty() {
         return None;
@@ -280,7 +299,7 @@ pub(crate) fn convert(dirs: &Dirs) -> Option<Converted> {
         );
     }
     let path = dirs.daemon.join("settings.lua");
-    converted.text = runnable(&path, &head, &mut sections, &mut converted.left_out);
+    converted.text = runnable(&path, &head, &mut sections, &mut converted.left_out, limit);
     Some(converted)
 }
 
@@ -288,15 +307,15 @@ pub(crate) fn convert(dirs: &Dirs) -> Option<Converted> {
 /// it comes to runs.
 #[cfg(feature = "fuzzing")]
 pub(crate) fn agents_text(text: &str) -> String {
-    let mut sections = vec![(
-        "agents.toml",
-        statements("agents.toml", None, text, &mut None),
-    )];
+    let mut left_out = Vec::new();
+    let statements = statements("agents.toml", None, text, &mut None, &mut left_out);
+    let mut sections = vec![("agents.toml", statements)];
     runnable(
         Path::new("daemon/settings.lua"),
         HEADER,
         &mut sections,
-        &mut Vec::new(),
+        &mut left_out,
+        lua::TIME,
     )
 }
 
@@ -308,6 +327,7 @@ fn runnable(
     head: &str,
     sections: &mut [(&str, Vec<Statement>)],
     left_out: &mut Vec<String>,
+    limit: Duration,
 ) -> String {
     let count: usize = sections
         .iter()
@@ -320,7 +340,7 @@ fn runnable(
             text: text.clone(),
             source: Source::Settings,
         };
-        let Err(failure) = lua::run(&[chunk], &[], lua::TIME) else {
+        let Err(failure) = lua::run(&[chunk], &[], limit) else {
             break;
         };
         let line = (failure.at)
@@ -357,7 +377,10 @@ fn keep_the_web_off(sections: &mut [(&str, Vec<Statement>)], left_out: &mut Vec<
         return;
     };
     let wrong: Vec<String> = (statements.iter())
-        .filter(|statement| statement.out.is_some() && statement.key != "password")
+        // The password moved isn't wrong: it has no code.
+        .filter(|statement| {
+            statement.out.is_some() && !(statement.key == "password" && statement.code.is_empty())
+        })
         .map(|statement| statement.key.clone())
         .collect();
     if wrong.is_empty() {
@@ -451,12 +474,13 @@ fn unread(why: &str) -> Statement {
 
 /// The statements `text`, the file called `name`, comes to, its top keys
 /// going in `group`, or for `agents.toml`, by its tables. A password is
-/// taken out, into `password`.
+/// taken out, into `password`; what's left out is said in `left_out`.
 fn statements(
     name: &str,
     group: Option<&str>,
     text: &str,
     password: &mut Option<String>,
+    left_out: &mut Vec<String>,
 ) -> Vec<Statement> {
     let document = match text.parse::<toml_edit::DocumentMut>() {
         Ok(document) => document,
@@ -465,6 +489,7 @@ fn statements(
             if let Some(first) = err.to_string().lines().next() {
                 let _ = write!(why, " ({first})");
             }
+            left_out.push(one_line(&why));
             return vec![unread(&why)];
         }
     };
@@ -474,10 +499,15 @@ fn statements(
         let comments = before(table, key, item);
         match (group, key) {
             (Some("web"), "password") => {
-                *password = item
-                    .as_str()
-                    .map(str::to_owned)
-                    .filter(|hash| !hash.is_empty());
+                let Some(hash) = item.as_str() else {
+                    // Wrong, so the web app stays off, as it did.
+                    let code = format!("{key} = {}", item.to_string().trim());
+                    let why = "the password is the hash `clackatoo web password` writes, a string";
+                    left_out.push(one_line(&format!("{code}: {why}")));
+                    statements.push(Statement::left_out(comments, key, code, why.to_owned()));
+                    continue;
+                };
+                *password = Some(hash.to_owned()).filter(|hash| !hash.is_empty());
                 statements.push(Statement::left_out(
                     comments,
                     key,
@@ -490,19 +520,17 @@ fn statements(
                     comments,
                     key,
                     &format!("daemon.{group}"),
-                    key,
-                    item,
+                    (key, item),
                     None,
+                    left_out,
                 ));
             }
             (None, "agents" | "profiles" | "subagents" | "upgrade") => {
                 let Some(inner) = item.as_table_like() else {
-                    statements.push(Statement::left_out(
-                        comments,
-                        key,
-                        format!("{key} = {}", item.to_string().trim()),
-                        format!("{key} is a table"),
-                    ));
+                    let code = format!("{key} = {}", item.to_string().trim());
+                    let why = format!("{key} is a table");
+                    left_out.push(one_line(&format!("{code}: {why}")));
+                    statements.push(Statement::left_out(comments, key, code, why));
                     continue;
                 };
                 statements.extend(
@@ -526,18 +554,18 @@ fn statements(
                         comments,
                         key,
                         &format!("daemon.{key}"),
-                        inner_key,
-                        inner_item,
+                        (inner_key, inner_item),
                         fields,
+                        left_out,
                     ));
                 }
             }
-            (None, key) => statements.push(Statement::left_out(
-                comments,
-                key,
-                format!("{key} = {}", item.to_string().trim()),
-                format!("{name} has no {key}"),
-            )),
+            (None, key) => {
+                let code = format!("{key} = {}", item.to_string().trim());
+                let why = format!("{name} has no {key}");
+                left_out.push(one_line(&format!("{code}: {why}")));
+                statements.push(Statement::left_out(comments, key, code, why));
+            }
         }
     }
     statements
@@ -546,14 +574,16 @@ fn statements(
 /// `key` in `table` set to `item`, as a statement, of `top`, the file's
 /// key it's in: a table's own comments, about its fields, go before it,
 /// as its literal has none. With `fields`, what a table of the kind named
-/// may have, any other field is left out of it alone, saying so.
+/// may have, any other field is left out of it alone, saying so, as is a
+/// field whose value Luau can't hold; what's left out is said in
+/// `left_out` too.
 fn set(
     mut comments: Vec<String>,
     top: &str,
     table: &str,
-    key: &str,
-    item: &toml_edit::Item,
+    (key, item): (&str, &toml_edit::Item),
     fields: Option<(&str, &[&str])>,
+    left_out: &mut Vec<String>,
 ) -> Statement {
     let path = literal::path(table, key);
     let mut kept = None;
@@ -568,47 +598,37 @@ fn set(
             if let Some(after) = field.as_value().and_then(|value| suffix(value.decor())) {
                 comments.push(format!("{after} ({name})"));
             }
-            if let Some((kind, known)) = fields
-                && !known.contains(&name)
-            {
-                comments.push(format!(
-                    "Left out: {path}.{name} isn't something {kind} has: it has {}",
+            let why = match (fields, literal_of(field)) {
+                (Some((kind, known)), _) if !known.contains(&name) => format!(
+                    "{path}.{name} isn't something {kind} has: it has {}",
                     known.join(", ")
-                ));
-                comments.push(format!("{name} = {}", field.to_string().trim()));
-                continue;
-            }
-            match literal_of(field) {
-                Some(value) => literal.push((name.to_owned(), value)),
-                None => {
-                    return Statement::left_out(
-                        comments,
-                        top,
-                        format!("{path} = {}", item.to_string().trim()),
-                        format!("{name} is a value Luau can't hold"),
-                    );
+                ),
+                (_, Some(value)) => {
+                    literal.push((name.to_owned(), value));
+                    continue;
                 }
-            }
+                (_, None) => format!("{path}.{name} is a value Luau can't hold"),
+            };
+            let code = format!("{name} = {}", field.to_string().trim());
+            left_out.push(one_line(&format!("{code}: {why}")));
+            comments.push(format!("Left out: {why}"));
+            comments.push(code);
         }
         kept = Some(Literal::Table(literal));
     }
-    match kept.or_else(|| literal_of(item)) {
-        Some(value) => {
-            let before = path.len() + 3;
-            let code = format!("{path} = {}", value.written(before));
-            // On a line of its own, before: never after code.
-            if let Some(after) = item.as_value().and_then(|value| suffix(value.decor())) {
-                comments.push(after);
-            }
-            Statement::new(comments, top, code)
-        }
-        None => Statement::left_out(
-            comments,
-            top,
-            format!("{path} = {}", item.to_string().trim()),
-            "a value Luau can't hold".to_owned(),
-        ),
+    let Some(value) = kept.or_else(|| literal_of(item)) else {
+        let code = format!("{path} = {}", item.to_string().trim());
+        let why = "a value Luau can't hold".to_owned();
+        left_out.push(one_line(&format!("{code}: {why}")));
+        return Statement::left_out(comments, top, code, why);
+    };
+    let before = path.len() + 3;
+    let code = format!("{path} = {}", value.written(before));
+    // On a line of its own, before: never after code.
+    if let Some(after) = item.as_value().and_then(|value| suffix(value.decor())) {
+        comments.push(after);
     }
+    Statement::new(comments, top, code)
 }
 
 /// `item` as a Luau value, if it has one.
@@ -940,6 +960,56 @@ mod tests {
             notes[0].contains("Left out: daemon.web.lock_after = 0"),
             "{notes:?}"
         );
+    }
+
+    /// A password that isn't a string is wrong: the web app stays off.
+    #[test]
+    fn a_password_that_isnt_a_string_keeps_the_web_app_off() {
+        let (_temp, dirs) = dirs();
+        write(&dirs, "web.toml", "mode = \"tailscale\"\npassword = 123\n");
+        let mut notes = Vec::new();
+        once(&dirs, &mut notes);
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
+        assert_eq!(
+            settings.value("web.mode"),
+            crate::schema::Value::Choice("off")
+        );
+        assert!(notes[0].contains("password = 123"), "{notes:?}");
+        assert_eq!(
+            super::super::password(dirs.state.as_ref().unwrap()).unwrap(),
+            None
+        );
+    }
+
+    /// What's left out as the lines are made, a field an agent never had
+    /// or a value Luau can't hold, is said in the window too; such a value
+    /// leaves out only its field.
+    #[test]
+    fn what_is_left_out_as_the_lines_are_made_is_said() {
+        let (_temp, dirs) = dirs();
+        write(
+            &dirs,
+            "agents.toml",
+            "surprise = 1\n[agents.mine]\ncommand = [\"mine-acp\"]\nmode = nan\ncolour = 1\n",
+        );
+        let mut notes = Vec::new();
+        once(&dirs, &mut notes);
+        let note = &notes[0];
+        assert!(
+            note.contains("surprise = 1: agents.toml has no surprise"),
+            "{note}"
+        );
+        assert!(note.contains("mode = nan"), "{note}");
+        assert!(
+            note.contains("colour = 1: daemon.agents.mine.colour"),
+            "{note}"
+        );
+        let agents = crate::settings::load(&dirs, crate::settings::When::Starting)
+            .settings
+            .agents()
+            .agents;
+        assert_eq!(agents[0].command, ["mine-acp"]);
+        assert_eq!(agents[0].starting_mode, None);
     }
 
     /// The password first, then settings.lua, then the old files: when one

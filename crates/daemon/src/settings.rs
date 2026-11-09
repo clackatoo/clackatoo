@@ -27,7 +27,7 @@ mod lua;
 mod migrate;
 pub mod options;
 
-pub use lua::{module_name, read as read_file};
+pub use lua::{module_name, read as read_file, read_text};
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -667,7 +667,7 @@ pub fn peek(dirs: &Dirs) -> Settings {
     if let Some(settings) = last_good(dirs) {
         return settings;
     }
-    let Some(text) = migrate::text(dirs) else {
+    let Some(text) = migrate::text(dirs, lua::UPGRADE_TIME) else {
         return Settings::default();
     };
     let chunk = lua::Chunk {
@@ -690,7 +690,7 @@ fn keep_good(dirs: &Dirs, settings: &Settings) {
     let Some(state) = &dirs.state else { return };
     let path = state.join(LAST_GOOD);
     let text = settings.to_lua();
-    if std::fs::read_to_string(&path).is_ok_and(|kept| kept == text) {
+    if lua::read(&path).is_ok_and(|kept| kept.as_deref() == Some(&*text)) {
         return;
     }
     if let Err(err) = write_private(&path, &text) {
@@ -719,7 +719,9 @@ pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
+    // Only the user's, as what's in it is.
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(dir)?;
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(".partial");
     let partial = dir.join(name);
