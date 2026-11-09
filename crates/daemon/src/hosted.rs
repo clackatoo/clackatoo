@@ -437,6 +437,12 @@ impl HostedTerminal {
         &mut self.emulator
     }
 
+    /// Puts back what the program asked of the terminal it was handed
+    /// over with, beyond its modes (see [`Terminal::restore_asked`]).
+    pub(crate) fn restore_asked(&mut self, asked: &clackatoo_term::AskedSnapshot) {
+        self.emulator.restore_asked(asked);
+    }
+
     /// Takes `blocks` as those whose commands the shell's integration said,
     /// as the build that handed this terminal over knew they were.
     pub(crate) fn trust_blocks(&mut self, blocks: &[u32]) {

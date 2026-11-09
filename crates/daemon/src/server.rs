@@ -1355,6 +1355,14 @@ impl Daemon {
                 pty.started_as(Some((exe.dev, exe.ino)));
             }
         }
+        // What programs asked of their terminals: the keys' encoding, the
+        // titles pushed, how far a task has got.
+        for asked in &state.asked {
+            let slot = daemon.terminals.get_mut(&TerminalId(asked.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.restore_asked(&asked.asked);
+            }
+        }
         daemon.restate_backgrounds();
         daemon.restate_lent_backgrounds();
         // The terminals kept running always, as they were, and how running
@@ -1621,6 +1629,7 @@ impl Daemon {
         let mut shells = Vec::new();
         let mut trusted = Vec::new();
         let mut exes = Vec::new();
+        let mut asked = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
@@ -1647,7 +1656,14 @@ impl Daemon {
                     }
                     let blocks = terminal.emulator().trusted_blocks();
                     let exe = terminal.exe();
+                    let programs_asked = terminal.emulator().asked_snapshot();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
+                    if programs_asked != clackatoo_term::AskedSnapshot::default() {
+                        asked.push(handover::Asked {
+                            terminal: terminal.id,
+                            asked: programs_asked,
+                        });
+                    }
                     if let Some((dev, ino)) = exe {
                         exes.push(handover::Exe {
                             terminal: terminal.id,
@@ -1807,6 +1823,7 @@ impl Daemon {
                 sharing,
                 trusted,
                 exes,
+                asked,
             },
             fds,
             version: handover::VERSION,

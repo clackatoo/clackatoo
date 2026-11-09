@@ -107,7 +107,7 @@ A program asks a flag at a time:
 
 Flag 2, key repeats and releases, isn't kept, so a program asking for it sees from `CSI ? u` that it isn't there: windows send presses alone. Nor are Super, Hyper, Meta, Caps Lock and Num Lock sent as modifiers, or modifier keys pressed alone. The keypad's keys have numbers of their own, but type their text without Ctrl or Alt.
 
-A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets (1), adds (2) or takes away (3) flags in effect. Each screen keeps a stack of its own, sixteen deep, so a full-screen program leaves the shell's alone, and a full reset (`ESC c`) ends them all. The window encodes keys this way; the web app on your phone sends xterm's encoding still. A window older than protocol 137 does too, which programs that ask still understand.
+A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets (1), adds (2) or takes away (3) flags in effect. Each screen keeps a stack of its own, sixteen deep, so a full-screen program leaves the shell's alone, and a full reset (`ESC c`) ends them all. They, the titles pushed and a program's progress go on through an upgrade in place. The window encodes keys this way; the web app on your phone sends xterm's encoding still. A window older than protocol 137 does too, which programs that ask still understand.
 
 ## Synchronized output
 
@@ -128,4 +128,3 @@ These are ignored:
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).
 - Variation selector 16 does not widen the character before it.
-- An upgrade in place doesn't carry the kitty keyboard flags, the titles pushed, or a program's progress: keys go in xterm's encoding until the program asks again, as it does when it next starts.
