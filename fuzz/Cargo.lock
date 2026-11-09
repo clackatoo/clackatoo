@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-daemon"
-version = "2026.11.26"
+version = "2026.11.27"
 dependencies = [
  "agent-client-protocol-schema",
  "argon2",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-protocol"
-version = "2026.11.26"
+version = "2026.11.27"
 dependencies = [
  "clackatoo-term",
  "clackatoo-text",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-syntax"
-version = "2026.11.26"
+version = "2026.11.27"
 dependencies = [
  "clackatoo-text",
  "log",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-term"
-version = "2026.11.26"
+version = "2026.11.27"
 dependencies = [
  "base64",
  "bitflags",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-text"
-version = "2026.11.26"
+version = "2026.11.27"
 dependencies = [
  "imara-diff",
  "ropey",

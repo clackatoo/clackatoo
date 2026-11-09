@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026.11.27 (2026-11-09)
+
+### Features
+
+- **config:** one Lua for the process of windows, options every window shares, and handlers run a slice at a time (92f0597c)
+- **settings:** the :Settings menu for window options and keys, and :mappersist (9f28f1eb)
+- **settings:** the menu's docs, NEWS, a :Tutor step and a look script; tidier layout (21520af5)
+- **settings:** the font picker lists monospace families, found off the window's thread, and Tab lists them all (75f99cfa)
+
+### Fixes
+
+- **config:** a window's command-line font is how it started, and keys follow bindings another window made in the same batch (42eea58f)
+- **config:** a handler that has had its time isn't resumed, and a stop asked too late stops nothing after (1b8b9429)
+- **config:** what a guarded window's event sets off is refused in every window, and isn't kept for windows opened later (683eda71)
+- **config:** Lua's requests are numbered across the process, so a reloaded config never takes the old one's answers (aad3d7cb)
+- **config:** a chat's turn ending is told once by the chat's own machine, and waits for the window's daemon to say which it's on (9c61a882)
+- **config:** a window that closes takes its handlers' waiting and background work with it (3ccd4504)
+- **config:** client.opt in a handler of a chat's turn ending is every window's, leaving each window's own as it is (dba681f4)
+- **config:** background work is bounded: a propagate binding pressed again runs once, and at most 64 handlers wait (f8aa7a64)
+- **settings:** keys taken out go back to the window's own, and the keys' help over the menu has no side (6bdf76e6)
+- **settings:** keys are saved and taken out mode by mode, and a row is one binding, bound by one thing (d1c598a4)
+- **settings:** undoing keys recorded over saved ones binds those again (d0347ae5)
+- **settings:** an option read as a window opens shows and steps from what's saved (ec24acb2)
+- **settings:** keys an agent's input can't save leave nothing to undo (0739b07f)
+- **settings:** undoing keys the user's config binds now is refused, and kept (63ea5d80)
+- **settings:** taking out keys and a row's tag go by what bound them in every mode (4eb32492)
+- **settings:** the config's line opens only on this machine's daemon, or the bar says why not (0d5b55d0)
+
 ## 2026.11.26 (2026-11-09)
 
 ### Features
