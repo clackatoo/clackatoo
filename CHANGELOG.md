@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.11.29 (2026-11-09)
+
+### Features
+
+- **daemon:** the daemon's config moves to Luau, daemon/settings.lua then init.lua, moved once from agents.toml, machine.toml and web.toml (f6968b9c)
+- **settings:** CLACKA-238's terminal settings join the daemon's config, as daemon.terminals.vs16 and notify_after, moved from machine.toml's [terminals] (397fccb7)
+- **settings:** Easy mode, pages of the usual settings with real controls, beside Advanced (a0051ebe)
+- **settings:** a cog at the top bar's right opens the settings menu, and closes it (b050b64d)
+
+### Fixes
+
+- **settings:** the move from TOML can't inject code, keeps the web app off when any of it can't move, and goes in order (726fd194)
+- **gui:** the window's config and its modules load as text only, never Luau bytecode (19dbf7c0)
+- **gui:** require takes only a module's name, never a path, and reads it as the daemon reads config, capped and never from a FIFO (0ce06782)
+- **settings:** a password that isn't a string keeps the web app off, everything left out is said, a field Luau can't hold drops only itself, and the state folder is the user's alone (d485cd17)
+- **gui:** the window's config has no loadstring, getfenv or setfenv, and its files are read as the daemon reads its own (3a0eee79)
+- **settings:** Easy's review: typing guards, shared undo, one write per control, a click off closes, laid out once (43ac30eb)
+
 ## 2026.11.28 (2026-11-09)
 
 ### Features
