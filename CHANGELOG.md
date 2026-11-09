@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026.11.15 (2026-11-09)
+
+### Features
+
+- **desktop:** open folders and files from file managers (6c65147c)
+- **editor:** ask once per folder before its language servers run its code (8567207d)
+- **chat:** subagents finishing show as a card, other agents' messages as quotes (9a0ff2f0)
+- **chat:** gx on a finished subagent's line opens it; clippy's lints (17d87c4d)
+- **gui:** show an agent's window access as a badge in the top bar, not the title (CLACKA-225) (71e8bb1b)
+
+### Fixes
+
+- **open:** reveal panes only in windows that say so, asked on this machine (d86c8beb)
+- **desktop:** keep Thunar's own actions, and never claim folders in the entry (e53fc1ac)
+- **editor:** trust what ran only after an upgrade from a build that never asked (50218d76)
+- **editor:** ask about a folder a file is moved or named into, by its machine (ad9326b1)
+- **chat:** every card of a notice's chats is boxed, with an answer or not (a8cf70b1)
+- **tools:** agents are told how many more subagents they may start (841abcb6)
+- **tools:** start_chats starts as many as the Subagents setting offers (fda5cf79)
+
 ## 2026.11.14 (2026-11-09)
 
 ### Fixes
