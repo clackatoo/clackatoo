@@ -518,24 +518,7 @@ fn statements(
             // A table of its own, as `daemon.terminals`.
             (Some("machine"), "terminals") if item.is_table_like() => {
                 let inner = item.as_table_like().expect("a table");
-                statements.extend(
-                    comments
-                        .into_iter()
-                        .map(|comment| Statement::new(vec![comment], key, String::new())),
-                );
-                for (inner_key, inner_item) in inner.iter() {
-                    let comments = (inner.key(inner_key))
-                        .map(|key| comments_in(key.leaf_decor()))
-                        .unwrap_or_default();
-                    statements.push(set(
-                        comments,
-                        key,
-                        "daemon.terminals",
-                        (inner_key, inner_item),
-                        None,
-                        left_out,
-                    ));
-                }
+                tables(&mut statements, comments, key, inner, None, left_out);
             }
             (Some(group), key) => {
                 statements.push(set(
@@ -555,32 +538,12 @@ fn statements(
                     statements.push(Statement::left_out(comments, key, code, why));
                     continue;
                 };
-                statements.extend(
-                    comments
-                        .into_iter()
-                        .map(|comment| Statement::new(vec![comment], key, String::new())),
-                );
                 let fields = match key {
                     "agents" => Some(("an agent", AGENT_FIELDS)),
                     "profiles" => Some(("a profile", PROFILE_FIELDS)),
                     _ => None,
                 };
-                for (inner_key, inner_item) in inner.iter() {
-                    let comments = (inner.key(inner_key))
-                        .map(|key| comments_in(key.leaf_decor()))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .chain(table_comments(inner_item))
-                        .collect();
-                    statements.push(set(
-                        comments,
-                        key,
-                        &format!("daemon.{key}"),
-                        (inner_key, inner_item),
-                        fields,
-                        left_out,
-                    ));
-                }
+                tables(&mut statements, comments, key, inner, fields, left_out);
             }
             (None, key) => {
                 let code = format!("{key} = {}", item.to_string().trim());
@@ -591,6 +554,40 @@ fn statements(
         }
     }
     statements
+}
+
+/// The statements `inner`, the old file's table called `key`, comes to: a
+/// line for each of its keys, set in `daemon.KEY`, after its `comments`,
+/// as [`set`] makes them with `fields`.
+fn tables(
+    statements: &mut Vec<Statement>,
+    comments: Vec<String>,
+    key: &str,
+    inner: &dyn toml_edit::TableLike,
+    fields: Option<(&str, &[&str])>,
+    left_out: &mut Vec<String>,
+) {
+    statements.extend(
+        comments
+            .into_iter()
+            .map(|comment| Statement::new(vec![comment], key, String::new())),
+    );
+    for (inner_key, inner_item) in inner.iter() {
+        let comments = (inner.key(inner_key))
+            .map(|key| comments_in(key.leaf_decor()))
+            .unwrap_or_default()
+            .into_iter()
+            .chain(table_comments(inner_item))
+            .collect();
+        statements.push(set(
+            comments,
+            key,
+            &format!("daemon.{key}"),
+            (inner_key, inner_item),
+            fields,
+            left_out,
+        ));
+    }
 }
 
 /// `key` in `table` set to `item`, as a statement, of `top`, the file's
