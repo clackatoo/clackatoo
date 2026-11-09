@@ -393,6 +393,8 @@ impl Runtime {
             };
             let thread = (self.lua.load(text))
                 .set_name(format!("@{}", chunk.path))
+                // Text only: Luau's bytecode is never run.
+                .set_mode(mlua::chunk::ChunkMode::Text)
                 .into_function()
                 .and_then(|function| self.lua.create_thread(function));
             let thread = match thread {
@@ -1307,6 +1309,7 @@ fn require(lua: &Lua, source: &Source) -> mlua::Result<Function> {
         };
         let module: Value = (lua.load(text))
             .set_name(format!("@{}", path.display()))
+            .set_mode(mlua::chunk::ChunkMode::Text)
             .call(())?;
         // A module that returns nothing is loaded all the same.
         let module = if module.is_nil() {

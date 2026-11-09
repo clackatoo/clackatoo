@@ -1285,6 +1285,46 @@ mod tests {
         dir
     }
 
+    /// Luau's bytecode is never run: as the config, or as a module.
+    #[test]
+    fn bytecode_is_never_run() {
+        let bytecode = mlua::chunk::Compiler::new()
+            .compile("client.opt.nuw = 7")
+            .unwrap();
+        let dir = config_dir(&[("lua/compiled.lua", ""), ("client/init.lua", "")]);
+        std::fs::write(dir.path().join("lua/compiled.lua"), &bytecode).unwrap();
+        std::fs::write(dir.path().join("client/init.lua"), &bytecode).unwrap();
+        let mut lua = Lua::start(
+            Source::Dir(dir.path().into()),
+            Options::default(),
+            vec![WINDOW],
+            Box::new(|| {}),
+        )
+        .expect("Lua started");
+        let said = lua.ready();
+        assert!(
+            !said.iter().any(|said| matches!(said, FromLua::Set { .. })),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|said| matches!(said, FromLua::Error(_))),
+            "{said:?}"
+        );
+        std::fs::write(dir.path().join("client/init.lua"), "require('compiled')").unwrap();
+        let mut lua = Lua::start(
+            Source::Dir(dir.path().into()),
+            Options::default(),
+            vec![WINDOW],
+            Box::new(|| {}),
+        )
+        .expect("Lua started");
+        let said = lua.ready();
+        assert!(
+            !said.iter().any(|said| matches!(said, FromLua::Set { .. })),
+            "{said:?}"
+        );
+    }
+
     #[test]
     #[allow(clippy::too_many_lines, reason = "one config, and what each line set")]
     fn settings_lua_runs_first_and_what_set_each_option_is_known_by_its_line() {
