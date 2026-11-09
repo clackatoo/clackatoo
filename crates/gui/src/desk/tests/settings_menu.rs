@@ -253,6 +253,10 @@ fn keys_recorded_are_saved_as_a_binding_that_a_reload_reads_back() {
     saved(&mut desk, 1);
     assert_eq!(read(&dir, "client/settings.lua"), format!("{HEADER}\n"));
     assert!(desk.client().0.keys().get(KeyMode::Normal, &keys).is_none());
+    assert_eq!(
+        desk.client().0.keys().bound_by(KeyMode::Normal, &keys),
+        crate::options::SetBy::DEFAULT
+    );
 }
 
 #[test]

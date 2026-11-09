@@ -435,7 +435,8 @@ impl Client {
 
     /// Binds `mapping`'s keys to its keys to type, as the settings menu
     /// and `:mappersist` do, noting `by` as what bound them; or if not
-    /// `bound`, puts them back as the window starts them.
+    /// `bound`, puts them back as the window starts them, as nothing had
+    /// bound them.
     pub(crate) fn map_keys(&self, mapping: &Mapping, bound: bool, by: &SetBy) {
         let Mapping {
             modes,
@@ -458,7 +459,8 @@ impl Client {
                 }
             }
         }
-        map.set_by(modes, keys, by);
+        let by = if bound { by.clone() } else { SetBy::DEFAULT };
+        map.set_by(modes, keys, &by);
         drop(map);
         self.keys_changed();
     }
