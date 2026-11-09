@@ -411,7 +411,7 @@ gates! {
     /// `Request::Zoom`; and the panes and tabs closed, which
     /// `Request::Reopen` opens again. An older peer is shown every tab
     /// unzoomed, and is never sent either request.
-    LAYOUT_EXTRAS = 145,
+    LAYOUT_EXTRAS = 144,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

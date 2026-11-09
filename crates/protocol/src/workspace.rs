@@ -131,7 +131,7 @@ pub struct Workspaces {
     /// other panes hidden, until it's unzoomed (see
     /// [`Request::Zoom`](crate::Request::Zoom)): at most one for each tab,
     /// of the tabs in [`list`](Self::list), never a background tab's.
-    /// Empty from a daemon older than protocol 145, whose tabs are never
+    /// Empty from a daemon older than protocol 144, whose tabs are never
     /// zoomed.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::LAYOUT_EXTRAS }, _>",

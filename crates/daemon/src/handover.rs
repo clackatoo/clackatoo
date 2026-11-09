@@ -102,7 +102,7 @@
 //!     pushed, and how far a task has got. Before, an upgrade dropped
 //!     them, and keys went in xterm's encoding until a program asked
 //!     again.
-//! 48. What a tab's layout keeps beside its splits (CLACKA-240): the
+//! 47. What a tab's layout keeps beside its splits (CLACKA-240): the
 //!     tabs zoomed to one of their panes, and the panes and tabs the user
 //!     closed, to open again. Before, an upgrade unzoomed every tab and
 //!     forgot what was closed.
@@ -120,7 +120,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 48;
+pub(crate) const VERSION: u32 = 47;
 
 /// The first version written by a build that asks before a folder's
 /// language servers run (CLACKA-224): a build handing over an older one
@@ -324,12 +324,12 @@ pub(crate) struct State {
     /// kept.
     pub(crate) asked: Vec<Asked>,
     /// What tabs' layouts keep beside their splits: see [`LayoutExtras`].
-    /// Since version 48; `None` before.
+    /// Since version 47; `None` before.
     pub(crate) layout: Option<LayoutExtras>,
 }
 
 /// What tabs' layouts keep beside their splits (CLACKA-240). Since
-/// version 48.
+/// version 47.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct LayoutExtras {
     /// The tabs zoomed, each by its number and its pane's.
@@ -5605,10 +5605,7 @@ mod tests {
 
     #[test]
     fn version_30_keeps_originals_and_their_thumbnail_references() {
-        // 47 is another branch's, numbered as this one is, provisionally
-        // (CLACKA-240): it's read once that branch is merged.
-        let readable: Vec<u32> = (1..=VERSION).filter(|&version| version != 47).collect();
-        assert_eq!(READABLE, readable);
+        assert_eq!(READABLE, (1..=VERSION).collect::<Vec<_>>());
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v30.bin"))
             .unwrap();
@@ -5949,23 +5946,23 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v48.bin"]
+    #[ignore = "writes tests/fixtures/handover-v47.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v48.bin"
+            "/tests/fixtures/handover-v47.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
     }
 
     #[test]
-    fn version_48_keeps_tabs_zoomed_and_what_was_closed() {
+    fn version_47_keeps_tabs_zoomed_and_what_was_closed() {
         let mut file = tempfile::tempfile().unwrap();
-        file.write_all(include_bytes!("../tests/fixtures/handover-v48.bin"))
+        file.write_all(include_bytes!("../tests/fixtures/handover-v47.bin"))
             .unwrap();
         let read = State::read(&mut file).unwrap();
-        let layout = read.layout.expect("version 48 has them");
+        let layout = read.layout.expect("version 47 has them");
         assert_eq!(layout.zoomed, [(1, 2)]);
         let closed: crate::saved::Closed = serde_json::from_str(&layout.closed[0]).unwrap();
         assert!(matches!(closed, crate::saved::Closed::Pane { tab: 1, .. }));

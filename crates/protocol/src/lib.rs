@@ -149,7 +149,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 145;
+pub const PROTOCOL_VERSION: u32 = 144;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -908,7 +908,7 @@ pub enum Request {
         /// The asker only looks at the pane, as a phone does, rather than
         /// moving to it: a tab zoomed to another of its panes stays zoomed
         /// ([`Workspaces::zoomed`]). A daemon relaying a phone's switch
-        /// sets it. `false` from a client older than protocol 145, whose
+        /// sets it. `false` from a client older than protocol 144, whose
         /// switch unzooms, as a daemon that old has no zoom.
         #[serde(
             skip_serializing_if = "wire::before::<{ wire::LAYOUT_EXTRAS }, _>",
@@ -1652,7 +1652,7 @@ pub enum Request {
     /// zoomed. The tab is unzoomed again as a pane is split in it, as
     /// another of its panes is focused, and as the pane zoomed to leaves
     /// it. Answered with [`Response::Done`]. Only to a daemon of protocol
-    /// 145 or later ([`wire::LAYOUT_EXTRAS`]).
+    /// 144 or later ([`wire::LAYOUT_EXTRAS`]).
     Zoom {
         /// The tab.
         tab: TabId,
@@ -1667,7 +1667,7 @@ pub enum Request {
     /// agent's session. It goes back where it was, beside the pane it was
     /// beside, as big as it was, or, if that's gone, beside `beside`.
     /// Answered with [`Response::PaneCreated`]: its pane, or the tab's
-    /// focused pane. Only to a daemon of protocol 145 or later
+    /// focused pane. Only to a daemon of protocol 144 or later
     /// ([`wire::LAYOUT_EXTRAS`]).
     Reopen {
         /// The pane the asker has the focus in, to put it beside if its
