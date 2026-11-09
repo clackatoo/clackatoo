@@ -2302,6 +2302,7 @@ fn an_explorer_on_another_machine_lists_its_folders_and_renames_its_files() {
                 .request(&Request::AttachFiles {
                     files,
                     changes: false,
+                    git_changes: false,
                 })
                 .unwrap(),
             Response::Done
@@ -2406,7 +2407,11 @@ fn another_machines_folder_goes_as_what_changed_only_while_every_window_asks() {
     });
     let files = shown.find_pane(pane).unwrap().2.content.files().unwrap();
     let attach = |client: &mut Client, changes| {
-        let attach = Request::AttachFiles { files, changes };
+        let attach = Request::AttachFiles {
+            files,
+            changes,
+            git_changes: false,
+        };
         assert_eq!(client.request(&attach).unwrap(), Response::Done);
         assert!(matches!(
             files_update(client, files),
@@ -2465,6 +2470,127 @@ fn another_machines_folder_goes_as_what_changed_only_while_every_window_asks() {
     let (listing, whole) = listed_from(&mut pair.window, files, &root, &listing);
     assert!(!whole, "changes again");
     assert_eq!(names(&listing).last().map(String::as_str), Some("g.txt"));
+}
+
+/// What git says of a file, as an explorer is told it.
+type Mark = (String, clackatoo_protocol::GitMark);
+
+/// What git says, as `client` is next sent it of explorer `files`, whole
+/// or as what changed in `had`, and whether it came whole.
+fn marks_from(client: &mut Client, files: FilesId, had: &[Mark]) -> (Vec<Mark>, bool) {
+    loop {
+        match files_update(client, files) {
+            FilesUpdate::Git(said) => return (said, true),
+            FilesUpdate::GitChanged { was, changes } => {
+                assert_eq!(was as usize, had.len(), "changes to what was sent");
+                return (changes.apply(had).expect("changes to it"), false);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Runs `git` with `args` in `dir`, as nobody's config would have it.
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?}");
+}
+
+#[test]
+fn another_machines_git_marks_go_as_what_changed_only_while_every_window_asks() {
+    let mut pair = Pair::new();
+    let project = pair.world.host("laptop").join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(project.join(name), "").unwrap();
+    }
+    // As the explorer's root is, so the folder expanded is its own.
+    let project = project.canonicalize().unwrap();
+    let root = project.display().to_string();
+    let first = pair.work.tabs[0].layout.panes()[0].id;
+    let explorer = PaneTerminal::Files(OpenFiles {
+        dir: Some(root.clone()),
+    });
+    let pane = pair.window.split_pane(first, Side::Left, explorer).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.files().is_some())
+    });
+    let files = shown.find_pane(pane).unwrap().2.content.files().unwrap();
+    let attach = |client: &mut Client, changes| {
+        let attach = Request::AttachFiles {
+            files,
+            changes,
+            git_changes: changes,
+        };
+        assert_eq!(client.request(&attach).unwrap(), Response::Done);
+        assert!(matches!(
+            files_update(client, files),
+            FilesUpdate::Root { .. }
+        ));
+    };
+    let names = |marks: &[Mark]| -> Vec<String> {
+        (marks.iter())
+            .map(|(path, _)| path.rsplit('/').next().unwrap_or_default().to_owned())
+            .collect()
+    };
+    attach(&mut pair.window, true);
+    pair.window
+        .files(files, FilesAction::Expand(root.clone()))
+        .unwrap();
+    let (marks, whole) = marks_from(&mut pair.window, files, &[]);
+    assert!(whole);
+    assert_eq!(names(&marks), ["a.txt", "b.txt", "c.txt", "d.txt"]);
+    std::fs::write(project.join("e.txt"), "").unwrap();
+    let (marks, whole) = marks_from(&mut pair.window, files, &marks);
+    assert!(!whole, "passed on as what changed");
+    assert_eq!(names(&marks), ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+
+    // A window that doesn't ask for changes, as an older one can't, has
+    // every window sent what git says whole from then on.
+    let mut other = pair.desk.client();
+    attach(&mut other, false);
+    let (_, whole) = marks_from(&mut other, files, &[]);
+    assert!(whole);
+    std::fs::write(project.join("f.txt"), "").unwrap();
+    let (sent, whole) = marks_from(&mut other, files, &[]);
+    assert!(whole);
+    assert_eq!(names(&sent).last().map(String::as_str), Some("f.txt"));
+    let mut marks = marks;
+    loop {
+        let (now, whole) = marks_from(&mut pair.window, files, &marks);
+        assert!(whole, "never changes the other can't read");
+        marks = now;
+        if marks == sent {
+            break;
+        }
+    }
+
+    // Once it's gone, changes are asked for again: the root comes again,
+    // and what git says whole, then a change goes as changes.
+    let detach = Request::DetachFiles { files };
+    assert_eq!(other.request(&detach).unwrap(), Response::Done);
+    // Past the folder's listings still on their way.
+    while !matches!(
+        files_update(&mut pair.window, files),
+        FilesUpdate::Root { .. }
+    ) {}
+    let (marks, whole) = marks_from(&mut pair.window, files, &marks);
+    assert!(whole);
+    std::fs::write(project.join("g.txt"), "").unwrap();
+    let (marks, whole) = marks_from(&mut pair.window, files, &marks);
+    assert!(!whole, "changes again");
+    assert_eq!(names(&marks).last().map(String::as_str), Some("g.txt"));
 }
 
 #[test]

@@ -828,6 +828,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Client(ClientMessage::Request(Request::AttachFiles {
                 files,
                 changes: true,
+                git_changes: false,
             })),
         ),
         (
@@ -986,6 +987,31 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             }]),
         })),
     ));
+    // An explorer attached asking for what git says as changes too, and
+    // what it says sent so.
+    samples.extend([
+        (
+            crate::wire::GIT_CHANGES,
+            Client(ClientMessage::Request(Request::AttachFiles {
+                files,
+                changes: true,
+                git_changes: true,
+            })),
+        ),
+        (
+            crate::wire::GIT_CHANGES,
+            Server(ServerMessage::Event(Event::Files {
+                files,
+                update: FilesUpdate::GitChanged {
+                    was: 2,
+                    changes: crate::MarksChanges {
+                        removed: vec![0],
+                        added: vec![(1, ("/src/b.rs".into(), GitMark::Untracked))],
+                    },
+                },
+            })),
+        ),
+    ]);
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
@@ -3407,6 +3433,7 @@ fn more() -> Vec<Sample> {
         request(Request::AttachFiles {
             files,
             changes: false,
+            git_changes: false,
         }),
         Client(ClientMessage::Files {
             files,

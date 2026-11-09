@@ -425,6 +425,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
             .request(&Request::AttachFiles {
                 files,
                 changes: false,
+                git_changes: false,
             })
             .unwrap();
         assert_eq!(attached, Response::Done);
@@ -500,6 +501,7 @@ fn files_shows_a_folder_in_an_explorer_and_the_current_one_with_no_path() {
             .request(&Request::AttachFiles {
                 files,
                 changes: false,
+                git_changes: false,
             })
             .unwrap();
         assert_eq!(attached, Response::Done);

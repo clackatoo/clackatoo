@@ -21,8 +21,10 @@
 //!
 //! What git says of the files comes in [`FilesUpdate::Git`], for the
 //! repository the root is in: every path git has something to say about,
-//! whenever that changes. A client rolls a directory's mark up from the
-//! paths under it. What `.gitignore` leaves out comes with each listing.
+//! whenever that changes, or as what changed in it
+//! ([`FilesUpdate::GitChanged`]), if the client asked for that and it's
+//! less to send. A client rolls a directory's mark up from the paths under
+//! it. What `.gitignore` leaves out comes with each listing.
 //!
 //! Files are made, moved, copied and deleted with
 //! [`ClientMessage::FileOp`](crate::ClientMessage::FileOp), answered by
@@ -133,32 +135,77 @@ pub enum FilesUpdate {
         /// What changed.
         changes: ListingChanges,
     },
+    /// What git says of the files that changed since it was last sent,
+    /// whole or as changes: sent in place of [`Git`](Self::Git) to a
+    /// client that attached asking for that, when it's less to send. Only
+    /// ever sent once the client has been sent what git says whole since
+    /// it last attached, so a client holding none, or what was sent on
+    /// another connection, drops it, and attaches again to be sent it
+    /// whole. New in protocol 137.
+    GitChanged {
+        /// How many marks what it changes holds, for a client to tell it
+        /// isn't what it has.
+        was: u32,
+        /// What changed, in what [`Git`](Self::Git) last said, as it's
+        /// ordered.
+        changes: MarksChanges,
+    },
 }
 
 /// What changed from one listing of a directory to the next: the entries
 /// gone and the entries new, a changed entry being both. Whether it's
 /// still cut short isn't said: a listing that changes that is sent whole.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListingChanges {
-    /// Where the entries gone, or changed, were in the listing before, in
+pub type ListingChanges = Changes<Entry>;
+
+/// What git says of an explorer's files that changed since it last said
+/// it: the marks gone and the marks new, a path whose mark changed being
+/// both.
+pub type MarksChanges = Changes<(String, GitMark)>;
+
+/// What changed from one list to the next, by places in them, so a peer
+/// holding the first needn't know what order they're in: the items gone
+/// and the items new, a changed item being both.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Changes<T> {
+    /// Where the items gone, or changed, were in the list before, in
     /// order.
     pub removed: Vec<u32>,
-    /// The entries new, or changed, each with where it is in the listing
-    /// after, in order.
-    pub added: Vec<(u32, Entry)>,
+    /// The items new, or changed, each with where it is in the list after,
+    /// in order.
+    pub added: Vec<(u32, T)>,
 }
 
-impl ListingChanges {
+impl<T> Default for Changes<T> {
+    fn default() -> Self {
+        Self {
+            removed: Vec::new(),
+            added: Vec::new(),
+        }
+    }
+}
+
+impl<T> Changes<T> {
+    /// Whether nothing changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.added.is_empty()
+    }
+
+    /// How many items changed, gone and new: what it costs to send,
+    /// against a whole list's length.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.removed.len() + self.added.len()
+    }
+}
+
+impl<T: Clone + PartialEq> Changes<T> {
     /// What changed from `old` to `new`, each in the order `key` gives:
     /// both are walked once, side by side, keeping what's the same in
     /// each. Whatever their order, applying what's returned to `old` makes
     /// `new`; out of order, it's only more than it need be. `None` if
     /// either is too long for its places to be numbered.
-    pub fn between<K: Ord>(
-        old: &[Entry],
-        new: &[Entry],
-        key: impl Fn(&Entry) -> K,
-    ) -> Option<Self> {
+    pub fn between<K: Ord>(old: &[T], new: &[T], key: impl Fn(&T) -> K) -> Option<Self> {
         u32::try_from(old.len().max(new.len())).ok()?;
         #[allow(clippy::cast_possible_truncation, reason = "checked above")]
         let at = |index: usize| index as u32;
@@ -188,23 +235,10 @@ impl ListingChanges {
         Some(changes)
     }
 
-    /// Whether nothing changed.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.removed.is_empty() && self.added.is_empty()
-    }
-
-    /// How many entries changed, gone and new: what it costs to send,
-    /// against a whole listing's length.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.removed.len() + self.added.len()
-    }
-
     /// `entries` with these changes made, or `None` if they aren't changes
     /// to it: a place past its end, or out of order.
     #[must_use]
-    pub fn apply(&self, entries: &[Entry]) -> Option<Vec<Entry>> {
+    pub fn apply(&self, entries: &[T]) -> Option<Vec<T>> {
         let kept = entries.len().checked_sub(self.removed.len())?;
         let mut out = Vec::with_capacity(kept + self.added.len());
         let mut removed = self.removed.iter().map(|&at| at as usize).peekable();
@@ -484,6 +518,30 @@ mod tests {
                 "{old:?} to {new:?}"
             );
         }
+    }
+
+    #[test]
+    fn marks_change_by_their_places_as_listings_do() {
+        let mark = |path: &str, mark| (path.to_owned(), mark);
+        let old = [
+            mark("/p/a", GitMark::Modified),
+            mark("/p/b", GitMark::Untracked),
+            mark("/p/c", GitMark::Added),
+        ];
+        let new = [
+            mark("/p/a", GitMark::Modified),
+            mark("/p/c", GitMark::Modified),
+            mark("/p/d", GitMark::Untracked),
+        ];
+        let key = |(path, _): &(String, GitMark)| path.clone();
+        let changes = MarksChanges::between(&old, &new, key).unwrap();
+        assert_eq!(changes.removed, [1, 2], "b gone, and c changed");
+        assert_eq!(
+            changes.added,
+            [(1, mark("/p/c", GitMark::Modified)), (2, new[2].clone())]
+        );
+        assert_eq!(changes.apply(&old).unwrap(), new);
+        assert!(changes.apply(&new[..1]).is_none(), "not changes to it");
     }
 
     #[test]

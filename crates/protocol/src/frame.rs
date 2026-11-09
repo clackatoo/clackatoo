@@ -1609,6 +1609,15 @@ mod tests {
             },
         });
         assert_eq!(files_dir(&payload(&changed)), Some("/srv"));
+        // What git says is about no one folder: it goes to every client.
+        let git_changed = ServerMessage::Event(Event::Files {
+            files: FilesId(3),
+            update: FilesUpdate::GitChanged {
+                was: 2,
+                changes: crate::MarksChanges::default(),
+            },
+        });
+        assert_eq!(files_dir(&payload(&git_changed)), None);
         let git = ServerMessage::Event(Event::Files {
             files: FilesId(3),
             update: FilesUpdate::NoGit("not a repository".into()),

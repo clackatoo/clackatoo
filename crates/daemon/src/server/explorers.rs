@@ -24,7 +24,8 @@
 //! another is, has git asked about it too, once a folder holding its
 //! `.git` is expanded: what an explorer is sent of git is what its root's
 //! repository says, but for what's in the one inside, and what that one
-//! says of itself.
+//! says of itself. A client that asks for it is sent what changed in that
+//! since it was last sent, once it's been sent it whole.
 //!
 //! The same watches serve buffers: each buffer's file is watched through
 //! the directory it's in, as most programs write a file by renaming a new
@@ -44,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     BufferId, Error, Event, FileOp, FileOpError, FilesAction, FilesId, FilesUpdate, GitMark,
-    ListingChanges, OpenFiles, PaneId, Response,
+    ListingChanges, MarksChanges, OpenFiles, PaneId, Response,
 };
 use mio::Token;
 use rustix::fs::inotify;
@@ -188,11 +189,30 @@ struct Explorer {
     /// Those of them that asked for a folder listed again to be sent as
     /// what changed in it.
     changes: Vec<Token>,
+    /// Those of them that asked for what git says to be sent as what
+    /// changed in it.
+    git_changes: Vec<Token>,
+    /// What git said of its files, as it was last sent: what changes sent
+    /// are changes to.
+    marks: Option<Vec<(String, GitMark)>>,
+    /// Those of its viewers that have been sent `marks`, so have what
+    /// changes to it change.
+    marks_sent: Vec<Token>,
     /// The top of the work tree its root is in, once found, if it's in one.
     repo: Option<PathBuf>,
     /// The tops of the repositories found inside folders expanded in it,
     /// as their listings show a `.git`.
     nested: Vec<PathBuf>,
+}
+
+impl Explorer {
+    /// Forgets the client at `token` following it.
+    fn forget_viewer(&mut self, token: Token) {
+        self.viewers.retain(|&viewer| viewer != token);
+        self.changes.retain(|&viewer| viewer != token);
+        self.git_changes.retain(|&viewer| viewer != token);
+        self.marks_sent.retain(|&viewer| viewer != token);
+    }
 }
 
 /// A directory some client has expanded.
@@ -305,6 +325,9 @@ impl Daemon {
             root: root.clone(),
             viewers: Vec::new(),
             changes: Vec::new(),
+            git_changes: Vec::new(),
+            marks: None,
+            marks_sent: Vec::new(),
             repo: None,
             nested: Vec::new(),
         };
@@ -333,13 +356,15 @@ impl Daemon {
 
     /// Answers [`Request::AttachFiles`](clackatoo_protocol::Request::AttachFiles):
     /// starts sending explorer `files` to the client at `token`, with its
-    /// root and what git says, if it's known; and folders listed again as
-    /// what changed in them, if it asks for `changes`.
+    /// root and what git says, whole, if it's known; folders listed again
+    /// as what changed in them, if it asks for `changes`; and what git says
+    /// as what changed in it, if it asks for `git_changes`.
     pub(super) fn attach_files(
         &mut self,
         token: Token,
         files: FilesId,
         changes: bool,
+        git_changes: bool,
     ) -> Result<Response, Error> {
         let explorer = (self.explorers.list.get_mut(&files)).ok_or(Error::NoSuchFiles(files))?;
         if !explorer.viewers.contains(&token) {
@@ -349,12 +374,15 @@ impl Daemon {
         if changes {
             explorer.changes.push(token);
         }
-        let root = root_update(&explorer.root, &self.config.home);
-        let marks = self.explorers.marks_of(files);
-        self.tell_files(token, files, root);
-        if let Some(marks) = marks {
-            self.tell_files(token, files, FilesUpdate::Git(marks));
+        explorer.git_changes.retain(|&viewer| viewer != token);
+        if git_changes {
+            explorer.git_changes.push(token);
         }
+        // Attached again, it's sent what git says whole again.
+        explorer.marks_sent.retain(|&viewer| viewer != token);
+        let root = root_update(&explorer.root, &self.config.home);
+        self.tell_files(token, files, root);
+        self.send_marks_to(files);
         if let Some(reason) = self.explorers.no_git {
             self.tell_files(token, files, FilesUpdate::NoGit(reason.to_owned()));
         }
@@ -366,8 +394,7 @@ impl Daemon {
     /// collapses what it expanded there.
     pub(super) fn detach_files(&mut self, token: Token, files: FilesId) -> Response {
         if let Some(explorer) = self.explorers.list.get_mut(&files) {
-            explorer.viewers.retain(|&viewer| viewer != token);
-            explorer.changes.retain(|&viewer| viewer != token);
+            explorer.forget_viewer(token);
         }
         self.collapse_where(|viewer| viewer == (token, files));
         Response::Done
@@ -377,8 +404,7 @@ impl Daemon {
     /// expanded, and asked to be done.
     pub(super) fn forget_files_viewer(&mut self, token: Token) {
         for explorer in self.explorers.list.values_mut() {
-            explorer.viewers.retain(|&viewer| viewer != token);
-            explorer.changes.retain(|&viewer| viewer != token);
+            explorer.forget_viewer(token);
         }
         self.collapse_where(|(viewer, _)| viewer == token);
         // What it asked is done all the same, but not answered.
@@ -1300,16 +1326,41 @@ impl Daemon {
     }
 
     /// Sends what git says of explorer `files`' files to every client
-    /// following it.
+    /// following it that hasn't had it: to one that was sent what it last
+    /// said and asked for changes, as what changed since, if that's less
+    /// to send than it whole.
     fn send_marks_to(&mut self, files: FilesId) {
         let Some(marks) = self.explorers.marks_of(files) else {
             return;
         };
-        let viewers = (self.explorers.list.get(&files))
-            .map(|explorer| explorer.viewers.clone())
-            .unwrap_or_default();
-        for viewer in viewers {
-            self.tell_files(viewer, files, FilesUpdate::Git(marks.clone()));
+        let Some(explorer) = self.explorers.list.get_mut(&files) else {
+            return;
+        };
+        // Those sent what it last said, who have what changes change.
+        let had = std::mem::replace(&mut explorer.marks_sent, explorer.viewers.clone());
+        let mut viewers = explorer.viewers.clone();
+        let mut as_changes = None;
+        if explorer.marks.as_ref() == Some(&marks) {
+            // Only those who haven't had it.
+            viewers.retain(|viewer| !had.contains(viewer));
+        } else if let Some(before) = explorer.marks.replace(marks.clone()) {
+            as_changes = marks_changes(&before, &marks);
+        }
+        // Those who have what it changes, and asked for changes, are sent
+        // them.
+        let takes = |viewer: &Token| had.contains(viewer) && explorer.git_changes.contains(viewer);
+        let (changed, whole): (Vec<Token>, Vec<Token>) = match &as_changes {
+            Some(_) => viewers.into_iter().partition(takes),
+            None => (Vec::new(), viewers),
+        };
+        if let Some(as_changes) = as_changes {
+            for viewer in changed {
+                self.tell_files(viewer, files, as_changes.clone());
+            }
+        }
+        let update = FilesUpdate::Git(marks);
+        for viewer in whole {
+            self.tell_files(viewer, files, update.clone());
         }
     }
 
@@ -1534,6 +1585,16 @@ fn listed_update(dir: &Path, listing: &Listing) -> FilesUpdate {
         entries: listing.entries.clone(),
         cut_short: listing.cut_short,
     }
+}
+
+/// What git says, `marks`, as what changed in it since it said `before`,
+/// both in the order they're sent in, if that's less to send than it
+/// whole. It's worked out here, on the loop, as `marks` was just put
+/// together and sorted here: a walk of both, side by side.
+fn marks_changes(before: &[(String, GitMark)], marks: &[(String, GitMark)]) -> Option<FilesUpdate> {
+    let was = u32::try_from(before.len()).ok()?;
+    let changes = MarksChanges::between(before, marks, |(path, _)| path.clone())?;
+    (changes.len() < marks.len()).then_some(FilesUpdate::GitChanged { was, changes })
 }
 
 /// Whether two listings hold the same.

@@ -118,8 +118,8 @@ pub use clackatoo_text::{
 pub use corpus::corpus;
 pub use devices::{Device, PairingAsk, PairingState};
 pub use files::{
-    Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
-    GitMark, ListingChanges, OpenFiles,
+    Changes, Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId,
+    FilesUpdate, GitMark, ListingChanges, MarksChanges, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
 pub use form::{
@@ -148,7 +148,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 136;
+pub const PROTOCOL_VERSION: u32 = 137;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1049,7 +1049,8 @@ pub enum Request {
     },
     /// Starts sending a file explorer: its [`FilesUpdate::Root`], then what
     /// the client asks for with [`ClientMessage::Files`]. Attaching twice
-    /// sends the root again, and takes `changes` as said again.
+    /// sends the root again, and what git says whole, and takes `changes`
+    /// and `git_changes` as said again.
     AttachFiles {
         /// The explorer.
         files: FilesId,
@@ -1061,6 +1062,15 @@ pub enum Request {
             deserialize_with = "wire::since::<{ wire::FILES_CHANGES }, _, _>"
         )]
         changes: bool,
+        /// Send what git says of the files, once it's been sent whole, as
+        /// what changed in it since it was last sent
+        /// ([`FilesUpdate::GitChanged`]), not whole. New in protocol 137:
+        /// `false`, an older peer's, has it sent whole.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::GIT_CHANGES }, _>",
+            deserialize_with = "wire::since::<{ wire::GIT_CHANGES }, _, _>"
+        )]
+        git_changes: bool,
     },
     /// Stops sending a file explorer, collapsing everything the client
     /// expanded in it.

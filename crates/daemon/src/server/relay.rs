@@ -763,8 +763,12 @@ impl Daemon {
     /// or chats' pages goes, if it's one, from the client at `token`.
     fn route_shown(&mut self, token: Token, request: &Request) -> Option<Routed> {
         let routed = match *request {
-            Request::AttachFiles { files, changes } => {
-                return self.route_attach_files(token, files, changes);
+            Request::AttachFiles {
+                files,
+                changes,
+                git_changes,
+            } => {
+                return self.route_attach_files(token, files, changes, git_changes);
             }
             Request::DetachFiles { files } => return self.route_detach_files(token, files),
             Request::AttachBoard { board: local } => {

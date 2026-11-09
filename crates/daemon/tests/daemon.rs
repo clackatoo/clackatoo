@@ -11515,6 +11515,7 @@ fn a_folder_opened_as_a_file_shows_its_listing_and_files_show_in_its_place() {
         .request(&Request::AttachFiles {
             files,
             changes: false,
+            git_changes: false,
         })
         .unwrap();
     assert!(matches!(
@@ -11554,6 +11555,7 @@ fn a_folder_opened_as_a_file_shows_its_listing_and_files_show_in_its_place() {
         .request(&Request::AttachFiles {
             files,
             changes: false,
+            git_changes: false,
         })
         .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchFiles(files)));
@@ -12611,6 +12613,7 @@ fn explore(client: &mut Client, root: &Path) -> (FilesId, String) {
     let attached = client.request(&Request::AttachFiles {
         files,
         changes: false,
+        git_changes: false,
     });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     match next_files_update(client) {
@@ -12723,6 +12726,7 @@ fn an_explorer_lists_what_is_expanded_and_shows_files_made_and_deleted_there() {
     let attached = other.request(&Request::AttachFiles {
         files,
         changes: false,
+        git_changes: false,
     });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     files_action(&mut other, files, expand(&dir));
@@ -12796,6 +12800,7 @@ fn a_folder_listed_again_goes_as_what_changed_to_a_client_that_asks() {
     let attach = Request::AttachFiles {
         files,
         changes: true,
+        git_changes: false,
     };
     assert!(matches!(new.request(&attach), Ok(Response::Done)));
     let expand = FilesAction::Expand(root.display().to_string());
@@ -12899,6 +12904,7 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
     let attached = client.request(&Request::AttachFiles {
         files,
         changes: false,
+        git_changes: false,
     });
     assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
     match next_files_update(&mut client) {
@@ -12913,6 +12919,7 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
     let again = client.request(&Request::AttachFiles {
         files,
         changes: false,
+        git_changes: false,
     });
     assert!(
         matches!(again, Ok(Response::Error(Error::NoSuchFiles(_)))),
@@ -12977,6 +12984,87 @@ fn an_explorer_says_what_git_says_and_what_it_ignores() {
                 said.contains(&(path("new.txt"), GitMark::Added)),
                 "{said:?}"
             );
+            break;
+        }
+    }
+}
+
+/// What git says, as `client` is next sent it, whole or as what changed
+/// in `had`, skipping the rest, and whether it came whole.
+fn next_marks_from(
+    client: &mut Client,
+    had: &[(String, GitMark)],
+) -> (Vec<(String, GitMark)>, bool) {
+    loop {
+        match next_files_update(client) {
+            FilesUpdate::Git(said) => return (said, true),
+            FilesUpdate::GitChanged { was, changes } => {
+                assert_eq!(was as usize, had.len(), "changes to what was sent");
+                return (changes.apply(had).expect("changes to it"), false);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn what_git_says_goes_as_what_changed_to_a_client_that_asks() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\n", "a\n");
+    run_git(&repo, &["commit", "-q", "-m", "a"]);
+    for name in ["b.txt", "c.txt", "d.txt"] {
+        std::fs::write(repo.join(name), "").unwrap();
+    }
+    let repo = repo.canonicalize().unwrap();
+    let untracked = |names: &[&str]| -> Vec<(String, GitMark)> {
+        (names.iter())
+            .map(|name| (repo.join(name).display().to_string(), GitMark::Untracked))
+            .collect()
+    };
+    let mut old = daemon.client();
+    let (files, _) = explore(&mut old, &repo);
+    let mut new = daemon.client();
+    let attach = Request::AttachFiles {
+        files,
+        changes: true,
+        git_changes: true,
+    };
+    assert!(matches!(new.request(&attach), Ok(Response::Done)));
+    let expand = FilesAction::Expand(repo.display().to_string());
+    files_action(&mut old, files, expand.clone());
+    files_action(&mut new, files, expand);
+    // Whole, the first time.
+    let (marks, whole) = next_marks_from(&mut new, &[]);
+    assert!(whole);
+    assert_eq!(marks, untracked(&["b.txt", "c.txt", "d.txt"]));
+    let (_, whole) = next_marks_from(&mut old, &[]);
+    assert!(whole);
+
+    // A file made: what changed, to the client that asked; whole to the
+    // other, as before.
+    std::fs::write(repo.join("e.txt"), "").unwrap();
+    let (marks, whole) = next_marks_from(&mut new, &marks);
+    assert!(!whole, "what changed");
+    let (sent, whole) = next_marks_from(&mut old, &[]);
+    assert!(whole, "whole to a client that didn't ask");
+    assert_eq!(marks, sent, "the same either way");
+    assert_eq!(marks, untracked(&["b.txt", "c.txt", "d.txt", "e.txt"]));
+
+    // Attached again, it's sent whole again.
+    assert!(matches!(new.request(&attach), Ok(Response::Done)));
+    let (marks, whole) = next_marks_from(&mut new, &marks);
+    assert!(whole);
+
+    // Changes more than it says after are sent whole.
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-q", "-m", "all"]);
+    let mut marks = marks;
+    loop {
+        let (now, whole) = next_marks_from(&mut new, &marks);
+        marks = now;
+        if marks.is_empty() {
+            assert!(whole, "all four gone is sent whole");
             break;
         }
     }

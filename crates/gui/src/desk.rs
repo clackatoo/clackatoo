@@ -11564,7 +11564,8 @@ mod tests {
         assert!(
             answer_all(&mut desk).contains(&Request::AttachFiles {
                 files: FilesId(1),
-                changes: true
+                changes: true,
+                git_changes: true,
             }),
             "attached"
         );

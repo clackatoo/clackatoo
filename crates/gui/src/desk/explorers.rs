@@ -222,12 +222,7 @@ impl Desk {
         }
         for files in new {
             self.explorers.attached.insert(files);
-            // A folder listed again comes as what changed in it.
-            let attach = Request::AttachFiles {
-                files,
-                changes: true,
-            };
-            self.request(attach, Asked::Quiet);
+            self.request(attach_files(files), Asked::Quiet);
         }
     }
 
@@ -299,6 +294,7 @@ impl Desk {
         };
         let first = explorer.root().is_none();
         explorer.update(update);
+        let again = explorer.take_attach_again();
         // Shown as one on its root was, when it closed.
         if first
             && !explorer.is_folder()
@@ -310,6 +306,11 @@ impl Desk {
         let asks = explorer.take_asks();
         for ask in asks {
             self.explorer_asked(pane, ask);
+        }
+        // What git says, sent as changes to what it hasn't, is sent whole
+        // again.
+        if again && self.connected {
+            self.request(attach_files(files), Asked::Quiet);
         }
         self.settle_gone(pane);
         self.list_if_stale(pane);
@@ -1459,6 +1460,16 @@ impl Desk {
     /// Whether `pane` is an explorer, which is always in normal mode.
     pub(super) fn is_explorer(&self, pane: PaneId) -> bool {
         self.explorers.panes.contains_key(&pane)
+    }
+}
+
+/// How the window attaches to the explorer `files`: a folder listed
+/// again, and what git says of the files, come as what changed in them.
+fn attach_files(files: FilesId) -> Request {
+    Request::AttachFiles {
+        files,
+        changes: true,
+        git_changes: true,
     }
 }
 

@@ -3570,7 +3570,11 @@ impl Daemon {
                 path,
                 force,
             } => self.save_as(token, buffer, &path, force),
-            Request::AttachFiles { files, changes } => self.attach_files(token, files, changes),
+            Request::AttachFiles {
+                files,
+                changes,
+                git_changes,
+            } => self.attach_files(token, files, changes, git_changes),
             Request::DetachFiles { files } => Ok(self.detach_files(token, files)),
             Request::AttachBoard { board } => self.attach_board(token, board),
             Request::DetachBoard { board } => Ok(self.detach_board(token, board)),

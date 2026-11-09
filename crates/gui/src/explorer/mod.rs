@@ -216,6 +216,13 @@ pub(crate) struct Explorer {
     current: HashSet<String>,
     /// What git says of the files, by path.
     marks: BTreeMap<String, GitMark>,
+    /// What git says, as it was last sent, whole or as changes, on this
+    /// connection, in the order it was sent in: what changes sent are
+    /// made to. `None` until it's sent whole.
+    git: Option<Vec<(String, GitMark)>>,
+    /// What git says was sent as changes to what this doesn't have: it's to
+    /// be attached to again, to be sent it whole.
+    attach_again: bool,
     /// The tree, as shown, and whether it needs flattening again.
     lines: Vec<Line>,
     stale: bool,
@@ -309,6 +316,8 @@ impl Explorer {
             asked: HashSet::new(),
             current: HashSet::new(),
             marks: BTreeMap::new(),
+            git: None,
+            attach_again: false,
             lines: Vec::new(),
             stale: true,
             cursor: 0,
@@ -669,7 +678,23 @@ impl Explorer {
                 // What was expanded in it no longer is.
                 self.sync();
             }
-            FilesUpdate::Git(marks) => self.marks = marks.into_iter().collect(),
+            FilesUpdate::Git(marks) => {
+                self.marks = marks.iter().cloned().collect();
+                self.git = Some(marks);
+            }
+            FilesUpdate::GitChanged { was, changes } => {
+                let marks = (self.git.as_ref())
+                    .filter(|git| git.len() == was as usize)
+                    .and_then(|git| changes.apply(git));
+                let Some(marks) = marks else {
+                    // Not changes to what's here: sent whole again.
+                    self.git = None;
+                    self.attach_again = true;
+                    return;
+                };
+                self.marks = marks.iter().cloned().collect();
+                self.git = Some(marks);
+            }
             FilesUpdate::NoGit(reason) => self.message = Some(reason),
         }
     }
@@ -679,8 +704,17 @@ impl Explorer {
     pub(crate) fn reconnected(&mut self) {
         self.asked.clear();
         self.current.clear();
+        self.git = None;
+        self.attach_again = false;
         self.unlisted = false;
         self.plan_cut_off();
+    }
+
+    /// Whether it's to be attached to again, as what git says was sent as
+    /// changes to what it doesn't have. Asked once, it isn't again until
+    /// that happens again.
+    pub(crate) fn take_attach_again(&mut self) -> bool {
+        std::mem::take(&mut self.attach_again)
     }
 
     /// Takes what's to be asked of the daemon, oldest first.

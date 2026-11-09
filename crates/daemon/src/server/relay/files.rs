@@ -11,6 +11,13 @@
 //! says (its root, and what git says of its files) goes to every client
 //! following it.
 //!
+//! Folders listed again, and what git says, are passed on as what changed
+//! in them only while every client following the explorer asked for that,
+//! as a client that didn't, or can't read them, would be sent changes to
+//! what it never had: it's attached there again, asking for them whole,
+//! as one that didn't follows it, and asking for changes again once the
+//! last of those has gone.
+//!
 //! A file operation names no explorer, only paths, so a client says which
 //! pane it's asked from ([`ClientMessage::FileOp`]'s `pane`, protocol 92),
 //! whose machine its paths are on: one on another machine is asked of the
@@ -40,6 +47,8 @@ pub(in crate::server) struct FollowedFiles {
     /// Those of them that asked for folders listed again as what changed
     /// in them.
     changes: BTreeSet<Token>,
+    /// Those of them that asked for what git says as what changed in it.
+    git_changes: BTreeSet<Token>,
     /// It's attached there.
     upstream: bool,
 }
@@ -56,6 +65,21 @@ impl FollowedFiles {
     /// for whole listings as a client that didn't follows it.
     fn takes_changes(&self) -> bool {
         (self.viewers.keys()).all(|token| self.changes.contains(token))
+    }
+
+    /// Whether every client following it asked for what git says as what
+    /// changed in it, which is asked for there only then, as for folders.
+    fn takes_git_changes(&self) -> bool {
+        (self.viewers.keys()).all(|token| self.git_changes.contains(token))
+    }
+
+    /// How it's attached there, for the clients following it.
+    fn attach(&self, files: FilesId) -> Request {
+        Request::AttachFiles {
+            files,
+            changes: self.takes_changes(),
+            git_changes: self.takes_git_changes(),
+        }
     }
 }
 
@@ -77,12 +101,14 @@ impl Daemon {
     /// Has the client at `token` follow this daemon's explorer `local`, if
     /// it's another daemon's, as [`Request::AttachFiles`] asks, sent
     /// folders listed again as what changed in them if it asks for
-    /// `changes`.
+    /// `changes`, and what git says as what changed in it if it asks for
+    /// `git_changes`.
     pub(super) fn route_attach_files(
         &mut self,
         token: Token,
         local: FilesId,
         changes: bool,
+        git_changes: bool,
     ) -> Option<Routed> {
         let (at, remote) = self.relayed_files(local)?;
         let followed = self.links.list[at].relayed.files.entry(local).or_default();
@@ -92,15 +118,16 @@ impl Daemon {
         } else {
             followed.changes.remove(&token);
         }
-        let changes = followed.takes_changes();
+        if git_changes {
+            followed.git_changes.insert(token);
+        } else {
+            followed.git_changes.remove(&token);
+        }
+        let attach = followed.attach(remote);
         if !self.is_linked(at) {
             // Attached there once the connection's made again.
             return Some(Routed::Answered(Response::Done));
         }
-        let attach = Request::AttachFiles {
-            files: remote,
-            changes,
-        };
         let routed = self.wait_for(token, at, attach, Then::Pass);
         if matches!(routed, Routed::Waiting)
             && let Some(followed) = self.links.list[at].relayed.files.get_mut(&local)
@@ -127,21 +154,20 @@ impl Daemon {
         let Some(followed) = relayed.files.get_mut(&local) else {
             return;
         };
-        let took = followed.takes_changes();
+        let took = (followed.takes_changes(), followed.takes_git_changes());
         let Some(open) = followed.viewers.remove(&token) else {
             return;
         };
         followed.changes.remove(&token);
+        followed.git_changes.remove(&token);
         // The last that didn't ask for changes gone, they're asked for.
-        let ask = !took && followed.takes_changes() && followed.upstream;
+        let takes = (followed.takes_changes(), followed.takes_git_changes());
+        let ask = ((!took.0 && takes.0) || (!took.1 && takes.1)) && followed.upstream;
         if ask
             && !followed.viewers.is_empty()
             && let Some(remote) = relayed.mirror.files_numbers.remote(local.0)
         {
-            let attach = Request::AttachFiles {
-                files: FilesId(remote),
-                changes: true,
-            };
+            let attach = followed.attach(FilesId(remote));
             let _ = self.send_upstream(at, &ClientMessage::Request(attach), Expect::Nothing);
         }
         let relayed = &mut self.links.list[at].relayed;
@@ -357,10 +383,7 @@ impl Daemon {
                 continue;
             };
             let files = FilesId(remote);
-            messages.push(ClientMessage::Request(Request::AttachFiles {
-                files,
-                changes: followed.takes_changes(),
-            }));
+            messages.push(ClientMessage::Request(followed.attach(files)));
             let open: BTreeSet<&String> = followed.viewers.values().flatten().collect();
             messages.extend(open.into_iter().map(|dir| ClientMessage::Files {
                 files,

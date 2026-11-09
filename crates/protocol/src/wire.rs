@@ -370,6 +370,11 @@ gates! {
     /// of a daemon that has it, and `GridState`'s `fed`, that a terminal
     /// shows what the daemon feeds it and can't be typed into.
     FED_TERMINALS = 136,
+    /// What git says of an explorer's files sent as what changed in it, to
+    /// a client that asks for that (CLACKA-59): `Request::AttachFiles`'
+    /// `git_changes`, and `FilesUpdate::GitChanged`, which nothing older
+    /// asks for or is sent.
+    GIT_CHANGES = 137,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -636,6 +641,7 @@ impl Since for FilesUpdate {
             | Self::Git(_)
             | Self::NoGit(_) => EARLIER,
             Self::Changed { .. } => FILES_CHANGES,
+            Self::GitChanged { .. } => GIT_CHANGES,
         }
     }
 }
@@ -1494,7 +1500,7 @@ impl Downgrade for ServerMessage {
     /// told of; and `Event::Listening`, which goes only to a client that
     /// asked for it, which an older one never does; and `Event::Reveal`,
     /// which goes only to a window that reads it; and
-    /// `FilesUpdate::Changed`, likewise, as a daemon passing another's
+    /// `FilesUpdate::Changed` and `FilesUpdate::GitChanged`, likewise, as a daemon passing another's
     /// explorer on asks for changes only while every client it passes
     /// them to reads them.
     /// `BufferUpdate::Trust` is dropped too, as the daemon asks only a
@@ -1602,7 +1608,7 @@ impl Downgrade for ServerMessage {
                 | Event::Listening(_)
                 | Event::Paired { .. }
                 | Event::Files {
-                    update: FilesUpdate::Changed { .. },
+                    update: FilesUpdate::Changed { .. } | FilesUpdate::GitChanged { .. },
                     ..
                 }
                 | Event::Buffer {
@@ -2430,8 +2436,9 @@ mod tests {
         // that asked for them is sent; and what the bar is told of panes
         // lent, which an older peer is never shown; and the ports
         // background tabs listen on, which only a client that asked is
-        // sent; and what changed in a folder, which only a client that
-        // asked for changes is sent; and a pane to switch to, which only
+        // sent; and what changed in a folder, or in what git says of an
+        // explorer's files, which only a client that asked for changes is
+        // sent; and a pane to switch to, which only
         // a window that reads it is sent;
         // and the question whether to trust a
         // folder, which only a client that can answer it is asked.
@@ -2439,7 +2446,7 @@ mod tests {
             message,
             ServerMessage::Event(
                 Event::Files {
-                    update: FilesUpdate::Changed { .. },
+                    update: FilesUpdate::Changed { .. } | FilesUpdate::GitChanged { .. },
                     ..
                 } | Event::Paired { .. }
                     | Event::NativeRequest { .. }
@@ -2559,6 +2566,11 @@ mod tests {
         assert_eq!(other.since(), FALLBACKS);
         assert_eq!(BufferUpdate::ChangedOnDisk.since(), EARLIER);
         assert_eq!(FilesUpdate::NoGit(String::new()).since(), EARLIER);
+        let git_changed = FilesUpdate::GitChanged {
+            was: 0,
+            changes: crate::MarksChanges::default(),
+        };
+        assert_eq!(git_changed.since(), GIT_CHANGES);
         assert_eq!(SettingKind::Browser.since(), EARLIER);
         assert_eq!(SettingKind::Subagents.since(), SUBAGENTS);
         let exited = Event::Exited {

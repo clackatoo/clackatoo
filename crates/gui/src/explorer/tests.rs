@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use super::*;
-use clackatoo_protocol::ListingChanges;
+use clackatoo_protocol::{ListingChanges, MarksChanges};
 
 use crate::vim::list::Searching;
 
@@ -208,6 +208,62 @@ fn what_changed_in_a_directory_is_made_to_its_listing_and_any_other_asks_for_it_
     explorer.reconnected();
     changed(&mut explorer, "/p", 3, made_b);
     assert_eq!(shown(&mut explorer).len(), 5, "shown as it was till listed");
+}
+
+#[test]
+fn what_changed_in_what_git_says_is_made_to_it_and_any_other_attaches_again() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, vec![file("a"), file("b"), file("c")]);
+    let mark = |path: &str, mark| (path.to_owned(), mark);
+    explorer.update(FilesUpdate::Git(vec![
+        mark("/p/a", GitMark::Modified),
+        mark("/p/c", GitMark::Untracked),
+    ]));
+    let made_b = MarksChanges {
+        removed: Vec::new(),
+        added: vec![(1, mark("/p/b", GitMark::Added))],
+    };
+    let git_changed = |explorer: &mut Explorer, was, changes: &MarksChanges| {
+        explorer.update(FilesUpdate::GitChanged {
+            was,
+            changes: changes.clone(),
+        });
+    };
+    git_changed(&mut explorer, 2, &made_b);
+    assert_eq!(
+        shown(&mut explorer),
+        ["~/p", "    ..", "M   a", "A   b", "?   c"]
+    );
+    assert!(!explorer.take_attach_again());
+
+    // Changes to what it hasn't, as what's another length: sent whole
+    // again, and nothing changed meanwhile.
+    git_changed(&mut explorer, 2, &made_b);
+    assert!(explorer.take_attach_again());
+    assert!(!explorer.take_attach_again(), "asked once");
+    // Nor by later ones, until it's come whole.
+    let clean_a = MarksChanges {
+        removed: vec![0],
+        added: Vec::new(),
+    };
+    git_changed(&mut explorer, 3, &clean_a);
+    assert_eq!(shown(&mut explorer)[2], "M   a");
+    explorer.update(FilesUpdate::Git(vec![
+        mark("/p/a", GitMark::Modified),
+        mark("/p/b", GitMark::Added),
+        mark("/p/c", GitMark::Untracked),
+    ]));
+    git_changed(&mut explorer, 3, &clean_a);
+    assert_eq!(
+        shown(&mut explorer),
+        ["~/p", "    ..", "    a", "A   b", "?   c"]
+    );
+
+    // Nothing's made to what was sent on a connection gone: shown as it
+    // was till it's sent whole.
+    explorer.reconnected();
+    git_changed(&mut explorer, 2, &clean_a);
+    assert_eq!(shown(&mut explorer)[3], "A   b");
 }
 
 #[test]
