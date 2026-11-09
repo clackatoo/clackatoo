@@ -47,11 +47,11 @@ try {
   await page.screenshot({path:`${output}/phone-home.png`,fullPage:true});
   // The measurements, asked for from the list, show over the page and
   // take no taps; asked for again, they go.
-  await page.getByRole('button',{name:'Screen measurements',exact:true}).click();
+  await page.locator('.measures-toggle').dispatchEvent('click'); // Hidden where the pointer hovers.
   await page.locator('.measures').waitFor();
   assert.equal(await page.locator('.measures').evaluate(e=>getComputedStyle(e).pointerEvents),'none');
   assert(/visual {2}h /.test(await page.locator('.measures').textContent()),'measurements should list the visual viewport');
-  await page.getByRole('button',{name:'Screen measurements',exact:true}).click();
+  await page.locator('.measures-toggle').dispatchEvent('click'); // Hidden where the pointer hovers.
   await page.locator('.measures').waitFor({state:'detached'});
   await page.getByRole('button',{name:/Needs you/}).click();
   await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).waitFor({state:'hidden'});
