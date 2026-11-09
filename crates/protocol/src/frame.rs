@@ -1250,6 +1250,7 @@ mod tests {
             passed: Vec::new(),
             kept: Vec::new(),
             homes: Vec::new(),
+            zoomed: Vec::new(),
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -1502,6 +1503,7 @@ mod tests {
             passed: Vec::new(),
             kept: Vec::new(),
             homes: Vec::new(),
+            zoomed: Vec::new(),
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

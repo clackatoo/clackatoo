@@ -1350,6 +1350,14 @@ impl Facts for DeskFacts<'_> {
             .map_or(0, |workspace| workspace.background.len())
     }
 
+    fn zoomed(&self) -> bool {
+        let Some(tab) = self.desk.tutor.open.as_ref().and_then(|open| open.tab) else {
+            return false;
+        };
+        (self.desk.workspaces.find_tab(tab))
+            .is_some_and(|(_, tab)| self.desk.workspaces.zoomed_in(tab).is_some())
+    }
+
     fn kept_terminals(&self) -> usize {
         let Some(workspace) =
             (self.desk.shown).and_then(|shown| self.desk.workspaces.get(shown.workspace))

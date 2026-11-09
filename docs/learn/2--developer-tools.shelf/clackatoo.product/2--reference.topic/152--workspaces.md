@@ -1,7 +1,7 @@
 ---
 title: Workspaces, Tabs, and Panes
 type: reference
-description: Workspaces, tabs, panes and splits, what comes back after a restart, keeping a terminal running, background tabs, the command line, moving between panes, Ctrl+B, and the finder.
+description: Workspaces, tabs, panes and splits, zooming a pane, opening again what was closed, what comes back after a restart, keeping a terminal running, background tabs, the command line, moving between panes, Ctrl+B, and the finder.
 related:
   - clackatoo/reference/window
 ---
@@ -65,6 +65,48 @@ The daemon keeps all of them, as it keeps terminals. Closing the window closes
 nothing, and the next window opens on the workspace, tab and pane last used.
 Each window shows one workspace, so two windows can show two workspaces, or
 two tabs of one.
+
+### Zooming a pane
+
+<kbd>Ctrl</kbd>+<kbd>B</kbd> `z`, or `:zoom`, zooms the focused pane: it
+fills its tab, and the tab's other panes are hidden, still running. The tab's
+name ends with ` Z` while it's zoomed. The same key, or `:zoom` again, puts
+the splits back as they were.
+
+Going to another of the tab's panes, as <kbd>Ctrl</kbd>+<kbd>B</kbd> `h` or
+<kbd>Ctrl</kbd>+<kbd>L</kbd> does, or splitting a pane in it, puts the splits
+back first, as tmux does. So does the zoomed pane closing.
+
+The zoom belongs to the tab, which the daemon keeps, as it keeps the layout:
+every window showing the tab shows it zoomed, and goes to the zoomed pane. It
+stays zoomed through an upgrade and a restart.
+
+### Opening again what was closed
+
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd>, or `:reopen`, opens again the
+pane or tab you closed last, as a browser does. Each time opens the one before
+it, back through the last 20. What comes back is what a
+[restart](#after-a-restart) brings back:
+
+- a terminal, as a new shell in the folder its shell was in, offering the
+  command it was running, which <kbd>R</kbd> puts at the prompt;
+- an editor, on its file, with its cursor and view where they were;
+- an explorer or a folder, on its root;
+- a chat, on its agent's session, which it goes on with.
+
+A pane goes back where it was: beside the panes it was beside, on the same
+side, as big as it was. If those have gone, it goes beside the focused pane,
+or into a tab of its own if the tab has gone too. A tab goes back to its place
+among its workspace's tabs. Either gets the focus.
+
+Only what you close is kept: a pane or tab closed with
+<kbd>Ctrl</kbd>+<kbd>B</kbd> `x`, `:close`, `:q` and the like, in any window
+or with the `clackatoo` command. A terminal whose program ends isn't, nor is a
+[subagent](~clackatoo/reference/chats-together#subagents) sent back to its
+parent, which is still there. A terminal you [kept running](#keeping-a-terminal-running)
+comes back offering its command, not running it. The list is the daemon's:
+any window can open again what another closed. It's kept through an upgrade,
+but not through a restart.
 
 ### After a restart
 
@@ -352,6 +394,8 @@ other pane, `5:` opens the command line as `:` does. From a selection it's
 | `:rename NAME` | Renames the workspace shown. |
 | `:bg`, `:bgpane`, `:Background` | Sends the tab shown, or the focused pane, to the [background](#background-tabs), or lists the background tabs. |
 | `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/chats-together#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
+| `:reopen` | [Opens again](#opening-again-what-was-closed) the pane or tab closed last. |
+| `:zoom` | [Zooms the focused pane](#zooming-a-pane) to fill its tab, or puts the splits back. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
 | `:bd`, `:bdelete` | Closes the focused chat for good, pane and all: a subagent's too, which `:q` and `:close` only send back to the background. |
 | `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor-files#writing). |
@@ -505,7 +549,8 @@ program, are bindings like any you make, so
 | `h` `j` `k` `l` | Moves to the pane to the left, below, above or right. |
 | `\|` `-` | Splits the pane, with the new one to the right or below. |
 | `a` | Opens a [chat with an agent](~clackatoo/reference/agents) to the right. |
-| `x` | Closes the pane; a subagent's goes back to the background. |
+| `x` | Closes the pane; a subagent's goes back to the background. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> [opens it again](#opening-again-what-was-closed). |
+| `z` | [Zooms the pane](#zooming-a-pane) to fill its tab, or puts the splits back. |
 | `u` | From a [subagent's](~clackatoo/reference/chats-together#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
 | `r` | Opens the [machine picker](~clackatoo/reference/connecting#picking-a-machine), to open a window on another machine, as `:connect` does. |

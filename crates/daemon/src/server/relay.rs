@@ -584,6 +584,7 @@ impl Daemon {
             // its own clients would see otherwise (CLACKA-131).
             shown.restored.extend(mirror.restored.iter().cloned());
             shown.kept.extend(mirror.kept.iter().cloned());
+            shown.zoomed.extend(mirror.zoomed.iter().copied());
         }
         self.show_held(&mut shown);
         self.others_shown(&mut shown);
@@ -1335,6 +1336,23 @@ impl Daemon {
                     name: name.clone(),
                 };
                 (at, Ok((rename, Then::Pass)))
+            }),
+            &Request::Zoom { tab: local, pane } => self.relayed_tab(local).map(|(at, tab)| {
+                // Zoomed to a pane of its own, by the number it has there.
+                let pane = match pane {
+                    None => Ok(None),
+                    Some(pane) => (self.relayed_pane(pane))
+                        .filter(|&(pane_at, _)| pane_at == at)
+                        .map(|(_, pane)| Some(pane))
+                        .ok_or(Error::NoSuchPane(pane)),
+                };
+                let zoom = pane.and_then(|pane| {
+                    if self.link_wire(at) < wire::LAYOUT_EXTRAS {
+                        return Err(self.too_old(at, "Zooming a tab"));
+                    }
+                    Ok((Request::Zoom { tab, pane }, Then::Pass))
+                });
+                (at, zoom)
             }),
             Request::ResizeSplit {
                 tab: local,

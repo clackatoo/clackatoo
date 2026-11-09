@@ -608,7 +608,7 @@ impl Window {
         let (Some(shown), Some(tab)) = (desk.shown(), desk.shown_tab()) else {
             return text;
         };
-        let placement = Placement::new(&tab.layout, &chrome.geometry.area);
+        let placement = Placement::new(&desk.layout_shown(tab), &chrome.geometry.area);
         let panes = tab.layout.panes();
         for drawing in drawings(desk, self.app.focused, &placement, &panes, shown.pane) {
             for row in &drawing.rows {

@@ -341,19 +341,76 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
         "the practice terminal took the mode"
     );
 
+    // Opened again, zoomed and put back, and closed again.
+    press(
+        &mut desk,
+        Key::Character("T".into()),
+        None,
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    let asked = take_requests(&mut desk);
+    assert!(
+        asked.contains(&Request::Reopen {
+            beside: Some(PaneId(3))
+        }),
+        "{asked:?}"
+    );
+    let again = side_by_side(vec![file_pane(3, 8), pane(2), pane(6)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(again.clone(), vec![], 2)]));
+    desk.answered(Response::PaneCreated(PaneId(6)));
+    answer_all(&mut desk);
+    snapshot(&mut desk, 6);
+    assert_eq!(step(&desk), 10);
+    ctrl_b(&mut desk, "p1");
+    ctrl_b(&mut desk, "z");
+    let asked = take_requests(&mut desk);
+    let zoom = Request::Zoom {
+        tab: TabId(2),
+        pane: Some(PaneId(3)),
+    };
+    assert!(asked.contains(&zoom), "{asked:?}");
+    for _ in &asked {
+        desk.answered(Response::Done);
+    }
+    let mut zoomed = workspaces(vec![with_lesson(again, vec![], 2)]);
+    zoomed.zoomed = vec![clackatoo_protocol::Zoomed {
+        tab: TabId(2),
+        pane: PaneId(3),
+    }];
+    desk.workspaces_changed(zoomed);
+    answer_all(&mut desk);
+    assert_eq!(step(&desk), 11);
+    ctrl_b(&mut desk, "z");
+    let asked = take_requests(&mut desk);
+    let unzoom = Request::Zoom {
+        tab: TabId(2),
+        pane: None,
+    };
+    assert!(asked.contains(&unzoom), "{asked:?}");
+    for _ in &asked {
+        desk.answered(Response::Done);
+    }
+    desk.workspaces_changed(workspaces(vec![with_lesson(two.clone(), vec![], 2)]));
+    answer_all(&mut desk);
+    assert_eq!(step(&desk), 12);
+
     // The command line: Tab completes an option, and Up goes back to it.
     normal_mode(&mut desk);
     let key = |desk: &mut Desk, key| press(desk, Key::Named(key), None, Modifiers::default());
     type_keys(&mut desk, ":set norel");
     key(&mut desk, NamedKey::Tab);
     enter(&mut desk);
-    assert_eq!(step(&desk), 10);
+    assert_eq!(step(&desk), 13);
     type_keys(&mut desk, ":set");
     key(&mut desk, NamedKey::ArrowUp);
     ctrl(&mut desk, "w");
     type_keys(&mut desk, "rnu");
     enter(&mut desk);
-    assert_eq!(step(&desk), 11);
+    assert_eq!(step(&desk), 14);
 
     // A tab of its own, and back.
     command(&mut desk, "Terminal");
@@ -369,10 +426,10 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(5)));
     answer_all(&mut desk);
     snapshot(&mut desk, 5);
-    assert_eq!(step(&desk), 12);
+    assert_eq!(step(&desk), 15);
     command(&mut desk, "2");
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 13);
+    assert_eq!(step(&desk), 16);
 
     // A workspace of its own, and back.
     command(&mut desk, "ws tutor");
@@ -388,25 +445,25 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(6)));
     answer_all(&mut desk);
     snapshot(&mut desk, 6);
-    assert_eq!(step(&desk), 14);
+    assert_eq!(step(&desk), 17);
     ctrl_b(&mut desk, "w");
     type_text(&mut desk, "w");
     enter(&mut desk);
     answer_all(&mut desk);
     assert_eq!(desk.shown().unwrap().tab, TabId(2));
-    assert_eq!(step(&desk), 15);
+    assert_eq!(step(&desk), 18);
 
     // What the bar has said.
     command(&mut desk, "messages");
-    assert_eq!(step(&desk), 16);
+    assert_eq!(step(&desk), 19);
     // The last steps are to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
-    assert!(lesson.steps[16].checks.is_empty());
-    assert!(lesson.steps[17].checks.is_empty());
+    assert!(lesson.steps[19].checks.is_empty());
+    assert!(lesson.steps[20].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
     type_keys(&mut desk, "]s");
-    assert_eq!(step(&desk), 17);
+    assert_eq!(step(&desk), 20);
     type_keys(&mut desk, "]s");
     assert_eq!(step(&desk), lesson.steps.len());
     assert!(

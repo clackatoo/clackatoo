@@ -109,6 +109,36 @@ Close the new one, not the practice terminal: closing that ends the lesson.
 panes 2
 ```
 
+## Open it again
+
+Ctrl+Shift+T, or `:reopen`, opens again the pane or tab you closed last, as a browser does, and again for the one before, back through the last twenty. It goes back where it was, as big as it was: a terminal as a new shell in its folder, offering the command it was running, which `R` puts at the prompt; an editor on its file, where its cursor was; a chat on its session. Any window can open again what another closed.
+
+Press Ctrl+Shift+T.
+
+```check
+panes 3
+```
+
+## Zoom a pane
+
+Ctrl+B and then `z`, or `:zoom`, zooms the focused pane: it fills the tab, its other panes hidden but still running, and the tab's name ends with ` Z`, in every window. Going to another of the tab's panes, or splitting one, puts the splits back first, as in tmux.
+
+Go to this lesson's pane, with Ctrl+B `p` and its number, and press Ctrl+B and then `z`.
+
+```check
+zoomed
+focused lesson
+```
+
+## Put the splits back
+
+The same key puts the splits back as they were. Press Ctrl+B and then `z` again, then go to the terminal you opened again and close it with Ctrl+B and then `x`.
+
+```check
+not zoomed
+panes 2
+```
+
 ## Complete with Tab
 
 The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Each suggestion includes a short description of what it does. Capitals mark panes, pickers and overlays (`Terminal`, `Files`, `Messages`); lowercase marks actions (`write`, `format`, `rename`). You can type command names in any case: `:terminal` and `:TERMINAL` both open a terminal. Autocomplete shows the canonical spelling; filenames and other arguments keep their case. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab (or Ctrl+N and Ctrl+P) cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.

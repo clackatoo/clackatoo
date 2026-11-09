@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use clackatoo_protocol::{
     Background, BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Kept as KeptRunning,
     Layout, Machine, MachineHome, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored,
-    ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces, Zoomed,
 };
 
 use crate::server::restore::kept_command;
@@ -190,6 +190,10 @@ pub(crate) struct Mirror {
     /// The terminals of its workspaces it keeps running, by this daemon's
     /// numbers (see [`Workspaces::kept`]).
     pub(crate) kept: Vec<KeptRunning>,
+    /// Its tabs zoomed to one of their panes, by this daemon's numbers
+    /// (see [`Workspaces::zoomed`]). Not in a [`Snapshot`]: said again as
+    /// the connection is made again.
+    pub(crate) zoomed: Vec<Zoomed>,
     /// Its chats, summed up, as this daemon's clients are told them.
     pub(crate) chats: Vec<ChatSummary>,
     /// The panes it lent this daemon, by the number this daemon gave each
@@ -401,13 +405,16 @@ impl Mirror {
         }
         self.cut = taken.cut;
         let (restored, kept_running) = self.renumber_restored(remote, &workspaces);
+        let zoomed = self.renumber_zoomed(remote, &workspaces);
         taken.changed = taken.restarted
             || workspaces != self.workspaces
             || restored != self.restored
-            || kept_running != self.kept;
+            || kept_running != self.kept
+            || zoomed != self.zoomed;
         self.workspaces = workspaces;
         self.restored = restored;
         self.kept = kept_running;
+        self.zoomed = zoomed;
         taken.lent = taken.restarted || lent != self.lent;
         self.lent = lent;
         taken.held = held_for != self.held_for;
@@ -570,6 +577,23 @@ impl Mirror {
     /// what's asked of such a pane, as dismissing its offer, goes to the
     /// machine it's on, never to `remote`. Each command is one this daemon
     /// would offer itself, or none.
+    /// The tabs `remote` says are zoomed, by this daemon's numbers: only
+    /// tabs of `workspaces`, those shown, each zoomed to a pane of its own.
+    fn renumber_zoomed(&self, remote: &Workspaces, workspaces: &[Workspace]) -> Vec<Zoomed> {
+        let tabs: Vec<&Tab> = (workspaces.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .collect();
+        (remote.zoomed.iter())
+            .filter_map(|zoomed| {
+                let tab = TabId(self.tab_numbers.local(zoomed.tab.0)?);
+                let pane = PaneId(self.pane_numbers.local(zoomed.pane.0)?);
+                let shown = tabs.iter().find(|shown| shown.id == tab)?;
+                shown.layout.contains(pane).then_some(Zoomed { tab, pane })
+            })
+            .take(tabs.len())
+            .collect()
+    }
+
     fn renumber_restored(
         &self,
         remote: &Workspaces,
@@ -1103,6 +1127,7 @@ impl From<Snapshot> for Mirror {
             // Said again as the connection is made again.
             home: None,
             homes: Vec::new(),
+            zoomed: Vec::new(),
             cut: m.cut,
             workspace_numbers: m.workspace_numbers,
             tab_numbers: m.tab_numbers,
@@ -1381,6 +1406,51 @@ mod tests {
         remote.kept.clear();
         assert!(take(&mut mirror, &mut fresh, &remote).changed);
         assert!(mirror.kept.is_empty());
+    }
+
+    #[test]
+    fn another_daemons_zoomed_tabs_are_renumbered_for_the_tabs_shown() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(1, Content::Terminal(TerminalId(1))),
+                pane(2, Content::Terminal(TerminalId(2))),
+            ],
+            shares: vec![1, 1],
+        };
+        let mut remote = workspaces(vec![workspace(1, "main", split, 1)]);
+        let remote_tab = remote.list[0].tabs[0].id;
+        remote.zoomed = vec![
+            Zoomed {
+                tab: remote_tab,
+                pane: PaneId(2),
+            },
+            // A tab it doesn't show, and a pane not in the tab, are left
+            // out.
+            Zoomed {
+                tab: TabId(77),
+                pane: PaneId(1),
+            },
+        ];
+        let take = |mirror: &mut Mirror, fresh: &mut Counters, remote: &Workspaces| {
+            mirror.take(remote, &machine(5), HERE, fresh, &following(&[]), true)
+        };
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        let tab = mirror.workspaces[0].tabs[0].id;
+        assert_eq!(
+            mirror.zoomed,
+            [Zoomed {
+                tab,
+                pane: PaneId(302)
+            }]
+        );
+        assert!(!take(&mut mirror, &mut fresh, &remote).changed);
+        // Unzoomed there, it is here, and that's a change.
+        remote.zoomed.clear();
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        assert!(mirror.zoomed.is_empty());
     }
 
     /// A background tab of another daemon's.

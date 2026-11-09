@@ -2161,6 +2161,7 @@ mod tests {
             passed: Vec::new(),
             kept: Vec::new(),
             homes: Vec::new(),
+            zoomed: Vec::new(),
         };
         state.chats = vec![
             summary(1, Some(1), false, 5 * 60_000),
@@ -2862,6 +2863,7 @@ mod tests {
             passed: Vec::new(),
             kept: Vec::new(),
             homes: Vec::new(),
+            zoomed: Vec::new(),
         };
         state.terminals = vec![TerminalInfo {
             id: TerminalId(2),

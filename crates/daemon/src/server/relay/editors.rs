@@ -288,7 +288,7 @@ impl Asked {
 pub(super) enum Out {
     /// A frame, encoded for it.
     Frame(Vec<u8>),
-    Event(Event),
+    Event(Box<Event>),
 }
 
 impl Daemon {
@@ -1551,17 +1551,17 @@ impl Daemon {
     fn tell_relayed(&mut self, token: Token, local: BufferId, update: BufferUpdate) {
         self.send_out(
             token,
-            Out::Event(Event::Buffer {
+            Out::Event(Box::new(Event::Buffer {
                 buffer: local,
                 update,
-            }),
+            })),
         );
     }
 
     /// Sends the client at `token` `out`.
     pub(super) fn send_out(&mut self, token: Token, out: Out) {
         match out {
-            Out::Event(event) => self.send_event(token, event),
+            Out::Event(event) => self.send_event(token, *event),
             Out::Frame(frame) => {
                 let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                     return;

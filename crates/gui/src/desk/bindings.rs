@@ -11,6 +11,7 @@
 //! | `h` `j` `k` `l` | The pane left, below, above, right |
 //! | `\|` `-` | Splits the pane, to the right or below |
 //! | `x` | Closes the pane |
+//! | `z` | Zooms the pane to fill its tab, or puts the splits back, as tmux's `z` does (see [`super::layouts`]) |
 //! | `o` `i` | Back and forward through the jump list, within the tab (see [`super::jumps`]) |
 //! | `a` | Opens a chat with an agent, to the right |
 //! | `w` | Picks a workspace, or makes one, in the palette |
@@ -19,6 +20,9 @@
 //! | `b` `p` | Sends the focused pane to the background, in a tab of its own, as `:bgpane` does |
 //! | `b` `l` | Lists the background tabs, as `:Background` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
+//!
+//! Ctrl+Shift+T, in normal, insert or visual mode, opens again the pane or
+//! tab closed last, as a browser's does (see [`super::layouts`]).
 //!
 //! Ctrl+Shift+Alt+V, in normal, insert or visual mode, pastes the
 //! clipboard's image into the
@@ -108,6 +112,10 @@ pub(crate) enum Action {
     /// A new pane beside the focused one.
     Split(Side, Kind),
     Close,
+    /// The tab zoomed to the focused pane, or its splits put back.
+    Zoom,
+    /// The pane or tab closed last, opened again.
+    Reopen,
     /// Back through the jump list, or forward, within the tab or anywhere.
     Jump {
         back: bool,
@@ -248,6 +256,8 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b>|", terminal(Side::Right), Some("split right"));
     bind("niv", "<C-b>-", terminal(Side::Below), Some("split below"));
     bind("niv", "<C-b>x", Action::Close, Some("close pane"));
+    // As tmux's.
+    bind("niv", "<C-b>z", Action::Zoom, Some("zoom pane"));
     let jump = |back| Action::Jump {
         back,
         within_tab: true,
@@ -264,6 +274,13 @@ fn defaults() -> Keymap<Binding> {
         bind("niv", keys, Action::Background(command), Some(label));
     }
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, Some("send Ctrl+B"));
+    // As a browser's: the terminal's own, as Ctrl+Shift+letters are.
+    bind(
+        "niv",
+        "<C-T>",
+        Action::Reopen,
+        Some("Open again what was closed last"),
+    );
     // Beside Ctrl+Shift+V, which pastes text: the terminal's own, as
     // Ctrl+Shift+letters are.
     bind(
@@ -528,6 +545,8 @@ impl Desk {
                 agent: None,
             }),
             Action::Close => self.run(Command::Close),
+            Action::Zoom => self.run(Command::Zoom),
+            Action::Reopen => self.run(Command::Reopen),
             Action::ParentChat => self.go_to_parent_chat(),
             // `3<C-o>` goes back three places, as in Vim.
             Action::Jump { back, within_tab } => {

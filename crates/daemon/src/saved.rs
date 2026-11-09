@@ -215,6 +215,11 @@ pub(crate) struct Tab {
     /// the top left.
     #[serde(default)]
     pub(crate) focused: usize,
+    /// Which pane the tab was zoomed to, filling it, if it was, by its
+    /// place as `focused` is (CLACKA-240). Builds before then pass this
+    /// over, and show the tab's splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) zoomed: Option<usize>,
 }
 
 /// How a tab's space is shared between its panes.
@@ -341,6 +346,53 @@ pub(crate) enum Pane {
         /// The directory whose project it's of.
         root: String,
     },
+}
+
+/// A pane or a tab the user closed, kept to open again (CLACKA-240):
+/// what it showed, as it's kept for a restart, and where it was, by the
+/// numbers of the daemon's run. Kept only while the daemon runs, and
+/// through its upgrades, as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "twenty at most, kept as they close"
+)]
+pub(crate) enum Closed {
+    /// A pane of a tab of several.
+    Pane {
+        /// Its workspace.
+        workspace: u32,
+        /// Its tab.
+        tab: u32,
+        /// Where in the tab it was, if anything else was beside it.
+        place: Option<Beside>,
+        /// What it showed.
+        pane: Pane,
+    },
+    /// A tab, its splits and all.
+    Tab {
+        /// Its workspace.
+        workspace: u32,
+        /// Its place among the workspace's tabs.
+        index: usize,
+        /// Its name, splits and panes.
+        tab: Tab,
+    },
+}
+
+/// Where in its tab a pane closed was: beside the part of the layout
+/// holding `beside`, on its `side`, with `share` thousandths of their
+/// split.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Beside {
+    /// The panes of the part it was beside, by their numbers.
+    pub(crate) panes: Vec<u32>,
+    /// Which side of them it was on: `right`, `left`, `below` or `above`.
+    pub(crate) side: String,
+    /// Its share of the split they were in, in thousandths, from 1 to
+    /// 999.
+    pub(crate) share: u16,
 }
 
 /// Where a chat an agent started stood among the others: what a cold
@@ -840,6 +892,7 @@ mod tests {
                                 shares: vec![1, 3],
                             },
                             focused: 1,
+                            zoomed: None,
                         },
                         Tab {
                             name: Some("agents".into()),
@@ -870,6 +923,7 @@ mod tests {
                                 shares: vec![1, 1, 1],
                             },
                             focused: 0,
+                            zoomed: None,
                         },
                     ],
                     active_tab: 1,
@@ -901,6 +955,7 @@ mod tests {
                             shares: vec![1, 1, 1, 1],
                         },
                         focused: 0,
+                        zoomed: None,
                     }],
                     active_tab: 0,
                     lent: None,
@@ -963,6 +1018,7 @@ mod tests {
                 keep: None,
             }),
             focused: 0,
+            zoomed: None,
         }];
         assert_eq!(State::decode(&state.encode()).unwrap(), state);
     }

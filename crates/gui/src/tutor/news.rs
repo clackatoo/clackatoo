@@ -1379,6 +1379,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Lessons open in a window on another machine, and in another machine's workspace",
     },
+    News {
+        id: "zoom",
+        date: "2026-11-09",
+        lesson: "basics",
+        what: "Ctrl+B z zooms a pane to fill its tab, in every window, and puts the splits back",
+    },
+    News {
+        id: "reopen",
+        date: "2026-11-09",
+        lesson: "basics",
+        what: "Ctrl+Shift+T or :reopen opens again the pane or tab you closed last, where it was",
+    },
 ];
 
 impl News {

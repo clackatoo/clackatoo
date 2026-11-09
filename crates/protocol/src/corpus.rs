@@ -575,6 +575,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 passed: Vec::new(),
                 kept: Vec::new(),
                 homes: Vec::new(),
+                zoomed: Vec::new(),
             }))),
         ),
         (
@@ -1056,6 +1057,31 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::HOMES,
         Server(ServerMessage::Event(Event::Workspaces(homes))),
     ));
+    // A tab zoomed to one of its panes, zooming one and putting it back,
+    // and opening again what was closed (CLACKA-240).
+    let mut zoomed = workspaces();
+    zoomed.zoomed = vec![crate::Zoomed {
+        tab: TabId(2),
+        pane: PaneId(1),
+    }];
+    samples.extend(
+        [
+            Server(ServerMessage::Event(Event::Workspaces(zoomed))),
+            Client(ClientMessage::Request(Request::Zoom {
+                tab: TabId(2),
+                pane: Some(PaneId(1)),
+            })),
+            Client(ClientMessage::Request(Request::Zoom {
+                tab: TabId(2),
+                pane: None,
+            })),
+            Client(ClientMessage::Request(Request::Reopen {
+                beside: Some(PaneId(1)),
+            })),
+            Client(ClientMessage::Request(Request::Reopen { beside: None })),
+        ]
+        .map(|sample| (crate::wire::LAYOUT_EXTRAS, sample)),
+    );
     // Turns that failed with something to do about it: signing in again,
     // and starting a new chat.
     let failed = |at: u32, remedy: crate::Remedy| {
@@ -3930,6 +3956,7 @@ fn workspaces() -> Workspaces {
         passed: Vec::new(),
         kept: Vec::new(),
         homes: Vec::new(),
+        zoomed: Vec::new(),
     }
 }
 

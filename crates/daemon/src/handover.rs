@@ -102,6 +102,10 @@
 //!     pushed, and how far a task has got. Before, an upgrade dropped
 //!     them, and keys went in xterm's encoding until a program asked
 //!     again.
+//! 48. What a tab's layout keeps beside its splits (CLACKA-240): the
+//!     tabs zoomed to one of their panes, and the panes and tabs the user
+//!     closed, to open again. Before, an upgrade unzoomed every tab and
+//!     forgot what was closed.
 
 pub(crate) mod relay;
 
@@ -116,7 +120,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 46;
+pub(crate) const VERSION: u32 = 48;
 
 /// The first version written by a build that asks before a folder's
 /// language servers run (CLACKA-224): a build handing over an older one
@@ -126,7 +130,7 @@ pub(crate) const ASKS_TRUST: u32 = 45;
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -319,6 +323,21 @@ pub(crate) struct State {
     /// their modes: see [`Asked`]. Since version 46; before, nothing was
     /// kept.
     pub(crate) asked: Vec<Asked>,
+    /// What tabs' layouts keep beside their splits: see [`LayoutExtras`].
+    /// Since version 48; `None` before.
+    pub(crate) layout: Option<LayoutExtras>,
+}
+
+/// What tabs' layouts keep beside their splits (CLACKA-240). Since
+/// version 48.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct LayoutExtras {
+    /// The tabs zoomed, each by its number and its pane's.
+    pub(crate) zoomed: Vec<(u32, u32)>,
+    /// The panes and tabs the user closed, to open again, the newest last,
+    /// each as the JSON of `saved::Closed`: one a build can't read is let
+    /// go, rather than the whole handover.
+    pub(crate) closed: Vec<String>,
 }
 
 /// What the program in terminal `terminal` asked of it beyond its modes
@@ -1777,6 +1796,7 @@ impl State {
             // Version 45 is 44's shape: it says only that the build
             // handing over asked before a folder's servers ran.
             44 | 45 => Ok(postcard::from_bytes::<v45::State>(body)?.into()),
+            46 => Ok(postcard::from_bytes::<v46::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         };
@@ -1882,6 +1902,7 @@ mod v31 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -1984,6 +2005,7 @@ mod v30 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2085,6 +2107,7 @@ mod v29 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2185,6 +2208,7 @@ mod v28 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2283,6 +2307,7 @@ mod v27 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2384,6 +2409,7 @@ mod v26 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2482,6 +2508,7 @@ mod v25 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2578,6 +2605,7 @@ mod v24 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2672,6 +2700,7 @@ mod v23 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2779,6 +2808,7 @@ mod v22 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2869,6 +2899,7 @@ mod v21 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -2957,6 +2988,7 @@ mod v20 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3041,6 +3073,7 @@ mod v19 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3125,6 +3158,7 @@ mod v18 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3674,6 +3708,7 @@ mod v7 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3782,6 +3817,7 @@ mod v8 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3860,6 +3896,7 @@ mod v9 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -3940,6 +3977,7 @@ mod v11 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4069,6 +4107,7 @@ mod v15 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4152,6 +4191,7 @@ mod v14 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4233,6 +4273,7 @@ mod v13 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4356,6 +4397,7 @@ mod v12 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4477,6 +4519,7 @@ mod v10 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -4496,6 +4539,12 @@ mod tests {
                 terminal: 1,
                 asked: asked(),
             }],
+            layout: Some(LayoutExtras {
+                zoomed: vec![(1, 2)],
+                closed: vec![
+                    r#"{"pane":{"workspace":1,"tab":1,"place":{"panes":[2],"side":"right","share":500},"pane":{"terminal":{"cwd":"/src","ran":"make"}}}}"#.into(),
+                ],
+            }),
             mcp: Some(Mcp {
                 key: [5; 32],
                 sessions: vec![
@@ -5556,7 +5605,10 @@ mod tests {
 
     #[test]
     fn version_30_keeps_originals_and_their_thumbnail_references() {
-        assert_eq!(READABLE, (1..=VERSION).collect::<Vec<_>>());
+        // 47 is another branch's, numbered as this one is, provisionally
+        // (CLACKA-240): it's read once that branch is merged.
+        let readable: Vec<u32> = (1..=VERSION).filter(|&version| version != 47).collect();
+        assert_eq!(READABLE, readable);
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v30.bin"))
             .unwrap();
@@ -5897,14 +5949,33 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v46.bin"]
+    #[ignore = "writes tests/fixtures/handover-v48.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v46.bin"
+            "/tests/fixtures/handover-v48.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
+    }
+
+    #[test]
+    fn version_48_keeps_tabs_zoomed_and_what_was_closed() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v48.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let layout = read.layout.expect("version 48 has them");
+        assert_eq!(layout.zoomed, [(1, 2)]);
+        let closed: crate::saved::Closed = serde_json::from_str(&layout.closed[0]).unwrap();
+        assert!(matches!(closed, crate::saved::Closed::Pane { tab: 1, .. }));
+        // Version 46 had neither, and keeps what it had.
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v46.bin"))
+            .unwrap();
+        let old = State::read(&mut file).unwrap();
+        assert!(old.layout.is_none());
+        assert_eq!(old.asked.len(), 1);
     }
 
     #[test]
@@ -6560,6 +6631,7 @@ mod v32 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -6727,6 +6799,7 @@ mod v33 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -6897,6 +6970,7 @@ mod v34 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7070,6 +7144,7 @@ mod v35 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7246,6 +7321,7 @@ mod v36 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7425,6 +7501,7 @@ mod v37 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7604,6 +7681,7 @@ mod v38 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7783,6 +7861,7 @@ mod v39 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -7964,6 +8043,7 @@ mod v40 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -8177,6 +8257,7 @@ mod v41 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -8384,6 +8465,7 @@ mod v42 {
                 federation: None,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -8593,6 +8675,7 @@ mod v43 {
                 federation: s.federation,
                 mcp: None,
                 asked: Vec::new(),
+                layout: None,
             }
         }
     }
@@ -8805,6 +8888,224 @@ mod v45 {
                 federation: s.federation,
                 mcp: s.mcp,
                 asked: Vec::new(),
+                layout: None,
+            }
+        }
+    }
+}
+
+/// Version 46, before tabs' layouts kept what they keep beside their
+/// splits.
+mod v46 {
+    use super::{
+        AgentCommand, Applied, Asked, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches,
+        ChatContinuation, ChatDraft, ChatForks, ChatPreviews, ChatQueue, ChatUids, Connection,
+        Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known, Lender, Lent,
+        LentBackground, Live, Mcp, NestedItem, Process, Restored, Reviews, Sharing, Shell, Talk,
+        Terminal, ToolPreviews, Trusted, Undelivered, Workspaces, relay,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        pub(super) listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        pub(super) lock: Option<u32>,
+        /// The ID the next terminal gets.
+        pub(super) next_terminal: u32,
+        pub(super) terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        pub(super) chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        pub(super) orphans: Vec<Process>,
+        pub(super) workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        pub(super) next_buffer: u32,
+        /// Files being edited.
+        pub(super) buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        pub(super) next_files: u32,
+        /// File explorers.
+        pub(super) explorers: Vec<Files>,
+        /// What agents changed in files.
+        pub(super) edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        pub(super) applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        pub(super) daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        pub(super) reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        pub(super) recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        pub(super) shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        pub(super) machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        pub(super) connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        pub(super) lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        pub(super) borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        pub(super) lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        pub(super) sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        pub(super) key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        pub(super) keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        pub(super) background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        pub(super) kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        pub(super) trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        pub(super) exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        pub(super) restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        pub(super) chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        pub(super) tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        pub(super) image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        pub(super) chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        pub(super) chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        pub(super) activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34; before, they
+        /// kept nothing, and none changed nothing.
+        pub(super) undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs of the daemons they're lent
+        /// to, and the failure of each not seen there yet. Since version 35;
+        /// before, none was.
+        pub(super) lent_background: Vec<LentBackground>,
+        /// Messages chats sent others that waited their turns and were
+        /// dropped as they came, so each sender is still told why. Since
+        /// version 36; before, none was.
+        pub(super) undelivered: Vec<Undelivered>,
+        /// Where chats stand among the others: see [`Talk`]. Since version
+        /// 37; `None` before, from a build that couldn't hand it over.
+        pub(super) talk: Option<Talk>,
+        /// The agents' processes that go on through the upgrade, and what
+        /// goes on with them: see [`Live`]. Since version 38; `None` before,
+        /// and from a build that stopped its agents, as it was told to, or as
+        /// the build it upgraded to couldn't take them.
+        pub(super) live: Option<Live>,
+        /// The items of chats' turns that an agent's own subagents did: see
+        /// [`NestedItem`]. Since version 39; before, none was.
+        pub(super) nested: Vec<NestedItem>,
+        /// The messages being typed in chats' boxes and not sent yet. Since
+        /// version 40; before, none was kept.
+        pub(super) drafts: Vec<ChatDraft>,
+        /// The numbers that stay with chats' turns, of the chats whose turns
+        /// aren't each numbered by their index: see [`ChatUids`]. Since
+        /// version 41; before, every turn was.
+        pub(super) uids: Vec<ChatUids>,
+        /// The branches of chats' conversations, of the chats that have been
+        /// cut back: see [`ChatBranches`]. Since version 41.
+        pub(super) branches: Vec<ChatBranches>,
+        /// Where chats' agent sessions can be forked: see [`ChatForks`].
+        /// Since version 41; before, none was known.
+        pub(super) forks: Vec<ChatForks>,
+        /// Command ownership and permanent selection protection, since 42.
+        /// None from older builds: selection history is unknown, so retain all.
+        pub(super) agent_terminals: Option<Vec<AgentCommand>>,
+        /// Federated views and edit receipts, since version 43.
+        pub(super) federation: Option<relay::Federation>,
+        /// What the secrets given chats' MCP servers are checked against,
+        /// since version 44.
+        pub(super) mcp: Option<Mcp>,
+        /// What programs asked of the terminals that asked anything beyond
+        /// their modes, since version 46.
+        pub(super) asked: Vec<Asked>,
+    }
+    impl From<State> for super::State {
+        fn from(s: State) -> Self {
+            Self {
+                listener: s.listener,
+                lock: s.lock,
+                next_terminal: s.next_terminal,
+                terminals: s.terminals,
+                chats: s.chats,
+                orphans: s.orphans,
+                workspaces: s.workspaces,
+                next_buffer: s.next_buffer,
+                buffers: s.buffers,
+                next_files: s.next_files,
+                explorers: s.explorers,
+                edits: s.edits,
+                applied: s.applied,
+                daemon: s.daemon,
+                reviews: s.reviews,
+                recovery_lock: s.recovery_lock,
+                shells: s.shells,
+                machine: s.machine,
+                connections: s.connections,
+                lent: s.lent,
+                borrowers: s.borrowers,
+                lenders: s.lenders,
+                sharing: s.sharing,
+                key: s.key,
+                keys: s.keys,
+                background: s.background,
+                kept: s.kept,
+                trusted: s.trusted,
+                exes: s.exes,
+                restored: s.restored,
+                chat_previews: s.chat_previews,
+                tool_previews: s.tool_previews,
+                image_originals: s.image_originals,
+                chat_queues: s.chat_queues,
+                chat_continuations: s.chat_continuations,
+                activities: s.activities,
+                undo_states: s.undo_states,
+                lent_background: s.lent_background,
+                undelivered: s.undelivered,
+                talk: s.talk,
+                live: s.live,
+                nested: s.nested,
+                drafts: s.drafts,
+                uids: s.uids,
+                branches: s.branches,
+                forks: s.forks,
+                agent_terminals: s.agent_terminals,
+                federation: s.federation,
+                mcp: s.mcp,
+                asked: s.asked,
+                layout: None,
             }
         }
     }

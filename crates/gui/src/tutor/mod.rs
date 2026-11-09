@@ -391,6 +391,9 @@ mod tests {
         fn kept_terminals(&self) -> usize {
             0
         }
+        fn zoomed(&self) -> bool {
+            false
+        }
     }
 
     #[test]

@@ -181,6 +181,7 @@ mod explorers;
 mod finding;
 mod formatting;
 mod jumps;
+mod layouts;
 mod lessons;
 mod links;
 mod macros;
@@ -717,13 +718,26 @@ impl Desk {
         self.workspaces.get(shown.workspace)?.tab(shown.tab)
     }
 
+    /// What the shown tab shows: the pane it's zoomed to alone, or else
+    /// its splits (see [`Workspaces::zoomed`]).
+    pub(crate) fn shown_layout(&self) -> Option<std::borrow::Cow<'_, Layout>> {
+        Some(self.layout_shown(self.shown_tab()?))
+    }
+
+    /// What `tab` shows, as [`shown_layout`](Self::shown_layout) says.
+    pub(crate) fn layout_shown<'a>(&self, tab: &'a Tab) -> std::borrow::Cow<'a, Layout> {
+        self.workspaces.shown_layout(tab)
+    }
+
     /// Where the shown tab's panes go, with any split being resized at its
-    /// new shares.
+    /// new shares: only the pane it's zoomed to, if it is.
     pub(crate) fn placement(&self) -> Option<Placement> {
+        let layout = self.shown_layout()?;
         let tab = self.shown_tab()?;
         let area = self.area.as_ref()?;
         if let Some((resized, path, new_shares)) = &self.split_shares
             && *resized == tab.id
+            && matches!(layout, std::borrow::Cow::Borrowed(_))
         {
             let mut layout = tab.layout.clone();
             if let Some(Layout::Split { shares, .. }) = layout.at_mut(path)
@@ -733,7 +747,7 @@ impl Desk {
             }
             return Some(Placement::new(&layout, area));
         }
-        Some(Placement::new(&tab.layout, area))
+        Some(Placement::new(&layout, area))
     }
 
     /// The title for the window: the focused pane's program's, or file's.
@@ -806,6 +820,10 @@ impl Desk {
             .enumerate()
             .map(|(index, tab)| {
                 let mut name = self.tab_name(index, tab);
+                // Zoomed to one of its panes, as tmux marks a window.
+                if self.workspaces.zoomed_in(tab).is_some() {
+                    name.push_str(" Z");
+                }
                 // A chat at work, asking, or finished unseen, anywhere in
                 // the tab: in another tab, or beside the pane with the
                 // keyboard, it says so. Still: it never wakes the window.
@@ -1058,6 +1076,9 @@ impl Desk {
         if self.loses_blank(&panes) {
             self.say(BLANK_KEPT.into());
             return;
+        }
+        for &pane in &panes {
+            self.tell_place_of(pane);
         }
         self.request(Request::CloseTab { tab }, Asked::Command);
     }
@@ -1527,6 +1548,7 @@ impl Desk {
         }
         let shown = self.shown;
         self.settle();
+        self.follow_zoom();
         // A pane a macro waiting closed, as with `:q`, moves the focus as it
         // asked: it goes on in the pane that has it. Closed by anyone else,
         // the macro stops, as its keys were for that pane.
@@ -2726,10 +2748,12 @@ impl Desk {
     /// Focuses the pane beside the focused one towards `direction`, if
     /// there is one.
     fn focus_towards(&mut self, direction: Direction) {
+        // Among all the tab's panes, zoomed or not: going to another puts
+        // its splits back, as tmux does.
+        let whole = self.shown_tab().zip(self.area.as_ref());
+        let whole = whole.map(|(tab, area)| Placement::new(&tab.layout, area));
         if let Some(shown) = self.shown
-            && let Some(next) = self
-                .placement()
-                .and_then(|placement| placement.neighbour(shown.pane, direction))
+            && let Some(next) = whole.and_then(|whole| whole.neighbour(shown.pane, direction))
         {
             self.show_pane(next);
         }
@@ -2827,8 +2851,11 @@ impl Desk {
             Command::Close if self.loses_blank(&[shown.pane]) => self.say(BLANK_KEPT.into()),
             Command::Close => {
                 self.closing_pane(shown.pane);
+                self.tell_place_of(shown.pane);
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
+            Command::Zoom => self.toggle_zoom(),
+            Command::Reopen => self.reopen(),
             Command::CloseChat => self.close_chat(),
             Command::Edit { place, path } => self.open_file(place, path),
             Command::EditBlank => self.edit_blank(),
@@ -3120,6 +3147,7 @@ mod tests {
             passed: Vec::new(),
             kept: Vec::new(),
             homes: Vec::new(),
+            zoomed: Vec::new(),
         }
     }
 
@@ -4553,6 +4581,84 @@ mod tests {
         assert_eq!(mode(&desk, 2), Mode::Normal);
     }
 
+    #[test]
+    fn ctrl_b_z_zooms_the_focused_pane_and_its_tab_says_so_until_put_back() {
+        let mut desk = three_tabs();
+        ctrl_b(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "z");
+        let asked = answer_all(&mut desk);
+        let zoom = Request::Zoom {
+            tab: TabId(1),
+            pane: Some(PaneId(2)),
+        };
+        assert!(asked.contains(&zoom), "{asked:?}");
+        // The daemon says it's zoomed: the pane fills the tab.
+        let mut zoomed = desk.workspaces.clone();
+        zoomed.zoomed = vec![clackatoo_protocol::Zoomed {
+            tab: TabId(1),
+            pane: PaneId(2),
+        }];
+        desk.workspaces_changed(zoomed.clone());
+        let placement = desk.placement().unwrap();
+        assert_eq!(placement.panes.len(), 1);
+        assert_eq!(placement.panes[0].0, PaneId(2));
+        assert!(
+            desk.tab_names()[0].1.ends_with(" Z"),
+            "{:?}",
+            desk.tab_names()
+        );
+        // The same key puts the splits back.
+        ctrl_b(&mut desk, "z");
+        let asked = answer_all(&mut desk);
+        let unzoom = Request::Zoom {
+            tab: TabId(1),
+            pane: None,
+        };
+        assert!(asked.contains(&unzoom), "{asked:?}");
+        // Going to another pane goes by the whole tab, zoomed or not, and
+        // the daemon puts the splits back as it's focused.
+        ctrl_b(&mut desk, "h");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        let asked = answer_all(&mut desk);
+        assert!(
+            asked.contains(&Request::Focus { pane: PaneId(1) }),
+            "{asked:?}"
+        );
+        // A window whose tab another zoomed goes to the pane zoomed to.
+        let mut other = zoomed.clone();
+        other.zoomed[0].pane = PaneId(3);
+        desk.workspaces_changed(other);
+        assert_eq!(shown_pane(&desk), PaneId(3));
+    }
+
+    #[test]
+    fn a_tab_of_one_pane_isnt_zoomed_and_ctrl_shift_t_opens_again_what_was_closed() {
+        let mut desk = three_tabs();
+        ctrl_b(&mut desk, "2");
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "z");
+        assert!(!(answer_all(&mut desk).iter()).any(|asked| matches!(asked, Request::Zoom { .. })));
+        press(
+            &mut desk,
+            Key::Character("T".into()),
+            None,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        let asked = answer_all(&mut desk);
+        let reopen = Request::Reopen {
+            beside: Some(PaneId(4)),
+        };
+        assert!(asked.contains(&reopen), "{asked:?}");
+        assert_eq!(crate::command::parse("reopen"), Ok(Command::Reopen));
+        assert_eq!(crate::command::parse("zoom"), Ok(Command::Zoom));
+    }
+
     /// Ctrl+B, then `keys`, each as typed.
     fn ctrl_b(desk: &mut Desk, keys: &str) {
         ctrl(desk, "b");
@@ -4656,6 +4762,7 @@ mod tests {
                 ("|", "split right"),
                 ("-", "split below"),
                 ("x", "close pane"),
+                ("z", "zoom pane"),
                 ("o", "jump back"),
                 ("i", "jump forward"),
                 ("a", "agent chat"),
@@ -4909,7 +5016,7 @@ mod tests {
             bytes: vec![0x02],
         }));
         // Anything else does nothing, and goes nowhere.
-        ctrl_b(&mut desk, "z");
+        ctrl_b(&mut desk, "y");
         assert!(desk.keymap.waiting().is_empty());
         assert!(answer_all(&mut desk).is_empty());
     }

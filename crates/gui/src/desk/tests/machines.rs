@@ -388,6 +388,7 @@ fn a_new_pane_with_no_workspace_shown_makes_one_on_the_machine_named() {
         passed: Vec::new(),
         kept: Vec::new(),
         homes: Vec::new(),
+        zoomed: Vec::new(),
     };
     let mut desk = desk(here(none));
     desk.connections_changed(to_desk(connected()));

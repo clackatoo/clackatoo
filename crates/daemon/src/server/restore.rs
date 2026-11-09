@@ -48,7 +48,7 @@ use super::{Daemon, Hosted};
 use crate::chat::{HostedChat, Standing};
 use crate::profiles::Limits;
 use crate::saved::{self, Pane, Scope, State, Tools};
-use crate::workspaces::Borrowed;
+use crate::workspaces::{Borrowed, MadeTab};
 
 /// How long after something kept changes the workspaces are written: so
 /// a burst of changes, such as a layout being made, is written once, and
@@ -70,7 +70,7 @@ const KEEP_WAIT: Duration = Duration::from_secs(1);
 
 /// The most panes made again as the daemon starts, so a file that holds
 /// thousands can't start thousands of shells.
-const MOST_PANES: usize = 512;
+pub(super) const MOST_PANES: usize = 512;
 
 /// The longest command line kept to offer to run again, in bytes.
 const LONGEST_COMMAND: usize = 1024;
@@ -477,19 +477,37 @@ impl Daemon {
 
     /// `tab`, as it's kept: `None` if none of its panes is.
     fn kept_tab(&self, tab: &clackatoo_protocol::Tab) -> Option<saved::Tab> {
+        self.kept_tab_but(tab, &[])
+    }
+
+    /// `tab`, as it's kept, but for the panes `skipped`: `None` if none of
+    /// the others is.
+    pub(super) fn kept_tab_but(
+        &self,
+        tab: &clackatoo_protocol::Tab,
+        skipped: &[PaneId],
+    ) -> Option<saved::Tab> {
         let mut kept = Vec::new();
-        let layout = self.kept_layout(&tab.layout, &mut kept)?;
+        let layout = self.kept_layout(&tab.layout, &mut kept, skipped)?;
+        let zoomed = self.workspaces.zoomed_to(tab.id);
         Some(saved::Tab {
             name: tab.name.clone(),
             layout,
             focused: (kept.iter().position(|&pane| pane == tab.focused)).unwrap_or(0),
+            zoomed: zoomed.and_then(|zoomed| kept.iter().position(|&pane| pane == zoomed)),
         })
     }
 
     /// `layout`, as it's kept, with the IDs of the panes kept added to
     /// `kept` in order: `None` if none is.
-    fn kept_layout(&self, layout: &Layout, kept: &mut Vec<PaneId>) -> Option<saved::Layout> {
+    fn kept_layout(
+        &self,
+        layout: &Layout,
+        kept: &mut Vec<PaneId>,
+        skipped: &[PaneId],
+    ) -> Option<saved::Layout> {
         match layout {
+            Layout::Pane(pane) if skipped.contains(&pane.id) => None,
             Layout::Pane(pane) => {
                 let saved = self.kept_pane(pane.id, pane.content)?;
                 kept.push(pane.id);
@@ -500,10 +518,11 @@ impl Daemon {
                 parts,
                 shares,
             } => {
-                let (mut parts, mut shares): (Vec<saved::Layout>, Vec<u32>) =
-                    (parts.iter().zip(shares))
-                        .filter_map(|(part, &share)| Some((self.kept_layout(part, kept)?, share)))
-                        .unzip();
+                let (mut parts, mut shares): (Vec<saved::Layout>, Vec<u32>) = (parts
+                    .iter()
+                    .zip(shares))
+                .filter_map(|(part, &share)| Some((self.kept_layout(part, kept, skipped)?, share)))
+                .unzip();
                 match parts.len() {
                     0 => None,
                     1 => parts.pop(),
@@ -521,7 +540,7 @@ impl Daemon {
     /// isn't, a buffer with no file yet, a chat's browser page or what an
     /// agent's command printed.
     #[allow(clippy::too_many_lines, reason = "an arm for each kind of pane")]
-    fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
+    pub(super) fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
         if let Some(borrowed) = self.workspaces.borrowed().get(&id) {
             return Some(Pane::Terminal {
                 cwd: None,
@@ -981,7 +1000,7 @@ impl Daemon {
 
     /// Makes the chats in `layout` again, each by its ID in the run that
     /// kept them, in `chats`, as yet in no pane.
-    fn restore_chats(
+    pub(super) fn restore_chats(
         &mut self,
         layout: &saved::Layout,
         chats: &mut HashMap<u32, (TerminalId, bool)>,
@@ -1224,24 +1243,29 @@ impl Daemon {
     /// Makes `tab` again: its name, layout and focused pane, or `None` if
     /// none of its panes could be made, noting what each has to show for
     /// the restart in `restored`.
-    fn restore_tab(
+    pub(super) fn restore_tab(
         &mut self,
         tab: &saved::Tab,
         chats: &mut HashMap<u32, (TerminalId, bool)>,
         room: &mut usize,
         restored: &mut Vec<Restored>,
-    ) -> Option<(Option<String>, Layout, Option<PaneId>)> {
+    ) -> Option<MadeTab> {
         let mut panes = Vec::new();
         let layout = self.restore_layout(&tab.layout, chats, room, &mut panes, restored)?;
-        let focused = panes.get(tab.focused).copied().flatten();
-        Some((tab.name.clone(), layout, focused))
+        let made = |at: usize| panes.get(at).copied().flatten();
+        Some(MadeTab {
+            name: tab.name.clone(),
+            layout,
+            focused: made(tab.focused),
+            zoomed: tab.zoomed.and_then(made),
+        })
     }
 
     /// Makes `layout` again: `None` if none of its panes could be. Each
     /// pane's ID is added to `panes` in order, or `None` for one that
     /// couldn't be made, and what each has to show for the restart to
     /// `restored`.
-    fn restore_layout(
+    pub(super) fn restore_layout(
         &mut self,
         layout: &saved::Layout,
         chats: &mut HashMap<u32, (TerminalId, bool)>,

@@ -2415,6 +2415,7 @@ mod tests {
                 passed: Vec::new(),
                 kept: Vec::new(),
                 homes: Vec::new(),
+                zoomed: Vec::new(),
             },
             ..State::default()
         };

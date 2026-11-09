@@ -64,6 +64,8 @@ pub(crate) enum Check {
     Rendered,
     Background(usize),
     Kept(usize),
+    /// `zoomed`: the lesson's tab is zoomed to one of its panes.
+    Zoomed,
     Not(Box<Check>),
 }
 
@@ -170,6 +172,8 @@ pub(crate) trait Facts {
     fn said(&self) -> Option<String> {
         None
     }
+    /// Whether the lesson's tab is zoomed to one of its panes.
+    fn zoomed(&self) -> bool;
 }
 
 impl Check {
@@ -238,6 +242,7 @@ impl Check {
             ["rendered"] => Self::Rendered,
             ["background", count] => Self::Background(number(count)?),
             ["kept", count] => Self::Kept(number(count)?),
+            ["zoomed"] => Self::Zoomed,
             _ => return Err("that isn't a check".into()),
         })
     }
@@ -290,6 +295,7 @@ impl Check {
             Self::Rendered => facts.rendered(),
             Self::Background(count) => facts.background_tabs() == *count,
             Self::Kept(count) => facts.kept_terminals() == *count,
+            Self::Zoomed => facts.zoomed(),
             Self::Not(check) => !check.holds(facts),
         }
     }
@@ -466,6 +472,9 @@ mod tests {
         }
         fn said(&self) -> Option<String> {
             self.said.clone()
+        }
+        fn zoomed(&self) -> bool {
+            false
         }
     }
 

@@ -151,6 +151,10 @@ pub(crate) enum Command {
     Rename(String),
     /// Close the focused pane.
     Close,
+    /// Zoom the shown tab to the focused pane, or put its splits back.
+    Zoom,
+    /// Open again the pane or tab closed last.
+    Reopen,
     /// `:bd`: close the focused pane's chat for good, a subagent's too,
     /// whose pane `:q` only sends back to the background.
     CloseChat,
@@ -440,6 +444,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
                 .ok_or_else(|| "rename needs a name: :rename NAME".to_owned());
         }
         "close" => return Ok(Command::Close),
+        "zoom" => return Ok(Command::Zoom),
+        "reopen" => return Ok(Command::Reopen),
         "reload" => return Ok(Command::Reload),
         "set" | "se" | "setpersist" | "setp" => {
             return Ok(Command::Set {
@@ -1016,6 +1022,8 @@ command_names! {
     "workspace" => "Switch to or create a workspace",
     "rename" => "Rename the current workspace",
     "close" => "Close the focused pane",
+    "zoom" => "Zoom the focused pane to fill its tab, or unzoom",
+    "reopen" => "Open again the pane or tab closed last",
     "bdelete" => "Close this chat for good, a subagent's too",
     "bg" => "Move the tab to the background, or run a command there",
     "bgpane" => "Move the focused terminal to the background",
@@ -1222,6 +1230,8 @@ mod tests {
         ("ws", "workspace"),
         ("rename", ""),
         ("close", ""),
+        ("zoom", ""),
+        ("reopen", ""),
         ("bdelete", ""),
         ("bd", "bdelete"),
         ("reload", ""),

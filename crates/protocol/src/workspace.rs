@@ -127,6 +127,26 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::HOMES }, _, _>"
     )]
     pub homes: Vec<MachineHome>,
+    /// The tabs zoomed to one of their panes, which fills the tab, its
+    /// other panes hidden, until it's unzoomed (see
+    /// [`Request::Zoom`](crate::Request::Zoom)): at most one for each tab,
+    /// of the tabs in [`list`](Self::list), never a background tab's.
+    /// Empty from a daemon older than protocol 145, whose tabs are never
+    /// zoomed.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::LAYOUT_EXTRAS }, _>",
+        deserialize_with = "wire::since::<{ wire::LAYOUT_EXTRAS }, _, _>"
+    )]
+    pub zoomed: Vec<Zoomed>,
+}
+
+/// A tab zoomed to one of its panes: see [`Workspaces::zoomed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Zoomed {
+    /// The tab.
+    pub tab: TabId,
+    /// The pane that fills it.
+    pub pane: PaneId,
 }
 
 /// Another machine's home directory: see [`Workspaces::homes`].
@@ -926,6 +946,29 @@ impl Workspaces {
 }
 
 impl Workspaces {
+    /// The pane tab `tab` is zoomed to, if it's zoomed, and the pane is
+    /// still in it.
+    #[must_use]
+    pub fn zoomed_in(&self, tab: &Tab) -> Option<PaneId> {
+        (self.zoomed.iter())
+            .find(|zoomed| zoomed.tab == tab.id)
+            .map(|zoomed| zoomed.pane)
+            .filter(|&pane| tab.layout.contains(pane))
+    }
+
+    /// What tab `tab` shows: the pane it's zoomed to alone, filling it,
+    /// or else its splits.
+    #[must_use]
+    pub fn shown_layout<'a>(&self, tab: &'a Tab) -> std::borrow::Cow<'a, Layout> {
+        let zoomed = self.zoomed_in(tab).and_then(|pane| {
+            (tab.layout.panes().into_iter()).find(|candidate| candidate.id == pane)
+        });
+        match zoomed {
+            Some(pane) => std::borrow::Cow::Owned(Layout::Pane(pane)),
+            None => std::borrow::Cow::Borrowed(&tab.layout),
+        }
+    }
+
     /// The workspace holding the tab with `id`, and the tab.
     #[must_use]
     pub fn find_tab(&self, id: TabId) -> Option<(&Workspace, &Tab)> {

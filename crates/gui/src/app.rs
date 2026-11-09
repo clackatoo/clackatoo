@@ -2499,7 +2499,7 @@ impl App {
         let desk = &self.desk;
         let shown = desk.shown()?;
         let tab = desk.shown_tab()?;
-        let placement = Placement::new(&tab.layout, &geometry.area);
+        let placement = Placement::new(&desk.layout_shown(tab), &geometry.area);
         let layout_panes = tab.layout.panes();
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
@@ -2706,7 +2706,7 @@ impl App {
             return (chats, all);
         };
         let cell = chrome.geometry.area.cell;
-        let placement = Placement::new(&tab.layout, &chrome.geometry.area);
+        let placement = Placement::new(&self.desk.layout_shown(tab), &chrome.geometry.area);
         let layout_panes = tab.layout.panes();
         let tiles: Vec<(TerminalId, Tile, bool)> = (placement.panes.iter())
             .filter_map(|&(id, tile)| {
@@ -2806,7 +2806,7 @@ pub(crate) fn drawn_cursors(
     let (Some(shown), Some(tab)) = (desk.shown(), desk.shown_tab()) else {
         return Vec::new();
     };
-    let placement = Placement::new(&tab.layout, area);
+    let placement = Placement::new(&desk.layout_shown(tab), area);
     let panes = tab.layout.panes();
     let keys_here = keys_here(desk, true, picking);
     (drawings(desk, keys_here, &placement, &panes, shown.pane).iter())

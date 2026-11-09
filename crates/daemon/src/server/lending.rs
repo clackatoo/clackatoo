@@ -378,6 +378,7 @@ impl Daemon {
             | Request::Focus { pane: id }
             | Request::Reveal { pane: id, .. }
             | Request::Split { pane: id, .. }
+            | Request::Reopen { beside: Some(id) }
             | Request::Keep { pane: id, .. } => pane(id, false),
             Request::OpenHere { pane: id, .. }
             | Request::BlankHere { pane: id, .. }
@@ -387,6 +388,7 @@ impl Daemon {
             Request::CloseTab { tab: id }
             | Request::RenameTab { tab: id, .. }
             | Request::ResizeSplit { tab: id, .. }
+            | Request::Zoom { tab: id, .. }
             | Request::SplitTab { tab: id, .. } => tab(id),
             Request::CloseWorkspace { workspace: id }
             | Request::RenameWorkspace { workspace: id, .. }

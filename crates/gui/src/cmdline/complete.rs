@@ -586,6 +586,7 @@ mod tests {
                 "Registers",
                 "reload",
                 "rename",
+                "reopen",
                 "Review",
                 "reviewkeep",
                 "reviewreject",

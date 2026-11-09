@@ -406,6 +406,12 @@ gates! {
     /// `Request::Tutor` (`TutorFiles`). An older daemon is never asked:
     /// the window refuses the lesson.
     TUTOR_FILES = 143,
+    /// What a tab's layout keeps beside its splits (CLACKA-240): the pane
+    /// a tab is zoomed to, filling it, `Workspaces::zoomed`, set with
+    /// `Request::Zoom`; and the panes and tabs closed, which
+    /// `Request::Reopen` opens again. An older peer is shown every tab
+    /// unzoomed, and is never sent either request.
+    LAYOUT_EXTRAS = 145,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1182,6 +1188,14 @@ impl Downgrade for ClientMessage {
             return Downgraded::Refused;
         }
         if wire < TUTOR_FILES && matches!(self, Self::Request(crate::Request::Tutor(_))) {
+            return Downgraded::Refused;
+        }
+        if wire < LAYOUT_EXTRAS
+            && matches!(
+                self,
+                Self::Request(crate::Request::Zoom { .. } | crate::Request::Reopen { .. })
+            )
+        {
             return Downgraded::Refused;
         }
         if wire < TERMINAL_STANDARDS && matches!(self, Self::Colours { .. }) {

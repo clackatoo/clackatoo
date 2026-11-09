@@ -25,7 +25,7 @@ use clackatoo_protocol::{
     PaneTerminal, Patch, Piece, Place, ProviderModels, Query, Request, Response, Restored, Resume,
     Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol,
     TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger,
-    TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
+    TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces, Zoomed,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -1996,6 +1996,135 @@ fn tabs_are_named_and_tabs_and_workspaces_closed_with_their_terminals() {
         Response::Done
     );
     assert!(client.list_terminals().unwrap().is_empty());
+}
+
+#[test]
+fn a_tab_zooms_to_a_pane_until_its_split_or_another_pane_is_focused() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let one = client.new_workspace(None, new_pane(&["cat"])).unwrap();
+    let two = client
+        .split_pane(one, Side::Right, new_pane(&["cat"]))
+        .unwrap();
+    let tab = client.watch_workspaces().unwrap().list[0].tabs[0].id;
+    let zoom = |pane| Request::Zoom { tab, pane };
+    assert_eq!(client.request(&zoom(Some(one))).unwrap(), Response::Done);
+    let workspaces = client.watch_workspaces().unwrap();
+    assert_eq!(workspaces.zoomed, [Zoomed { tab, pane: one }]);
+    assert_eq!(workspaces.list[0].tabs[0].focused, one);
+    let shown = workspaces.shown_layout(&workspaces.list[0].tabs[0]);
+    assert_eq!(shown.panes().len(), 1);
+    // A pane not in it, or a tab that isn't there.
+    assert!(matches!(
+        client.request(&zoom(Some(PaneId(99)))),
+        Ok(Response::Error(Error::NoSuchPane(_)))
+    ));
+    assert!(matches!(
+        client.request(&Request::Zoom {
+            tab: clackatoo_protocol::TabId(99),
+            pane: None
+        }),
+        Ok(Response::Error(Error::NoSuchTab(_)))
+    ));
+    // Another of its panes focused puts its splits back, as tmux does.
+    client.focus(two).unwrap();
+    assert!(client.watch_workspaces().unwrap().zoomed.is_empty());
+    client.request(&zoom(Some(two))).unwrap();
+    client
+        .split_pane(one, Side::Below, new_pane(&["cat"]))
+        .unwrap();
+    assert!(client.watch_workspaces().unwrap().zoomed.is_empty());
+    client.request(&zoom(Some(two))).unwrap();
+    assert_eq!(client.request(&zoom(None)).unwrap(), Response::Done);
+    assert!(client.watch_workspaces().unwrap().zoomed.is_empty());
+}
+
+#[test]
+fn panes_and_tabs_closed_open_again_where_they_were() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let notes = project.join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\nthree\n").unwrap();
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    assert!(matches!(
+        client.request(&Request::Reopen { beside: None }),
+        Ok(Response::Error(Error::Other(_)))
+    ));
+    let shell = client
+        .new_workspace(Some("work".into()), shell_in(&project))
+        .unwrap();
+    let open = OpenFile {
+        path: notes.display().to_string(),
+        cwd: None,
+    };
+    let editor = (client.split_pane(shell, Side::Right, PaneTerminal::File(open))).unwrap();
+    let tab = client.watch_workspaces().unwrap().list[0].tabs[0].id;
+    let resize = Request::ResizeSplit {
+        tab,
+        split: vec![],
+        shares: vec![3, 1],
+    };
+    client.request(&resize).unwrap();
+    let place = Place {
+        line: 2,
+        column: 1,
+        top: 1,
+    };
+    client.place(editor, place).unwrap();
+    client.close_pane(editor).unwrap();
+    let reopen = Request::Reopen {
+        beside: Some(shell),
+    };
+    let Response::PaneCreated(again) = client.request(&reopen).unwrap() else {
+        panic!("no pane made");
+    };
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = &workspaces.list[0].tabs[0];
+    let Layout::Split { parts, shares, .. } = &tab.layout else {
+        panic!("not split: {:?}", tab.layout);
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(shares[0] / shares[1], 3, "as big as it was: {shares:?}");
+    let panes = tab.layout.panes();
+    assert_eq!((panes[0].id, panes[1].id), (shell, again));
+    assert!(matches!(panes[1].content, Content::Buffer(_)));
+    // On its file, where its cursor was.
+    assert_eq!(
+        workspaces.restored,
+        [Restored {
+            pane: again,
+            ran: None,
+            place: Some(place),
+        }]
+    );
+    // A tab closed comes back where it was among the others, its splits
+    // and all, a terminal as a new shell in its folder.
+    let workspace = workspaces.list[0].id;
+    client.new_tab(workspace, shell_in(dir.path())).unwrap();
+    let tabs = client.watch_workspaces().unwrap().list[0].tabs.clone();
+    client
+        .request(&Request::CloseTab { tab: tabs[0].id })
+        .unwrap();
+    assert_eq!(client.watch_workspaces().unwrap().list[0].tabs.len(), 1);
+    let Response::PaneCreated(focused) = client.request(&Request::Reopen { beside: None }).unwrap()
+    else {
+        panic!("no tab made");
+    };
+    let workspaces = client.watch_workspaces().unwrap();
+    let tabs = &workspaces.list[0].tabs;
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[0].layout.panes().len(), 2);
+    assert_eq!(tabs[0].focused, focused);
+    assert_eq!(workspaces.list[0].active_tab, tabs[0].id);
+    let shell = tabs[0].layout.panes()[0].id;
+    wait_for_pwd(&mut client, terminal_of(&workspaces, shell), &project);
+    // Nothing more was closed.
+    assert!(matches!(
+        client.request(&Request::Reopen { beside: None }),
+        Ok(Response::Error(_))
+    ));
 }
 
 // --- QUIC ---------------------------------------------------------------

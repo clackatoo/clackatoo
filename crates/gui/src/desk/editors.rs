@@ -1916,6 +1916,30 @@ impl Desk {
         told
     }
 
+    /// Tells the daemon where the editor in `pane` is now, if it has
+    /// moved since it was last told, as it closes: what's kept of it to
+    /// open again (`:reopen`) is where it was last.
+    pub(super) fn tell_place_of(&mut self, pane: PaneId) {
+        if !self.connected || !self.daemon_has(wire::RESTORED) {
+            return;
+        }
+        let editors = &mut self.editors;
+        let Some(editor) = editors.panes.get(&pane) else {
+            return;
+        };
+        let Some(copy) = editors.buffers.get(&editor.buffer()) else {
+            return;
+        };
+        if !copy.loaded() || copy.is_scratch() {
+            return;
+        }
+        let spot = editor.spot();
+        if editors.told.insert(pane, spot) != Some(spot) {
+            let place = editor.place(copy);
+            self.outbox.push(ClientMessage::Place { pane, place });
+        }
+    }
+
     /// A new connection, to a daemon that may know nothing of where
     /// editors are, as one just upgraded: it's told each again.
     pub(super) fn tell_places_again(&mut self) {

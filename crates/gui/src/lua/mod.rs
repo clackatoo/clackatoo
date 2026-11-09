@@ -453,6 +453,7 @@ mod tests {
                 others: Vec::new(),
                 kept: Vec::new(),
                 homes: Vec::new(),
+                zoomed: Vec::new(),
             },
             shown: Some(Shown {
                 workspace: WorkspaceId(1),

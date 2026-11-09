@@ -64,6 +64,7 @@ mod chain;
 mod chat_queue;
 mod chats;
 mod clipboard;
+mod closed;
 mod disk;
 mod edit_log;
 mod explorers;
@@ -1077,6 +1078,8 @@ pub struct Daemon {
     /// The terminals kept running always, and how running each again
     /// goes.
     keeps: keep::Keeps,
+    /// The panes and tabs the user closed, to open again.
+    closed: closed::ClosedList,
     /// Which daemon this is, kept from one run to the next.
     machine: Machine,
     /// The key that proves it, which signs the QUIC certificate.
@@ -1228,6 +1231,7 @@ impl Daemon {
             tools: Tools::with_limits(config.agents.subagent_limits()),
             background: background::Backgrounds::default(),
             keeps: keep::Keeps::default(),
+            closed: closed::ClosedList::default(),
             explorers: Explorers::default(),
             boards,
             signs: Signs::default(),
@@ -1352,6 +1356,11 @@ impl Daemon {
         daemon.workspaces.resume_kept(&state.kept);
         if let Some(restored) = &state.restored {
             daemon.workspaces.resume_restored(restored);
+        }
+        // The tabs zoomed, and the panes and tabs closed, to open again.
+        if let Some(layout) = &state.layout {
+            daemon.workspaces.resume_zoomed(&layout.zoomed);
+            daemon.resume_closed(&layout.closed);
         }
         daemon.resume_machines(state);
 
@@ -1853,6 +1862,10 @@ impl Daemon {
                 trusted,
                 exes,
                 asked,
+                layout: Some(handover::LayoutExtras {
+                    zoomed: self.workspaces.hand_over_zoomed(),
+                    closed: self.hand_over_closed(),
+                }),
             },
             fds,
             version: handover::VERSION,
@@ -3700,6 +3713,8 @@ impl Daemon {
             | Request::ResizeSplit { .. }
             | Request::OpenHere { .. }
             | Request::BlankHere { .. }
+            | Request::Zoom { .. }
+            | Request::Reopen { .. }
             | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
             asked @ (Request::CarryQuic | Request::CarryMcp { .. }) => self.carry(token, &asked),
             Request::AttachBuffer {
@@ -3829,7 +3844,6 @@ impl Daemon {
     /// Nothing is closed, or shown in place of what a pane shows, that
     /// would lose a buffer with no file yet that has changes, whoever asks:
     /// a window that saw it, one that didn't, or one too old to know of it.
-    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
     fn respond_about_workspaces(
         &mut self,
         request: Request,
@@ -3864,6 +3878,25 @@ impl Daemon {
             };
             return Err(buffers::blank_kept(wire));
         }
+        // What the user closes is kept, to open again.
+        if let Some(closed) = self.closing(&request, token) {
+            let answer = self.answer_about_workspaces(request, token);
+            if answer.is_ok() {
+                self.note_closed(closed);
+            }
+            return answer;
+        }
+        self.answer_about_workspaces(request, token)
+    }
+
+    /// Answers `request`, about workspaces, from the client at `token`,
+    /// once checked by [`respond_about_workspaces`](Self::respond_about_workspaces).
+    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
+    fn answer_about_workspaces(
+        &mut self,
+        request: Request,
+        token: Token,
+    ) -> Result<Response, Error> {
         match request {
             Request::WatchWorkspaces => {
                 if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
@@ -3972,6 +4005,13 @@ impl Daemon {
                 panes.extend(self.workspaces.workspace_panes(workspace)?);
                 self.close_panes(&panes, self.sends_subagents_back(token))
             }
+            Request::Zoom { tab, pane } => self.workspaces.zoom(tab, pane).map(|changed| {
+                if changed {
+                    self.workspaces_changed();
+                }
+                Response::Done
+            }),
+            Request::Reopen { beside } => self.reopen(beside),
             other => unreachable!("{other:?} isn't about workspaces"),
         }
     }

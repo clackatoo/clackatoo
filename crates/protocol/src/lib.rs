@@ -144,12 +144,12 @@ pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
     LentBackground, LentBackgroundAction, MAX_NESTING, MachineHome, OpenOutput, OtherMachine, Pane,
     PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId,
-    Workspaces,
+    Workspaces, Zoomed,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 143;
+pub const PROTOCOL_VERSION: u32 = 145;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1635,6 +1635,35 @@ pub enum Request {
     /// [`Response::Done`] for the rest. Never from a web device. Only to a
     /// daemon of protocol 143 or later ([`wire::TUTOR_FILES`]).
     Tutor(TutorFiles),
+    /// Zooms tab `tab` to `pane`, which then fills the tab in every
+    /// window, its other panes hidden but still running, or with `None`,
+    /// puts the tab's splits back as they were ([`Workspaces::zoomed`]).
+    /// The tab's focused pane becomes `pane`. A tab of one pane isn't
+    /// zoomed. The tab is unzoomed again as a pane is split in it, as
+    /// another of its panes is focused, and as the pane zoomed to leaves
+    /// it. Answered with [`Response::Done`]. Only to a daemon of protocol
+    /// 145 or later ([`wire::LAYOUT_EXTRAS`]).
+    Zoom {
+        /// The tab.
+        tab: TabId,
+        /// The pane it's zoomed to, one of its own, or `None`.
+        pane: Option<PaneId>,
+    },
+    /// Opens again the pane or tab closed last, of the last 20 the user
+    /// closed with [`Request::ClosePane`] or [`Request::CloseTab`]: a
+    /// terminal as a new shell in its folder, offering to run again what
+    /// it ran ([`Workspaces::restored`]); an editor on its file, where its
+    /// cursor and view were; an explorer on its root; a chat on its
+    /// agent's session. It goes back where it was, beside the pane it was
+    /// beside, as big as it was, or, if that's gone, beside `beside`.
+    /// Answered with [`Response::PaneCreated`]: its pane, or the tab's
+    /// focused pane. Only to a daemon of protocol 145 or later
+    /// ([`wire::LAYOUT_EXTRAS`]).
+    Reopen {
+        /// The pane the asker has the focus in, to put it beside if its
+        /// own place is gone: `None` puts it in a tab of its own.
+        beside: Option<PaneId>,
+    },
 }
 
 /// What [`Request::Tutor`] does. The daemon chooses each lesson's folder,

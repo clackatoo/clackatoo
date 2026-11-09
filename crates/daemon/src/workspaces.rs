@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap};
 use clackatoo_protocol::{
     Axis, Background, BackgroundState, BoardId, BufferId, Content, Error, FilesId, Kept, Layout,
     Lent, LentBackground, MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side,
-    Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces, Zoomed,
 };
 
 use crate::handover::{self, HandoverError};
@@ -72,6 +72,27 @@ pub(crate) struct WorkspaceState {
     /// whose terminals that have ended the server makes again (see
     /// [`take_promoted`](Self::take_promoted)).
     promoted: Vec<TabId>,
+}
+
+/// Where in its tab a pane is, as it's closed (see
+/// [`WorkspaceState::place_of`]): the panes of the part of the layout
+/// it's beside, which side of them it's on, and its share of their split,
+/// in thousandths.
+pub(crate) type Beside = (Vec<PaneId>, Side, u16);
+
+/// A tab made again, as kept from the last run of the daemon, or as it
+/// was closed (see [`WorkspaceState::add_restored`]).
+#[derive(Debug)]
+pub(crate) struct MadeTab {
+    /// The name it was given, if it was.
+    pub(crate) name: Option<String>,
+    /// Its layout of panes from [`fresh_pane`](WorkspaceState::fresh_pane),
+    /// which is tidied.
+    pub(crate) layout: Layout,
+    /// Its focused pane, or else its first.
+    pub(crate) focused: Option<PaneId>,
+    /// The pane it was zoomed to, if it was.
+    pub(crate) zoomed: Option<PaneId>,
 }
 
 /// A machine whose daemon this one lends workspaces to.
@@ -513,10 +534,71 @@ impl WorkspaceState {
         content: impl Into<Content>,
     ) -> PaneId {
         let new = self.pane(content.into());
+        self.split_with(pane, side, new);
+        new.id
+    }
+
+    /// Puts `new`, a pane from [`fresh_pane`](Self::fresh_pane), on `side`
+    /// of `pane`, which [`check_split`](Self::check_split) checked, as
+    /// [`split`](Self::split) does.
+    pub(crate) fn split_with(&mut self, pane: PaneId, side: Side, new: Pane) {
         let tab = self.tab_mut(pane);
         split(&mut tab.layout, pane, side, new);
         tab.focused = new.id;
-        new.id
+        let tab = tab.id;
+        self.unzoom(tab);
+    }
+
+    /// Where in its tab `pane` is, as it's closed, to put it back there
+    /// (see [`put_back`](Self::put_back)): its workspace and tab, and
+    /// unless it's the tab's only pane, the panes of the part of the
+    /// layout it's beside, which side of them it's on, and its share of
+    /// their split, in thousandths.
+    pub(crate) fn place_of(&self, pane: PaneId) -> Option<(WorkspaceId, TabId, Option<Beside>)> {
+        let (workspace, tab, _) = self.workspaces.find_pane(pane)?;
+        Some((workspace.id, tab.id, beside(&tab.layout, pane)))
+    }
+
+    /// Puts `new`, a pane from [`fresh_pane`](Self::fresh_pane), back
+    /// where [`place_of`](Self::place_of) said a pane was in `tab`: on
+    /// `side` of the part of its layout holding those of `beside` still
+    /// in it, with `share` thousandths of their split. Returns `false`,
+    /// changing nothing, if the tab or all those panes are gone, or it
+    /// would nest the splits too deep.
+    pub(crate) fn put_back(
+        &mut self,
+        tab: TabId,
+        beside: &[PaneId],
+        side: Side,
+        share: u16,
+        new: Pane,
+    ) -> bool {
+        let Some((workspace, found)) = self.workspaces.find_tab(tab) else {
+            return false;
+        };
+        if workspace.lent.is_some() {
+            return false;
+        }
+        let anchors: Vec<PaneId> = (beside.iter().copied())
+            .filter(|&pane| found.layout.contains(pane))
+            .collect();
+        if anchors.is_empty() {
+            return false;
+        }
+        let mut layout = found.layout.clone();
+        put_beside(&mut layout, &anchors, side, share.clamp(1, 999), new);
+        tidy(&mut layout);
+        if fits(&layout).is_err() {
+            return false;
+        }
+        let found = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|found| found.id == tab)
+            .expect("the tab was found");
+        found.layout = layout;
+        found.focused = new.id;
+        self.unzoom(tab);
+        true
     }
 
     /// Puts a pane showing `content` along `side` of `tab`, which
@@ -537,6 +619,8 @@ impl WorkspaceState {
             .expect("the tab was checked");
         split_edge(&mut tab.layout, side, new, share);
         tab.focused = new.id;
+        let tab = tab.id;
+        self.unzoom(tab);
         new.id
     }
 
@@ -556,6 +640,11 @@ impl WorkspaceState {
         // No window shows a lent one, so a new window never starts on it.
         if !lent {
             self.workspaces.active = Some(workspace);
+        }
+        // Another of a zoomed tab's panes, as tmux's select-pane does.
+        let zoomed = (self.workspaces.zoomed.iter()).any(|z| z.tab == tab && z.pane != pane);
+        if zoomed {
+            self.unzoom(tab);
         }
         let workspace = self.workspace_mut(workspace);
         workspace.active_tab = tab;
@@ -788,6 +877,85 @@ impl WorkspaceState {
         }
     }
 
+    /// Zooms `tab` to `pane`, which then fills it, or with `None`, puts
+    /// its splits back: see [`Request::Zoom`](clackatoo_protocol::Request::Zoom).
+    /// Returns whether that changed anything. A tab of one pane isn't
+    /// zoomed.
+    pub(crate) fn zoom(&mut self, tab: TabId, pane: Option<PaneId>) -> Result<bool, Error> {
+        let (_, found) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        let Some(pane) = pane else {
+            return Ok(self.unzoom(tab));
+        };
+        if !found.layout.contains(pane) {
+            return Err(Error::NoSuchPane(pane));
+        }
+        if matches!(found.layout, Layout::Pane(_)) {
+            return Ok(false);
+        }
+        if self.zoomed_to(tab) == Some(pane) {
+            return Ok(false);
+        }
+        self.unzoom(tab);
+        self.workspaces.zoomed.push(Zoomed { tab, pane });
+        let found = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|found| found.id == tab)
+            .expect("the tab was found");
+        found.focused = pane;
+        Ok(true)
+    }
+
+    /// The pane `tab` is zoomed to, if it is.
+    pub(crate) fn zoomed_to(&self, tab: TabId) -> Option<PaneId> {
+        (self.workspaces.zoomed.iter())
+            .find(|zoomed| zoomed.tab == tab)
+            .map(|zoomed| zoomed.pane)
+    }
+
+    /// Puts `tab`'s splits back, if it's zoomed. Returns whether it was.
+    fn unzoom(&mut self, tab: TabId) -> bool {
+        let before = self.workspaces.zoomed.len();
+        self.workspaces.zoomed.retain(|zoomed| zoomed.tab != tab);
+        self.workspaces.zoomed.len() != before
+    }
+
+    /// Forgets the zooms of tabs that have gone, or gone to the
+    /// background, whose pane has left them, or that have one pane left.
+    fn sweep_zoomed(&mut self) {
+        if self.workspaces.zoomed.is_empty() {
+            return;
+        }
+        let list = &self.workspaces.list;
+        self.workspaces.zoomed.retain(|zoomed| {
+            (list.iter())
+                .flat_map(|workspace| &workspace.tabs)
+                .find(|tab| tab.id == zoomed.tab)
+                .is_some_and(|tab| {
+                    matches!(tab.layout, Layout::Split { .. }) && tab.layout.contains(zoomed.pane)
+                })
+        });
+    }
+
+    /// The tabs zoomed, for the next build, each by its number and its
+    /// pane's.
+    pub(crate) fn hand_over_zoomed(&self) -> Vec<(u32, u32)> {
+        (self.workspaces.zoomed.iter())
+            .map(|zoomed| (zoomed.tab.0, zoomed.pane.0))
+            .collect()
+    }
+
+    /// Takes the tabs zoomed the last build handed over, forgetting those
+    /// of tabs or panes it doesn't have.
+    pub(crate) fn resume_zoomed(&mut self, handed: &[(u32, u32)]) {
+        for &(tab, pane) in handed {
+            let (tab, pane) = (TabId(tab), PaneId(pane));
+            if self.zoomed_to(tab).is_none() {
+                self.workspaces.zoomed.push(Zoomed { tab, pane });
+            }
+        }
+        self.sweep_zoomed();
+    }
+
     pub(crate) fn rename(&mut self, workspace: WorkspaceId, name: &str) -> Result<(), Error> {
         self.check_workspace(workspace)?;
         let name = self.check_name(name, Some(workspace))?;
@@ -836,6 +1004,14 @@ impl WorkspaceState {
     /// pane, and the workspace if that was its last tab. Returns whether
     /// there was such a pane.
     pub(crate) fn remove_pane(&mut self, pane: PaneId) -> bool {
+        let removed = self.remove_pane_from_tab(pane);
+        self.sweep_zoomed();
+        removed
+    }
+
+    /// As [`remove_pane`](Self::remove_pane), leaving the tabs zoomed as
+    /// they were.
+    fn remove_pane_from_tab(&mut self, pane: PaneId) -> bool {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             // A background tab's, as one another machine lent: the tab goes
             // with it, or the pane alone, from a tab of several.
@@ -942,6 +1118,7 @@ impl WorkspaceState {
             failed: None,
             name,
         });
+        self.sweep_zoomed();
     }
 
     /// Takes `pane`, which [`check_background_pane`](Self::check_background_pane)
@@ -977,6 +1154,7 @@ impl WorkspaceState {
             failed: None,
             name,
         });
+        self.sweep_zoomed();
         Some(id)
     }
 
@@ -1198,9 +1376,7 @@ impl WorkspaceState {
 
     /// Adds a workspace made again from the workspaces kept from the last
     /// run of the daemon, called `name` unless that's taken or no name,
-    /// with `tabs`: each one's name, its layout of panes from
-    /// [`fresh_pane`](Self::fresh_pane), which it tidies, and its focused
-    /// pane, or else its first. Tab `active_tab`, by its place, is shown,
+    /// with `tabs`, each a [`MadeTab`]. Tab `active_tab`, by its place, is shown,
     /// or the first if there's no such tab. Its background tabs are
     /// `background`, made as `tabs` are, idle until the server says how
     /// each is getting on: one holding anything but terminals is made a
@@ -1209,9 +1385,9 @@ impl WorkspaceState {
     pub(crate) fn add_restored(
         &mut self,
         name: &str,
-        tabs: Vec<(Option<String>, Layout, Option<PaneId>)>,
+        tabs: Vec<MadeTab>,
         active_tab: usize,
-        background: Vec<(Option<String>, Layout, Option<PaneId>)>,
+        background: Vec<MadeTab>,
     ) -> WorkspaceId {
         let name = (self.name_for_new(Some(name)))
             .or_else(|_| self.name_for_new(None))
@@ -1221,7 +1397,11 @@ impl WorkspaceState {
             .collect();
         let mut kept = Vec::new();
         for tab in background {
-            let tab = self.restored_tab(tab);
+            // Only a tab is zoomed, never a background tab.
+            let tab = self.restored_tab(MadeTab {
+                zoomed: None,
+                ..tab
+            });
             // A shell another machine lends goes back to the background too.
             let panes = tab.layout.panes();
             let lent_here = panes
@@ -1249,15 +1429,40 @@ impl WorkspaceState {
             lent: None,
             background: kept,
         });
+        // One that went to the background as it had no tabs isn't zoomed.
+        self.sweep_zoomed();
         id
     }
 
-    /// A tab made again from those kept: its name, its layout of panes
-    /// from [`fresh_pane`](Self::fresh_pane), which it tidies, and its
-    /// focused pane, or else its first.
+    /// Adds tab `made` to `workspace`, which
+    /// [`check_new_tab`](Self::check_new_tab) checked, at place `index`
+    /// among its tabs, or last if it has fewer, as the tab last switched
+    /// to, as a tab closed is opened again. Returns its focused pane.
+    pub(crate) fn add_tab(
+        &mut self,
+        workspace: WorkspaceId,
+        index: usize,
+        made: MadeTab,
+    ) -> PaneId {
+        let tab = self.restored_tab(made);
+        let focused = tab.focused;
+        let workspace = self.workspace_mut(workspace);
+        workspace.active_tab = tab.id;
+        let index = index.min(workspace.tabs.len());
+        workspace.tabs.insert(index, tab);
+        self.sweep_zoomed();
+        focused
+    }
+
+    /// A tab made again from those kept, as `made` says, zoomed if it was.
     fn restored_tab(
         &mut self,
-        (name, mut layout, focused): (Option<String>, Layout, Option<PaneId>),
+        MadeTab {
+            name,
+            mut layout,
+            focused,
+            zoomed,
+        }: MadeTab,
     ) -> Tab {
         // Shares are kept as they were unless the layout breaks its rules,
         // which tidying puts right.
@@ -1270,6 +1475,10 @@ impl WorkspaceState {
         }
         let id = TabId(self.next_tab);
         self.next_tab += 1;
+        if let Some(pane) = zoomed.filter(|&pane| layout.contains(pane)) {
+            self.workspaces.zoomed.push(Zoomed { tab: id, pane });
+        }
+        let focused = zoomed.or(focused);
         Tab {
             id,
             focused: (focused.filter(|&focused| layout.contains(focused)))
@@ -1328,6 +1537,16 @@ impl WorkspaceState {
     /// for it, if anything.
     pub(crate) fn restored(&self, pane: PaneId) -> Option<&Restored> {
         (self.workspaces.restored.iter()).find(|restored| restored.pane == pane)
+    }
+
+    /// Adds what pane `restored.pane`, opened again, has to show for it,
+    /// as one made again as the daemon started has, in place of anything
+    /// it had.
+    pub(crate) fn add_offer(&mut self, restored: Restored) {
+        self.workspaces
+            .restored
+            .retain(|old| old.pane != restored.pane);
+        self.workspaces.restored.push(restored);
     }
 
     /// Offers, in windows showing `pane`, to put `ran` at its new shell's
@@ -2173,6 +2392,93 @@ fn split_edge(layout: &mut Layout, side: Side, new: Pane, share: Option<u16>) {
     };
 }
 
+/// The panes of the part of `layout` that `pane` is beside, which side of
+/// them it's on, and its share of their split, in thousandths: the part
+/// before it, or for a first part, after it. `None` if it's all of
+/// `layout`.
+fn beside(layout: &Layout, pane: PaneId) -> Option<Beside> {
+    let Layout::Split {
+        axis,
+        parts,
+        shares,
+    } = layout
+    else {
+        return None;
+    };
+    let Some(index) = parts
+        .iter()
+        .position(|part| matches!(part, Layout::Pane(found) if found.id == pane))
+    else {
+        let part = parts.iter().find(|part| part.contains(pane))?;
+        return beside(part, pane);
+    };
+    let (other, after) = match index {
+        0 => (1, false),
+        _ => (index - 1, true),
+    };
+    let side = match (axis, after) {
+        (Axis::LeftToRight, true) => Side::Right,
+        (Axis::LeftToRight, false) => Side::Left,
+        (Axis::TopToBottom, true) => Side::Below,
+        (Axis::TopToBottom, false) => Side::Above,
+    };
+    let total: u64 = shares.iter().map(|&share| u64::from(share)).sum();
+    let share = u64::from(shares[index]) * 1000 / total.max(1);
+    let share = u16::try_from(share.clamp(1, 999)).expect("under 1000");
+    let panes = parts[other].panes().iter().map(|pane| pane.id).collect();
+    Some((panes, side, share))
+}
+
+/// Puts `new` on `side` of the smallest part of `layout` holding all of
+/// `anchors`, with `share` thousandths of their split: in the split that
+/// part is in, if it's along the same axis, or else in a new split of the
+/// two. `layout` may need tidying after.
+fn put_beside(layout: &mut Layout, anchors: &[PaneId], side: Side, share: u16, new: Pane) {
+    let holds = |part: &Layout| anchors.iter().all(|&anchor| part.contains(anchor));
+    if let Layout::Split {
+        axis,
+        parts,
+        shares,
+    } = layout
+        && let Some(index) = parts.iter().position(holds)
+    {
+        let deeper = match &parts[index] {
+            Layout::Split { parts: inner, .. } => inner.iter().any(holds),
+            Layout::Pane(_) => false,
+        };
+        if deeper || *axis != side.axis() {
+            put_beside(&mut parts[index], anchors, side, share, new);
+            return;
+        }
+        // Its share of the split, the others keeping theirs.
+        let wide: Vec<u64> = shares
+            .iter()
+            .map(|&share| u64::from(share) * 1000)
+            .collect();
+        let total: u64 = wide.iter().sum();
+        let share = u64::from(share);
+        let added = (total * share / (1000 - share)).max(1);
+        let at = if side.before() { index } else { index + 1 };
+        parts.insert(at, Layout::Pane(new));
+        let mut wide = wide;
+        wide.insert(at, added);
+        *shares = normalized(&wide);
+        return;
+    }
+    let old = std::mem::replace(layout, Layout::Pane(placeholder()));
+    let share = u32::from(share);
+    let (parts, shares) = if side.before() {
+        (vec![Layout::Pane(new), old], vec![share, 1000 - share])
+    } else {
+        (vec![old, Layout::Pane(new)], vec![1000 - share, share])
+    };
+    *layout = Layout::Split {
+        axis: side.axis(),
+        parts,
+        shares,
+    };
+}
+
 /// `pane`, if it's in `layout`.
 fn pane_mut(layout: &mut Layout, pane: PaneId) -> Option<&mut Pane> {
     match layout {
@@ -2640,6 +2946,150 @@ mod tests {
             state.resize_split(TabId(99), &[], &[1, 1]),
             Err(Error::NoSuchTab(_))
         ));
+    }
+
+    #[test]
+    fn a_tab_is_zoomed_until_split_focused_elsewhere_or_its_pane_goes() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        // A tab of one pane has nothing to zoom past.
+        assert_eq!(state.zoom(tab, Some(one)), Ok(false));
+        let two = state.split(one, Side::Right, TerminalId(2));
+        let three = state.split(two, Side::Below, TerminalId(3));
+        assert_eq!(state.zoom(tab, Some(one)), Ok(true));
+        assert_eq!(state.zoomed_to(tab), Some(one));
+        assert_eq!(only_tab(&state).focused, one, "the pane zoomed is focused");
+        assert_eq!(shape(&state.get().shown_layout(only_tab(&state))), "1");
+        // The layout itself is kept as it was, to put back.
+        assert_eq!(shape(&only_tab(&state).layout), "(1 | (2 / 3))");
+        assert_eq!(state.zoom(tab, Some(one)), Ok(false));
+        assert_eq!(
+            state.zoom(tab, Some(PaneId(99))),
+            Err(Error::NoSuchPane(PaneId(99)))
+        );
+        // Focusing it again changes nothing; focusing another unzooms.
+        state.focus(one).unwrap();
+        assert_eq!(state.zoomed_to(tab), Some(one));
+        state.focus(two).unwrap();
+        assert_eq!(state.zoomed_to(tab), None);
+        // Splitting unzooms, as tmux does.
+        state.zoom(tab, Some(three)).unwrap();
+        let four = state.split(one, Side::Below, TerminalId(4));
+        assert_eq!(state.zoomed_to(tab), None);
+        // The pane zoomed to going unzooms; another going doesn't.
+        state.zoom(tab, Some(three)).unwrap();
+        state.remove_pane(four);
+        assert_eq!(state.zoomed_to(tab), Some(three));
+        state.remove_pane(three);
+        assert_eq!(state.zoomed_to(tab), None);
+        // Nor does a tab left with one pane stay zoomed.
+        state.zoom(tab, Some(two)).unwrap();
+        state.remove_pane(one);
+        assert_eq!(state.zoomed_to(tab), None);
+        assert_eq!(state.zoom(tab, None), Ok(false));
+    }
+
+    #[test]
+    fn zoomed_tabs_are_handed_over_but_not_those_gone() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        let two = state.split(one, Side::Right, TerminalId(2));
+        state.zoom(tab, Some(two)).unwrap();
+        let handed = state.hand_over_zoomed();
+        assert_eq!(handed, [(tab.0, two.0)]);
+        let (workspaces, lent) = state.hand_over();
+        let mut resumed = WorkspaceState::resume(&workspaces, &lent).unwrap();
+        resumed.resume_zoomed(&[(tab.0, two.0), (tab.0, one.0), (99, 1), (tab.0, 77)]);
+        assert_eq!(resumed.hand_over_zoomed(), [(tab.0, two.0)]);
+    }
+
+    #[test]
+    fn a_pane_closed_goes_back_beside_what_it_was_beside_as_big_as_it_was() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        let two = state.split(one, Side::Right, TerminalId(2));
+        let three = state.split(two, Side::Below, TerminalId(3));
+        state.resize_split(tab, &[], &[3, 1]).unwrap();
+        assert_eq!(shape(&only_tab(&state).layout), "(1 | (2 / 3))");
+        let put_back = |state: &mut WorkspaceState, pane: PaneId, terminal: u32| {
+            let (_, tab, place) = state.place_of(pane).unwrap();
+            let (beside, side, share) = place.unwrap();
+            state.remove_pane(pane);
+            let new = state.fresh_pane(Content::Terminal(TerminalId(terminal)));
+            assert!(state.put_back(tab, &beside, side, share, new));
+            new.id
+        };
+        // Its split going with it: stacked below the pane it was below.
+        let five = put_back(&mut state, three, 5);
+        assert_eq!(
+            shape(&only_tab(&state).layout),
+            format!("(1 | (2 / {five}))")
+        );
+        assert_eq!(only_tab(&state).focused, five);
+        // Beside a split, as big as it was.
+        let six = put_back(&mut state, one, 6);
+        assert_eq!(
+            shape(&only_tab(&state).layout),
+            format!("({six} | (2 / {five}))")
+        );
+        assert_eq!(percents(&state, &[]), [75, 25]);
+        // In the middle of three, after the one before it.
+        let seven = state.split(six, Side::Right, TerminalId(7));
+        let shown = shape(&only_tab(&state).layout);
+        let eight = put_back(&mut state, seven, 8);
+        assert_eq!(
+            shape(&only_tab(&state).layout),
+            shown.replace(&seven.to_string(), &eight.to_string())
+        );
+        // Once all it was beside has gone, it can't go back.
+        let (_, tab, place) = state.place_of(eight).unwrap();
+        let (beside, side, share) = place.unwrap();
+        state.remove_pane(eight);
+        state.remove_pane(six);
+        let new = state.fresh_pane(Content::Terminal(TerminalId(9)));
+        assert!(!state.put_back(tab, &beside, side, share, new));
+        assert!(!state.put_back(TabId(99), &[two], side, share, new));
+        // A tab's only pane has nothing beside it.
+        let lone = state.new_workspace("lone".into(), TerminalId(10));
+        assert!(matches!(state.place_of(lone), Some((_, _, None))));
+    }
+
+    #[test]
+    fn a_tab_made_again_comes_back_zoomed() {
+        let mut state = WorkspaceState::new();
+        let one = state.fresh_pane(Content::Terminal(TerminalId(1)));
+        let two = state.fresh_pane(Content::Terminal(TerminalId(2)));
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![Layout::Pane(one), Layout::Pane(two)],
+            shares: vec![1, 1],
+        };
+        let made = MadeTab {
+            name: None,
+            layout: split,
+            focused: Some(one.id),
+            zoomed: Some(two.id),
+        };
+        let workspace = state.add_restored("work", vec![made], 0, Vec::new());
+        let tab = state.get().get(workspace).unwrap().tabs[0].id;
+        assert_eq!(state.zoomed_to(tab), Some(two.id));
+        assert_eq!(only_tab(&state).focused, two.id);
+        // A tab opened again among the others, at its place.
+        let three = state.fresh_pane(Content::Terminal(TerminalId(3)));
+        let made = MadeTab {
+            name: Some("logs".into()),
+            layout: Layout::Pane(three),
+            focused: None,
+            zoomed: Some(three.id),
+        };
+        assert_eq!(state.add_tab(workspace, 0, made), three.id);
+        let tabs = &state.get().get(workspace).unwrap().tabs;
+        assert_eq!(tabs[0].name.as_deref(), Some("logs"));
+        // One pane alone isn't zoomed.
+        assert_eq!(state.zoomed_to(tabs[0].id), None);
     }
 
     #[test]
