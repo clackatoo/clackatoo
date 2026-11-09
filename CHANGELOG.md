@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026.11.22 (2026-11-09)
+
+### Features
+
+- **config:** one option schema, provenance, settings.lua and :setpersist (6a7fc01f)
+- **tutor:** teach :setpersist and :verbose set in the wrap lesson (cbf56590)
+
+### Fixes
+
+- **config:** clackatoo config font names the system's font as its default (2dac977f)
+- **config:** saving checks every value, and settings.lua escapes control characters (500d564b)
+- **config:** saving keeps settings.lua's comments, blank lines and order, block comments included (f9bbf928)
+- **config:** saved settings are synced to disk, keep their file's mode and leave nothing half written (cfa4c5eb)
+- **config:** saving through a link changes the file it links to and keeps the link (e7dfe420)
+- **config:** clackatoo config takes the lock :setpersist takes (c6fd2833)
+- **config:** settings.lua refuses names Luau keeps for itself, naming the line (7b892734)
+- **config:** a config that waits as it loads is loading until it ends (0fd0ceff)
+- **config:** a config file that can't be read is said in the bar, and startup.toml's reader never panics (db1c9362)
+- **tutor:** the wrap lesson teaches :verbose set and :set nu& and never saves to your config (11134d1e)
+
 ## 2026.11.21 (2026-11-09)
 
 ### Fixes
