@@ -68,7 +68,8 @@ impl Desk {
     /// in `fixed` alone, which the command line set.
     pub(crate) fn start_options(&mut self, options: options::Options, fixed: Vec<&'static Info>) {
         self.font_in_use = FontInUse::of(&options);
-        self.options = Store::new(options, fixed);
+        self.options = Store::new(options);
+        self.fixed = fixed;
         self.options_changed();
     }
 
@@ -89,7 +90,7 @@ impl Desk {
     /// between machines. Once it's loaded, the config's handlers set
     /// options as `:set` does, as you asked them to, now.
     pub(super) fn config_sets(&mut self, info: &'static Info, value: Value, by: SetBy) {
-        if by.loading && self.options.fixed(info) {
+        if by.loading && self.fixed.contains(&info) {
             log::info!(
                 "config sets {}, but the command line set it, so it stays {}",
                 info.name,

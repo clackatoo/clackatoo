@@ -17,8 +17,6 @@ pub(crate) struct Store {
     /// As the window started them, from startup.toml and the command line,
     /// before config ran: what a reload puts them back to.
     start: Options,
-    /// Those the command line set, which config doesn't change as it loads.
-    fixed: Vec<&'static Info>,
     /// What last set each, by its place in [`ALL`]: none if nothing has
     /// since the window started.
     set_by: Vec<Option<SetBy>>,
@@ -29,7 +27,7 @@ pub(crate) struct Store {
 
 impl Default for Store {
     fn default() -> Self {
-        Self::new(Options::default(), Vec::new())
+        Self::new(Options::default())
     }
 }
 
@@ -50,13 +48,11 @@ impl std::ops::DerefMut for Store {
 }
 
 impl Store {
-    /// The options as the window starts them, the command line having set
-    /// those in `fixed`.
-    pub(crate) fn new(start: Options, fixed: Vec<&'static Info>) -> Self {
+    /// The options as the window starts them.
+    pub(crate) fn new(start: Options) -> Self {
         Self {
             now: start.clone(),
             start,
-            fixed,
             set_by: vec![None; ALL.len()],
             configured: vec![None; ALL.len()],
         }
@@ -65,12 +61,6 @@ impl Store {
     /// The options as the window started them.
     pub(crate) fn start(&self) -> &Options {
         &self.start
-    }
-
-    /// Whether the command line set `info`'s option, so config can't as it
-    /// loads.
-    pub(crate) fn fixed(&self, info: &Info) -> bool {
-        self.fixed.iter().any(|fixed| std::ptr::eq(*fixed, info))
     }
 
     /// Sets `info`'s option to `value`, if it can hold it, noting `by` as
@@ -128,7 +118,7 @@ mod tests {
             ..Options::default()
         };
         let (nu, fsz) = (find("nu").unwrap(), find("fsz").unwrap());
-        let mut store = Store::new(start, Vec::new());
+        let mut store = Store::new(start);
         assert_eq!(store.set_by(nu), SetBy::DEFAULT);
         assert_eq!(store.set_by(fsz), SetBy::STARTUP);
         let init = SetBy {

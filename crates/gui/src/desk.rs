@@ -455,6 +455,9 @@ pub(crate) struct Desk {
     /// The options, as config and `:set` have set them, as the window
     /// started them, and what set each.
     options: crate::options::Store,
+    /// The options the command line set, or the environment, which config
+    /// doesn't change as it loads: this window's own, as it was opened.
+    fixed: Vec<&'static crate::options::Info>,
     /// What `:setpersist` saves come back on.
     saving: settings::Saving,
     /// What sets options with `:set` while the config's command runs it,
