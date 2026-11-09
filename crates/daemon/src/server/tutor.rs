@@ -11,6 +11,11 @@
 //! named for when it was made, as `20261109-101500-1`, holding the
 //! lesson's text, `LESSON.txt`, and its practice folder, `LESSON`.
 //!
+//! Each folder is the client's that made it, for as long as it's
+//! connected: only it may write the lesson's text again, or remove the
+//! folder. One whose client has gone, as by a reconnection, is left to be
+//! pruned.
+//!
 //! A client only ever names a folder made there, and plain file names, with
 //! no `/` and not starting with `.`: nothing is written outside it, and
 //! nothing through a link. Each file is made new (`O_EXCL`, `O_NOFOLLOW`),
@@ -35,6 +40,8 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use std::collections::HashMap;
+
 use clackatoo_protocol::{Error, Response, TutorFiles};
 use mio::Token;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
@@ -55,10 +62,44 @@ const MOST_FILES: usize = 32;
 /// The most bytes a lesson's text and practice files may have in all.
 const MOST_BYTES: usize = 1024 * 1024;
 
+/// The lessons' folders made, by name, each with the client that made it,
+/// for as long as it's connected.
+#[derive(Debug, Default)]
+pub(super) struct Tutor {
+    makers: HashMap<String, Token>,
+}
+
+impl Tutor {
+    /// The client at `token` has gone: the folders it made are no one's.
+    pub(super) fn forget(&mut self, token: Token) {
+        self.makers.retain(|_, maker| *maker != token);
+    }
+
+    /// The name of `dir`, if it's a lesson's folder in `lessons` the
+    /// client at `token` made.
+    fn made_by<'d>(
+        &self,
+        lessons: &Lessons,
+        dir: &'d str,
+        token: Token,
+    ) -> Result<&'d str, String> {
+        let name = lessons.made(dir)?;
+        if self.makers.get(name) == Some(&token) {
+            Ok(name)
+        } else {
+            Err(format!("{dir} isn't a folder this window made"))
+        }
+    }
+}
+
 impl Daemon {
     /// Answers [`Request::Tutor`](clackatoo_protocol::Request::Tutor),
     /// from the client at `token`.
-    pub(super) fn tutor_files(&self, token: Token, files: TutorFiles) -> Result<Response, Error> {
+    pub(super) fn tutor_files(
+        &mut self,
+        token: Token,
+        files: TutorFiles,
+    ) -> Result<Response, Error> {
         if self.device_of(token).is_some() {
             return Err(Error::Other("a phone has no lessons".into()));
         }
@@ -81,11 +122,22 @@ impl Daemon {
                 lesson,
                 text,
                 files,
-            } => lessons.make(&lesson, &text, &files).map(Response::Text),
-            TutorFiles::Rewrite { dir, lesson, text } => lessons
-                .rewrite(&dir, &lesson, &text)
+            } => lessons.make(&lesson, &text, &files).map(|(name, path)| {
+                self.tutor.makers.insert(name, token);
+                Response::Text(path)
+            }),
+            TutorFiles::Rewrite { dir, lesson, text } => {
+                (self.tutor.made_by(&lessons, &dir, token))
+                    .and_then(|name| lessons.rewrite(name, &lesson, &text))
+                    .map(|()| Response::Done)
+            }
+            TutorFiles::Remove { dir } => (self.tutor.made_by(&lessons, &dir, token))
+                .map(str::to_owned)
+                .and_then(|name| {
+                    self.tutor.makers.remove(&name);
+                    lessons.remove(&name)
+                })
                 .map(|()| Response::Done),
-            TutorFiles::Remove { dir } => lessons.remove(&dir).map(|()| Response::Done),
         };
         done.map_err(|why| Error::Other(format!("the lesson's files: {why}")))
     }
@@ -110,9 +162,15 @@ struct Lessons {
 
 impl Lessons {
     /// Makes a new folder for the lesson `lesson`, with its text and its
-    /// practice files, and returns its path, first letting go of those
-    /// left behind. Nothing's made if anything's refused, or can't be.
-    fn make(&self, lesson: &str, text: &str, files: &[(String, String)]) -> Result<String, String> {
+    /// practice files, and returns its name and path, first letting go of
+    /// those left behind. Nothing's made if anything's refused, or can't
+    /// be.
+    fn make(
+        &self,
+        lesson: &str,
+        text: &str,
+        files: &[(String, String)],
+    ) -> Result<(String, String), String> {
         plain(lesson)?;
         for (name, _) in files {
             plain(name)?;
@@ -139,19 +197,18 @@ impl Lessons {
             let _ = std::fs::remove_dir_all(&path);
             return Err(err.to_string());
         }
-        path.into_os_string()
-            .into_string()
-            .map_err(|_| "the daemon's runtime folder's path isn't UTF-8".to_owned())
+        let path = (path.into_os_string().into_string())
+            .map_err(|_| "the daemon's runtime folder's path isn't UTF-8".to_owned())?;
+        Ok((name, path))
     }
 
-    /// Writes the lesson `lesson`'s text in `dir`, a folder made for it,
-    /// again: to a new file, renamed over the old.
-    fn rewrite(&self, dir: &str, lesson: &str, text: &str) -> Result<(), String> {
+    /// Writes the lesson `lesson`'s text in its folder `name` again: to a
+    /// new file, renamed over the old.
+    fn rewrite(&self, name: &str, lesson: &str, text: &str) -> Result<(), String> {
         plain(lesson)?;
         if text.len() > MOST_BYTES {
             return Err("more than a MiB of text".into());
         }
-        let name = self.made(dir)?;
         let folder = open_dir(&self.folder, name).map_err(|err| err.to_string())?;
         let file = format!("{lesson}.txt");
         let new = format!(".{file}.new");
@@ -171,10 +228,9 @@ impl Lessons {
         })
     }
 
-    /// Removes `dir`, a folder made for a lesson, and everything in it, if
-    /// it's there.
-    fn remove(&self, dir: &str) -> Result<(), String> {
-        let name = self.made(dir)?;
+    /// Removes the lesson's folder `name`, and everything in it, if it's
+    /// there.
+    fn remove(&self, name: &str) -> Result<(), String> {
         match std::fs::remove_dir_all(self.path.join(name)) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.to_string()),
             _ => Ok(()),
@@ -351,17 +407,58 @@ mod tests {
     }
 
     #[test]
+    fn only_the_window_that_made_a_lessons_folder_writes_it_again_or_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = daemon(dir.path());
+        let (maker, _maker) = client(&mut daemon);
+        let (other, _other) = client(&mut daemon);
+        let Ok(Response::Text(made)) = make(&mut daemon, maker) else {
+            panic!("no folder made");
+        };
+        let rewrite = || TutorFiles::Rewrite {
+            dir: made.clone(),
+            lesson: "basics".into(),
+            text: "# Again\n".into(),
+        };
+        let remove = || TutorFiles::Remove { dir: made.clone() };
+        assert!(daemon.tutor_files(other, rewrite()).is_err());
+        assert!(daemon.tutor_files(other, remove()).is_err());
+        assert!(Path::new(&made).is_dir());
+        let text = || std::fs::read_to_string(Path::new(&made).join("basics.txt")).unwrap();
+        assert_eq!(text(), "# Basics\n");
+        assert_eq!(daemon.tutor_files(maker, rewrite()), Ok(Response::Done));
+        assert_eq!(text(), "# Again\n");
+        // Its maker gone, as on a reconnection, it's no one's: left to be
+        // pruned.
+        daemon.tutor.forget(maker);
+        assert!(daemon.tutor_files(maker, remove()).is_err());
+        let Ok(Response::Text(again)) = make(&mut daemon, maker) else {
+            panic!("no folder made");
+        };
+        assert!(
+            daemon.tutor_files(maker, remove()).is_err(),
+            "still no one's"
+        );
+        assert_eq!(
+            daemon.tutor_files(maker, TutorFiles::Remove { dir: again.clone() }),
+            Ok(Response::Done)
+        );
+        assert!(!Path::new(&again).exists());
+    }
+
+    #[test]
     fn a_lesson_is_made_in_a_new_folder_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
         let files = [("a.txt".to_owned(), "one\n".to_owned())];
-        let made = lessons.make("basics", "# Basics\n", &files).unwrap();
+        let (name, made) = lessons.make("basics", "# Basics\n", &files).unwrap();
         let made = Path::new(&made);
         assert_eq!(made.parent(), Some(lessons.path.as_path()));
+        assert_eq!(lessons.made(made.to_str().unwrap()), Ok(name.as_str()));
         let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
         assert_eq!(read(made.join("basics.txt")), "# Basics\n");
         assert_eq!(read(made.join("basics/a.txt")), "one\n");
-        let again = lessons.make("basics", "# Basics\n", &files).unwrap();
+        let (_, again) = lessons.make("basics", "# Basics\n", &files).unwrap();
         assert_ne!(Path::new(&again), made, "each is a folder of its own");
         // The user's alone.
         let bits = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -397,8 +494,8 @@ mod tests {
     fn only_a_lessons_folder_is_written_again_or_removed() {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
-        let made = lessons.make("basics", "# Basics\n", &[]).unwrap();
-        lessons.rewrite(&made, "basics", "# Again\n").unwrap();
+        let (name, made) = lessons.make("basics", "# Basics\n", &[]).unwrap();
+        lessons.rewrite(&name, "basics", "# Again\n").unwrap();
         let text = std::fs::read_to_string(Path::new(&made).join("basics.txt")).unwrap();
         assert_eq!(text, "# Again\n");
         // Elsewhere, or a folder of another name, is refused.
@@ -407,46 +504,44 @@ mod tests {
         let other = lessons.path.join("mine");
         std::fs::create_dir(&other).unwrap();
         for dir in [outside.to_str().unwrap(), other.to_str().unwrap(), "/"] {
-            assert!(lessons.rewrite(dir, "basics", "x").is_err(), "{dir}");
-            assert!(lessons.remove(dir).is_err(), "{dir}");
+            assert!(lessons.made(dir).is_err(), "{dir}");
         }
-        let traversal = format!(
-            "{made}/../{}",
-            Path::new(&made).file_name().unwrap().display()
-        );
-        assert!(lessons.remove(&traversal).is_err());
-        assert!(lessons.rewrite(&made, "../basics", "x").is_err());
+        let traversal = format!("{made}/../{name}");
+        assert!(lessons.made(&traversal).is_err());
+        assert!(lessons.rewrite(&name, "../basics", "x").is_err());
         assert!(outside.is_dir() && other.is_dir());
-        lessons.remove(&made).unwrap();
+        lessons.remove(&name).unwrap();
         assert!(!Path::new(&made).exists());
         // Gone already: nothing to do.
-        lessons.remove(&made).unwrap();
+        lessons.remove(&name).unwrap();
     }
 
     #[test]
     fn nothing_is_written_through_a_link() {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
-        let made = lessons.make("basics", "# Basics\n", &[]).unwrap();
+        let (name, made) = lessons.make("basics", "# Basics\n", &[]).unwrap();
         let made = Path::new(&made);
-        // The lesson's text a link to a file of the user's, and a link
-        // where its new text is written first.
+        // A link where its new text is written first.
         let target = dir.path().join("precious");
         std::fs::write(&target, "mine\n").unwrap();
+        std::os::unix::fs::symlink(&target, made.join(".basics.txt.new")).unwrap();
+        lessons.rewrite(&name, "basics", "# Again\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+        // The lesson's text a link to a file of the user's.
         std::fs::remove_file(made.join("basics.txt")).unwrap();
         std::os::unix::fs::symlink(&target, made.join("basics.txt")).unwrap();
-        std::os::unix::fs::symlink(&target, made.join(".basics.txt.new")).unwrap();
-        lessons
-            .rewrite(made.to_str().unwrap(), "basics", "# Again\n")
-            .unwrap();
+        let _ = lessons.rewrite(&name, "basics", "# Again\n");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
-        let kept = std::fs::symlink_metadata(made.join("basics.txt")).unwrap();
-        assert!(kept.is_file(), "the link is replaced, not followed");
         // A lesson's folder that's a link isn't one.
-        let linked = lessons.path.join("20261109-101500-9");
-        std::os::unix::fs::symlink(dir.path(), &linked).unwrap();
-        assert!(lessons.rewrite(linked.to_str().unwrap(), "x", "x").is_err());
-        assert!(!dir.path().join("x.txt").exists());
+        let linked = "20261109-101500-9";
+        std::os::unix::fs::symlink(dir.path(), lessons.path.join(linked)).unwrap();
+        std::fs::write(dir.path().join("x.txt"), "mine\n").unwrap();
+        assert!(lessons.rewrite(linked, "x", "x").is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("x.txt")).unwrap(),
+            "mine\n"
+        );
         // Nor is the folder for them.
         let elsewhere = tempfile::tempdir().unwrap();
         let link = elsewhere.path().join("tutor");
@@ -459,7 +554,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
         let mut made: Vec<String> = (0..MOST_KEPT)
-            .map(|_| lessons.make("basics", "", &[]).unwrap())
+            .map(|_| lessons.make("basics", "", &[]).unwrap().1)
             .collect();
         // The first is the oldest. Its name may be taken again, made in
         // the same second, so it's known by a file in it.
@@ -468,7 +563,7 @@ mod tests {
         let first = File::open(&made[0]).unwrap();
         let old = SystemTime::now() - Duration::from_mins(1);
         first.set_modified(old).unwrap();
-        made.push(lessons.make("basics", "", &[]).unwrap());
+        made.push(lessons.make("basics", "", &[]).unwrap().1);
         assert!(!marked.exists());
         assert!(made.iter().all(|dir| Path::new(dir).is_dir()));
         // One past its time goes, whatever else there is.

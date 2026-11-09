@@ -972,6 +972,8 @@ pub struct Daemon {
     renames: rename::Renames,
     /// Images being pasted into terminals.
     pastes: pastes::Pastes,
+    /// Lessons' folders made for windows on other machines.
+    tutor: tutor::Tutor,
     /// The finder's searches going on.
     finds: Finds,
     /// What agents' tools are waiting for, and the panes and terminals
@@ -1221,6 +1223,7 @@ impl Daemon {
             trust: trust::Asking::new(&config.trusted),
             renames: rename::Renames::default(),
             pastes: pastes::Pastes::default(),
+            tutor: tutor::Tutor::default(),
             finds,
             tools: Tools::with_limits(config.agents.subagent_limits()),
             background: background::Backgrounds::default(),
@@ -4364,6 +4367,7 @@ impl Daemon {
             self.forget_listings(token);
             self.forget_link_client(token);
             self.forget_relay_client(token);
+            self.tutor.forget(token);
             // What's lent to its machine may be parked now.
             if client.machine.is_some() {
                 self.held_reach_changed();
