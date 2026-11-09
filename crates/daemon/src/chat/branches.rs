@@ -408,11 +408,12 @@ impl HostedChat {
     }
 
     /// Whether the agent is at work, or the chat between sessions, as
-    /// nothing may cut or copy its conversation while it is.
+    /// nothing may cut or copy its conversation while it is. A Stop the
+    /// agent hasn't answered keeps it answering; once it has, the chat
+    /// held for the user (see `held_by_stop`) is at rest.
     fn busy(&self) -> bool {
         self.answering()
             || self.woken()
-            || self.stop_requested
             || self.loading()
             || self.told_again()
             || matches!(self.link, Link::Opening | Link::Closing)
@@ -2024,6 +2025,26 @@ mod tests {
         assert_eq!(prompts(&copy), ["apple", "banana"]);
         assert_eq!(copy.fork_plan(), Some(&plan));
         assert!(chat.copy_of(0).is_err());
+    }
+
+    /// A chat the user stopped, held for them once its turn has ended, may
+    /// be copied, rewound and switched between branches, as before the
+    /// hold, and through an upgrade too; not while the stop is on its way
+    /// (CLACKA-220).
+    #[test]
+    fn a_chat_stopped_and_settled_may_be_copied_and_rewound() {
+        let mut chat = talked(&["apple", "banana"]);
+        send(&mut chat, "cherry");
+        drop(chat.act(clackatoo_protocol::ChatAction::Stop));
+        assert!(chat.copy_of(1).is_err(), "the stop is on its way");
+        chat.answered(Ok(StopReason::Cancelled));
+        assert!(chat.held_by_stop());
+        assert!(chat.copy_of(2).is_ok());
+        assert_eq!(chat.unsettled(false), None);
+        let mut held = talked(&["apple"]);
+        held.hold_as_stopped();
+        assert!(held.copy_of(1).is_ok());
+        assert_eq!(held.unsettled(false), None);
     }
 
     fn answer(chat: &mut HostedChat, id: &str) {
