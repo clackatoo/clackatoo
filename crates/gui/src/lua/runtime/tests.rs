@@ -284,13 +284,13 @@ fn a_window_that_closes_takes_its_handlers_work_with_it() {
         .insert(2, World::default());
     load(
         &mut runtime,
-        r#"
+        r"
         client.keys.map('n', 's', function(ev)
             ev.pane:split('right', {kind = 'terminal'})
             client.cmd('split')
         end)
         client.on('turnend', function() client.cmd('heard') end)
-        "#,
+        ",
     );
     let key = |window| KeyInfo {
         key: "s".into(),
@@ -351,7 +351,7 @@ fn client_opt_in_a_daemons_event_is_every_windows() {
     );
     load(
         &mut runtime,
-        r#"
+        r"
         client.on('turnend', function()
             client.cmd(`heard {client.opt.ts}`)
             client.opt.ts = 2
@@ -360,7 +360,7 @@ fn client_opt_in_a_daemons_event_is_every_windows() {
             client.cmd(`pressed {client.opt.ts}`)
             client.opt.ts = 3
         end)
-        "#,
+        ",
     );
     let sets = |said: &Receiver<(To, Origin, FromLua)>| -> Vec<(Option<u32>, String)> {
         (said.try_iter())
@@ -409,11 +409,11 @@ fn background_work_is_bounded() {
     let (mut runtime, said) = runtime();
     load(
         &mut runtime,
-        r#"
+        r"
         client.keys.map('n', 'k', function(ev) client.cmd(`count {ev.count}`) end,
             {propagate = true})
         client.on('turnend', function() client.cmd('heard') end)
-        "#,
+        ",
     );
     let key = |count| KeyInfo {
         key: "k".into(),

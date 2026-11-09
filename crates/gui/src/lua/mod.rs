@@ -214,7 +214,7 @@ pub(crate) enum ToLua {
     /// A window has closed: its handlers go with it.
     Closed { window: u32 },
     /// The world looks like this through `window` now.
-    World { window: u32, world: World },
+    World { window: u32, world: Box<World> },
     /// Run these keypress handlers, in order, and say whether the key was
     /// stopped.
     Key {
@@ -542,7 +542,7 @@ mod tests {
         let said = plain(lua.ready());
         lua.send(ToLua::World {
             window: WINDOW,
-            world: world(&[1, 2]),
+            world: Box::new(world(&[1, 2])),
         });
         (lua, said)
     }
@@ -931,7 +931,7 @@ mod tests {
         };
         lua.send(ToLua::World {
             window: WINDOW,
-            world: world(&[1, 2, 3]),
+            world: Box::new(world(&[1, 2, 3])),
         });
         lua.send(ToLua::Answer {
             request,

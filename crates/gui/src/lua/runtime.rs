@@ -438,7 +438,7 @@ impl Runtime {
                 let mut worlds = self.state.worlds.borrow_mut();
                 // Not one that's closed, as a world can cross with that.
                 if let Some(was) = worlds.get_mut(&window) {
-                    *was = world;
+                    *was = *world;
                 }
             }
             ToLua::Key { seq, key, handlers } => {

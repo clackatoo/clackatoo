@@ -201,7 +201,7 @@ impl Desk {
         }
         client.send(ToLua::World {
             window,
-            world: world.clone(),
+            world: Box::new(world.clone()),
         });
         self.script.told = Some(world);
     }
