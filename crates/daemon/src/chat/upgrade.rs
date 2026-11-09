@@ -15,8 +15,8 @@ const CONTINUE: &str = "Clackatoo resumed this session after the daemon restarte
     command failed or rerun completed actions. Keep the user's existing scope \
     and permissions; an unanswered approval is not permission. \
     Use read_activities to recover managed operation IDs and recorded outcomes before \
-    starting replacement work. Reusing the ID of an operation still kept inspects it, \
-    never starts it twice; an ID let go long ago starts a new job.";
+    starting replacement work. Reusing an operation ID never starts it twice: a kept \
+    one is inspected, and one let go long ago is refused.";
 
 impl HostedChat {
     pub(crate) fn prepare_upgrade(&mut self) -> Option<ChatContinuation> {

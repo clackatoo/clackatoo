@@ -100,6 +100,11 @@ pub(super) struct Tools {
     /// The explorer pane each chat last opened, by chat, which the next
     /// it opens shows instead.
     explorers: BTreeMap<TerminalId, PaneId>,
+    /// The ids of each chat's activities let go, oldest first, which are
+    /// never started again (see `forget_old_activities`). Not handed over:
+    /// the activities' own handover is a frozen shape, so after an upgrade
+    /// or a restart, these start again from none.
+    gone_activities: BTreeMap<TerminalId, std::collections::VecDeque<String>>,
     /// Agents talking to each other.
     talk: talk::Talk,
 }

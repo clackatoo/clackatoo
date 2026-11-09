@@ -17,6 +17,10 @@ const MOST_RUNNING: usize = 64;
 const KEPT_PER_CHAT: usize = 16;
 const KEPT: usize = 64;
 
+/// The most ids of activities let go kept a chat, so none is started
+/// again: past it, the oldest is forgotten.
+const MOST_GONE: usize = 1024;
+
 use crate::saved::Operation as Record;
 
 impl Daemon {
@@ -47,8 +51,14 @@ impl Daemon {
             }
             return self.read_activities(chat, Some(id));
         }
+        // One let go long ago is never started again, as a lost answer
+        // to the first start would have it.
+        if (self.tools.gone_activities.get(&chat)).is_some_and(|gone| gone.iter().any(|g| g == id))
+        {
+            return Err("That id was used before and its record is gone; use a new id.".to_owned());
+        }
         self.forget_old_activities();
-        if let Some(why) = (self.too_many_running(chat)).or_else(|| self.too_many_kept(chat)) {
+        if let Some(why) = self.too_many_running(chat) {
             return Err(why);
         }
         // Unmarked shells cannot provide a reliable lifecycle.
@@ -140,46 +150,24 @@ impl Daemon {
         })
     }
 
-    /// Why the chat `chat` may start no more activities now, if it may
-    /// not: more finished ones are kept than may be, of its own or in all,
-    /// and none of those past the caps may be let go (see
-    /// [`Self::forget_old_activities`]).
-    fn too_many_kept(&self, chat: TerminalId) -> Option<String> {
-        let finished = |r: &&Record| !r.activity.state.active();
-        let all = self.tools.activities.iter().filter(finished).count();
-        let own = (self.tools.activities.iter())
-            .filter(|r| r.activity.owner == chat)
-            .filter(finished)
-            .count();
-        (own > KEPT_PER_CHAT || all > KEPT).then(|| {
-            format!(
-                "Activity limit reached: {KEPT_PER_CHAT} finished activities per chat and {KEPT} \
-                 in all are kept, and those past it have outcomes not yet seen, or unknown, which \
-                 are never let go. Inspect them with read_activities before starting more; the \
-                 user may close chats whose activities are no longer needed."
-            )
-        })
-    }
-
     /// Lets go of finished activities past the newest [`KEPT_PER_CHAT`]
-    /// of each chat's and [`KEPT`] in all, oldest first, with their ids:
-    /// one reused after that starts afresh. Never one running, nor one
-    /// whose agent hasn't been told how it ended, nor one whose outcome
-    /// isn't known, which its agent must see before anything is redone
-    /// (see [`Self::too_many_kept`]).
+    /// of each chat's and [`KEPT`] in all, oldest first; never one
+    /// running, nor one whose agent hasn't been told how it ended yet. The
+    /// id of each let go is kept, [`MOST_GONE`] a chat, so it's never
+    /// started again.
     pub(in crate::server) fn forget_old_activities(&mut self) {
         let mut kept_of = std::collections::HashMap::new();
         let mut kept = 0;
         let mut keep = vec![true; self.tools.activities.len()];
         let mut owners = std::collections::BTreeSet::new();
-        // Newest first: what's protected is counted, and kept, as it
+        // Newest first: one not yet told is counted, and kept, as it
         // comes; what's past the caps of the rest goes.
         for (at, record) in self.tools.activities.iter().enumerate().rev() {
             if record.activity.state.active() {
                 continue;
             }
             let of = kept_of.entry(record.activity.owner).or_insert(0);
-            if (*of < KEPT_PER_CHAT && kept < KEPT) || protected(record) {
+            if (*of < KEPT_PER_CHAT && kept < KEPT) || !record.notified {
                 *of += 1;
                 kept += 1;
             } else {
@@ -190,16 +178,35 @@ impl Daemon {
         if owners.is_empty() {
             return;
         }
+        let mut gone = Vec::new();
         let mut keep = keep.into_iter();
-        (self.tools.activities).retain(|_| keep.next().unwrap_or(true));
+        (self.tools.activities).retain(|record| {
+            let kept = keep.next().unwrap_or(true);
+            if !kept {
+                gone.push((record.activity.owner, record.activity.id.clone()));
+            }
+            kept
+        });
+        // Oldest first, so the oldest go first past the bound.
+        for (owner, id) in gone {
+            let ids = self.tools.gone_activities.entry(owner).or_default();
+            if !ids.contains(&id) {
+                ids.push_back(id);
+            }
+            while ids.len() > MOST_GONE {
+                ids.pop_front();
+            }
+        }
         for owner in owners {
             self.publish_activities(owner);
         }
     }
 
     /// The chat `chat` has closed: its activities go, as nothing can read
-    /// them now. What they run in the background goes on, as the user's.
+    /// them now, with the ids of those let go before. What they run in the
+    /// background goes on, as the user's.
     pub(in crate::server) fn forget_activities_of(&mut self, chat: TerminalId) {
+        self.tools.gone_activities.remove(&chat);
         let had = self.tools.activities.len();
         (self.tools.activities).retain(|r| r.activity.owner != chat);
         if self.tools.activities.len() != had {
@@ -585,12 +592,6 @@ impl Daemon {
     }
 }
 
-/// Whether a finished activity is never let go: its agent hasn't been
-/// told how it ended, or how it ended isn't known.
-fn protected(record: &Record) -> bool {
-    !record.notified || record.activity.state == ActivityState::Unknown
-}
-
 /// Where turn `uid` of `chat` is on the conversation shown, as an
 /// activity's card says: `None` if it isn't, being on another branch.
 fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> Option<u32> {
@@ -709,13 +710,12 @@ mod tests {
         assert!(!hosted.deliver_next().is_empty(), "begun after the user's");
     }
 
-    /// A finished activity whose outcome isn't known, or whose agent
-    /// hasn't heard how it ended, is never let go, whichever chat's it is,
-    /// nor through an upgrade from a build that kept them all: others go
-    /// in its place, oldest first, and with only those past the caps, no
-    /// more start (CLACKA-220).
+    /// Finished activities past the caps are let go, oldest first, across
+    /// chats and through an upgrade from a build that kept them all, but
+    /// never one whose agent hasn't been told how it ended; the id of each
+    /// is kept, to a bound, so it's never started again (CLACKA-220).
     #[test]
-    fn activities_not_yet_seen_are_never_let_go() {
+    fn activities_let_go_leave_their_ids_never_to_run_again() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
         let (_, records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
@@ -753,21 +753,40 @@ mod tests {
                 .filter(|r| r.activity.owner == owner)
                 .count()
         };
-        assert_eq!(of(&daemon, a), KEPT_PER_CHAT + 4, "none of a's let go");
+        // Past the cap in all, a's oldest go, unknown ones too, but not
+        // those its agent hasn't been told of; the newest chats' stay, and
+        // the next oldest chat's oldest go.
+        let gone = |daemon: &Daemon, owner: TerminalId| {
+            (daemon.tools.gone_activities.get(&owner))
+                .map(|ids| ids.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        assert_eq!(of(&daemon, a), KEPT_PER_CHAT / 2 + 2, "those not told stay");
         assert_eq!(of(&daemon, b), 4, "the newest stay");
-        let finished = daemon.tools.activities.len();
+        let a_gone = gone(&daemon, a);
+        assert_eq!(a_gone.len(), KEPT_PER_CHAT / 2 + 2);
+        assert_eq!(a_gone[0], format!("op-{a}-0"), "oldest first");
+        assert_eq!(gone(&daemon, TerminalId(80)).len(), 4);
+        assert!(gone(&daemon, b).is_empty());
+        // An id let go is never started again.
+        let again =
+            daemon.start_activity(a, &format!("op-{a}-0"), "Build".into(), "make".into(), None);
         assert_eq!(
-            finished,
-            KEPT + KEPT_PER_CHAT + 4,
-            "only what's protected past the cap"
+            again.unwrap_err(),
+            "That id was used before and its record is gone; use a new id."
         );
-        // a's are past its own cap, and none may go: it starts no more.
-        let refused = daemon.too_many_kept(a).unwrap();
-        assert!(refused.contains("never let go"), "{refused}");
-        // The cap in all is past too, by a's alone: so is every chat's.
-        assert!(daemon.too_many_kept(b).is_some());
         daemon.forget_activities_of(a);
-        assert!(daemon.too_many_kept(b).is_none());
+        assert!(gone(&daemon, a).is_empty(), "with its chat");
+        // Only so many ids are kept, the oldest forgotten first.
+        let c = TerminalId(90);
+        daemon.tools.activities = (0..MOST_GONE + 100 + KEPT_PER_CHAT)
+            .map(|n| record(c, n, ActivityState::Exited(0), true))
+            .collect();
+        daemon.forget_old_activities();
+        let c_gone = gone(&daemon, c);
+        assert_eq!(c_gone.len(), MOST_GONE);
+        assert_eq!(c_gone[0], format!("op-{c}-100"));
+        assert_eq!(of(&daemon, c), KEPT_PER_CHAT);
     }
 
     /// Finished activities don't fill the caps for good: only the newest
