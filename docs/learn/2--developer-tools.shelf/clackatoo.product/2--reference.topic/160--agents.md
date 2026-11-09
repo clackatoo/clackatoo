@@ -922,7 +922,8 @@ The harness tells agents when to use `start_activity`, `read_activities` and
 `cancel_activity`. Existing command approvals apply. A stable operation ID is
 saved before execution; asking to start the same ID, command and folder returns
 the existing record. Reusing it for a different command or folder is refused. Completion
-notifies the owning chat, without resuming a chat explicitly stopped by you.
+notifies the owning chat; a chat you stopped holds the notice until you write
+there, then hears it after your message.
 
 Jobs and their records survive a planned daemon upgrade. After a full restart,
 unfinished operations say **Outcome unknown** and never restart automatically.

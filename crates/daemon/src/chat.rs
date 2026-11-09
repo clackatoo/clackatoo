@@ -4046,8 +4046,11 @@ impl HostedChat {
         self.set_usage(None);
     }
 
+    /// Whether the notice that an activity ended may be given it. One the
+    /// user stopped takes it, to hold for them as other agents' messages
+    /// are (see [`Self::held_by_stop`]): it begins once they write.
     pub(crate) fn activity_notifications_allowed(&self) -> bool {
-        !self.stop_requested && !matches!(self.node.state, ChatState::Failed(_))
+        !matches!(self.node.state, ChatState::Failed(_))
     }
 
     pub(crate) fn set_activities(&mut self, activities: Vec<clackatoo_protocol::Activity>) {

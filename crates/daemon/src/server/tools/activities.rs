@@ -651,6 +651,32 @@ mod tests {
         assert_eq!(daemon.saved_activities()[0].activity.turn, 3);
     }
 
+    /// The notice that an activity ended, to a chat the user stopped, is
+    /// held for them as other agents' messages are, and begins once they
+    /// write; it isn't lost (CLACKA-220).
+    #[test]
+    fn an_activitys_notice_to_a_stopped_chat_waits_for_the_user() {
+        use agent_client_protocol_schema::v1::StopReason;
+        use clackatoo_protocol::ChatAction;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let hosted = daemon.chat(chat).unwrap();
+        drop(hosted.act(ChatAction::Stop));
+        hosted.answered(Ok(StopReason::Cancelled));
+        let (_, mut records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
+        records[0].activity.owner = chat;
+        records[0].activity.state = ActivityState::Exited(0);
+        daemon.tools.activities = records;
+        daemon.notify_activity(0);
+        assert!(daemon.tools.activities[0].notified);
+        let hosted = daemon.chat(chat).unwrap();
+        assert_eq!(hosted.relations().inbox.len(), 1, "held");
+        assert_eq!(hosted.node().turns.len(), 1, "nothing begun");
+        drop(hosted.act(ChatAction::Send("go on".to_owned())));
+        hosted.answered(Ok(StopReason::EndTurn));
+        assert!(!hosted.deliver_next().is_empty(), "begun after the user's");
+    }
+
     /// Finished activities don't fill the caps for good: only the newest
     /// are kept, per chat and in all, those running always, and a chat
     /// that closes takes its own with it (CLACKA-220).
