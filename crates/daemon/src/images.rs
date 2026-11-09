@@ -38,6 +38,18 @@ const DROPPED_KEPT: usize = 4096;
 /// How many bytes of copies at a smaller size are kept.
 const COPIES_BYTES: u64 = 32 * MIB;
 
+/// How many sizes of images a copy couldn't be kept at are remembered, so
+/// a copy isn't made again, and again, for each asking.
+const UNCOPIED_KEPT: usize = 256;
+
+/// How many copies too big to keep are held for those who asked, until
+/// they've had them.
+const ONCE_KEPT: usize = 2;
+
+/// The most bytes an image is sent as it is, at a size it can't be made
+/// smaller at: past this, asking for it fails.
+const ORIGINAL_INSTEAD: u64 = 16 * MIB;
+
 /// How many bytes sent to be kept may be on their way to the thread at
 /// once: past that, more are refused until it catches up.
 const ON_THE_WAY: u64 = 256 * MIB;
@@ -274,6 +286,15 @@ pub(crate) struct Images<T> {
     tick: u64,
     copies: HashMap<(ImageId, u32), Copy>,
     copies_bytes: u64,
+    /// The most bytes of copies kept: [`COPIES_BYTES`], less in tests.
+    copies_most: u64,
+    /// The sizes of images a copy couldn't be made at, or kept at, oldest
+    /// first: asked for again, the image as it is is sent, if it isn't
+    /// too big, and else asking fails. Never made again.
+    uncopied: VecDeque<(ImageId, u32)>,
+    /// Copies too big to keep, held until those who asked have had them
+    /// whole, oldest first.
+    once: VecDeque<((ImageId, u32), Copy)>,
     /// Copies being made, and who's waiting for each.
     scaling: HashMap<(ImageId, u32), Waiting<T>>,
     /// Bytes on their way to the thread.
@@ -315,6 +336,9 @@ impl<T: Clone + PartialEq> Images<T> {
             tick: 0,
             copies: HashMap::new(),
             copies_bytes: 0,
+            copies_most: COPIES_BYTES,
+            uncopied: VecDeque::new(),
+            once: VecDeque::new(),
             scaling: HashMap::new(),
             on_the_way: 0,
             pending: 0,
@@ -403,12 +427,27 @@ impl<T: Clone + PartialEq> Images<T> {
                 }
                 Done::Scaled { image, side, copy } => {
                     let waiting = self.scaling.remove(&(image, side)).unwrap_or_default();
-                    if let Some((info, bytes)) = copy {
-                        self.keep_copy(image, side, info, bytes);
-                    } else {
-                        // It couldn't be made: those waiting are sent the
-                        // image itself.
-                        self.copies.remove(&(image, side));
+                    match copy {
+                        Some((info, bytes)) if info.bytes <= self.copies_most => {
+                            self.keep_copy(image, side, info, bytes);
+                        }
+                        // Too big to keep: held for those waiting, until
+                        // they've had it, and never made again.
+                        Some((info, bytes)) => {
+                            self.uncopied_at(image, side);
+                            if self.once.len() >= ONCE_KEPT {
+                                self.once.pop_front();
+                            }
+                            let copy = Copy {
+                                info,
+                                bytes,
+                                used: self.tick,
+                            };
+                            self.once.push_back(((image, side), copy));
+                        }
+                        // It couldn't be made: those waiting, asking again,
+                        // are sent the image as it is, or told it fails.
+                        None => self.uncopied_at(image, side),
                     }
                     if !waiting.is_empty() {
                         ready.push(Ready { image, waiting });
@@ -666,6 +705,26 @@ impl<T: Clone + PartialEq> Images<T> {
             copy.used = tick;
             return part(copy.info, &copy.bytes, at);
         }
+        if let Some(held) = self.once.iter().position(|(key, _)| *key == (id, side)) {
+            let copy = &self.once[held].1;
+            let answer = part(copy.info, &copy.bytes, at);
+            // Had whole: let go.
+            if let ImageAnswer::Part {
+                at, bytes, total, ..
+            } = &answer
+                && at + bytes.len() as u64 >= *total
+            {
+                self.once.remove(held);
+            }
+            return answer;
+        }
+        if self.uncopied.contains(&(id, side)) {
+            return if info.bytes <= ORIGINAL_INSTEAD {
+                part(info, &bytes, at)
+            } else {
+                ImageAnswer::Failed("it can't be made smaller to send".into())
+            };
+        }
         let fit = fit.unwrap_or_default();
         if let Some(waiting) = self.scaling.get_mut(&(id, side)) {
             if !waiting.contains(&(asker.clone(), owner, fit)) {
@@ -688,8 +747,26 @@ impl<T: Clone + PartialEq> Images<T> {
         ImageAnswer::Scaling
     }
 
+    /// Remembers image `image` can't be had at `side`.
+    fn uncopied_at(&mut self, image: ImageId, side: u32) {
+        self.copies.remove(&(image, side));
+        if self.uncopied.contains(&(image, side)) {
+            return;
+        }
+        if self.uncopied.len() >= UNCOPIED_KEPT {
+            self.uncopied.pop_front();
+        }
+        self.uncopied.push_back((image, side));
+    }
+
+    /// Keeps at most `most` bytes of copies, as tests do.
+    #[cfg(test)]
+    pub(crate) fn keep_copies_within(&mut self, most: u64) {
+        self.copies_most = most;
+    }
+
     fn keep_copy(&mut self, image: ImageId, side: u32, info: ImageInfo, bytes: Arc<[u8]>) {
-        if !self.entries.contains_key(&image) || info.bytes > COPIES_BYTES {
+        if !self.entries.contains_key(&image) || info.bytes > self.copies_most {
             return;
         }
         self.tick += 1;
@@ -704,7 +781,7 @@ impl<T: Clone + PartialEq> Images<T> {
         ) {
             self.copies_bytes -= old.info.bytes;
         }
-        while self.copies_bytes > COPIES_BYTES {
+        while self.copies_bytes > self.copies_most {
             let Some(oldest) = (self.copies.iter())
                 .min_by_key(|(_, copy)| copy.used)
                 .map(|(&key, _)| key)
@@ -1186,6 +1263,68 @@ mod tests {
             store.fetch(1, OTHER, info.id, None, 0),
             ImageAnswer::Missing
         );
+    }
+
+    /// A copy that can't be made, or kept, is made once: those asking again
+    /// get the image as it is, or are told it fails, and no copy is made
+    /// again.
+    #[test]
+    fn a_copy_that_cant_be_made_or_kept_is_made_once_then_answered_for_good() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        // Its header says 1000 × 500, but its pixels are cut short.
+        let mut cut = png(1000, 500, 3);
+        cut.truncate(cut.len() - 20);
+        let (info, bytes) = examine(cut.clone(), MIB).unwrap();
+        store.insert(CHAT, info, bytes).unwrap();
+        let fit = Some([300, 300]);
+        assert_eq!(store.fetch(1, CHAT, info.id, fit, 0), ImageAnswer::Scaling);
+        let (_, ready) = store.take(true);
+        assert_eq!(ready.len(), 1, "those waiting are told");
+        for _ in 0..3 {
+            assert!(matches!(
+                store.fetch(1, CHAT, info.id, fit, 0),
+                ImageAnswer::Part { info: sent, .. } if sent == info
+            ));
+            assert!(!store.busy(), "no copy is made again");
+        }
+        // One too big to keep is held until it's had whole, then let go.
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store.keep_copies_within(10);
+        let info = kept(&mut store, CHAT, png(1000, 500, 4)).unwrap();
+        assert_eq!(store.fetch(1, CHAT, info.id, fit, 0), ImageAnswer::Scaling);
+        let (_, ready) = store.take(true);
+        assert_eq!(ready.len(), 1);
+        let ImageAnswer::Part {
+            info: copy, total, ..
+        } = store.fetch(1, CHAT, info.id, fit, 0)
+        else {
+            panic!("not held");
+        };
+        assert_eq!((copy.width, total), (384, copy.bytes));
+        assert!(store.once.is_empty(), "had whole, so let go");
+        assert!(matches!(
+            store.fetch(1, CHAT, info.id, fit, 0),
+            ImageAnswer::Part { info: sent, .. } if sent == info
+        ));
+        assert!(!store.busy(), "no copy is made again");
+        // Too big to send as it is, asking fails.
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        let big = ImageInfo {
+            bytes: ORIGINAL_INSTEAD + 1,
+            ..info
+        };
+        store
+            .insert(
+                CHAT,
+                big,
+                vec![0; usize::try_from(ORIGINAL_INSTEAD + 1).unwrap()].into(),
+            )
+            .unwrap();
+        store.uncopied_at(info.id, 384);
+        assert!(matches!(
+            store.fetch(1, CHAT, info.id, fit, 0),
+            ImageAnswer::Failed(_)
+        ));
     }
 
     #[test]

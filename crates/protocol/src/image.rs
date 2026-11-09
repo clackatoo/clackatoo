@@ -195,7 +195,8 @@ impl ImageAnswer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageNews {
     /// The copy of `image` at `fit` is ready to be asked for: or, if it
-    /// couldn't be made, it's the image itself that's sent then.
+    /// couldn't be made, or kept, what's to be had instead, the image
+    /// itself or a failure, which is all that's sent for it after.
     Scaled {
         /// Whose it is.
         from: ImageFrom,

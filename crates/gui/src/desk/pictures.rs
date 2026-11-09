@@ -22,6 +22,13 @@ use crate::picture::{Ask, PicturePane, STATUS_ROWS};
 /// doesn't say when it's ready, is waited for before it's asked again.
 const ASK_AGAIN: Duration = Duration::from_secs(1);
 
+/// How many times a copy being made is asked for before it's given up on:
+/// each time after twice as long, up to [`ASK_LONGEST`].
+const ASK_TRIES: u32 = 8;
+
+/// The longest a copy being made is waited for between asks.
+const ASK_LONGEST: Duration = Duration::from_secs(30);
+
 /// How soon the window is drawn again while images are being decoded, to
 /// show each once it is.
 const DECODE_WAKE: Duration = Duration::from_millis(16);
@@ -43,6 +50,8 @@ struct Fetching {
     /// When to ask again, while a copy is made: `None` while a part is
     /// asked for.
     waiting: Option<Instant>,
+    /// How many times it's been said to be being made.
+    tries: u32,
 }
 
 /// The images being fetched, and the picture panes.
@@ -254,6 +263,7 @@ impl Desk {
                     from,
                     bytes: Vec::new(),
                     waiting: None,
+                    tries: 0,
                 },
             );
             self.ask_for_part(fetch);
@@ -334,7 +344,14 @@ impl Desk {
             // Asked again once it's made, which a daemon passing the
             // answer on from another doesn't say: or after a while.
             Response::Image(ImageAnswer::Scaling) => {
-                fetching.waiting = Some(Instant::now() + ASK_AGAIN);
+                fetching.tries += 1;
+                if fetching.tries > ASK_TRIES {
+                    self.pictures.fetching.remove(&fetch);
+                    images.gone(fetch.id, Gone::Failed("its copy never came".into()));
+                    return true;
+                }
+                let wait = (ASK_AGAIN * (1 << (fetching.tries - 1).min(16))).min(ASK_LONGEST);
+                fetching.waiting = Some(Instant::now() + wait);
                 false
             }
             Response::Image(ImageAnswer::Dropped { limit }) => {

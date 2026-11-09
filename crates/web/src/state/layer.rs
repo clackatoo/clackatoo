@@ -23,6 +23,14 @@ const FIT_STEP: u32 = 64;
 /// daemon passing requests on.
 const SCALING_AGAIN: f64 = 1000.0;
 
+/// How many times a copy being made is asked for before it's given up on:
+/// each time after twice as long, up to [`SCALING_LONGEST`].
+const SCALING_TRIES: u32 = 8;
+
+/// The longest a copy being made is waited for between asks, in
+/// milliseconds.
+const SCALING_LONGEST: f64 = 30_000.0;
+
 /// The most bytes of `data:` URLs kept: those used longest ago go first.
 const MOST_URLS: usize = 32 * 1024 * 1024;
 
@@ -58,6 +66,8 @@ pub(super) struct Layer {
     /// Those that won't come: the words in their place if they were
     /// dropped, `None` if they're missing.
     gone: BTreeMap<ImageId, Option<String>>,
+    /// How many times each copy being made has been asked for.
+    tries: BTreeMap<(ImageId, Fit), u32>,
 }
 
 /// How an image is to be shown, once that's known.
@@ -261,11 +271,20 @@ impl State {
                 self.layer.fetching.remove(&key);
                 self.image_came(key, url);
             }
+            // Asked again later, and later each time, never for ever.
             ImageAnswer::Scaling => {
-                if let Some((_, fetch)) = self.layer.fetching.get_mut(&key) {
-                    *fetch = Fetch::Scaling(self.now + SCALING_AGAIN);
+                let tries = self.layer.tries.entry(key).or_default();
+                *tries += 1;
+                if *tries > SCALING_TRIES {
+                    self.image_gone(key, None);
+                } else {
+                    let wait = (SCALING_AGAIN * f64::from(1u32 << (*tries - 1).min(16)))
+                        .min(SCALING_LONGEST);
+                    if let Some((_, fetch)) = self.layer.fetching.get_mut(&key) {
+                        *fetch = Fetch::Scaling(self.now + wait);
+                    }
+                    return;
                 }
-                return;
             }
             ImageAnswer::Dropped { limit } => self.image_gone(key, Some(dropped_words(limit))),
             _ => self.image_gone(key, None),
@@ -284,6 +303,7 @@ impl State {
     /// Image `key` won't come: `words` in its place, if any.
     fn image_gone(&mut self, key: (ImageId, Fit), words: Option<String>) {
         self.layer.fetching.remove(&key);
+        self.layer.tries.remove(&key);
         self.layer.gone.insert(key.0, words);
     }
 
@@ -291,6 +311,7 @@ impl State {
     /// ago while there are too many.
     fn image_came(&mut self, key: (ImageId, Fit), url: String) {
         let layer = &mut self.layer;
+        layer.tries.remove(&key);
         layer.uses += 1;
         layer.bytes += url.len();
         if let Some((old, _)) = layer.urls.insert(key, (url, layer.uses)) {
@@ -436,11 +457,23 @@ mod tests {
         })));
         assert_eq!(asked(&mut s), [(Some([64, 64]), 0)]);
         assert_eq!(s.images_again_at(), None);
-        // Or, through a daemon that never says, after a while.
+        // Or, through a daemon that never says, after a while, longer each
+        // time, and given up on in the end.
         answer(&mut s, ImageAnswer::Scaling);
         s.now += SCALING_AGAIN;
         s.images_again();
+        assert!(asked(&mut s).is_empty(), "the second wait is longer");
+        s.now += SCALING_AGAIN;
+        s.images_again();
         assert_eq!(asked(&mut s), [(Some([64, 64]), 0)]);
+        for _ in 2..SCALING_TRIES {
+            answer(&mut s, ImageAnswer::Scaling);
+            s.now += SCALING_LONGEST;
+            s.images_again();
+            assert_eq!(asked(&mut s).len(), 1);
+        }
+        answer(&mut s, ImageAnswer::Scaling);
+        assert_eq!(s.images_again_at(), None, "given up on");
     }
 
     #[test]
