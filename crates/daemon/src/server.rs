@@ -1485,6 +1485,9 @@ impl Daemon {
             }
             daemon.add_chat(chat);
         }
+        // Notices a build before handed over without the chats they say
+        // finished, once every chat is back to say what each is.
+        daemon.recover_notices();
         // What waits on the agents that went on, and the connections their
         // tools are served on.
         if let Some(live) = live.as_mut() {

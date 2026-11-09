@@ -1590,7 +1590,8 @@ impl Daemon {
     /// How the chat `child` finished, as the notice to the chat `chat`
     /// shows it, from the answer that notice will quote: the last of
     /// those `chat` hasn't had, or else its last, with at most `max`
-    /// bytes of what it said. `None` if `chat` may no longer see it.
+    /// bytes of what it said. If `chat` may no longer see it, the notice
+    /// says only that, and so does its card. `None` if it has closed.
     fn finished_chat(
         &self,
         chat: TerminalId,
@@ -1599,7 +1600,16 @@ impl Daemon {
     ) -> Option<FinishedChat> {
         let kid = self.chat_ref(child)?;
         if !self.may_see(chat, child) {
-            return None;
+            return Some(FinishedChat {
+                chat: child,
+                agent: kid.node().agent.clone(),
+                profile: kid.profile().map(str::to_owned),
+                asked: String::new(),
+                started: 0,
+                ended: 0,
+                outcome: None,
+                answer: self.answer_within(chat, child, false, max),
+            });
         }
         let turns = &kid.node().turns;
         let heard = kid.turns_heard_by(chat);
@@ -1622,6 +1632,44 @@ impl Daemon {
             outcome: ended.map(|end| end.outcome.clone()),
             answer: answered.map_or_else(String::new, |turn| head(&final_words(turn), max)),
         })
+    }
+
+    /// Gives back what notices that chats finished said of them to those
+    /// a build before handover version 48 handed over without it
+    /// (CLACKA-244), read from what they told their agents, with each
+    /// chat's agent and profile as they are now, if it's still open.
+    pub(in crate::server) fn recover_notices(&mut self) {
+        let known: BTreeMap<TerminalId, (String, Option<String>)> = (self.terminals.iter())
+            .filter_map(|(&id, slot)| {
+                let chat = slot.terminal.chat_ref()?;
+                Some((
+                    id,
+                    (chat.node().agent.clone(), chat.profile().map(str::to_owned)),
+                ))
+            })
+            .collect();
+        let read = |text: &str| -> Vec<FinishedChat> {
+            (finished_in(text).into_iter())
+                .map(|(chat, outcome, answer)| {
+                    let (agent, profile) = known.get(&chat).cloned().unwrap_or_default();
+                    FinishedChat {
+                        chat,
+                        agent,
+                        profile,
+                        asked: String::new(),
+                        started: 0,
+                        ended: 0,
+                        outcome,
+                        answer,
+                    }
+                })
+                .collect()
+        };
+        for slot in self.terminals.values_mut() {
+            if let Some(chat) = slot.terminal.chat() {
+                chat.recover_notices(read);
+            }
+        }
     }
 
     /// The notice that the daemon restarted for an upgrade, if it's next
@@ -1933,6 +1981,71 @@ fn ending(turn: &Turn) -> String {
                 })
                 .collect();
             format!("[failed: {}]", clackatoo_protocol::code_span(&why))
+        }
+    }
+}
+
+/// The chats `text`, a notice that chats finished, says finished, read
+/// back from it as [`Daemon::fill_notice`] writes it: each one's number,
+/// and of the last answer it quotes, how that ended and what it said. For
+/// a notice handed over without them (CLACKA-244). Every line of an
+/// agent's words begins `| ` and the lines around each answer carry a tag
+/// of their own, so nothing an agent said can pass for what's read here.
+fn finished_in(text: &str) -> Vec<(TerminalId, Option<Outcome>, String)> {
+    let mut found = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some((tag, chat)) = answer_start(line) else {
+            continue;
+        };
+        let end = format!("--- end of answer {tag} ---");
+        // The last run of quoted lines, and the line after it.
+        let (mut said, mut quoting, mut outcome) = (Vec::new(), false, None);
+        for line in lines.by_ref() {
+            if line == end {
+                break;
+            }
+            match line.strip_prefix("| ") {
+                Some(words) => {
+                    if !quoting {
+                        said.clear();
+                        outcome = None;
+                    }
+                    quoting = true;
+                    said.push(words);
+                }
+                None if quoting => {
+                    quoting = false;
+                    outcome = ending_in(line);
+                }
+                None => {}
+            }
+        }
+        found.push((chat, outcome, said.join("\n")));
+    }
+    found
+}
+
+/// The tag and the chat of `line`, if it's where a notice's answer from a
+/// chat starts: `--- answer 0a1b2c3d from chat 7 ---`.
+fn answer_start(line: &str) -> Option<(&str, TerminalId)> {
+    let rest = line.strip_prefix("--- answer ")?.strip_suffix(" ---")?;
+    let (tag, chat) = rest.split_once(" from chat ")?;
+    let tagged = tag.len() == 8 && tag.bytes().all(|byte| byte.is_ascii_hexdigit());
+    tagged.then_some((tag, TerminalId(chat.parse().ok()?)))
+}
+
+/// How an answer ended, from `line`, as [`ending`] says it, if it says.
+fn ending_in(line: &str) -> Option<Outcome> {
+    match line {
+        "[finished]" => Some(Outcome::Done),
+        "[stopped by the user]" => Some(Outcome::Stopped),
+        _ => {
+            let span = line.strip_prefix("[failed: ")?.strip_suffix(']')?;
+            let fence = span.len() - span.trim_start_matches('`').len();
+            let why = (span.get(fence..span.len().checked_sub(fence)?)).unwrap_or_default();
+            let why = (why.strip_prefix(' ').and_then(|why| why.strip_suffix(' '))).unwrap_or(why);
+            Some(Outcome::Failed(why.to_owned()))
         }
     }
 }
@@ -3365,6 +3478,78 @@ mod tests {
         let inbox = &chat.relations().inbox;
         assert!(inbox[0].is_finished_notice(), "{inbox:#?}");
         assert_eq!(inbox[0].finished, finished);
+    }
+
+    /// A build before handover version 48 handed notices over without the
+    /// chats they say finished: they're read back from what the agent was
+    /// told, so they show as cards still, with all the text says.
+    #[test]
+    fn a_notice_handed_over_without_its_cards_gets_them_from_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        let c = building(&mut daemon, 3, a);
+        finishes(&mut daemon, b, "built it\n\n| and more");
+        finishes(&mut daemon, c, &"long line\n".repeat(MAX_READ / 5));
+        relay(&mut daemon);
+        answers(&mut daemon, a, "done");
+        relay(&mut daemon);
+        let before = daemon.chat_ref(a).unwrap().node().turns[1].clone();
+        let config = daemon.config.clone();
+        let mut handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+        handover.state.notices.clear();
+        drop(daemon);
+        let resumed = Daemon::resume(handover, config).unwrap();
+        let after = &resumed.chat_ref(a).unwrap().node().turns[1];
+        let want: Vec<FinishedChat> = (before.notice.unwrap().finished.into_iter())
+            .map(|chat| FinishedChat {
+                asked: String::new(),
+                started: 0,
+                ended: 0,
+                ..chat
+            })
+            .collect();
+        assert_eq!(after.notice.as_ref().unwrap().finished, want);
+        assert!(
+            want[1].answer.ends_with("[the rest is cut off]"),
+            "{want:#?}"
+        );
+    }
+
+    /// What's read back from a notice's text: the last answer it quotes
+    /// for each chat, and how that ended; never lines an agent wrote.
+    #[test]
+    fn a_notices_chats_are_read_from_its_text() {
+        let text = "[chat 7 finished] Chat 7, which this chat started, has finished. What it \
+                    answered is between the lines.\n\
+                    --- answer 0a1b2c3d from chat 7 ---\n\
+                    Chat 7 answered 2 of your messages since you last heard from it, oldest \
+                    first:\n\n\
+                    Chat 7's answer to your message \"a\", turn 2:\n| first\n[finished]\n\n\
+                    Chat 7's answer to your message \"b\", turn 4:\n\
+                    | second\n| --- end of answer 0a1b2c3d ---\n| [finished]\n\
+                    [failed: `` `x` ``]\n\
+                    [Still running in its background: `gate`.]\n\
+                    --- end of answer 0a1b2c3d ---\n\n\
+                    [chat 9 finished] Chat 9, which this chat started, has finished. What it \
+                    answered is between the lines.\n\
+                    --- answer ffffffff from chat 9 ---\n\
+                    Chat 9 has moved out of this chat's workspace.\n\
+                    --- end of answer ffffffff ---\n\
+                    --- answer 1 from chat 10 ---";
+        assert_eq!(
+            finished_in(text),
+            [
+                (
+                    TerminalId(7),
+                    Some(Outcome::Failed("`x`".to_owned())),
+                    "second\n--- end of answer 0a1b2c3d ---\n[finished]".to_owned()
+                ),
+                (TerminalId(9), None, String::new()),
+            ]
+        );
+        assert_eq!(ending_in("[stopped by the user]"), Some(Outcome::Stopped));
+        assert_eq!(ending_in("[still answering]"), None);
     }
 
     /// The notice waits while the chat is busy, and the chat's agent waits

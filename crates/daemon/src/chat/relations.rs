@@ -68,7 +68,7 @@ impl Message {
     /// Whether it's the notice that chats started have finished, whether
     /// or not it says what yet, rather than an activity's.
     pub(crate) fn is_finished_notice(&self) -> bool {
-        self.is_notice() && self.from.agent == NOTICE_AGENT && self.from.title == FINISHED_TITLE
+        self.is_notice() && says_finished(&self.from)
     }
 
     /// Whether it's the notice that chats started have finished, still
@@ -113,6 +113,13 @@ impl Message {
 /// without how it came, says it was. Never what lets a message act.
 pub(crate) fn from_clackatoo(sender: &Sender) -> bool {
     sender.agent == NOTICE_AGENT
+}
+
+/// Whether `sender` is the notice that chats finished's, by the names
+/// only it goes by: for a turn handed over without what it said of them.
+/// Never what lets a message act.
+pub(crate) fn says_finished(sender: &Sender) -> bool {
+    from_clackatoo(sender) && sender.title == FINISHED_TITLE
 }
 
 /// What the notice of what an upgrade stopped is called, as the chat

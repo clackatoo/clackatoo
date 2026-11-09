@@ -57,10 +57,11 @@ The agent's own answer to the notice shows under the card as any answer does.
 Clackatoo's other notices, such as that an
 [activity](~clackatoo/reference/agent-tools#managed-activities-and-recovery)
 ended, show quoted down the left under `Clackatoo · Activity completion`. A
-window or phone older than these cards shows the text the agent was told. A
-notice from before a daemon upgrade shows that text, quoted under
-`Clackatoo · Subagents finished`: what the card says isn't carried through
-one.
+window or phone older than these cards shows the text the agent was told. The
+cards go through a daemon upgrade with the notice. One handed over by a build
+that didn't carry them gets its cards back from the text the agent was told,
+which doesn't say how long each chat worked or what it was asked, so its lines
+leave those out.
 
 Agents are told to use `start_chat` or `start_chats`, with a profile, for all
 subagent work. Claude Code's own Task tool, whose helpers work inside one

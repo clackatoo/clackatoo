@@ -328,7 +328,7 @@ impl HostedChat {
             .filter(|(_, message)| !message.finished.is_empty())
             .filter_map(|(at, message)| Some((u32::try_from(at).ok()?, json(&message.finished))))
             .collect();
-        (!turns.is_empty() || !inbox.is_empty()).then(|| handover::ChatNotices {
+        (!turns.is_empty() || !inbox.is_empty()).then_some(handover::ChatNotices {
             chat: self.id.0,
             turns,
             inbox,
@@ -366,6 +366,33 @@ impl HostedChat {
                 .and_then(|at| self.relations.inbox.get_mut(at));
             if let Some(message) = message.filter(|message| message.is_finished_notice()) {
                 message.finished = read(finished);
+            }
+        }
+    }
+
+    /// Its notices that chats finished that say nothing of them, though
+    /// their text does, as a build before handover version 48 handed them
+    /// over (CLACKA-244), each turn's and waiting message's, get them back
+    /// from `read`, which reads them from that text.
+    pub(crate) fn recover_notices(&mut self, read: impl Fn(&str) -> Vec<FinishedChat>) {
+        for turn in &mut self.node.turns {
+            let says = turn
+                .from
+                .as_ref()
+                .is_some_and(super::relations::says_finished);
+            if let Some(notice) = turn.notice.as_mut()
+                && says
+                && notice.finished.is_empty()
+            {
+                notice.finished = read(&turn.prompt);
+            }
+        }
+        for message in &mut self.relations.inbox {
+            if message.is_finished_notice() && message.finished.is_empty() {
+                // One still to say what says it as it begins.
+                if !message.text.is_empty() {
+                    message.finished = read(&message.text);
+                }
             }
         }
     }
