@@ -1276,6 +1276,48 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
     );
 }
 
+/// A phone's user isn't at this machine's screen: it can't have a window
+/// come to the front, nor be revealed a pane as one.
+#[test]
+fn a_device_can_neither_reveal_a_pane_nor_be_revealed_one() {
+    let daemon = TestDaemon::start();
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    let Response::PaneCreated(pane) = phone.request(Request::NewWorkspace {
+        name: None,
+        terminal: PaneTerminal::New(NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        }),
+        on: None,
+    }) else {
+        panic!("a pane");
+    };
+    assert!(matches!(
+        phone.request(Request::WatchWorkspaces),
+        Response::Workspaces(_)
+    ));
+    assert_eq!(phone.request(Request::Window), Response::Done);
+    phone.send(&ClientMessage::Present { here: true });
+
+    let refused = phone.request(Request::Reveal { pane, token: None });
+    assert!(
+        matches!(&refused, Response::Error(Error::Other(why)) if why.contains("this machine")),
+        "{refused:?}"
+    );
+    // Asked on this machine, there's no window for it: the phone isn't one.
+    let mut asker = daemon.window();
+    let none = asker
+        .request(&Request::Reveal { pane, token: None })
+        .unwrap();
+    assert!(
+        matches!(&none, Response::Error(Error::Other(why)) if why.contains("no window")),
+        "{none:?}"
+    );
+}
+
 #[test]
 fn a_device_isnt_given_colours_for_chats_code() {
     let daemon = TestDaemon::start();

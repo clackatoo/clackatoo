@@ -543,6 +543,11 @@ fn open(mut client: Client) -> Result<Opened, ClientError> {
         client.new_workspace(None, terminal)?;
         workspaces = client.watch_workspaces()?;
     }
+    // Panes the user opens from outside, as from a file manager, are
+    // revealed in a window, which says it is one.
+    if client.daemon_has(wire::REVEAL) {
+        client.say_window()?;
+    }
     let daemon_version = client
         .daemon_version()
         .inspect_err(|err| log::warn!("the daemon didn't say which release it is: {err}"))

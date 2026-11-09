@@ -710,6 +710,17 @@ impl Client {
         self.send(&ClientMessage::Dismiss { pane })
     }
 
+    /// Says the client is a window, which panes the user opens from
+    /// outside are revealed in (see [`Request::Window`]). Only to a daemon
+    /// of protocol 128 or later.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn say_window(&mut self) -> Result<(), ClientError> {
+        self.done(&Request::Window)
+    }
+
     /// Says whether the client's user is there (see
     /// [`ClientMessage::Present`]).
     ///

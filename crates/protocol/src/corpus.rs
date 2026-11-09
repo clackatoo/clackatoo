@@ -859,7 +859,12 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Server(ServerMessage::Event(Event::Reveal {
                 pane: PaneId(7),
                 token: None,
+                raise: true,
             })),
+        ),
+        (
+            crate::wire::REVEAL,
+            Client(ClientMessage::Request(Request::Window)),
         ),
     ]);
     // A preview of an open file, coloured as its buffer is.

@@ -336,7 +336,8 @@ gates! {
     FILES_CHANGES = 127,
     /// A window told to switch to a pane and come to the front, for the
     /// user opening something from outside it, as from a file manager
-    /// (CLACKA-223): `Request::Reveal` and `Event::Reveal`.
+    /// (CLACKA-223): `Request::Reveal`, `Request::Window` and
+    /// `Event::Reveal`.
     REVEAL = 128,
     /// The secret an agent's MCP server shows to serve a chat's tools
     /// (CLACKA-215): `Request::CarryMcp`'s `token`. The daemon refuses a

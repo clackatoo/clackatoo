@@ -3812,10 +3812,12 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Show { pane, at })) => {
                 self.agent_shows(pane, at);
             }
-            SessionEvent::Message(ServerMessage::Event(Event::Reveal { pane, token })) => {
+            SessionEvent::Message(ServerMessage::Event(Event::Reveal { pane, token, raise })) => {
                 self.desk.reveal(pane);
                 self.update_title();
-                self.raise(token.as_deref());
+                if raise {
+                    self.raise(token.as_deref());
+                }
                 self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::Exited { terminal })) => {

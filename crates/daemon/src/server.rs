@@ -457,6 +457,10 @@ struct Client {
     /// When the client last said its user was there, which a window says
     /// while it's used: the one to reveal a pane in (see `reveal`).
     last_here: Option<Instant>,
+    /// Whether the client said it's a window, which panes are revealed in.
+    is_window: bool,
+    /// When the client, a window, was last brought to the front.
+    last_raised: Option<Instant>,
     /// Events to queue after the answer to the request being answered.
     later: Vec<u8>,
     /// Answers waiting for one before them, which was passed on to the
@@ -699,6 +703,8 @@ impl Client {
             carrier_as: None,
             present_until: None,
             last_here: None,
+            is_window: false,
+            last_raised: None,
             later: Vec::new(),
             held: VecDeque::new(),
         }
@@ -3574,6 +3580,7 @@ impl Daemon {
                 pane,
                 token: launch,
             } => self.reveal(token, pane, launch),
+            Request::Window => self.is_window(token),
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),

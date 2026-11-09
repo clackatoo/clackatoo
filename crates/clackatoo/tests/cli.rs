@@ -1982,9 +1982,10 @@ fn bg_starts_a_command_in_a_background_tab_of_the_workspace_named() {
 }
 
 /// Runs `clackatoo open` with `paths` after `--`, in `cwd`, against the
-/// daemon in `runtime`, as a launcher would, with its token, and nothing
+/// daemon in `runtime`, as a launcher would, with its tokens, and nothing
 /// of the desktop's or the user's config: a window it starts can't open,
-/// but says it tried in `state`'s window log.
+/// but says it tried in `state`'s window log, and whether it was given a
+/// token.
 fn open(runtime: &Path, state: &Path, cwd: &Path, paths: &[&std::ffi::OsStr]) -> Output {
     Command::new(BINARY)
         .env("CLACKATOO_WORKSPACES", "off")
@@ -1996,6 +1997,8 @@ fn open(runtime: &Path, state: &Path, cwd: &Path, paths: &[&std::ffi::OsStr]) ->
         .env("XDG_STATE_HOME", state)
         .env("XDG_CONFIG_HOME", state)
         .env("XDG_ACTIVATION_TOKEN", "launcher-token")
+        .env("DESKTOP_STARTUP_ID", "launcher-token")
+        .env("RUST_LOG", "clackatoo_gui=debug")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("DISPLAY")
         .current_dir(cwd)
@@ -2024,6 +2027,7 @@ fn open_makes_a_tab_for_each_path_and_has_the_window_used_last_show_the_last() {
     std::fs::write(&odd, "").unwrap();
     let mut window = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
     window.watch_workspaces().unwrap();
+    window.say_window().unwrap();
     window.present(true).unwrap();
     window.list_terminals().unwrap();
 
@@ -2041,12 +2045,13 @@ fn open_makes_a_tab_for_each_path_and_has_the_window_used_last_show_the_last() {
     window
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let (pane, token) = loop {
-        if let Event::Reveal { pane, token } = window.next_event().unwrap() {
-            break (pane, token);
+    let (pane, token, raise) = loop {
+        if let Event::Reveal { pane, token, raise } = window.next_event().unwrap() {
+            break (pane, token, raise);
         }
     };
     assert_eq!(token.as_deref(), Some("launcher-token"));
+    assert!(raise);
     let workspaces = window.watch_workspaces().unwrap();
     let tabs = &workspaces.list[0].tabs;
     let contents: Vec<Content> = (tabs.iter())
@@ -2073,12 +2078,35 @@ fn open_makes_a_tab_for_each_path_and_has_the_window_used_last_show_the_last() {
     wait(daemon);
 }
 
+/// The environment `pid` was started with, as `NAME=value` lines.
+fn environment_of(pid: u32) -> Vec<String> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+    (bytes.split(|&byte| byte == 0))
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect()
+}
+
+/// The daemon running in `runtime`, found among this user's processes:
+/// this build, run as `daemon`, with `runtime` as its runtime directory.
+fn daemon_in(runtime: &Path) -> Option<u32> {
+    let runtime = format!("XDG_RUNTIME_DIR={}", runtime.display());
+    std::fs::read_dir("/proc").ok()?.find_map(|entry| {
+        let pid: u32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+        let command = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let mut args = command.split(|&byte| byte == 0);
+        let program = std::path::PathBuf::from(String::from_utf8_lossy(args.next()?).as_ref());
+        let ours = program == Path::new(BINARY) && args.next() == Some(b"daemon".as_slice());
+        (ours && environment_of(pid).contains(&runtime)).then_some(pid)
+    })
+}
+
 #[test]
-fn open_with_no_window_open_starts_one_on_the_last_tab() {
+fn open_with_no_window_open_starts_one_on_the_last_tab_with_the_launchers_token() {
     use clackatoo_daemon::Client;
 
+    // No daemon either: `open` starts one, which mustn't be given the
+    // launcher's token, which is the window's.
     let runtime = Runtime::new();
-    let daemon = daemon(runtime.path());
     let state = tempfile::tempdir().unwrap();
     let files = tempfile::tempdir().unwrap();
     std::fs::write(files.path().join("notes.txt"), "notes\n").unwrap();
@@ -2101,9 +2129,22 @@ fn open_with_no_window_open_starts_one_on_the_last_tab() {
         workspace.tabs[1].layout.panes()[0].content,
         clackatoo_protocol::Content::Buffer(_)
     ));
-    // A window was started: it logs as it opens.
+    // A window was started, with the token: it logs as it opens.
     let log = state.path().join("clackatoo/window.log");
-    eventually("a window starts", || log.exists());
-    drop(runtime);
-    wait(daemon);
+    eventually("a window starts with the token", || {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|log| log.contains("launched with the desktop's activation token"))
+    });
+    let daemon = daemon_in(runtime.path()).expect("open started a daemon");
+    let environment = environment_of(daemon);
+    assert!(
+        environment
+            .iter()
+            .any(|line| line.starts_with("XDG_RUNTIME_DIR="))
+    );
+    assert!(
+        !(environment.iter()).any(|line| line.starts_with("XDG_ACTIVATION_TOKEN=")
+            || line.starts_with("DESKTOP_STARTUP_ID=")),
+        "{environment:?}"
+    );
 }

@@ -180,6 +180,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     // First, while this is the only thread: nothing started from here on
     // inherits the desktop's token, the daemon included.
     let launch = launch::LaunchToken::take();
+    if launch.token().is_some() {
+        log::debug!("launched with the desktop's activation token");
+    }
     let start = options::Options::drawing_with(&options.font);
     let fonts = {
         let options = start.font_options();

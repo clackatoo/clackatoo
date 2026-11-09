@@ -658,6 +658,9 @@ pub enum Event {
         /// The desktop's activation token to take the focus with, if the
         /// asker had one.
         token: Option<String>,
+        /// Whether to come to the front: not if the window was told to a
+        /// moment ago, so nothing can keep taking the focus.
+        raise: bool,
     },
 }
 
@@ -1522,9 +1525,11 @@ pub enum Request {
     /// Asks one window to switch to a pane and come to the front, for the
     /// user asking from outside any window, as `clackatoo open` does for a
     /// file manager: the window whose user was there last, of those on
-    /// this machine that read [`Event::Reveal`]. Answered with
-    /// [`Response::Done`] once one is told, or an error if none is open.
-    /// Only to a daemon of protocol 128 or later ([`wire::REVEAL`]).
+    /// this machine that said they're windows ([`Request::Window`]).
+    /// Asked only on this machine's socket, never by another machine's
+    /// daemon or client, nor a phone. Answered with [`Response::Done`]
+    /// once one is told, or an error if none is open. Only to a daemon of
+    /// protocol 128 or later ([`wire::REVEAL`]).
     Reveal {
         /// The pane, in one of the daemon's own workspaces' tabs.
         pane: PaneId,
@@ -1532,6 +1537,11 @@ pub enum Request {
         /// the window to take the focus with.
         token: Option<String>,
     },
+    /// Says the client is a window, showing the user the workspaces: the
+    /// only kind of client [`Event::Reveal`] is sent to. Answered with
+    /// [`Response::Done`]. Only to a daemon of protocol 128 or later
+    /// ([`wire::REVEAL`]).
+    Window,
 }
 
 /// How to start a terminal.
