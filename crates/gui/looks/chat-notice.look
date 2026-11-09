@@ -8,14 +8,19 @@ keys <S-CR>
 type mcp start_chat {"prompt":"usage-limit"}
 keys <CR>
 wait-for subagents finished
-sleep 300
+sleep 500
 shot notice-folded
-keys <C-;>gg/Find where<CR>za
-sleep 300
+keys <C-;>gg/Find where<CR>nza
+sleep 500
 shot notice-open
+keys <C-?>
+type answer
+sleep 300
+shot notice-help
+keys <Esc>
 keys zMi
 type mcp start_chat {"prompt":"Look at the parser","show":true}
 keys <CR>
-wait-for From chat
-sleep 300
+wait-for echo: Look at the parser
+sleep 500
 shot message-quoted

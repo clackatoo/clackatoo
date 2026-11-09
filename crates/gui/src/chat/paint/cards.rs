@@ -1,7 +1,7 @@
 //! Tools start as quiet single-line summaries. Opening a row reveals its
 //! full title and output or diff; a failed tool keeps a short excerpt visible.
 
-use clackatoo_protocol::{Tool, ToolStatus};
+use clackatoo_protocol::{FINISHED_CARD, Tool, ToolStatus};
 
 use super::select::TextKey;
 use super::{Canvas, Drawn, Laid, Look, Measures, draw_laid, intersection, lay_out};
@@ -467,7 +467,9 @@ pub(super) fn draw_card(
     (drawn, previews): (&mut Drawn<'_>, &crate::chat::images::Cache),
 ) {
     let rect = [origin[0], origin[1], width, card.height];
-    if card.open || !card.body.is_empty() || card.image_height > 0.0 {
+    // A notice's chats' cards are boxed alike, with an answer or not.
+    let answer = card.tool.id.starts_with(FINISHED_CARD);
+    if card.open || !card.body.is_empty() || card.image_height > 0.0 || answer {
         canvas.fill(Fill::rounded(rect, Paint::Code, m.em(0.6)).bordered(1.0, Paint::RaisedEdge));
     }
     // What's drawn in it stays in it, and in view.
