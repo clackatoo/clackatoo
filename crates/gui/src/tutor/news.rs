@@ -1243,7 +1243,7 @@ pub(crate) const NEWS: &[News] = &[
     },
     News {
         id: "one-window-process",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "basics",
         what: "New windows open at once: every window shares one process, and only the first sets up the GPU",
     },
