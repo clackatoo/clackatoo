@@ -9,7 +9,7 @@ related:
 
 A pane can hold a chat with an agent, such as Claude Code, instead of a shell. You type a message in the box along the bottom, the agent answers above it, and it works on the files in the pane's directory as it would in its own program.
 
-Your messages are bubbles on the right. The agent's answers run the width of a column down the middle of the pane, with Markdown laid out as it's meant to look: headings in bold, lists, quotes, links in blue, code in the terminal's font on a background of its own, colored as an editor colors it when its language is installed, and tables as a grid. Code, quotes and cards all start at the column's left edge.
+Your messages are bubbles on the right. The agent's answers run the width of a column down the middle of the pane, with Markdown laid out as it's meant to look: headings in bold, lists, quotes, links in blue, code in the terminal's font on a background of its own, colored as an editor colors it when its language is installed, and tables as a grid. Code, quotes, and cards all start at the column's left edge.
 
 Long conversations open on recent turns. Scroll toward the top to fetch earlier turns a page at a time, keeping the message you're reading in place. This works in the window and web app, including chats on connected machines. Reconnecting retains the range you've loaded. Live output and file actions keep their original turn identities; to undo a specific older turn by number, load that turn first. A daemon older than protocol 104 sends the full conversation.
 
@@ -38,10 +38,10 @@ A chat is listed once, as the branch it shows: the sessions of its other [branch
 | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder. |
 | `l`, `h`, Right, Left | The picker's next or previous choice. |
 | `b` | Lists the branches of chats that have gone too, or leaves them out again. |
-| `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
+| `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U, and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
 | Esc, Ctrl+C | Clears what's typed, or closes the page. |
 
-`j`, `k`, `n`, `h`, `l` and `b` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
+`j`, `k`, `n`, `h`, `l`, and `b` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
 
 Going on with a session shows its conversation so far as the chat's turns, where the agent can tell it, as Claude Code and Codex can. Nothing in those turns changes your files again, asks you anything, or runs anything: they're only shown. An agent that can't goes on from where it was, and the chat says the turns before aren't shown. A message sent while the turns are coming waits until they've all come. A session another chat has open goes to that chat; one open in another workspace's chat is refused, saying where it is.
 
@@ -169,7 +169,7 @@ A path with a space in it is quoted, as Claude Code quotes one: `@"docs/read me.
 
 When the message is sent, the daemon finds each file it mentions and sends it to the agent with the message, as ACP context:
 
-| What's mentioned | Claude Code | Codex, Gemini and others |
+| What's mentioned | Claude Code | Codex, Gemini, and others |
 |---|---|---|
 | A saved file | A link to it, which it reads with its Read tool | Its text, if it's at most 64 KiB; a link if bigger |
 | A file open in an editor with changes not saved | Its text as it is in the editor, at most 64 KiB; a link if bigger, which reads the saved file | The same |
@@ -220,7 +220,7 @@ The circular gauge shows context used as a percentage in its center. Its ring fi
 
 Hover over the gauge for the conversation's token counts and any account limits reported during that chat. Select it, or press `K` in normal mode, to open **Usage & limits**. The modal separates conversation context from account allowances and lists the installed providers, including those whose adapters cannot report limits. Escape, Ctrl+;, the close button, or selecting outside it dismisses it without changing the draft. Scroll or use the arrow and page keys for more windows.
 
-Claude Code, Codex and Antigravity can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance has a bordered card with a prominent percentage left and a provider-colored bar. The hatched part is the allowance already used, and the badge inside the bar counts down to reset. Wide windows place the figure beside the bar; narrow panes stack them. Update times beside provider names use the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
+Claude Code, Codex, and Antigravity can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance has a bordered card with a prominent percentage left and a provider-colored bar. The hatched part is the allowance already used, and the badge inside the bar counts down to reset. Wide windows place the figure beside the bar; narrow panes stack them. Update times beside provider names use the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
 
 The daemon collects these readings, so windows connected remotely see the accounts on that daemon's machine. It caches readings after the first completed message, then refreshes every three completed messages across chats (or on the next completion after five minutes). Opening the modal shows cached values immediately and requests a refresh, as does **Refresh**. All refreshes have a one-minute minimum interval and concurrent windows share the work; nothing polls while chats are idle. New chats receive the same cached readings. Failed reads retain the last successful values and their update time; expired windows say they need a refresh rather than guessing that usage is zero. Readings are collected again after a daemon upgrade.
 
@@ -314,7 +314,7 @@ What's yanked goes into the window's registers as an editor's yank does: into th
 
 A search looks through the text the chat shows, block by block: messages, the agent's words and thinking without their Markdown, and the lines of cards. A match is never across two blocks. It looks in folded work too, as Vim's search opens folds: a match in a turn's folded work opens the work, and one in a tool's folded card opens the card. Only the turns the chat has loaded are searched; scroll up to load older ones. The cursor goes to the match, and every match in view is lit up, as Vim's `hlsearch` lights them, the match the search, `n` or `N` went to brighter than the rest, wherever the cursor goes after, until Esc (but one leaving visual mode) or `:nohlsearch` (`:noh`), and again at the next search, `n` or `N`. Only the text drawn is looked through for them, with 4 KiB around it, and at most 512 are lit in a block, and only again when what's drawn or the search changes. With the [option](~clackatoo/reference/config#options) `hlsearch` off, only the match found is lit, until Esc or `:noh`.
 
-While you type the search, the cursor goes to the match it would find from where you started, opening the work or card it's in, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). It's worked out once after each key, as one step of a search, within the same bounds. Esc puts the cursor, the view and anything it opened back; Enter keeps them, and is the search. With the [option](~clackatoo/reference/config#options) `incsearch` off, nothing moves until Enter.
+While you type the search, the cursor goes to the match it would find from where you started, opening the work or card it's in, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). It's worked out once after each key, as one step of a search, within the same bounds. Esc puts the cursor, the view, and anything it opened back; Enter keeps them, and is the search. With the [option](~clackatoo/reference/config#options) `incsearch` off, nothing moves until Enter.
 
 A card shows at most 1,000 lines of output: a match only in lines it leaves out is said to be there, rather than not found.
 
@@ -396,7 +396,7 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 - A failed call of one of its tools for other agents, such as SendMessage, shows its error as plain text, not as code.
 - clackatoo also asks for AIR's session failures, so Claude Code says when it [tries a request again](#when-a-turn-fails), and why a turn failed by its kind. A turn that fails then ends as if well, with the failure beside, which clackatoo reads; and Claude Code's error for a failure leaves out the provider's words, which come with the failure instead.
 
-Commands' output, file changes and images show as usual. To have none of this and no shelf, set `tasks = false` for Claude Code, beside its `command`, in [`agents.toml`](#which-agent).
+Commands' output, file changes, and images show as usual. To have none of this and no shelf, set `tasks = false` for Claude Code, beside its `command`, in [`agents.toml`](#which-agent).
 
 ### Claude Code's own subagents
 
@@ -435,7 +435,7 @@ A turn that fails anyway says why in plain words, with what to do, rather than t
 | The agent refused the request | only that |
 | The connection to the model dropped mid-turn | to send the message again |
 | The conversation, or the answer, hit the model's limit | to start a new chat |
-| A Codex session open in another Codex client: the app, the CLI or an editor | to close it there, then send the message again |
+| A Codex session open in another Codex client: the app, the CLI, or an editor | to close it there, then send the message again |
 
 Where the agent's words say more, they follow clackatoo's, as `Codex said:` and the words, in the terminal's font, as code: nothing the agent says can pass for clackatoo's advice, nor hide what it says, and each thing it says is cut to about 2 KB. What it said in full follows underneath, `The agent said: …`, unless that's said already; `clackatoo capture` and copying the turn keep it. A failure clackatoo doesn't know says `the agent failed:` and the agent's words, quoted the same way. A Codex session open in another Codex client isn't taken for one that's gone: the chat says so and waits, rather than starting a new session in its place.
 
@@ -476,13 +476,13 @@ Questions wait their turn, 16 at most of each kind, the agent's own, clackatoo's
 
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
-### Questions, forms and plans
+### Questions, forms, and plans
 
 An agent can ask you something rather than ask leave: Claude Code's multiple-choice questions (its AskUserQuestion tool), Codex's questions, an MCP server's form, a link to sign in to an MCP server, or whether to try again with another model when one turns a request down. ACP calls these elicitations. The question takes the box's place as a form: the agent's message, then each field's title and what it asks, then a row for each option, a yes-or-no, or a box to type in, and at the end Submit and Decline.
 
 - A choice of one shows a dot by each option (`◉` picked, `○` not); a choice of several a box to tick (`☑`, `☐`). Options are numbered, and an option's meaning shows under it.
 - `j` and `k`, the arrows, Tab and Shift+Tab, or Ctrl+N and Ctrl+P move between rows, in either mode: in normal mode they move through the form, not the conversation. The row picked is lit.
-- `1` to `9` pick that option of the field you're in. Space or `x` picks, ticks or flips the row picked. Enter does the same, moves on from a box, or presses Submit, Decline or Open the link.
+- `1` to `9` pick that option of the field you're in. Space or `x` picks, ticks, or flips the row picked. Enter does the same, moves on from a box, or presses Submit, Decline or Open the link.
 - In a box, in insert mode, keys type, Backspace, Ctrl+W and Ctrl+U delete, and Tab, Down, Up or Enter move on. In normal mode, `i`, `a` or Enter go into it. A secret shows as dots; a number's box takes only what a number holds. A paste goes into the box picked. Select a row to pick it, or a box to type in it.
 - Claude Code puts a box called Other after each of its questions: type your own answer there instead of picking, or a note beside what you picked.
 - Submit sends only answers that fit what the agent asked; otherwise the bar says what's missing or wrong. A required field shows `*`. clackatoo checks them again before the agent hears them.
@@ -509,7 +509,7 @@ Drag across the conversation to select its text, or double-click a word or tripl
 
 ### Desktop notifications
 
-The window shows a desktop notification when a chat you can't see finishes a turn, fails (its turn went wrong, or its agent couldn't start) or asks you something: a permission, or a form. A chat you can't see is one that isn't in the tab shown, or any chat while the window doesn't have the focus. These are the chats the tabs mark `•` and `?` (see [Workspaces, tabs and panes](~clackatoo/reference/window#workspaces-tabs-and-panes)): the notification and the mark go by the same rules.
+The window shows a desktop notification when a chat you can't see finishes a turn, fails (its turn went wrong, or its agent couldn't start) or asks you something: a permission, or a form. A chat you can't see is one that isn't in the tab shown, or any chat while the window doesn't have the focus. These are the chats the tabs mark `•` and `?` (see [Workspaces, tabs, and panes](~clackatoo/reference/window#workspaces-tabs-and-panes)): the notification and the mark go by the same rules.
 
 - **One a chat.** Each chat has one notification at most, replaced as it changes, so a chat that asks and then finishes says so in one.
 - **Taken back when you look.** Showing the chat with the window focused removes its notification, as does its question being answered elsewhere, the agent going again, or the chat closing.
@@ -551,7 +551,7 @@ Undoing a turn takes it out of the files, but the agent still remembers it. Rewi
 | `:branches` | The finder over every branch: where it parts, its first message, its turns, when it was last shown. Enter shows it. |
 | `:fork N`, `:fork` | Copies the branch shown, up to turn N or all of it, into a new chat in this pane; the chat copied goes to the start page's chats in no pane. `:\|fork` and `:-fork` put the copy beside instead. `/fork` and `/branch`, typed as the whole message, are `:fork`. |
 
-A rewind always asks first, naming the turn and quoting its message, as in `Rewind to before turn 7 ("fix the lint…")? (y/n)`: `dG` and `cc` are a key or two, and fall back to the last turn when the turn under the cursor isn't in view. Only `:rewind!` doesn't ask. If the turns taken out changed files, the same question asks whether to undo them: `y` undoes them, newest first, as undoing each turn does, `n` leaves them and rewinds all the same, and any other key changes nothing. The `rewindfiles` option (`ask`, `undo` or `keep`) answers about the files for you. A turn whose files can't be undone, as when you've changed the same lines since, stops the rewind before anything is rewound; the turns after it that were undone stay undone, and the chat says so. If the agent runs anything in the background, the bar says leaving the branch stops it, and asks first. Nothing can be rewound while the agent is answering or asking you something, and a chat another agent started can't be rewound.
+A rewind always asks first, naming the turn and quoting its message, as in `Rewind to before turn 7 ("fix the lint…")? (y/n)`: `dG` and `cc` are a key or two, and fall back to the last turn when the turn under the cursor isn't in view. Only `:rewind!` doesn't ask. If the turns taken out changed files, the same question asks whether to undo them: `y` undoes them, newest first, as undoing each turn does, `n` leaves them and rewinds all the same, and any other key changes nothing. The `rewindfiles` option (`ask`, `undo`, or `keep`) answers about the files for you. A turn whose files can't be undone, as when you've changed the same lines since, stops the rewind before anything is rewound; the turns after it that were undone stay undone, and the chat says so. If the agent runs anything in the background, the bar says leaving the branch stops it, and asks first. Nothing can be rewound while the agent is answering or asking you something, and a chat another agent started can't be rewound.
 
 After a rewind, the chat ends at the turn before, with a row saying "New branch · write to go on from here". Nothing is asked of the agent until you send: the first message makes the branch, forking the agent's session at the end of the turn before, so the agent knows the conversation up to there exactly. Where the agent can't fork its session there, it's told the turns before as a summary, and the switcher says "from a summary".
 
@@ -578,7 +578,7 @@ Lines an agent changed that you haven't looked at yet get a bar of their own bes
 | `R` | Works the list out again |
 | `Q` | Closes the review |
 
-Rejecting takes the change out as undoing a turn does, keeping what you've changed since, including anything you typed inside the agent's change. It's refused if you've changed the same lines, and says which. `:reviewkeep` and `:reviewreject` do the change at the cursor, or `file`, `turn` (`turn 3`) or `all`; `:reviewreject!` rejects what it can. Comments wait until `:reviewsend` or `S` sends them, as "Review comments:" and a line for each, with its file and line, and whether it's in the agent's change; they move with the text as you and the agent edit. Undoing a turn clears its color; redoing it brings it back. What you've reviewed, the comments waiting and open reviews last through an upgrade.
+Rejecting takes the change out as undoing a turn does, keeping what you've changed since, including anything you typed inside the agent's change. It's refused if you've changed the same lines, and says which. `:reviewkeep` and `:reviewreject` do the change at the cursor, or `file`, `turn` (`turn 3`) or `all`; `:reviewreject!` rejects what it can. Comments wait until `:reviewsend` or `S` sends them, as "Review comments:" and a line for each, with its file and line, and whether it's in the agent's change; they move with the text as you and the agent edit. Undoing a turn clears its color; redoing it brings it back. What you've reviewed, the comments waiting, and open reviews last through an upgrade.
 
 A review of a turn or of the chat takes in its subagents too, open or closed: a turn's review lists the ones that turn started, and theirs. Under the heading is a line for each, with what it was asked, and each change says whose it is, as `· explore (chat 7), turn 1`, the turn being the subagent's own. Keeping and rejecting work as for any change. A rejected change of a subagent's is that subagent's step, never the chat's you're reviewing and never yours; rejecting a file holding several chats' changes does all of it or none, a step for each chat. Changes of two chats too close together to tell apart are refused: reject each chat's alone. Undoing a turn in the chat that started them leaves their changes, as the review says: reject them in the review instead. `:reviewkeep turn` and `:reviewreject turn` take in the subagents the turn started.
 
@@ -630,7 +630,7 @@ When the daemon supports browsing, the tools are advertised from the start, even
 
 | Tool | Does |
 |---|---|
-| `browser_navigate`, `browser_back` | Open a page, or go back. http, https and `data:` addresses; never files. |
+| `browser_navigate`, `browser_back` | Open a page, or go back. http, https, and `data:` addresses; never files. |
 | `browser_snapshot` | Reads the page as an outline of headings, links, buttons and text boxes, each with a ref. |
 | `browser_click`, `browser_type`, `browser_press_key` | Click or type into a thing by its ref, or press a key. |
 | `browser_screenshot`, `browser_read` | A picture of the page, or its text. |
@@ -639,7 +639,7 @@ Before its first page, the chat asks: Allow for this chat, or Reject. The browse
 
 Turning Browser or Tools off, stopping the chat, or closing it stops what its agent asked the browser to do: what's waiting is never done, the click, typing or load under way stops at its next step, and the agent is told why at once. A chat can have 4 browser calls under way at a time; one browser serves every chat, so more would hold up other chats' pages.
 
-A page's alerts, confirms and prompts are turned down as they open. The agent hears of the first 8 since it last used the browser, and how many more there were. A page's address and title are cut to 2 KiB wherever they're kept, shown or sent, as a page can make its address megabytes long, many times a second.
+A page's alerts, confirms, and prompts are turned down as they open. The agent hears of the first 8 since it last used the browser, and how many more there were. A page's address and title are cut to 2 KiB wherever they're kept, shown or sent, as a page can make its address megabytes long, many times a second.
 
 A snap of Chromium can only use a profile in its own folder under `~/snap`, and anywhere else it would use yours: clackatoo puts its profile there, checks once the browser has started that it's using it, and stops it at once, and never starts it again, if it isn't.
 
@@ -660,7 +660,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `start_chats` | Starts several at once, up to 16. |
 | `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, opened and sent back to the background, or whose changes or comments wait for your review: those are yours to close. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat might go on by itself when that ends. |
-| `wait_for_chats` | Waits for several chats, up to 16, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
+| `wait_for_chats` | Waits for several chats, up to 16, all of them or the first to finish, and gives one summary: each one's status, final answer, and files changed. |
 
 What another chat's agent said reaches an agent quoted, each line after `| `, in what `read_chat`, `wait_for_chat` and `wait_for_chats` give, as the messages in a turn are after `> `: nothing a chat says can pass for a turn of yours, or for clackatoo's words around it.
 
@@ -726,7 +726,7 @@ Stopping a chat holds it for you, as it pauses your own [queue](#queuing-and-ste
 
 Starting and messaging chats never asks you first. Instead, what an agent can't do through another chat is refused, and the agent is told to ask you, so it can never gain, through another chat, what its own chat isn't allowed:
 
-- An agent lists, messages, reads and waits for only chats in its own workspace or family: the chat that started it, the chats it started, and the others the chat that started it started. Chats in other workspaces are out of its sight, a workspace lent to another machine included.
+- An agent lists, messages, reads, and waits for only chats in its own workspace or family: the chat that started it, the chats it started, and the others the chat that started it started. Chats in other workspaces are out of its sight, a workspace lent to another machine included.
 - A chat outside its family must work inside the sender's project, the git repository its folder is in, or else that folder, to be messaged.
 - A message to a chat that can do more is refused: one whose Tools setting is looser than the sender's, whose [limits](#profiles) are fewer, counting what each one's mode rules out, or whose mode comes later among those its agent offers, the first, such as Manual or Read-only, being the safest. Modes of different agents can't be compared, so a chat with another agent is messaged only in its first mode, and not at all if that agent offers no modes. A chat whose agent hasn't started yet is judged by the mode it will start in, where that's known, and otherwise the sender is told to wait for it.
 - A message that waits its turn is checked again as its turn comes. If it can't go by then, it's dropped, and the sender is told as it waits for that chat.
@@ -771,7 +771,7 @@ clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.co
 
 Each agent uses its own sign-in: run `claude`, `codex login` or `gemini` once in a terminal, or for Antigravity, [its own](#gemini-through-antigravity). A chat with an agent no one's signed in to says what to run. With a subscription, chats count toward its limits.
 
-If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it might be waiting on: most often an MCP server in the agent's config that needs you to sign in. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`, `claude mcp list` or `gemini mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx might be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which Esc picks, **Retry**, which stops the agent and starts it again, or **Stop**; Ctrl+C stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
+If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it might be waiting on: most often an MCP server in the agent's config that needs you to sign in. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`, `claude mcp list`, or `gemini mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx might be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which Esc picks, **Retry**, which stops the agent and starts it again, or **Stop**; Ctrl+C stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
 
 An agent that stops listening, say because its input broke, is still read for a moment for the rest of what it says, but nothing more is sent to it: a message to it ends at once, saying the agent stopped, and so does stopping the chat or changing a setting. A chat that tries to start it meanwhile waits, saying it's stopping, and starts it again once it has gone, sending any message you typed.
 
@@ -822,7 +822,7 @@ What each turn changed in files lasts through an upgrade, so turns can still be 
 
 A chat that moved between agents keeps the sessions it had with each, and goes back to them after an upgrade too.
 
-When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, folder, model, Tools, Browser and Subagents settings (the last no more than `working`) and whether it can use Claude Code's own Task tool, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
+When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, folder, model, Tools, Browser, and Subagents settings (the last no more than `working`) and whether it can use Claude Code's own Task tool, and starts in the agent's own starting mode. Chats in no pane don't come back, but the start page lists their sessions.
 
 A [subagent](#subagents) in a pane comes back a subagent of its chat, if that chat is in a pane of the same workspace and so comes back with it: with its band, on its chat's card, under the turn that started it, and with its profile and that profile's limits. `:q` sends it back to the card, its chat can message it and wait for it, and one you'd sent back and opened again is still yours to close. It never comes back able to do more than it could: it keeps its limits (ones this build doesn't know count as read-only), never fewer than its chat's, it can start no deeper chats than it could, and it asks its agent for the mode it had chosen only if that's no higher than its chat's: otherwise for the safest, Manual or Read-only, and never the mode your own new chats start in. An agent whose modes clackatoo doesn't know is asked for none. A subagent whose chat didn't come back, because it was in no pane, or is in another workspace, comes back on its own, with its profile and limits, in a mode no higher than its agent's safest, and says so. Its Subagents setting is never more than its chat's. Some things start again: how many chats agents have started under each of yours (up to 128), how many turns notices have started (100), messages from other agents still waiting their turn, and waits under way, which end. What its chat had already heard from it isn't told again: the conversation it tells again counts as no answer to anyone. One kept by a build from before then comes back as a chat of its own.
 

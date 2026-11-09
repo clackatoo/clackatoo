@@ -49,7 +49,7 @@ Generated workloads play in a 120x40 terminal, a typical window. The vim recordi
 
 Each benchmark feeds a workload to one emulator in 64 KiB pieces, the size the daemon reads from a PTY at a time. The emulator is reused from one iteration to the next, so its 10,000-line scrollback is full and every new line pushes an old one out. That's the steady state of a terminal that has been open a while. Neither emulator does any I/O or drawing.
 
-For each workload there are three results: `clackatoo`, `clackatoo-eager` and `alacritty`. A flood never pauses, so by default clackatoo never compacts its scrollback during the benchmark, much as alacritty never does. `clackatoo-eager` compacts every line as it scrolls off, so the cost of compacting stays measured.
+For each workload there are three results: `clackatoo`, `clackatoo-eager`, and `alacritty`. A flood never pauses, so by default clackatoo never compacts its scrollback during the benchmark, much as alacritty never does. `clackatoo-eager` compacts every line as it scrolls off, so the cost of compacting stays measured.
 
 ```text
 ascii/clackatoo         time:   [23.467 ms 23.522 ms 23.601 ms]

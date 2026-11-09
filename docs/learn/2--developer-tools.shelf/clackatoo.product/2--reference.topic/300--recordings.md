@@ -30,4 +30,4 @@ The output is written as it arrives, so a recording can be read while the progra
 
 ## Privacy
 
-A recording contains everything the program displayed: paths, hostnames, file contents and anything else that appeared on screen. Check a recording before sharing it.
+A recording contains everything the program displayed: paths, hostnames, file contents, and anything else that appeared on screen. Check a recording before sharing it.

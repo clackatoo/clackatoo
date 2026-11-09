@@ -15,8 +15,8 @@ A fuzzer runs a piece of code over and over with input it makes up, keeping the 
 | `parser` | what a program writes to its terminal | the parser reports what `vte`, its oracle, reports, however the bytes are cut |
 | `terminal` | the same, onto the whole emulator, with resizes, searches and scrollback | a snapshot, as an upgrade hands it over, makes the same terminal again |
 | `frames` | protocol frames, at every version the compatibility window holds | a message read is encoded at that version to what reads back the same; what relays read without decoding agrees with decoding |
-| `transform` | edits made at once to one text | each made after the other, transformed, gives one text; compose, invert and coarsen agree with making the edits |
-| `history` | several authors editing, undoing and sending late edits | every edit the history gives fits the text; bringing an edit up to date keeps to its budget |
+| `transform` | edits made at once to one text | each made after the other, transformed, gives one text; compose, invert, and coarsen agree with making the edits |
+| `history` | several authors editing, undoing, and sending late edits | every edit the history gives fits the text; bringing an edit up to date keeps to its budget |
 | `handover` | a handover file of any version, from any bytes | it's read or refused, and what's read is made into workspaces, screens, buffers and chats |
 | `workspaces` | the saved workspaces file | what's read writes back the same |
 | `agents_toml` | `agents.toml` | its limits on subagents stay in their ranges |
