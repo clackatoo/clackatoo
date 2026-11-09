@@ -148,23 +148,53 @@ fn settings_lua(path: &Path, info: &Info, value: Option<Value>) -> anyhow::Resul
     if text.as_deref() == Some(rendered.as_str()) {
         return Ok(());
     }
-    replace(path, &rendered)
+    replace(path, &rendered, PRIVATE)
 }
 
+/// Who may read and write a new settings.lua: only its owner, as config
+/// can say what's private.
+pub(crate) const PRIVATE: u32 = 0o600;
+
 /// Replaces the file at `path` with `text`, all at once, so whatever reads
-/// it meanwhile reads either the old file or the new one.
-pub(crate) fn replace(path: &Path, text: &str) -> anyhow::Result<()> {
+/// it meanwhile reads either the old file or the new one, and a crash
+/// leaves one or the other on the disk. The file keeps its mode, or a new
+/// one has `mode`. A file half written is never left behind.
+pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let dir = path.parent().context("the file is in a directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("couldn't make {}", dir.display()))?;
     let name = path.file_name().context("the file has a name")?;
+    let mode = (std::fs::metadata(path))
+        .map(|metadata| metadata.permissions().mode() & 0o7777)
+        .unwrap_or(mode);
     let partial = dir.join(format!(
         ".{}.{}.partial",
         name.to_string_lossy(),
         std::process::id()
     ));
-    std::fs::write(&partial, text)
-        .with_context(|| format!("couldn't write {}", partial.display()))?;
-    std::fs::rename(&partial, path).with_context(|| format!("couldn't write {}", path.display()))
+    let written = (|| -> anyhow::Result<()> {
+        let mut file = (std::fs::OpenOptions::new())
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(&partial)
+            .with_context(|| format!("couldn't write in {}", dir.display()))?;
+        // As the old file was, whatever the umask says.
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&partial, path)
+            .with_context(|| format!("couldn't replace {}", path.display()))?;
+        // The rename itself, kept.
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 #[cfg(test)]
@@ -222,6 +252,38 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["settings.lua"]);
+    }
+
+    #[test]
+    fn a_file_is_replaced_whole_keeping_its_mode_or_left_as_it_was() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert!(
+            saved(dir.path(), "nu", Some(Value::Bool(false)))
+                .result
+                .is_ok()
+        );
+        let path = dir.path().join("client/settings.lua");
+        assert_eq!(mode(&path), 0o600, "a new settings.lua is only its owner's");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            saved(dir.path(), "wrap", Some(Value::Bool(false)))
+                .result
+                .is_ok()
+        );
+        assert_eq!(mode(&path), 0o640);
+        // One that can't be replaced, as a folder can't, is left as it is,
+        // and nothing half written stays.
+        let folder = dir.path().join("folder");
+        std::fs::create_dir_all(folder.join("inside")).unwrap();
+        assert!(replace(&folder, "text", PRIVATE).is_err());
+        assert!(folder.join("inside").is_dir());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
     }
 
     #[test]

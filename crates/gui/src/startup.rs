@@ -305,7 +305,8 @@ pub(crate) fn persist(path: &Path, info: &Info, value: Option<Value>) -> anyhow:
             }
         }
     }
-    options::persist::replace(path, &document.to_string())
+    // As other programs' config is, readable by others.
+    options::persist::replace(path, &document.to_string(), 0o644)
 }
 
 #[cfg(test)]
