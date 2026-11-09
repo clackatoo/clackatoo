@@ -176,6 +176,128 @@ mod printing {
     }
 
     #[test]
+    fn what_wraps_to_the_left_margin_never_joins_the_cell_past_it() {
+        // The skin tone has no room to widen ☝ at the right margin, so it
+        // wraps to the left one, where a cell outside the box is before
+        // it: a cluster it would go on with, by Unicode's rules alone.
+        for simple in [false, true] {
+            let mut t = boxed("");
+            if simple {
+                t.use_simple_print();
+            }
+            t.advance("\x1b[?2027h\x1b[1;3Habc☝\u{1F3FD}".as_bytes());
+            t.assert_invariants();
+            assert_eq!(texts(&t, 0)[2..6], ["a", "b", "c", "☝"], "simple: {simple}");
+            assert_eq!(
+                texts(&t, 1)[..5],
+                ["0", "1", "\u{1F3FD}", "*", "4"],
+                "simple: {simple}"
+            );
+            assert_eq!(cursor(&t), (1, 4), "simple: {simple}");
+
+            // Nor a flag's second half, the first's past the margin.
+            let mut t = boxed("\x1b[?2027h\x1b[2;2H\u{1F1EF}");
+            if simple {
+                t.use_simple_print();
+            }
+            t.advance("\x1b[1;3Habc\u{1F1EC}\u{1F1E7}".as_bytes());
+            t.assert_invariants();
+            assert_eq!(
+                texts(&t, 1)[..4],
+                ["0", "\u{1F1EF}", "\u{1F1E7}", "3"],
+                "simple: {simple}"
+            );
+            assert_eq!(cursor(&t), (1, 3), "simple: {simple}");
+
+            // Kept apart, they stay apart through history and a snapshot.
+            t.advance(b"\x1b[?69l\x1b[4;1H\n\n\n\n");
+            let printed = cells(&t);
+            t.compact_scrollback();
+            assert_eq!(cells(&t), printed, "through history, simple: {simple}");
+            let snapshot = cells(&Terminal::restore(&t.snapshot(), &Config::default()).unwrap());
+            assert_eq!(snapshot, printed, "through a snapshot, simple: {simple}");
+
+            // With the mode off too, nor what follows a ZWJ there.
+            let mut t = boxed("\x1b[2;2Ha\u{200D}");
+            if simple {
+                t.use_simple_print();
+            }
+            t.advance("\x1b[1;3Habc字".as_bytes());
+            t.assert_invariants();
+            assert_eq!(
+                texts(&t, 1)[..5],
+                ["0", "a\u{200D}", "字", "*", "4"],
+                "simple: {simple}"
+            );
+        }
+    }
+
+    /// A terminal of `cols` × 3 after `input`, as one read, printed the
+    /// fast way. Read in two at every byte, either way it's printed, it
+    /// must come out the same.
+    fn read_whole_or_split(cols: u16, input: &str) -> Terminal {
+        let input = input.as_bytes();
+        let read = |split: usize, simple: bool| {
+            let mut t = terminal(cols, 3);
+            if simple {
+                t.use_simple_print();
+            }
+            t.advance(&input[..split]);
+            t.advance(&input[split..]);
+            t.assert_invariants();
+            t
+        };
+        let whole = read(input.len(), false);
+        for (split, simple) in (0..=input.len()).flat_map(|split| [(split, false), (split, true)]) {
+            let case = format!("{input:?} in {cols} columns, split at {split}, simple {simple}");
+            assert_eq!(cells(&read(split, simple)), cells(&whole), "{case}");
+        }
+        whole
+    }
+
+    #[test]
+    fn a_cluster_split_between_reads_prints_as_one_read_does() {
+        // Each sequence, then what it prints to after `a`, with mode 2027
+        // off and on: VS16 and a ZWJ join either way, a skin tone and a
+        // flag's halves only by clusters.
+        let sequences = [
+            (
+                "☝\u{1F3FD}",
+                ["☝", "\u{1F3FD}", "*"],
+                ["☝\u{1F3FD}", "*", "b"],
+            ),
+            (
+                "\u{1F469}\u{200D}\u{1F4BB}",
+                ["\u{1F469}\u{200D}\u{1F4BB}", "*", "b"],
+                ["\u{1F469}\u{200D}\u{1F4BB}", "*", "b"],
+            ),
+            (
+                "\u{2764}\u{FE0F}",
+                ["\u{2764}\u{FE0F}", "*", "b"],
+                ["\u{2764}\u{FE0F}", "*", "b"],
+            ),
+            (
+                "\u{1F1EC}\u{1F1E7}",
+                ["\u{1F1EC}", "\u{1F1E7}", "b"],
+                ["\u{1F1EC}\u{1F1E7}", "*", "b"],
+            ),
+        ];
+        // Columns, and what comes before the sequence: in the last column
+        // but one and the last, and at the right margin, where what would
+        // widen wraps to the left one.
+        let edges = [(3, "a"), (2, "a"), (10, "\x1b[?69h\x1b[3;6s\x1b[1;5Ha")];
+        for (sequence, off, on) in sequences {
+            for (mode, shown) in [("", off), ("\x1b[?2027h", on)] {
+                let t = read_whole_or_split(10, &format!("{mode}a{sequence}b"));
+                assert_eq!(texts(&t, 0)[1..4], shown, "{sequence:?} after {mode:?}");
+                for (cols, before) in edges {
+                    read_whole_or_split(cols, &format!("{mode}{before}{sequence}b"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn insert_mode_makes_room_for_the_wider_half() {
         let t = after(6, 2, "abc\r\x1b[4h\u{2764}\u{FE0F}");
         assert_eq!(texts(&t, 0), ["\u{2764}\u{FE0F}", "*", "a", "b", "c", " "]);

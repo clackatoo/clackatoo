@@ -1196,13 +1196,24 @@ impl Emulator {
     /// Prints `text`, line by line.
     fn print_printable(&mut self, text: &impl Printable) {
         let mut at = 0;
-        let mut wrapped = false;
         while at < text.bytes().len() {
-            let (end, wrap) = self.print_on_line(text, at, wrapped);
+            let (end, wrap) = self.print_on_line(text, at);
             at = end;
-            wrapped = wrap;
             if wrap {
                 self.wrap();
+                // The character that wraps was found to start a cell of its
+                // own before the wrap, as the simple way finds it. Wrapped
+                // to a left margin, there's a cell before it, past the
+                // margin, that the fast way would look at again and might
+                // join, so it's printed the simple way.
+                if self.cursor.col > 0 {
+                    let (ch, len) = text.char_at(at);
+                    let ch = self.cursor.charsets.map(ch);
+                    if let Some(cells @ 1..) = width::of(ch) {
+                        self.print_cell(ch, cells == 2);
+                    }
+                    at += len;
+                }
             }
         }
     }
@@ -1213,15 +1224,9 @@ impl Emulator {
     /// and writes runs of ASCII straight from the bytes. Insert mode must be
     /// off.
     ///
-    /// Starts at byte `start` of `text`, just after a wrap if `wrapped`.
-    /// Returns where it stopped, and whether the line must wrap before the
-    /// rest.
-    fn print_on_line<T: Printable>(
-        &mut self,
-        text: &T,
-        start: usize,
-        wrapped: bool,
-    ) -> (usize, bool) {
+    /// Starts at byte `start` of `text`. Returns where it stopped, and
+    /// whether the line must wrap before the rest.
+    fn print_on_line<T: Printable>(&mut self, text: &T, start: usize) -> (usize, bool) {
         // Where text wraps, as the margins say, and the columns between
         // there and where it wraps to: never fewer than two, as margins are
         // set, but a character wider than that is dropped all the same, as
@@ -1253,11 +1258,7 @@ impl Emulator {
         // Whether the next character may join the cell before it, as one
         // after a ZWJ does, or by clusters one after a character past
         // ASCII may: then even ASCII is looked at a character at a time.
-        // Just wrapped, the character was found to start a cell of its own
-        // before the wrap, as the simple way finds it: past a left margin,
-        // there's a cell before it that it mustn't join.
-        let mut joins =
-            !wrapped && previous_cell(row, cursor).is_some_and(|col| may_join(row, col, clusters));
+        let mut joins = previous_cell(row, cursor).is_some_and(|col| may_join(row, col, clusters));
         // Nothing below interns again, so the index stays valid.
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
