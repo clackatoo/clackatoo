@@ -192,6 +192,7 @@ impl World {
             gone_wait: clackatoo_daemon::DEFAULT_GONE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
+            long_commands: None,
             rename_gate: None,
             workspaces: Some(dir.join("workspaces")),
             keep_gate: None,

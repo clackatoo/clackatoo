@@ -463,6 +463,27 @@ pub(crate) fn configured_priority(config: &Path) -> Option<bool> {
     Some(priority)
 }
 
+/// How long a command must have run for a notification to say it ended,
+/// if `daemon/machine.toml` in `config` says, in seconds:
+/// `[terminals] notify_after = 30`; 0 says never (`Some(None)`). Read as
+/// the daemon starts or upgrades, as the name is.
+#[allow(clippy::option_option, reason = "unsaid, or said to be none")]
+pub(crate) fn configured_long_command(config: &Path) -> Option<Option<std::time::Duration>> {
+    let (path, document) = machine_toml(config)?;
+    let after = document.get("terminals")?.get("notify_after")?;
+    let Some(seconds) = after
+        .as_integer()
+        .and_then(|seconds| u64::try_from(seconds).ok())
+    else {
+        log::warn!(
+            "`notify_after` in {}'s [terminals] is a number of seconds",
+            path.display()
+        );
+        return None;
+    };
+    Some((seconds > 0).then(|| std::time::Duration::from_secs(seconds)))
+}
+
 /// `daemon/machine.toml` in `config`, and where it is, if it's there and
 /// can be read. One that can't, or isn't TOML, is said in the log.
 fn machine_toml(config: &Path) -> Option<(PathBuf, toml_edit::DocumentMut)> {
@@ -683,6 +704,16 @@ mod tests {
         assert_eq!(configured_name(dir.path()).as_deref(), Some("desk"));
         fs::write(&file, "priority = true\n").unwrap();
         assert_eq!(configured_priority(dir.path()), Some(true));
+        assert_eq!(configured_long_command(dir.path()), None);
+        fs::write(&file, "[terminals]\nnotify_after = 30\n").unwrap();
+        assert_eq!(
+            configured_long_command(dir.path()),
+            Some(Some(std::time::Duration::from_secs(30)))
+        );
+        fs::write(&file, "[terminals]\nnotify_after = 0\n").unwrap();
+        assert_eq!(configured_long_command(dir.path()), Some(None));
+        fs::write(&file, "[terminals]\nnotify_after = -3\n").unwrap();
+        assert_eq!(configured_long_command(dir.path()), None);
         fs::write(&file, "priority = \"off\"\n").unwrap();
         assert_eq!(configured_priority(dir.path()), None);
     }

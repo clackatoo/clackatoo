@@ -46,7 +46,7 @@ end)
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
   daemon/agents.toml        agents chats can talk to, besides those clackatoo knows, and their limits
-  daemon/machine.toml       the name this machine's daemon goes by on other machines, and its priority
+  daemon/machine.toml       the name this machine's daemon goes by on other machines, its priority, and its terminals
   daemon/web.toml           whether phones and browsers can reach it, and how
   lua/                      modules shared with the daemon's config, once it has one
 ```
@@ -98,6 +98,22 @@ starts or upgrades.
 `priority = false` beside it has the daemon run as other programs do, rather
 than
 [ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
+
+### The daemon's terminals
+
+The `[terminals]` table in `daemon/machine.toml` says how the daemon's
+terminals behave, for every window:
+
+```toml
+[terminals]
+notify_after = 30
+```
+
+| Key | What it does | Default |
+|---|---|---|
+| `notify_after` | How many seconds a command must run for its end to be [told in a notification](~clackatoo/reference/terminal-emulation#long-commands) while you aren't looking at its terminal. 0 tells none. | `10` |
+
+It's read when the daemon starts or upgrades.
 
 Each daemon also has an ID of its own, chosen the first time it starts and
 kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`),

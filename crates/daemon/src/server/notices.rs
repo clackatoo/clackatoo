@@ -14,11 +14,22 @@
 //!   terminal shows a few at once, then one every few seconds (see
 //!   `HostedTerminal::take_notice`).
 //!
+//! A command that ran for longer than `DaemonConfig::long_commands` is
+//! told of too as it ends, the same way: the command, if the shell's
+//! integration said it, signed, how it ended, and how long it took. Its
+//! end is taken only once the shell has the terminal to itself again
+//! (`HostedTerminal::shell_has_terminal`), as an agent's wait for a
+//! command is, so a program printing the marks of an end it hasn't had
+//! says nothing. A terminal an agent started says nothing either, nor
+//! one the daemon writes an agent's command's output into.
+//!
 //! [`Request::NotifyPhone`]: clackatoo_protocol::Request::NotifyPhone
 
 use std::time::Instant;
 
-use clackatoo_protocol::{Error, Event, Notice, Response, TerminalId, wire};
+use std::time::Duration;
+
+use clackatoo_protocol::{Error, Event, Notice, Notification, Response, TerminalId, Urgency, wire};
 use mio::Token;
 
 use super::{Daemon, Source};
@@ -77,6 +88,40 @@ impl Daemon {
         }
     }
 
+    /// Tells of the command terminal `id`'s shell said ended, if one did
+    /// that ran long enough, and the shell really has the terminal back.
+    pub(super) fn command_moved_on(&mut self, id: TerminalId) {
+        let Some(after) = self.config.long_commands else {
+            return;
+        };
+        let Some(terminal) = (self.terminals.get_mut(&id)).and_then(|slot| slot.terminal.pty())
+        else {
+            return;
+        };
+        let Some(ended) = terminal.command_ended(Instant::now()) else {
+            return;
+        };
+        if ended.took < after || terminal.is_fed() {
+            return;
+        }
+        // Asked of `/proc` only now, as a long command ends.
+        if let Err(taken) = terminal.shell_has_terminal() {
+            log::debug!("terminal {id}: a command's end isn't told: {}", taken.why());
+            return;
+        }
+        if self.agent_terminal(id).is_some() {
+            return;
+        }
+        let notification = Notification::new(
+            ended.command.as_deref().unwrap_or("A command"),
+            &ended_line(ended.exit, ended.took),
+            Urgency::Normal,
+        );
+        if let Some(notification) = notification {
+            self.send_notice(id, &Notice::Show(notification));
+        }
+    }
+
     /// Answers [`Request::NotifyPhone`](clackatoo_protocol::Request::NotifyPhone):
     /// marks terminal `id` to have its notifications reach the phone, or
     /// not.
@@ -97,5 +142,42 @@ impl Daemon {
             self.collect_damage(id);
         }
         Ok(Response::Done)
+    }
+}
+
+/// What a notification says of a command that ended with `exit`, if the
+/// shell said, after `took`: "failed (exit 101) after 2m14s".
+fn ended_line(exit: Option<i32>, took: Duration) -> String {
+    let how = match exit {
+        Some(0) => "finished".to_owned(),
+        Some(status) => format!("failed (exit {status})"),
+        None => "ended".to_owned(),
+    };
+    format!("{how} after {}", took_as_said(took))
+}
+
+/// `took`, as a person says it: `14s`, `2m14s`, `1h02m`.
+fn took_as_said(took: Duration) -> String {
+    let seconds = took.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, seconds / 60 % 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ended_command_says_how_and_after_how_long() {
+        let secs = Duration::from_secs;
+        assert_eq!(ended_line(Some(0), secs(14)), "finished after 14s");
+        assert_eq!(
+            ended_line(Some(101), secs(134)),
+            "failed (exit 101) after 2m14s"
+        );
+        assert_eq!(ended_line(None, secs(3725)), "ended after 1h02m");
     }
 }

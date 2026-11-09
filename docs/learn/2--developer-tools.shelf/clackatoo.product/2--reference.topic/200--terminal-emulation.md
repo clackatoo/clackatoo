@@ -318,6 +318,21 @@ heard only as often. Nothing is ever said back to the program: kitty's
 questions about what's supported (`p=?`), and its reports of a notification
 clicked or closed, get no answer.
 
+### Long commands
+
+A command that ran for 10 seconds or more says so as it ends, in the same way
+and to the same places as a program's notifications, while no one is looking
+at its terminal: the command, how it ended, and how long it took, as
+`cargo build` and `failed (exit 101) after 2m14s`. The command is named only
+when clackatoo's own shell integration said it, signed; otherwise it's
+`A command`. Its end is believed only once the shell has the terminal to
+itself again, as with an agent's wait for a command, so a program printing
+the marks of an end (OSC 133 `D`) while it runs on says nothing. Terminals an
+agent started, and those showing what an agent's command printed, never say.
+`notify_after` in `daemon/machine.toml`'s
+[`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) changes
+the 10 seconds, or turns it off.
+
 ## Not supported
 
 These are ignored:

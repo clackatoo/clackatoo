@@ -114,6 +114,7 @@ impl TestDaemon {
             gone_wait: clackatoo_daemon::DEFAULT_GONE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
+            long_commands: None,
             rename_gate: None,
             workspaces: None,
             keep_gate: None,
@@ -1678,6 +1679,35 @@ fn a_programs_notifications_reach_windows_while_no_one_present_looks() {
     assert_eq!(
         next_program_notice(&mut window),
         (terminal, clackatoo_protocol::Notice::Close)
+    );
+}
+
+#[test]
+fn a_long_command_ending_is_told_but_not_an_end_a_program_printed() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.long_commands = Some(Duration::from_millis(300));
+    });
+    let mut window = daemon.client();
+    a_window(&mut window);
+    // A command starts; a program it runs prints its end and runs on, so
+    // the shell doesn't have the terminal back; then another starts, and
+    // ends for real, a while later, failing.
+    let script = r#"printf '\033]133;C\007'; sleep 0.5; \
+                    sh -c 'printf "\033]133;D;3\007"; sleep 1'; \
+                    printf '\033]133;A\007\033]133;C\007'; sleep 0.5; \
+                    printf '\033]133;D;101\007'; read x"#;
+    let (terminal, _clients) = followed(&daemon, script, 1, 0);
+    let (from, notice) = next_program_notice(&mut window);
+    assert_eq!(from, terminal);
+    let clackatoo_protocol::Notice::Show(said) = notice else {
+        panic!("shown: {notice:?}");
+    };
+    // Unsigned, the command isn't named.
+    assert_eq!(said.title, "A command");
+    assert!(
+        said.body.starts_with("failed (exit 101) after "),
+        "{}",
+        said.body
     );
 }
 

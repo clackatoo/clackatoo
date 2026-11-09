@@ -72,6 +72,8 @@ exited 2
 
 A program can ask for a desktop notification, as a long build does when it ends: `OSC 9`, `OSC 777` and kitty's `OSC 99`. clackatoo shows it while you aren't looking at the program's pane: it's in another tab, or the window is in the background. It goes once you look. What it says is cleaned, as tab names are, and a program asking over and over shows a few, then one every ten seconds. `:set notify=off` turns them off with chats'.
 
+A command that ran for 10 seconds or more tells of its end the same way, with how it ended and how long it took; `notify_after` in `daemon/machine.toml`'s `[terminals]` changes the 10 seconds.
+
 `:notify phone` marks the terminal so its notifications reach your phone too, through the web app, when no one is looking at it anywhere; `:notify nophone` takes the mark off. The tab's name ends with ` 📱` while one of its terminals is marked.
 
 In the terminal, type `:notify phone`.

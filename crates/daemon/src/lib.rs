@@ -191,6 +191,12 @@ pub struct DaemonConfig {
     /// How long a terminal stays fitted to a client, as a phone fits one,
     /// unless the client asks for the fit again: see `Request::Fit`.
     pub fit_lasts: std::time::Duration,
+    /// How long a command must have run for a notification to say it
+    /// ended, while no one is looking at its terminal (see
+    /// `server/notices.rs`). `None` says none. `notify_after` in
+    /// `daemon/machine.toml`'s `[terminals]`, or else
+    /// [`DEFAULT_LONG_COMMAND`].
+    pub long_commands: Option<std::time::Duration>,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
     /// in place, so a test can act while it's under way. `None`, but in
@@ -443,6 +449,11 @@ pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_m
 /// unless told otherwise: zsh with plugins can take seconds to start.
 pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a command must have run for its end to be told, unless
+/// `daemon/machine.toml` says otherwise (see
+/// [`DaemonConfig::long_commands`]).
+pub const DEFAULT_LONG_COMMAND: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long a command kept running always waits to run again once it
 /// ends, at first (see [`DaemonConfig::keep_wait`]).
 pub const DEFAULT_KEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -597,6 +608,9 @@ impl DaemonConfig {
             gone_wait: DEFAULT_GONE_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,
+            long_commands: config_dir().map_or(Some(DEFAULT_LONG_COMMAND), |dir| {
+                machine::configured_long_command(&dir).unwrap_or(Some(DEFAULT_LONG_COMMAND))
+            }),
             rename_gate: None,
             workspaces: match non_empty("CLACKATOO_WORKSPACES") {
                 Some(off) if off == "off" => None,

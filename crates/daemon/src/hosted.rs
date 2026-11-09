@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{
     Error, NewTerminal, Node, Size, TerminalId, TerminalInfo, TerminalStatus, View,
 };
-use clackatoo_term::{ClipboardRead, ClipboardRequest, Damage, Terminal, recording};
+use clackatoo_term::{ClipboardRead, ClipboardRequest, Damage, Progress, Terminal, recording};
 
 use crate::DaemonConfig;
 use crate::handover::{self, Fds, HandoverError};
@@ -87,6 +87,22 @@ pub(crate) struct HostedTerminal {
     phone: bool,
     /// How many notifications it may still show now.
     notices: NoticeAllowance,
+    /// The block whose command its shell said is running, when that was
+    /// first seen, and the command, if the shell's integration said it,
+    /// signed: for how long it ran, as it ends.
+    running: Option<(u32, Instant, Option<String>)>,
+}
+
+/// A command a terminal's shell said ended: see
+/// [`HostedTerminal::command_ended`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ended {
+    /// The command, if the shell's integration said it, signed.
+    pub(crate) command: Option<String>,
+    /// Its exit status, if the shell said.
+    pub(crate) exit: Option<i32>,
+    /// About how long it ran: from when its start was first seen.
+    pub(crate) took: Duration,
 }
 
 /// How many notifications a terminal may show: [`NOTICE_BURST`] at once,
@@ -285,6 +301,7 @@ impl HostedTerminal {
             fed: None,
             phone: false,
             notices: NoticeAllowance::new(),
+            running: None,
         })
     }
 
@@ -322,6 +339,7 @@ impl HostedTerminal {
             fed: Some(Fed { ended: false }),
             phone: false,
             notices: NoticeAllowance::new(),
+            running: None,
         }
     }
 
@@ -509,6 +527,7 @@ impl HostedTerminal {
             fed: fed.then_some(Fed { ended: true }),
             phone: false,
             notices: NoticeAllowance::new(),
+            running: None,
         };
         // Where its program is, found now rather than at the next writing
         // of the workspaces, which may never come: a shutdown that ends it
@@ -578,6 +597,38 @@ impl HostedTerminal {
                 None
             }
             notice => Some(notice),
+        }
+    }
+
+    /// The command its shell said ended since this was last asked, at
+    /// `now`, if one did that was seen to start: by the marks alone, which
+    /// any program can print. Cheap: asked as output is read.
+    pub(crate) fn command_ended(&mut self, now: Instant) -> Option<Ended> {
+        let (block, progress) = self.emulator.latest_block()?;
+        match progress {
+            Progress::Running => {
+                if self
+                    .running
+                    .as_ref()
+                    .is_none_or(|(known, ..)| *known != block)
+                {
+                    let command = (self.emulator.trusted_running_command()).map(str::to_owned);
+                    self.running = Some((block, now, command));
+                }
+                None
+            }
+            Progress::Finished(exit) => {
+                let (known, since, command) = self.running.take()?;
+                (known == block).then(|| Ended {
+                    command,
+                    exit,
+                    took: now.saturating_duration_since(since),
+                })
+            }
+            Progress::Prompt => {
+                self.running = None;
+                None
+            }
         }
     }
 

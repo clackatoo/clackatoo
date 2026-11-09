@@ -2559,6 +2559,7 @@ impl Daemon {
         self.kept_moved_on(id);
         self.history_moved_on(id);
         self.note_shell(id);
+        self.command_moved_on(id);
     }
 
     /// Hands the lines the terminal changed to each client following it.

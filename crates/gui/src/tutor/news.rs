@@ -1254,6 +1254,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs' notifications (OSC 9, 777, 99) show when you're not looking; :notify phone sends a pane's to the phone",
     },
     News {
+        id: "long-commands",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "A command that ran 10 s or more ends with a notification, if you weren't looking: what failed, and how long it took",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

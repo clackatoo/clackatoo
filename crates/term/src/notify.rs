@@ -78,6 +78,13 @@ pub enum Notice {
 }
 
 impl Notification {
+    /// The notification titled `title`, saying `body`, cleaned as a
+    /// program's is; `None` if nothing's left of either.
+    #[must_use]
+    pub fn new(title: &str, body: &str, urgency: Urgency) -> Option<Self> {
+        Self::cleaned(title.as_bytes(), body.as_bytes(), urgency)
+    }
+
     /// The notification titled `title`, saying `body`, both as a program
     /// sent them, cleaned; `None` if nothing's left of either.
     pub(crate) fn cleaned(title: &[u8], body: &[u8], urgency: Urgency) -> Option<Self> {
@@ -94,7 +101,7 @@ impl Notification {
     /// trusted to have, such as a daemon on another machine.
     #[must_use]
     pub fn recleaned(&self) -> Option<Self> {
-        Self::cleaned(self.title.as_bytes(), self.body.as_bytes(), self.urgency)
+        Self::new(&self.title, &self.body, self.urgency)
     }
 }
 
