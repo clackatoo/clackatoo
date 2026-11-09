@@ -67,6 +67,11 @@ const READ_WAIT: Duration = Duration::from_secs(10);
 /// once: past that, more are refused until it catches up.
 const ON_THE_WAY: u64 = 256 * MIB;
 
+/// How many bytes of images written in base64 may be on their way to
+/// those who asked at once: past that, more are refused until they've
+/// gone. One is always written, however big.
+const ENCODING: u64 = 256 * MIB;
+
 /// The sides copies are made at: a copy asked for at any size is made at
 /// the next of these up, so copies are shared between sizes near it.
 const SIDES: [u32; 12] = [
@@ -346,6 +351,10 @@ pub(crate) struct Images<T> {
     pending: usize,
     /// Images written in base64, for who asked, to be taken.
     encoded: Vec<(u64, String)>,
+    /// How many bytes of base64 are being written.
+    encoding: u64,
+    /// How many may be at once: [`ENCODING`], but in tests.
+    encoding_most: u64,
     /// The store's thread, started when it's first needed.
     jobs: Option<mpsc::Sender<Job>>,
     /// What the thread and the readers have done.
@@ -404,6 +413,8 @@ impl<T: Clone + PartialEq> Images<T> {
             on_the_way: 0,
             pending: 0,
             encoded: Vec::new(),
+            encoding: 0,
+            encoding_most: ENCODING,
             jobs: None,
             done: mpsc::channel(),
             to_read: VecDeque::new(),
@@ -609,7 +620,10 @@ impl<T: Clone + PartialEq> Images<T> {
                         ready.push(Ready { image, waiting });
                     }
                 }
-                Done::Encoded { asker, text } => self.encoded.push((asker, text)),
+                Done::Encoded { asker, text } => {
+                    self.encoding = self.encoding.saturating_sub(text.len() as u64);
+                    self.encoded.push((asker, text));
+                }
             }
         }
         self.give_up_reading(wait.is_some(), &mut kept);
@@ -619,7 +633,8 @@ impl<T: Clone + PartialEq> Images<T> {
     /// Starts writing the image `id`, which `owner` holds, in base64 on
     /// the store's thread, for `asker`, who's given it by
     /// [`take_encoded`](Self::take_encoded) once it's done: a big image
-    /// would hold up the loop. Fails if `owner` holds no such image.
+    /// would hold up the loop. Fails, saying why, if `owner` holds no such
+    /// image, or too many are being written already.
     pub(crate) fn encode(
         &mut self,
         owner: ImageFrom,
@@ -632,9 +647,15 @@ impl<T: Clone + PartialEq> Images<T> {
                 entry.used = self.tick;
                 Arc::clone(&entry.bytes)
             }
-            _ => return Err("the image is no longer kept".into()),
+            _ => return Err("Original image is no longer available".into()),
         };
-        self.send(Job::Encode { asker, bytes })
+        let size = (bytes.len() as u64).div_ceil(3) * 4;
+        if self.encoding > 0 && self.encoding + size > self.encoding_most {
+            return Err("too many images are being sent just now: try again".into());
+        }
+        self.send(Job::Encode { asker, bytes })?;
+        self.encoding += size;
+        Ok(())
     }
 
     /// The images written in base64 since this was last asked, each with
@@ -1678,6 +1699,41 @@ mod tests {
     /// A file that hangs, as on a mount gone away, holds up neither the
     /// store's thread nor anything waiting for it: it's given up on in
     /// its time, or at once before a handover; and only so many wait.
+    /// Only so many bytes of base64 are written at once, but always one.
+    #[test]
+    fn only_so_many_images_are_written_in_base64_at_once() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store.encoding_most = 10;
+        let mut ids = Vec::new();
+        for shade in 1..=2 {
+            store
+                .keep(
+                    CHAT,
+                    Why::Test(shade.into()),
+                    Source::Bytes(png(2, 2, shade)),
+                )
+                .unwrap();
+            let (kept, _) = store.take(Some(Duration::from_secs(10)));
+            ids.push(kept[0].kept.clone().unwrap().id);
+        }
+        store.encode(CHAT, ids[0], 1).unwrap();
+        assert!(
+            store
+                .encode(CHAT, ids[1], 2)
+                .unwrap_err()
+                .contains("try again")
+        );
+        assert!(store.encode(CHAT, ImageId([9; 16]), 3).is_err());
+        store.take(Some(Duration::from_secs(10)));
+        let encoded = store.take_encoded();
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].0, 1);
+        // Once it's gone, another is.
+        store.encode(CHAT, ids[1], 2).unwrap();
+        store.take(Some(Duration::from_secs(10)));
+        assert_eq!(store.take_encoded()[0].0, 2);
+    }
+
     /// What panics as it's read, on the store's thread or a reader, fails,
     /// and the thread goes on.
     #[test]

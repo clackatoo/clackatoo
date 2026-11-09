@@ -488,7 +488,7 @@ impl Daemon {
             }
             Err(why) => {
                 log::debug!("chat {chat}: original {original}: {why}");
-                self.hand_answer_with(token, ticket, Response::Error(gone()));
+                self.hand_answer_with(token, ticket, Response::Error(Error::Other(why)));
             }
         }
         Ok(())
