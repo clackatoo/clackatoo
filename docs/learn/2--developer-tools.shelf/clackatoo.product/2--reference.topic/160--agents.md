@@ -934,11 +934,13 @@ covers managed activities, not every provider or external tool call.
 Activities require workspace storage and shell integration. A chat may have 8
 jobs active at once, and the daemon 64; past those, starting another is
 refused. Finished jobs are kept, with their IDs, only as the newest 16 of each
-chat and 64 in all: an older one is let go as a new one starts, and its ID then
-starts a new job. A chat's jobs go when the chat closes; what they ran goes on
-in its background tab. Results retain the end of the terminal's last 50
-lines, up to 4 KiB, with how the command ended; the terminal keeps its own
-scrollback.
+chat and 64 in all: an older one is let go as a new one starts, oldest first,
+and its ID then starts a new job. One whose outcome is unknown, or whose agent
+hasn't yet been told how it ended, is never let go: with only such jobs past
+those caps, no more start until the user closes chats that hold them.
+A chat's jobs go when the chat closes; what they ran goes on in its background
+tab. Results retain the end of the terminal's last 50 lines, up to 4 KiB, with
+how the command ended; the terminal keeps its own scrollback.
 
 ## Inspecting capabilities
 
