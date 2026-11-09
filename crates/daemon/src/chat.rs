@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
@@ -386,12 +387,14 @@ pub(crate) struct Wrote {
 
 /// A change a tool says it made to a file: `old` replaced by `new`, as
 /// the agent gives it, with no line cut. `old` is `None` for a file the
-/// tool made.
+/// tool made. The texts are shared, as each is often a whole file, and
+/// several hold them: what the tool shows, and what's checked against
+/// the file, on the settling worker (see `server::settling`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RawDiff {
     pub(crate) path: String,
-    pub(crate) old: Option<String>,
-    pub(crate) new: String,
+    pub(crate) old: Option<Arc<str>>,
+    pub(crate) new: Arc<str>,
 }
 
 /// Whether a chat's session is open in the agent.
@@ -3087,8 +3090,8 @@ impl HostedChat {
             .filter_map(|content| match content {
                 ToolCallContent::Diff(diff) => Some(RawDiff {
                     path: diff.path.to_string_lossy().into_owned(),
-                    old: diff.old_text.clone(),
-                    new: diff.new_text.clone(),
+                    old: diff.old_text.as_deref().map(Arc::from),
+                    new: Arc::from(diff.new_text.as_str()),
                 }),
                 _ => None,
             })
@@ -4529,6 +4532,16 @@ fn head(text: &str, max: usize) -> String {
 /// that needs: an edit's diff can carry a whole file of megabytes, and
 /// cleaning it all would hold up the daemon's loop.
 fn clean_head(text: &str, max: usize) -> String {
+    // Most text has no control characters to take out: it's cut as it is,
+    // rather than walked a character at a time, which for a tool's diff
+    // of a big file costs milliseconds in a debug build. Any byte that
+    // may start or be one (C1's start with 0xC2) has it walked.
+    let near = &text.as_bytes()[..text.len().min(max.saturating_add(4))];
+    let control =
+        |byte: &u8| (*byte < 0x20 && !matches!(byte, b'\n' | b'\t')) || matches!(byte, 0x7f | 0xc2);
+    if !near.iter().any(control) {
+        return head(text, max);
+    }
     let mut cleaned = String::new();
     for ch in text.chars() {
         if matches!(ch, '\n' | '\t') || !ch.is_control() {

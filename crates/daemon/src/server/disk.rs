@@ -69,6 +69,10 @@ pub(super) struct Disk {
     /// When to try again to watch the directories of buffers whose
     /// directories couldn't be watched, and how long the wait was.
     rewatch: Option<(Instant, Duration)>,
+    /// Buffers whose files changed, noted as no chat's, while an agent's
+    /// change to them was being checked or merged: looked at again once
+    /// it's taken in, as from outside, if it wasn't made.
+    deferred: Vec<BufferId>,
 }
 
 /// A change found on disk that a chat's agent made.
@@ -125,6 +129,7 @@ impl Daemon {
         }
         self.disk.noted.remove(&id);
         self.disk.touched.retain(|&touched| touched != id);
+        self.disk.deferred.retain(|&deferred| deferred != id);
     }
 
     /// Notes that the watches on the files of buffers `ids` have gone, as
@@ -213,6 +218,34 @@ impl Daemon {
                 }
             }
             Some(_) => {}
+        }
+    }
+
+    /// Has the files of buffers whose changes were heard of while an
+    /// agent's change to them was pending, and noted as no chat's, looked
+    /// at again, once none is pending for `path`: as the buffer may not
+    /// know them, if it wasn't made.
+    pub(super) fn pending_ended(&mut self, path: &Path) {
+        if self.agent_files.pending(path) {
+            return;
+        }
+        let buffers = &self.buffers;
+        let (ended, waiting): (Vec<BufferId>, Vec<BufferId>) = (self.disk.deferred.iter())
+            .partition(|id| (buffers.get(id)).is_none_or(|slot| slot.buffer.path() == path));
+        self.disk.deferred = waiting;
+        for id in ended {
+            self.disk_maybe_changed(id);
+        }
+    }
+
+    /// As [`pending_ended`](Self::pending_ended), for every file with
+    /// nothing pending.
+    pub(super) fn pending_ended_everywhere(&mut self) {
+        let paths: Vec<std::path::PathBuf> = (self.disk.deferred.iter())
+            .filter_map(|id| Some(self.buffers.get(id)?.buffer.path().to_owned()))
+            .collect();
+        for path in paths {
+            self.pending_ended(&path);
         }
     }
 
@@ -318,20 +351,25 @@ impl Daemon {
             (Some(by), Some(noted)) if noted.chat == by.chat => {
                 self.disk.noted.insert(id, Noted { seen, ..noted });
             }
+            // The change noted as a chat's, heard of again once its tool
+            // has finished, as when the directory is watched again, or
+            // inotify says one write more than once: still the chat's, to
+            // be taken as noted.
+            (None, Some(noted)) if noted.seen == seen => {}
             // An agent's change to it is still being merged into the
             // buffer, which doesn't know the file as it is yet: nothing is
             // taken as from outside until it's made, and the file looked
             // at again. A change noted as a chat's, changed again by
             // someone else, is taken as from outside then, as it would
             // have been now.
-            (_, noted) if self.agent_files.pending(&path) => {
-                if let Some(noted) = noted
-                    && noted.seen != seen
-                {
+            (_, noted) if self.agent_files.pending(&path) => match noted {
+                Some(noted) if noted.seen != seen => {
                     let contested = true;
                     self.disk.noted.insert(id, Noted { contested, ..noted });
                 }
-            }
+                None if !self.disk.deferred.contains(&id) => self.disk.deferred.push(id),
+                _ => {}
+            },
             _ => {
                 self.disk.noted.remove(&id);
                 self.changed_outside(id, true);
@@ -577,7 +615,7 @@ pub(in crate::server) mod tests {
         std::fs::write(&path, "one\n").unwrap();
         let (mut daemon, _) = daemon_with_chat(dir.path());
         let id = open(&mut daemon, &path);
-        assert_eq!(watched(&daemon), [id]);
+        assert_eq!(watched(&daemon), [id], "{:?}", daemon.out_of_inotify());
         assert!(daemon.buffers[&id].watched);
 
         // Shown in no pane, and with nothing to save, it closes.
@@ -606,7 +644,7 @@ pub(in crate::server) mod tests {
         std::fs::create_dir(&sub).unwrap();
         daemon.disk.rewatch = Some((Instant::now(), wait));
         daemon.check_disk();
-        assert!(daemon.buffers[&id].watched);
+        assert!(daemon.buffers[&id].watched, "{:?}", daemon.out_of_inotify());
         assert_eq!(watched(&daemon), [id]);
         assert_eq!(daemon.disk.rewatch, None);
     }
@@ -634,7 +672,12 @@ pub(in crate::server) mod tests {
         daemon.explorers.refuse_instance = false;
         std::fs::write(&path, "two\n").unwrap();
         daemon.retry_watches_now();
-        assert_eq!(daemon.next_watch_retry(), None);
+        assert_eq!(
+            daemon.next_watch_retry(),
+            None,
+            "{:?}",
+            daemon.out_of_inotify()
+        );
         assert_eq!(daemon.out_of_inotify(), None);
         daemon.check_disk();
         assert!(daemon.buffers[&id].watched);
@@ -727,7 +770,12 @@ pub(in crate::server) mod tests {
         replace(&path, "one\ntwo\n");
         finish_command(&mut daemon, chat);
         daemon.check_disk();
-        assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "one\ntwo\n");
+        assert_eq!(
+            daemon.buffers[&id].buffer.text().to_string(),
+            "one\ntwo\n",
+            "{:?}",
+            daemon.out_of_inotify()
+        );
         assert!(!daemon.buffers[&id].stale());
         let buffer = &mut daemon.buffers.get_mut(&id).unwrap().buffer;
         buffer.reverse(Author::Agent(chat), false).unwrap().unwrap();

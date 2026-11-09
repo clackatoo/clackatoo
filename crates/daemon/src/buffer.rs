@@ -713,22 +713,10 @@ impl Buffer {
     /// and what it is, if something has changed it since it was read or
     /// last written. `None` if it hasn't, or it's gone.
     pub(crate) fn changed_on_disk(&self) -> Result<Option<(String, DiskStamp)>, Error> {
-        let failed = |err: io::Error| Error::OpenFailed {
-            path: self.path.display().to_string(),
-            reason: err.to_string(),
-        };
-        if DiskStamp::now(&self.path).map_err(failed)? == self.disk {
+        let Some((file, disk)) = open_changed(&self.path, self.disk)? else {
             return Ok(None);
-        }
-        match read(&self.path) {
-            Ok((text, disk)) => Ok(Some((lf(text), disk))),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) if err.kind() == io::ErrorKind::InvalidData => Err(Error::OpenFailed {
-                path: self.path.display().to_string(),
-                reason: "it isn't UTF-8 text".to_owned(),
-            }),
-            Err(err) => Err(failed(err)),
-        }
+        };
+        Ok(Some((read_changed(&self.path, &file)?, disk)))
     }
 
     /// The text as last read from the file or written to it.
@@ -1061,6 +1049,49 @@ const MAX_FILE: u64 = 256 * 1024 * 1024;
 /// and `/sys` say they are, whatever they hold: some, such as a page map,
 /// go on for gigabytes, and the read is on the daemon's loop.
 const MAX_SAID_EMPTY: u64 = 4 * 1024 * 1024;
+
+/// The file at `path`, opened, and what it is, if it isn't as `known`
+/// says, as a buffer last read or wrote it: `None` if it is, or it's
+/// gone. Only a regular file is opened. What's opened is what's read
+/// ([`read_changed`]), whatever is renamed over it meanwhile: so a big
+/// file can be read off the loop as it was when an agent said it changed
+/// it (see `server::settling`).
+pub(crate) fn open_changed(
+    path: &Path,
+    known: Option<DiskStamp>,
+) -> Result<Option<(File, DiskStamp)>, Error> {
+    let failed = |err: io::Error| Error::OpenFailed {
+        path: path.display().to_string(),
+        reason: err.to_string(),
+    };
+    if DiskStamp::now(path).map_err(failed)? == known {
+        return Ok(None);
+    }
+    let opened = regular::open(path, Links::Follow)
+        .and_then(|file| Ok((DiskStamp::of(&file.metadata()?), file)));
+    match opened {
+        Ok((disk, _)) if Some(disk) == known => Ok(None),
+        Ok((disk, file)) => Ok(Some((file, disk))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(failed(err)),
+    }
+}
+
+/// The text of `file`, opened at `path` ([`open_changed`]), with its line
+/// ends as buffers keep them.
+pub(crate) fn read_changed(path: &Path, file: &File) -> Result<String, Error> {
+    match file.try_clone().and_then(read_file) {
+        Ok((text, _)) => Ok(lf(text)),
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => Err(Error::OpenFailed {
+            path: path.display().to_string(),
+            reason: "it isn't UTF-8 text".to_owned(),
+        }),
+        Err(err) => Err(Error::OpenFailed {
+            path: path.display().to_string(),
+            reason: err.to_string(),
+        }),
+    }
+}
 
 /// Reads the file at `path` as text, and what it was as it was read. Only
 /// a regular file is read: a pipe would hang the daemon as it opened, even

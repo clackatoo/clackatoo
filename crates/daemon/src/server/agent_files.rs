@@ -281,9 +281,8 @@ pub(super) struct Settled {
     read_as: Option<DiskStamp>,
 }
 
-/// A change an agent made to a file open in a buffer, to be merged into
-/// the buffer's text as it was at `version`: off the loop, if it's big
-/// (see [`super::settling`]).
+/// A change an agent made to a file open in a buffer, found to be what made
+/// the file, to be merged into the buffer's text as it was at `version`.
 #[derive(Debug)]
 pub(super) struct Merging {
     chat: TerminalId,
@@ -310,22 +309,155 @@ pub(super) struct Merging {
 }
 
 impl Merging {
-    /// The text it holds, in bytes, as a change to a file not open counts
-    /// its texts before and after: the buffer's before, and the file's
-    /// after. The ropes share most of what they hold, so they're counted
-    /// as the bigger, and the steps before the last only as the file's
-    /// text once: several tools' edits to a big file are each about as big
-    /// as it, and counting each whole would merge them on the loop.
-    pub(super) fn bytes(&self) -> usize {
-        self.saved.len_bytes().max(self.text.len_bytes())
-            + self.steps.last().map_or(0, |(text, _)| text.len())
-    }
-
     /// Merges the change into the buffer's text as it was, as the buffer
     /// would, with what the review needs of each step.
     pub(super) fn prepare(&self) -> Result<Prepared, Unprepared> {
         let (saved, now) = (self.saved.to_string(), self.text.to_string());
         buffer::prepare_written((&saved, &now, &self.text), &self.steps, true)
+    }
+}
+
+/// A change an agent made to a file open in a buffer, as the buffer was at
+/// `version`, to be checked against the file, and merged into the buffer's
+/// text if it's what made it: off the loop, if it's big (see
+/// [`super::settling`]), as reading the file, making what the tools said
+/// of the text saved, and comparing the two take as long as the file.
+#[derive(Debug)]
+pub(super) struct Checking {
+    chat: TerminalId,
+    path: PathBuf,
+    pub(super) id: BufferId,
+    /// The buffer's version, and what it knew of its file: the change is
+    /// made only if they're still so.
+    version: u64,
+    known: Option<DiskStamp>,
+    /// The buffer's text saved, and its text, then.
+    pub(super) saved: Rope,
+    text: Rope,
+    /// Whether the file was there before.
+    pub(super) existed: bool,
+    /// The file, opened on the loop as the change was heard of, and what
+    /// it was then: read later, it's still what was there then, unless
+    /// written in place meanwhile, as a file renamed over it isn't it.
+    file: std::fs::File,
+    stamp: DiskStamp,
+    /// What's taken to have made the change.
+    by: By,
+    /// The reports it takes in, by serial number, forgotten once it is.
+    covered: Vec<u64>,
+}
+
+/// What changed a buffer's file, as far as is known.
+#[derive(Debug)]
+enum By {
+    /// The chat's tools: each one's changes, as it last said them, with
+    /// whether they start an undo step, and who made them, in the order
+    /// made. If they make the file only with its leading tabs as spaces,
+    /// and `spaced` says how, the file is what they made, as one change.
+    Tools {
+        changes: Vec<(Vec<RawDiff>, bool, Maker)>,
+        spaced: Option<(bool, Maker)>,
+    },
+    /// The chat's commands, as one step.
+    Commands(Maker),
+}
+
+/// What a change to a buffer's file was found to be.
+#[derive(Debug)]
+pub(super) enum Checked {
+    /// The file can't be read.
+    Unchanged,
+    /// It isn't what the tools' changes make of the text saved.
+    Other,
+    /// It is, merged into the buffer's text as it was, as the second says.
+    Merged(Box<Merging>, Result<Prepared, Unprepared>),
+}
+
+impl Checking {
+    /// The text it holds, in bytes, once the file's is read: the buffer's
+    /// text saved and its text, which share most of what they hold, so
+    /// counted as the bigger, and the file's, about as big. The tools'
+    /// changes share theirs with the chat.
+    pub(super) fn bytes(&self) -> usize {
+        self.saved.len_bytes().max(self.text.len_bytes()) * 2
+    }
+
+    /// Who made each step it takes to have made the change.
+    fn makers(&self) -> Vec<Maker> {
+        match &self.by {
+            By::Tools { changes, .. } => {
+                changes.iter().map(|(_, _, maker)| maker.clone()).collect()
+            }
+            By::Commands(maker) => vec![maker.clone()],
+        }
+    }
+
+    /// Reads the file, and checks it against what's taken to have changed
+    /// it: if that made it, merges the change into the buffer's text as it
+    /// was, as the buffer would, with what the review needs of each step.
+    pub(super) fn check(&self) -> Checked {
+        let stamp = self.stamp;
+        let disk = match buffer::read_changed(&self.path, &self.file) {
+            Ok(disk) => disk,
+            Err(err) => {
+                log::warn!("buffer {}: {err}", self.id);
+                return Checked::Unchanged;
+            }
+        };
+        let (steps, makers) = match &self.by {
+            By::Commands(maker) => (vec![(disk, true)], vec![maker.clone()]),
+            By::Tools { changes, spaced } => {
+                // Each tool's own changes, in the order the agent made them.
+                let mut text = self.saved.to_string();
+                let mut steps = Vec::with_capacity(changes.len());
+                for (diffs, step, _) in changes {
+                    let Some(next) = apply(&text, diffs) else {
+                        break;
+                    };
+                    text = next;
+                    steps.push((text.clone(), *step));
+                }
+                if steps.len() == changes.len() && text == disk {
+                    (steps, self.makers())
+                } else {
+                    // Claude Code says a tab-indented file's changes with
+                    // spaces for each leading tab (its patches are for
+                    // showing, and its adapter passes them on as they are,
+                    // still in 0.98.0), so they make the file only with
+                    // its tabs so too. Then the file's text is what the
+                    // tools made, as one change, since what each made
+                    // can't be told exactly. Not if something else changed
+                    // the file too, which the spaces could hide.
+                    let diffs: Vec<&[RawDiff]> = (changes.iter())
+                        .map(|(diffs, _, _)| diffs.as_slice())
+                        .collect();
+                    match spaced {
+                        Some((step, maker))
+                            if made_with_tabs_as_spaces(&self.saved, &diffs, &disk) =>
+                        {
+                            (vec![(disk, *step)], vec![maker.clone()])
+                        }
+                        _ => return Checked::Other,
+                    }
+                }
+            }
+        };
+        let merging = Merging {
+            chat: self.chat,
+            path: self.path.clone(),
+            id: self.id,
+            version: self.version,
+            known: self.known,
+            saved: self.saved.clone(),
+            text: self.text.clone(),
+            steps,
+            stamp,
+            makers,
+            covered: self.covered.clone(),
+            existed: self.existed,
+        };
+        let prepared = merging.prepare();
+        Checked::Merged(Box::new(merging), prepared)
     }
 }
 
@@ -647,7 +779,7 @@ impl Daemon {
     fn took_settled(&mut self, worked: Worked) {
         let (chat, path) = match &worked {
             Worked::Closed(settled, _) => (settled.chat, settled.path.clone()),
-            Worked::Open(merging, _) => (merging.chat, merging.path.clone()),
+            Worked::Open(checking, _) => (checking.chat, checking.path.clone()),
         };
         let files = &mut self.agent_files;
         let Some(at) = (files.diffing.iter())
@@ -661,58 +793,72 @@ impl Daemon {
         // someone else.
         if self.chat(chat).is_none() {
             self.agent_files.ending.retain(|&ending| ending != chat);
-            if let Worked::Open(merging, _) = worked {
-                self.disk_maybe_changed(merging.id);
+            if let Worked::Open(checking, _) = worked {
+                self.disk_maybe_changed(checking.id);
             }
-            return;
+            return self.pending_ended(&path);
         }
         match worked {
-            Worked::Closed(settled, Some(diffed)) => self.settled_closed(settled, &diffed),
-            Worked::Closed(_, None) => self.unknown(&diffing),
-            Worked::Open(merging, prepared) => return self.merged(merging, prepared, diffing),
+            Worked::Closed(settled, Some(diffed)) => {
+                self.settled_closed(settled, &diffed);
+                self.after_diffing(diffing);
+            }
+            Worked::Closed(_, None) => {
+                self.unknown(&diffing);
+                self.after_diffing(diffing);
+            }
+            Worked::Open(checking, checked) => self.checked_later(&checking, checked, diffing),
         }
-        self.after_diffing(diffing);
+        self.pending_ended(&path);
     }
 
-    /// Takes in a change merged into a buffer off the loop, as `prepared`
-    /// says, or `None` if it couldn't be: made, if the buffer is still as
-    /// it was merged into, or else merged again; or for a buffer closed
-    /// meanwhile, taken in as a change to a file not open.
-    fn merged(
+    /// Takes in a change to a buffer's file checked off the loop, as
+    /// `checked` says, or `None` if it couldn't be: one merged is made, if
+    /// the buffer is still as it was merged into, or else merged again; for
+    /// a buffer closed meanwhile, it's taken in as a change to a file not
+    /// open.
+    fn checked_later(
         &mut self,
-        merging: Merging,
-        prepared: Option<Result<Prepared, Unprepared>>,
+        checking: &Checking,
+        checked: Option<Checked>,
         mut diffing: Diffing,
     ) {
         let Some(open) = diffing.open.take() else {
             return self.after_diffing(diffing);
         };
-        let id = merging.id;
-        let slot = (self.buffers.get(&id)).filter(|slot| slot.buffer.path() == merging.path);
-        match (slot, prepared) {
-            (None, _) => {
-                self.settle_as_closed(merging);
-                self.carry_on(diffing);
+        let id = checking.id;
+        let slot = (self.buffers.get(&id)).filter(|slot| slot.buffer.path() == checking.path);
+        let Some(slot) = slot else {
+            match checked {
+                Some(Checked::Merged(merging, _)) => self.settle_as_closed(*merging),
+                _ => self.settle_gone_as_closed(&diffing, &open),
             }
-            (Some(slot), Some(prepared))
+            return self.carry_on(diffing);
+        };
+        match checked {
+            Some(Checked::Merged(merging, prepared))
                 if slot.buffer.version() == merging.version
                     && slot.buffer.disk() == merging.known =>
             {
                 // Looked at again, as it may have changed since it was
                 // read; not a file whose change was refused, as the user
                 // has been told of it already.
-                if self.land(merging, prepared) {
+                if self.land(*merging, prepared) {
                     self.look_again(id);
                 }
                 self.after_diffing(diffing);
             }
             // Changed meanwhile: merged again from the buffer as it is.
-            (Some(_), Some(_)) => {
+            Some(Checked::Merged(..)) => {
                 let tries = open.tries + 1;
                 self.merge_again(diffing, &open, tries);
             }
-            // Merging failed on the worker: on the loop, then.
-            (Some(_), None) => self.merge_again(diffing, &open, MERGES),
+            Some(checked) => {
+                self.checked_now(checking, checked, open.source);
+                self.after_diffing(diffing);
+            }
+            // Checking failed on the worker: on the loop, then.
+            None => self.merge_again(diffing, &open, MERGES),
         }
     }
 
@@ -840,6 +986,7 @@ impl Daemon {
             }
         }
         self.agent_files.ending.clear();
+        self.pending_ended_everywhere();
     }
 
     /// Notes `diffing`'s change as unknown: its text before wasn't seen, so
@@ -911,101 +1058,91 @@ impl Daemon {
         }
         // Another chat's change to it is taken in first.
         self.settle_pending(path);
-        let forget = |files: &mut AgentFiles| {
-            (files.reports).retain(|report| report.chat != chat || report.path != path);
-        };
-        let buffer = &self.buffers[&id].buffer;
-        let (disk, stamp) = match buffer.changed_on_disk() {
-            Ok(Some(changed)) => changed,
-            Ok(None) => return forget(&mut self.agent_files),
-            Err(err) => {
-                log::warn!("buffer {id}: {err}");
-                return forget(&mut self.agent_files);
-            }
-        };
-        let existed = buffer.disk().is_some();
         let reports = self.reports_of(chat, path);
         let covered: Vec<u64> = reports.iter().map(|report| report.serial).collect();
-        // Each report's own changes, in the order the agent made them.
-        let mut text = buffer.saved().to_string();
-        let mut steps = Vec::with_capacity(reports.len());
-        let mut makers = Vec::with_capacity(reports.len());
-        for report in &reports {
-            let Some(next) = apply(&text, &report.diffs) else {
-                break;
-            };
-            text = next;
-            let tool = Some(report.tool.as_str());
-            let step = !(self.agent_files.log).continues(chat, path, report.turn, tool);
-            steps.push((text.clone(), step));
-            makers.push(Maker {
-                chat,
-                turn: report.turn,
-                tool: Some(report.tool.clone()),
-            });
-        }
-        if steps.len() != reports.len() || text != disk {
-            // Claude Code says a tab-indented file's changes with spaces
-            // for each leading tab (its patches are for showing, and its
-            // adapter passes them on as they are, still in 0.98.0), so they
-            // make the file only with its tabs so too. Then the file's text is what the tools
-            // made, as one change, since what each made can't be told
-            // exactly. Not if something else changed the file too, which
-            // the spaces could hide.
-            if let Some(report) = reports.last()
-                && !self.buffers[&id].stale()
-                && made_with_tabs_as_spaces(buffer.saved(), &reports, &disk)
-            {
+        let log = &self.agent_files.log;
+        let changes: Vec<(Vec<RawDiff>, bool, Maker)> = (reports.iter())
+            .map(|report| {
                 let tool = Some(report.tool.as_str());
-                let step = !(self.agent_files.log).continues(chat, path, report.turn, tool);
-                steps = vec![(disk.clone(), step)];
-                makers = vec![Maker {
+                let step = !log.continues(chat, path, report.turn, tool);
+                let maker = Maker {
                     chat,
                     turn: report.turn,
                     tool: Some(report.tool.clone()),
-                }];
-            } else {
-                if last {
-                    forget(&mut self.agent_files);
-                    self.tell_of_change(chat, id, path, false);
-                }
-                return;
-            }
+                };
+                (report.diffs.clone(), step, maker)
+            })
+            .collect();
+        // No tool's changes to check yet, as when the tools' reports were
+        // taken in by a change merged meanwhile: nothing could make the
+        // file, so it's checked only as the turn ends, to say so.
+        if changes.is_empty() && !last {
+            return;
         }
+        let spaced = (changes.last())
+            .filter(|_| !self.buffers[&id].stale())
+            .map(|(_, step, maker)| (*step, maker.clone()));
+        let by = By::Tools { changes, spaced };
+        match self.checking(chat, id, by, covered) {
+            Ok(checking) => self.check_into(checking, Source::Tools { last }, tries),
+            // As the buffer knows it, or gone: nothing to take.
+            Err(covered) => self.agent_files.forget_reports(&covered),
+        }
+    }
+
+    /// The change `by` made to buffer `id`'s file, to check, as the
+    /// buffer is now, taking in the reports `covered`: the file is opened
+    /// now, as it is. `Err` with the reports if it's as the buffer knows
+    /// it, or gone, or can't be opened.
+    fn checking(
+        &self,
+        chat: TerminalId,
+        id: BufferId,
+        by: By,
+        covered: Vec<u64>,
+    ) -> Result<Checking, Vec<u64>> {
         let buffer = &self.buffers[&id].buffer;
-        let merging = Merging {
+        let (file, stamp) = match buffer::open_changed(buffer.path(), buffer.disk()) {
+            Ok(Some(opened)) => opened,
+            Ok(None) => return Err(covered),
+            Err(err) => {
+                log::warn!("buffer {id}: {err}");
+                return Err(covered);
+            }
+        };
+        Ok(Checking {
             chat,
-            path: path.to_owned(),
+            path: buffer.path().to_owned(),
             id,
             version: buffer.version(),
             known: buffer.disk(),
             saved: buffer.saved().clone(),
             text: buffer.text().clone(),
-            steps,
+            existed: buffer.disk().is_some(),
+            file,
             stamp,
-            makers,
+            by,
             covered,
-            existed,
-        };
-        self.merge_into(merging, Source::Tools { last }, tries);
+        })
     }
 
-    /// Merges `merging`'s change into its buffer: off the loop if it's big
-    /// and this, try `tries`, isn't the last, made once it's merged; or
-    /// else now.
-    fn merge_into(&mut self, merging: Merging, source: Source, tries: u32) {
-        let merging = if merging.bytes() > ON_LOOP && tries < MERGES {
-            let (path, id) = (merging.path.clone(), merging.id);
-            let (saved, existed) = (merging.saved.clone(), merging.existed);
-            let maker = merging.makers.first().cloned().unwrap_or(Maker {
-                chat: merging.chat,
+    /// Checks `checking`'s change against its buffer's file, and merges it
+    /// into the buffer if it's what made it: off the loop if it's big and
+    /// this, try `tries`, isn't the last, taken in once it's done; or else
+    /// now.
+    fn check_into(&mut self, checking: Checking, source: Source, tries: u32) {
+        let checking = if checking.bytes() > ON_LOOP && tries < MERGES {
+            let (path, id) = (checking.path.clone(), checking.id);
+            let (saved, existed) = (checking.saved.clone(), checking.existed);
+            let maker = checking.makers().into_iter().next().unwrap_or(Maker {
+                chat: checking.chat,
                 turn: TurnUid::default(),
                 tool: None,
             });
             match self
                 .agent_files
                 .settler
-                .submit(Job::Open(merging), &self.waker)
+                .submit(Job::Open(checking), &self.waker)
             {
                 None => {
                     self.agent_files.diffing.push(Diffing {
@@ -1028,34 +1165,53 @@ impl Daemon {
                     if self.agent_files.settler.lost() {
                         self.settler_lost();
                     }
-                    let Job::Open(merging) = job else {
+                    let Job::Open(checking) = job else {
                         unreachable!("the worker gives back the job it was given");
                     };
-                    merging
+                    checking
                 }
             }
         } else {
-            merging
+            checking
         };
-        let id = merging.id;
-        // A merge that panics on the loop isn't tried again: the change is
+        // One that panics on the loop isn't tried again: the change is
         // noted as unknown, and the file looked at again, as changed by
         // someone else.
-        match catch_unwind(AssertUnwindSafe(|| merging.prepare())) {
-            Ok(prepared) => {
-                if self.land(merging, prepared) {
-                    self.look_again(id);
+        match catch_unwind(AssertUnwindSafe(|| checking.check())) {
+            Ok(checked) => self.checked_now(&checking, checked, source),
+            Err(panic) => {
+                let id = checking.id;
+                log::warn!("buffer {id}: merging an agent's change panicked: {panic:?}");
+                self.agent_files.forget_reports(&checking.covered);
+                let makers = checking.makers();
+                let turns: Vec<TurnUid> = makers.iter().map(|maker| maker.turn).collect();
+                for maker in &makers {
+                    (self.agent_files.log).note_unknown(maker, &checking.path);
+                }
+                self.refresh_files(checking.chat, turns);
+                self.disk_maybe_changed(id);
+            }
+        }
+    }
+
+    /// Takes in what `checking`'s change was found to be, `checked`, for
+    /// its buffer, which is as it was checked against, from `source`: a
+    /// change merged is made; for a file as the buffer knows it, the
+    /// reports are let go; one the tools didn't make is left be, or, as
+    /// the agent's turn ends, the user is told it changed some other way.
+    fn checked_now(&mut self, checking: &Checking, checked: Checked, source: Source) {
+        match checked {
+            Checked::Unchanged => self.agent_files.forget_reports(&checking.covered),
+            Checked::Other => {
+                if let Source::Tools { last: true } = source {
+                    self.agent_files.forget_reports(&checking.covered);
+                    self.tell_of_change(checking.chat, checking.id, &checking.path, false);
                 }
             }
-            Err(panic) => {
-                log::warn!("buffer {id}: merging an agent's change panicked: {panic:?}");
-                self.agent_files.forget_reports(&merging.covered);
-                let turns: Vec<TurnUid> = merging.makers.iter().map(|maker| maker.turn).collect();
-                for maker in &merging.makers {
-                    (self.agent_files.log).note_unknown(maker, &merging.path);
+            Checked::Merged(merging, prepared) => {
+                if self.land(*merging, prepared) {
+                    self.look_again(checking.id);
                 }
-                self.refresh_files(merging.chat, turns);
-                self.disk_maybe_changed(id);
             }
         }
     }
@@ -1133,37 +1289,17 @@ impl Daemon {
     /// As [`take_from_commands`](Self::take_from_commands), once nothing
     /// else is pending for the file, as try `tries` (see [`MERGES`]).
     fn commands_into(&mut self, chat: TerminalId, turn: TurnUid, id: BufferId, tries: u32) {
-        let Some(slot) = self.buffers.get(&id) else {
+        if !self.buffers.contains_key(&id) {
             return;
-        };
-        let buffer = &slot.buffer;
-        let (disk, stamp) = match buffer.changed_on_disk() {
-            Ok(Some(changed)) => changed,
-            Ok(None) => return,
-            Err(err) => {
-                log::warn!("buffer {id}: {err}");
-                return;
-            }
-        };
-        let merging = Merging {
+        }
+        let maker = Maker {
             chat,
-            path: buffer.path().to_owned(),
-            id,
-            version: buffer.version(),
-            known: buffer.disk(),
-            saved: buffer.saved().clone(),
-            text: buffer.text().clone(),
-            steps: vec![(disk, true)],
-            stamp,
-            makers: vec![Maker {
-                chat,
-                turn,
-                tool: None,
-            }],
-            covered: Vec::new(),
-            existed: buffer.disk().is_some(),
+            turn,
+            tool: None,
         };
-        self.merge_into(merging, Source::Commands { turn }, tries);
+        if let Ok(checking) = self.checking(chat, id, By::Commands(maker), Vec::new()) {
+            self.check_into(checking, Source::Commands { turn }, tries);
+        }
     }
 
     /// Checks the file `path`, not open, against what the tools of the
@@ -1540,24 +1676,24 @@ fn apply(text: &str, diffs: &[RawDiff]) -> Option<String> {
 /// each leading tab as: Claude Code showed two under its adapter 0.88.0.
 const TAB_WIDTHS: [usize; 3] = [2, 4, 8];
 
-/// Whether the changes `reports` said, made in turn to `saved`, make
-/// `disk` once the leading tabs of each line of both are spaces, as an
-/// agent that shows a file's tabs so says its changes: as many for each
+/// Whether the changes each tool said, `changes`, made in turn to `saved`,
+/// make `disk` once the leading tabs of each line of both are spaces, as
+/// an agent that shows a file's tabs so says its changes: as many for each
 /// tab as one of [`TAB_WIDTHS`].
-fn made_with_tabs_as_spaces(saved: &Rope, reports: &[&Report], disk: &str) -> bool {
+fn made_with_tabs_as_spaces(saved: &Rope, changes: &[&[RawDiff]], disk: &str) -> bool {
     // Quick to rule out first, before reading a big file three times: a
     // report with no changes can't make it, and with no tab on either
     // side, the changes would have made it as they are.
     let tabbed = (saved.chunks()).any(|chunk| memchr::memchr(b'\t', chunk.as_bytes()).is_some())
         || memchr::memchr(b'\t', disk.as_bytes()).is_some();
-    if !tabbed || reports.iter().any(|report| report.diffs.is_empty()) {
+    if !tabbed || changes.iter().any(|diffs| diffs.is_empty()) {
         return false;
     }
     let saved = saved.to_string();
     TAB_WIDTHS.into_iter().any(|width| {
         let mut text = tabs_as_spaces(&saved, width);
-        for report in reports {
-            match apply(&text, &report.diffs) {
+        for diffs in changes {
+            match apply(&text, diffs) {
                 Some(next) => text = next,
                 None => return false,
             }
@@ -1852,19 +1988,23 @@ pub(super) mod tests {
         // As Claude Code's adapter says it: two spaces a tab.
         let said = report("all:\n  cc a.c", "all:\n  cc -O2 a.c");
         let disk = "all:\n\tcc -O2 a.c\n\t\techo\n";
-        assert!(made_with_tabs_as_spaces(&saved, &[&said], disk));
+        assert!(made_with_tabs_as_spaces(&saved, &[&said.diffs], disk));
         let four = report("    cc a.c\n        echo", "    cc -O2 a.c\n        echo");
-        assert!(made_with_tabs_as_spaces(&saved, &[&four], disk));
+        assert!(made_with_tabs_as_spaces(&saved, &[&four.diffs], disk));
         // Indented differently on disk than the change says: not the tool's.
         let reindented = "all:\n\tcc -O2 a.c\n\techo\n";
-        assert!(!made_with_tabs_as_spaces(&saved, &[&said], reindented));
+        assert!(!made_with_tabs_as_spaces(
+            &saved,
+            &[&said.diffs],
+            reindented
+        ));
     }
 
     #[test]
     fn a_tools_changes_are_found_in_order_or_not_at_all() {
         let diff = |old: Option<&str>, new: &str| RawDiff {
             path: "/a".into(),
-            old: old.map(str::to_owned),
+            old: old.map(Into::into),
             new: new.into(),
         };
         let text = "one\ntwo\nthree\ntwo\n";

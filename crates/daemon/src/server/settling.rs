@@ -9,12 +9,14 @@
 //! it's worked out on a thread of its own, and the loop takes it in once
 //! it's done. Small files are worked out at once, as before.
 //!
-//! A change to a file open in a buffer is merged into the buffer's text
-//! the same way (CLACKA-201): the worker merges it into a copy of the
-//! text, as it was at one version (ropes share what they have in common,
-//! so the copy is cheap), and works out what the review needs of it. The
-//! loop makes the merged edits only if the buffer is still at that
-//! version, with the file as it was, so the merge's promise never to mix
+//! A change to a file open in a buffer is checked and merged into the
+//! buffer's text the same way (CLACKA-201, CLACKA-222): the worker reads
+//! the file, makes what the agent's tools said they changed of the text
+//! saved, and compares the two; if the tools made the file, it merges the
+//! change into a copy of the text, as it was at one version (ropes share
+//! what they have in common, so the copy is cheap), and works out what the
+//! review needs of it. The loop makes the merged edits only if the buffer
+//! is still at that version, with the file as it was, so the merge's promise never to mix
 //! the agent's change into lines changed and not saved still holds.
 //! Otherwise, as when you typed meanwhile, or undid something, it's merged
 //! again from the buffer as it is now, and after a few tries, on the loop.
@@ -44,9 +46,8 @@ use clackatoo_protocol::TerminalId;
 use clackatoo_protocol::BufferId;
 use clackatoo_text::Rope;
 
-use super::agent_files::{Merging, Settled};
+use super::agent_files::{Checked, Checking, Settled};
 use super::edit_log::{Diffed, Maker};
-use crate::buffer::{Prepared, Unprepared};
 
 /// The most bytes of text, before and after together, worked out on the
 /// loop. A change to a bigger file is worked out on the worker.
@@ -110,8 +111,9 @@ impl Diffing {
 pub(super) enum Job {
     /// To a file not open: the edit to work out.
     Closed(Settled),
-    /// To a file open in a buffer: to merge into it.
-    Open(Merging),
+    /// To a file open in a buffer: to check against the file, and merge
+    /// into the buffer.
+    Open(Checking),
 }
 
 /// A change the worker has done with: worked out, or `None` if it
@@ -119,7 +121,7 @@ pub(super) enum Job {
 #[derive(Debug)]
 pub(super) enum Worked {
     Closed(Settled, Option<Diffed>),
-    Open(Merging, Option<Result<Prepared, Unprepared>>),
+    Open(Checking, Option<Checked>),
 }
 
 impl Job {
@@ -127,7 +129,7 @@ impl Job {
     fn bytes(&self) -> usize {
         match self {
             Self::Closed(settled) => bytes(settled),
-            Self::Open(merging) => merging.bytes(),
+            Self::Open(checking) => checking.bytes(),
         }
     }
 
@@ -148,15 +150,15 @@ impl Job {
                 }
                 Worked::Closed(settled, diffed.ok())
             }
-            Self::Open(merging) => {
-                let prepared = catch_unwind(AssertUnwindSafe(|| {
+            Self::Open(checking) => {
+                let checked = catch_unwind(AssertUnwindSafe(|| {
                     first();
-                    merging.prepare()
+                    checking.check()
                 }));
-                if let Err(panic) = &prepared {
+                if let Err(panic) = &checked {
                     log::warn!("settling: merging a change panicked: {panic:?}");
                 }
-                Worked::Open(merging, prepared.ok())
+                Worked::Open(checking, checked.ok())
             }
         }
     }
@@ -167,7 +169,7 @@ impl Worked {
     fn bytes(&self) -> usize {
         match self {
             Self::Closed(settled, _) => bytes(settled),
-            Self::Open(merging, _) => merging.bytes(),
+            Self::Open(checking, _) => checking.bytes(),
         }
     }
 }
@@ -334,6 +336,8 @@ mod tests {
 
     use serde_json::json;
 
+    use crate::chat::{RawDiff, Wrote};
+    use crate::server::agent_files::tests::start_tool;
     use crate::server::disk::tests::{finish_command, says, start_command};
     use crate::server::turn_undo::tests::{World, big_file, change_big_file};
 
@@ -346,6 +350,15 @@ mod tests {
         let second = change_big_file(world, ("t1", 1), &first);
         assert_eq!(world.text(id), first, "not made yet");
         (id, first, second)
+    }
+
+    /// Writes `text` over `big.txt` as `sed -i`, git and most editors
+    /// write a file: beside it, then renamed over it. What's being checked
+    /// was opened before, and is read as it was.
+    fn write_over(world: &World, text: &str) {
+        let new = world.path("big.txt.new");
+        std::fs::write(&new, text).unwrap();
+        std::fs::rename(new, world.path("big.txt")).unwrap();
     }
 
     /// The buffer's text saved.
@@ -450,7 +463,7 @@ mod tests {
         // made.
         start_command(&mut world.daemon, chat);
         let third = second.replacen("line 5\n", "line #5\n", 1);
-        std::fs::write(world.path("big.txt"), &third).unwrap();
+        write_over(&world, &third);
         world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         finish_command(&mut world.daemon, chat);
@@ -459,6 +472,10 @@ mod tests {
         world.daemon.check_disk();
         world.daemon.check_disk();
         world.daemon.settle_all_pending();
+        // Heard of again once the tool's change is made, as when the
+        // file's directory is watched again, having been without inotify:
+        // still the command's.
+        world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         world.daemon.settle_all_pending();
         assert!(!world.daemon.buffers[&id].stale());
@@ -503,18 +520,14 @@ mod tests {
         says(&mut world.daemon, chat, done);
         start_command(&mut world.daemon, chat);
         let third = second.replacen("line 5\n", "line #5\n", 1);
-        std::fs::write(world.path("big.txt"), &third).unwrap();
+        write_over(world, &third);
         world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         finish_command(&mut world.daemon, chat);
         world.daemon.check_disk();
         world.daemon.check_disk();
         other(world);
-        std::fs::write(
-            world.path("big.txt"),
-            third.replacen("line 9\n", "line #9\n", 1),
-        )
-        .unwrap();
+        write_over(world, &third.replacen("line 9\n", "line #9\n", 1));
         world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         (id, second)
@@ -587,7 +600,7 @@ mod tests {
         let (id, _, second) = merging(&mut world);
         world.end_turn();
         let third = second.replacen("line 7\n", "line #7\n", 1);
-        std::fs::write(world.path("big.txt"), third).unwrap();
+        write_over(&world, &third);
         world.daemon.disk_maybe_changed(id);
         world.daemon.check_disk();
         assert!(!world.daemon.buffers[&id].stale());
@@ -759,6 +772,53 @@ mod tests {
         world.end_turn();
         assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
         assert_eq!(world.disk("big.txt"), Some(first));
+    }
+
+    /// A change heard of while an agent's change to the file is checked
+    /// off the loop, that no chat made, isn't lost if the agent's isn't
+    /// made, as when its tool's changes don't make the file: it's taken
+    /// as from outside once the check is done.
+    #[test]
+    fn a_change_from_outside_while_a_big_change_is_checked_is_seen_if_it_isnt_made() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let id = world.open("big.txt");
+        let chat = world.chat;
+        let path = world.path("big.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, "t1");
+        // The tool says it changed line 2, but changed line 1.
+        write_over(&world, &first.replacen("line 1\n", "line #1\n", 1));
+        let said = Wrote {
+            done: true,
+            turn: world.first(),
+            tool: "t1".into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs: vec![RawDiff {
+                path,
+                old: Some("line 2\n".into()),
+                new: "line #2\n".into(),
+            }],
+        };
+        world.daemon.take_written(chat, &said);
+        assert!(
+            world.daemon.agent_files.diffing(chat),
+            "checked off the loop"
+        );
+        let done = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+        });
+        says(&mut world.daemon, chat, done);
+        world.daemon.check_disk();
+        // Something else changes it, while no tool runs.
+        write_over(&world, &first.replacen("line 9\n", "line #9\n", 1));
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        assert!(!world.daemon.buffers[&id].stale(), "not yet");
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        assert_eq!(world.text(id), first);
+        assert!(world.daemon.buffers[&id].stale());
     }
 
     #[test]

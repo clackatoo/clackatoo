@@ -56,8 +56,8 @@ impl HostedChat {
                     let diffs = (diffs.into_iter())
                         .map(|diff| handover::LiveDiff {
                             path: diff.path,
-                            old: diff.old,
-                            new: diff.new,
+                            old: diff.old.as_deref().map(str::to_owned),
+                            new: diff.new.to_string(),
                         })
                         .collect();
                     (tool, diffs)
@@ -108,8 +108,8 @@ impl HostedChat {
                 let diffs = (diffs.into_iter())
                     .map(|diff| RawDiff {
                         path: diff.path,
-                        old: diff.old,
-                        new: diff.new,
+                        old: diff.old.map(Into::into),
+                        new: diff.new.into(),
                     })
                     .collect();
                 (tool, diffs)

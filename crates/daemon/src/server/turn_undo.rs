@@ -1353,8 +1353,8 @@ pub(in crate::server) mod tests {
         std::fs::write(world.path(name), &after).unwrap();
         let diff = RawDiff {
             path: path.clone(),
-            old: Some(old),
-            new,
+            old: Some(old.into()),
+            new: new.into(),
         };
         world.daemon.take_written(chat, &said(true, vec![diff]));
         assert!(
