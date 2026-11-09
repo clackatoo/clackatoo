@@ -359,7 +359,7 @@ fn peeking_never_runs_the_users_own_config() {
 ",
     );
     assert!(peek(&dirs).agents().keep_agents, "not run");
-    load(&dirs, When::Starting);
+    let _ = load(&dirs, When::Starting);
     assert!(!peek(&dirs).agents().keep_agents, "what last ran");
     write(
         &dirs.daemon.join("init.lua"),

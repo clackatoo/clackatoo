@@ -1300,7 +1300,7 @@ mod tests {
             String::new(),
         ] {
             let dir = config_dir(&[("client/init.lua", &format!("require({name:?})"))]);
-            let mut lua = Lua::start(
+            let lua = Lua::start(
                 Source::Dir(dir.path().into()),
                 Options::default(),
                 vec![WINDOW],
@@ -1324,7 +1324,7 @@ mod tests {
         let dir = config_dir(&[("lua/compiled.lua", ""), ("client/init.lua", "")]);
         std::fs::write(dir.path().join("lua/compiled.lua"), &bytecode).unwrap();
         std::fs::write(dir.path().join("client/init.lua"), &bytecode).unwrap();
-        let mut lua = Lua::start(
+        let lua = Lua::start(
             Source::Dir(dir.path().into()),
             Options::default(),
             vec![WINDOW],
@@ -1341,7 +1341,7 @@ mod tests {
             "{said:?}"
         );
         std::fs::write(dir.path().join("client/init.lua"), "require('compiled')").unwrap();
-        let mut lua = Lua::start(
+        let lua = Lua::start(
             Source::Dir(dir.path().into()),
             Options::default(),
             vec![WINDOW],

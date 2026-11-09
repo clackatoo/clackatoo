@@ -477,21 +477,33 @@ pub struct Dirs {
     pub state: Option<PathBuf>,
 }
 
-/// `$CLACKATOO_CONFIG`, as it's set: `None` if it isn't, `Some(None)` for
-/// `off`, or the folder it names.
-fn config_override() -> Option<Option<PathBuf>> {
-    let dir = std::env::var_os("CLACKATOO_CONFIG").filter(|dir| !dir.is_empty())?;
+/// What `$CLACKATOO_CONFIG` says.
+enum Override {
+    /// Nothing: the user's own config.
+    Unset,
+    /// No config at all.
+    Off,
+    /// The config in this folder.
+    Dir(PathBuf),
+}
+
+/// What `$CLACKATOO_CONFIG` says: one that's neither `off` nor an absolute
+/// path is taken as `off`, and said.
+fn config_override() -> Override {
+    let Some(dir) = std::env::var_os("CLACKATOO_CONFIG").filter(|dir| !dir.is_empty()) else {
+        return Override::Unset;
+    };
     if dir == "off" {
-        return Some(None);
+        return Override::Off;
     }
     if !Path::new(&dir).is_absolute() {
         log::warn!(
             "CLACKATOO_CONFIG isn't an absolute path or `off`: {}",
             dir.display()
         );
-        return Some(None);
+        return Override::Off;
     }
-    Some(Some(PathBuf::from(dir)))
+    Override::Dir(PathBuf::from(dir))
 }
 
 /// Where the daemon keeps what its config needs between runs, the web
@@ -501,8 +513,8 @@ fn config_override() -> Option<Option<PathBuf>> {
 #[must_use]
 pub fn state_dir() -> Option<PathBuf> {
     match config_override() {
-        Some(Some(config)) => Some(config.join("state")),
-        _ => crate::state_dir(),
+        Override::Dir(config) => Some(config.join("state")),
+        Override::Unset | Override::Off => crate::state_dir(),
     }
 }
 
@@ -515,8 +527,9 @@ impl Dirs {
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let config = match config_override() {
-            Some(config) => config?,
-            None => crate::config_dir()?,
+            Override::Dir(config) => config,
+            Override::Off => return None,
+            Override::Unset => crate::config_dir()?,
         };
         Some(Self {
             daemon: config.join("daemon"),
