@@ -841,8 +841,9 @@ mod tests {
         File::open(path).unwrap().set_modified(when).unwrap();
     }
 
-    /// Whether the lesson's folder at `path` is still there: not one made
-    /// again since, of the same name, as it's known by a file in it.
+    /// Whether the lesson's folder at `path` is still there, as it's known
+    /// by its lesson's text. A folder made again of its name, for the same
+    /// lesson, has that too: one that may be needs a file of its own.
     fn still(path: &str) -> bool {
         Path::new(path).join("basics.txt").exists()
     }
@@ -932,6 +933,11 @@ mod tests {
             panic!("no folder made");
         };
         daemon.tutor.forget(gone);
+        // The thread may prune it before the next is made, which then
+        // takes its name, made the same second: it's known by a file only
+        // it has, made before it's aged.
+        let theirs_alone = Path::new(&theirs).join("gone");
+        std::fs::write(&theirs_alone, "").unwrap();
         for path in [&theirs, &mine] {
             changed_ago(path, KEPT_FOR + Duration::from_mins(1));
         }
@@ -941,7 +947,7 @@ mod tests {
             panic!("no folder made");
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while still(&theirs) {
+        while theirs_alone.exists() {
             assert!(std::time::Instant::now() < deadline, "never pruned");
             std::thread::sleep(Duration::from_millis(5));
         }
