@@ -7,6 +7,7 @@
 //! level and ignored, the same way xterm ignores what it doesn't know.
 
 use crate::charset::{Charset, Slot};
+use crate::keyboard;
 use crate::parser::{Params, Perform};
 use crate::requests::{Kind, Request};
 use crate::sgr;
@@ -125,6 +126,18 @@ impl Perform for Emulator {
                 }
             }
             ([b'?'], 'n') => self.device_status_report(arg(0).unwrap_or(0), true),
+            // The kitty keyboard protocol (see crate::keyboard).
+            ([b'?'], 'u') => self.report_keyboard(),
+            ([b'>'], 'u') => {
+                let flags = keyboard::flags(arg(0).unwrap_or(0));
+                self.keyboard_mut().push(flags);
+            }
+            ([b'<'], 'u') => self.keyboard_mut().pop(count(0)),
+            ([b'='], 'u') => {
+                let flags = keyboard::flags(arg(0).unwrap_or(0));
+                let mode = arg(1).filter(|&mode| mode != 0).unwrap_or(1);
+                self.keyboard_mut().set(flags, mode);
+            }
             ([b'$'], 'p') => self.report_mode(arg(0).unwrap_or(0), false),
             ([b'?', b'$'], 'p') => self.report_mode(arg(0).unwrap_or(0), true),
             ([b'>'], 'c') if arg(0).unwrap_or(0) == 0 => {

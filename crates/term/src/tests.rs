@@ -520,10 +520,24 @@ mod queries {
     }
 
     #[test]
+    fn the_keyboard_protocol_says_what_was_asked() {
+        // fish asks, then sends DA1: an answer to the first says the
+        // protocol is there.
+        assert_eq!(replies("\x1b[?u\x1b[c"), "\x1b[?0u\x1b[?62;22c");
+        assert_eq!(replies("\x1b[>1u\x1b[?u"), "\x1b[?1u");
+        assert_eq!(replies("\x1b[>1u\x1b[>13u\x1b[<u\x1b[?u"), "\x1b[?1u");
+        assert_eq!(replies("\x1b[>1u\x1b[>13u\x1b[<2u\x1b[?u"), "\x1b[?0u");
+        assert_eq!(replies("\x1b[=5u\x1b[=8;2u\x1b[?u"), "\x1b[?13u");
+        assert_eq!(replies("\x1b[=13u\x1b[=4;3u\x1b[?u"), "\x1b[?9u");
+        // Key releases aren't sent, so asking for them isn't kept.
+        assert_eq!(replies("\x1b[>3u\x1b[?u"), "\x1b[?1u");
+    }
+
+    #[test]
     fn unsupported_queries_get_no_reply() {
-        // The kitty keyboard query: fish follows it with DA1 and treats a
-        // DA1-only answer as "unsupported".
-        assert_eq!(replies("\x1b[?u\x1b[c"), "\x1b[?62;22c");
+        // XTWINOPS 21t would read the title back, and a title can say
+        // anything.
+        assert_eq!(replies("\x1b]2;rm -rf ~\x07\x1b[21t"), "");
     }
 }
 
@@ -1099,6 +1113,22 @@ mod other_sequences {
     }
 
     #[test]
+    fn each_screen_keeps_its_own_keyboard_flags() {
+        let mut t = after(5, 2, "\x1b[>1u");
+        assert_eq!(t.keyboard(), 1);
+        t.advance(b"\x1b[?1049h");
+        assert_eq!(t.keyboard(), 0, "the alternate screen starts with none");
+        t.advance(b"\x1b[>13u");
+        assert_eq!(t.keyboard(), 13);
+        t.advance(b"\x1b[?1049l");
+        assert_eq!(t.keyboard(), 1, "the shell's are left alone");
+        t.advance(b"\x1b[?1049h");
+        assert_eq!(t.keyboard(), 13, "until they're popped");
+        t.advance(b"\x1bc");
+        assert_eq!(t.keyboard(), 0);
+    }
+
+    #[test]
     fn hiding_the_cursor() {
         assert!(!after(5, 1, "\x1b[?25l").cursor().visible);
         assert!(after(5, 1, "\x1b[?25l\x1b[?25h").cursor().visible);
@@ -1147,10 +1177,10 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         b"\x0f".to_vec(),
     ]);
     let csi = (
-        prop::sample::select(vec!["", "?", ">", "!"]),
+        prop::sample::select(vec!["", "?", ">", "!", "<", "="]),
         prop::collection::vec(0u16..30, 0..3),
         prop::sample::select(
-            "@ABCDEFGHIJKLMPSTXZabcdeghlmnrsu"
+            "@ABCDEFGHIJKLMPSTXZabcdeghlmnrstu"
                 .chars()
                 .collect::<Vec<_>>(),
         ),
@@ -1834,11 +1864,14 @@ mod snapshots {
 
             let (snapshot, links) = original.snapshot_with_links();
             let blocks = original.blocks_snapshot();
+            let asked = original.asked_snapshot();
             let mut restored = Terminal::restore_with_links(&snapshot, &links, &config()).unwrap();
             restored.restore_blocks(&blocks);
+            restored.restore_asked(&asked);
             restored.assert_invariants();
             prop_assert_eq!(&restored.snapshot_with_links(), &(snapshot, links));
             prop_assert_eq!(&restored.blocks_snapshot(), &blocks);
+            prop_assert_eq!(&restored.asked_snapshot(), &asked);
             prop_assert_eq!(cells(&restored), cells(&original));
 
             // What the screen doesn't show (modes, character sets, tab
@@ -1852,6 +1885,8 @@ mod snapshots {
             prop_assert_eq!(restored.input_modes(), original.input_modes());
             prop_assert_eq!(restored.emulator_state(), original.emulator_state());
             prop_assert_eq!(restored.blocks_snapshot(), original.blocks_snapshot());
+            prop_assert_eq!(restored.keyboard(), original.keyboard());
+            prop_assert_eq!(restored.asked_snapshot(), original.asked_snapshot());
         }
     }
 

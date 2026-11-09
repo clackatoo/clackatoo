@@ -22,6 +22,7 @@ mod document;
 #[doc(hidden)]
 pub mod fuzzing;
 mod grid;
+pub mod keyboard;
 mod links;
 pub mod mouse;
 mod parser;
@@ -52,7 +53,7 @@ pub use paste::{bracketed_paste, paste, shell_quoted, unbracketed};
 pub use row::{MAX_EXTRA, Row, RowBuilder};
 pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};
-pub use snapshot::{BlocksSnapshot, LinksSnapshot, RestoreError, Snapshot};
+pub use snapshot::{AskedSnapshot, BlocksSnapshot, LinksSnapshot, RestoreError, Snapshot};
 pub use style::{Attributes, Color, Style, Underline};
 pub use terminal::{Config, Cursor, CursorShape, InputModes, Terminal};
 pub use width::{invisible, of as char_width};

@@ -22,12 +22,15 @@
 //! without one restores with no blocks. So did links (see
 //! [`crate::Hyperlink`]): [`LinksSnapshot`] says which runs of which lines
 //! are part of which link, and a terminal restored without one has none.
+//! And so did what programs ask of the terminal beyond its modes, such as
+//! the kitty keyboard protocol's flags: [`AskedSnapshot`].
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::blocks::{Blocks, Entry, Mark, Phase as LivePhase};
 use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
+use crate::keyboard;
 use crate::links::{Hyperlink, LinkId, Links};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::row::{Row, RowBuilder};
@@ -109,6 +112,55 @@ pub struct LinksSnapshot {
     /// The link the cursor's pen prints, then the pens DECSC saved for the
     /// primary and alternate screens.
     pub(crate) pens: [Option<u32>; 3],
+}
+
+/// What programs asked of a terminal that came after [`Snapshot`]'s
+/// format was fixed, from
+/// [`Terminal::asked_snapshot`](crate::Terminal::asked_snapshot), for
+/// [`Terminal::restore_asked`](crate::Terminal::restore_asked). A terminal
+/// restored without one has none of it: keys go in xterm's encoding until
+/// a program asks again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct AskedSnapshot {
+    /// The kitty keyboard protocol's flags each screen's programs pushed:
+    /// the primary screen's, then the alternate's.
+    pub(crate) keyboard: [KeyboardFlags; 2],
+    /// The titles pushed to be popped again, oldest first.
+    pub(crate) titles: Vec<String>,
+}
+
+/// One screen's kitty keyboard flags.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) struct KeyboardFlags {
+    /// The flags with nothing pushed.
+    pub(crate) base: u8,
+    /// What was pushed, oldest first.
+    pub(crate) pushed: Vec<u8>,
+}
+
+impl AskedSnapshot {
+    pub(crate) fn capture(keyboard: [&keyboard::Stack; 2], titles: &[String]) -> Self {
+        Self {
+            keyboard: keyboard.map(|stack| {
+                let (base, pushed) = stack.parts();
+                KeyboardFlags {
+                    base,
+                    pushed: pushed.to_vec(),
+                }
+            }),
+            titles: titles.to_vec(),
+        }
+    }
+
+    /// Each screen's keyboard flags, and the titles, as a live terminal
+    /// keeps them. The titles aren't bounded yet.
+    pub(crate) fn restore(&self) -> ([keyboard::Stack; 2], &[String]) {
+        let keyboard = (self.keyboard.each_ref())
+            .map(|flags| keyboard::Stack::from_parts(flags.base, &flags.pushed));
+        (keyboard, &self.titles)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -12,6 +12,7 @@ use crate::charset::Charsets;
 use crate::clipboard::{self, ClipboardRequest};
 use crate::damage::Damage;
 use crate::grid::Grid;
+use crate::keyboard;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::parser::Parser;
@@ -20,7 +21,9 @@ use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::sgr;
 use crate::size::Size;
-use crate::snapshot::{BlocksSnapshot, LineLinks, LinksSnapshot, RestoreError, Snapshot, position};
+use crate::snapshot::{
+    AskedSnapshot, BlocksSnapshot, LineLinks, LinksSnapshot, RestoreError, Snapshot, position,
+};
 use crate::style::Style;
 use crate::tabs::TabStops;
 use crate::width;
@@ -242,6 +245,15 @@ impl Terminal {
         }
     }
 
+    /// The kitty keyboard protocol's flags in effect: how the program on
+    /// the screen shown wants keys encoded, beyond
+    /// [`input_modes`](Self::input_modes) (see [`crate::keyboard`]). 0
+    /// means xterm's encoding.
+    #[must_use]
+    pub fn keyboard(&self) -> u8 {
+        self.emulator.keyboard().flags()
+    }
+
     /// The window title the program last set, or empty.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -456,6 +468,33 @@ impl Terminal {
         // process's renumberings.
         emulator.blocks = blocks.renumbered_as(emulator.blocks.renumbered());
         emulator.cwd = snapshot.cwd.as_deref().map(Arc::from);
+    }
+
+    /// What the program asked of the terminal that a
+    /// [`snapshot`](Self::snapshot) doesn't keep, to carry into another
+    /// process with it: the keyboard's flags and the titles it pushed.
+    #[must_use]
+    pub fn asked_snapshot(&self) -> AskedSnapshot {
+        let emulator = &self.emulator;
+        AskedSnapshot::capture(
+            [&emulator.keyboard_primary, &emulator.keyboard_alternate],
+            &emulator.titles,
+        )
+    }
+
+    /// Puts back what the program asked, from an
+    /// [`asked_snapshot`](Self::asked_snapshot) taken with the
+    /// [`snapshot`](Self::snapshot) this terminal was restored from.
+    pub fn restore_asked(&mut self, snapshot: &AskedSnapshot) {
+        let ([primary, alternate], titles) = snapshot.restore();
+        let emulator = &mut self.emulator;
+        emulator.keyboard_primary = primary;
+        emulator.keyboard_alternate = alternate;
+        let newest = titles.len().saturating_sub(MOST_TITLES);
+        emulator.titles = titles[newest..]
+            .iter()
+            .map(|title| shortened(title))
+            .collect();
     }
 
     /// The number of links the terminal holds.
@@ -776,6 +815,10 @@ pub(crate) struct Emulator {
     /// Titles pushed to be popped again (XTWINOPS 22 and 23), oldest
     /// first.
     titles: Vec<String>,
+    /// The kitty keyboard protocol's flags programs pushed on each
+    /// screen (see [`crate::keyboard`]).
+    keyboard_primary: keyboard::Stack,
+    keyboard_alternate: keyboard::Stack,
     /// The device control string being collected, if it's a request this
     /// terminal answers (see [`crate::requests`]).
     pub(crate) request: Option<Request>,
@@ -832,6 +875,8 @@ impl Emulator {
             tabs: TabStops::new(width),
             title: String::new(),
             titles: Vec::new(),
+            keyboard_primary: keyboard::Stack::default(),
+            keyboard_alternate: keyboard::Stack::default(),
             request: None,
             cwd: None,
             blocks: Blocks::default(),
@@ -1629,11 +1674,30 @@ impl Emulator {
         if self.titles.len() == MOST_TITLES {
             self.titles.remove(0);
         }
-        let mut end = self.title.len().min(LONGEST_PUSHED_TITLE);
-        while !self.title.is_char_boundary(end) {
-            end -= 1;
+        self.titles.push(shortened(&self.title));
+    }
+
+    /// The kitty keyboard protocol's flags on the screen shown.
+    pub(crate) fn keyboard(&self) -> &keyboard::Stack {
+        match self.screen {
+            Screen::Primary => &self.keyboard_primary,
+            Screen::Alternate => &self.keyboard_alternate,
         }
-        self.titles.push(self.title[..end].to_owned());
+    }
+
+    pub(crate) fn keyboard_mut(&mut self) -> &mut keyboard::Stack {
+        match self.screen {
+            Screen::Primary => &mut self.keyboard_primary,
+            Screen::Alternate => &mut self.keyboard_alternate,
+        }
+    }
+
+    /// `CSI ? u`: the kitty keyboard protocol's flags in effect, as
+    /// `CSI ? flags u`. fish asks this, then DA1, and takes an answer to
+    /// DA1 alone to mean the protocol isn't there.
+    pub(crate) fn report_keyboard(&mut self) {
+        let reply = format!("\x1b[?{}u", self.keyboard().flags());
+        self.reply(reply.as_bytes());
     }
 
     /// Answers `request`, a device control string that has ended, unless
@@ -1936,6 +2000,16 @@ impl Emulator {
             self.replies.extend_from_slice(bytes);
         }
     }
+}
+
+/// `title`, or as much of it as a pushed title keeps: no more than
+/// [`LONGEST_PUSHED_TITLE`] bytes, cut between characters.
+fn shortened(title: &str) -> String {
+    let mut end = title.len().min(LONGEST_PUSHED_TITLE);
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    title[..end].to_owned()
 }
 
 /// The command a `C` mark's `options` say started, from its
