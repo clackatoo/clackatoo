@@ -237,22 +237,21 @@ impl Daemon {
         let only = marks.only();
         let key = history::key(self.id, id.0);
         let job = if only.as_ref().is_some_and(Vec::is_empty) {
-            Job::Remove { key }
+            Job::Remove
         } else {
             let Some(Hosted::Pty(terminal)) = self.terminals.get(&id).map(|slot| &slot.terminal)
             else {
                 return true;
             };
             Job::Write {
-                key,
                 copy: Box::new(terminal.emulator().copy_to_keep(lines)),
                 only,
             }
         };
-        match self.history_writer() {
-            Some(writer) => writer.send(job),
-            None => true,
+        if let Some(writer) = self.history_writer() {
+            writer.send(key, job);
         }
+        true
     }
 
     /// Has the history of every terminal that changed written now, as
@@ -286,7 +285,7 @@ impl Daemon {
         if let Some(lock) = lock
             && let Some(writer) = self.histories.writer.as_ref()
         {
-            writer.send(Job::Let(lock));
+            writer.let_go(lock);
         }
     }
 
@@ -300,7 +299,7 @@ impl Daemon {
         }
         let key = history::key(self.id, id.0);
         if let Some(writer) = self.history_writer() {
-            writer.send(Job::Remove { key });
+            writer.send(key, Job::Remove);
         }
     }
 
@@ -497,7 +496,7 @@ impl Daemon {
             .map(|&id| history::key(self.id, id.0))
             .collect();
         if let Some(writer) = self.history_writer() {
-            writer.send(Job::Sweep(keep));
+            writer.sweep(keep);
         }
     }
 

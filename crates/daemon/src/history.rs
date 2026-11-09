@@ -31,14 +31,15 @@
 //! under the workspaces' lock (see `saved`), so two daemons never share
 //! the folder.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use clackatoo_term::{KeptCopy, KeptLines};
@@ -69,10 +70,6 @@ const MOST_INFLATED: u64 = 24 * 1024 * 1024;
 /// The most bytes of lines this build writes to a file, framing included,
 /// whatever it's asked to keep: always read back.
 const MOST_WRITTEN: usize = 20 * 1024 * 1024;
-
-/// How many jobs wait for the thread before more are refused, the
-/// terminals they're of written at the next chance instead.
-const QUEUED: usize = 1024;
 
 /// What a history file holds, after its version.
 #[derive(Debug, Serialize, Deserialize)]
@@ -257,29 +254,65 @@ fn now() -> u64 {
         })
 }
 
-/// What the thread is asked to do, in order.
+/// What the thread is asked to do with a terminal's file.
 pub(crate) enum Job {
-    /// Writes the lines of `copy` numbered within `only`, or all, as the
-    /// file `key` names, or removes it if none are kept.
+    /// Writes the lines of `copy` numbered within `only`, or all, or
+    /// removes the file if none are kept.
     Write {
-        key: String,
         copy: Box<KeptCopy>,
         only: Option<Vec<Range<u64>>>,
     },
-    /// Removes the file `key` names.
-    Remove { key: String },
-    /// Removes every file but those named.
+    /// Removes the file.
+    Remove,
+}
+
+/// What waits for the thread, in the order it was asked.
+enum Item {
+    /// A terminal's file, by its key, whose job waits in [`Queue::jobs`].
+    File(String),
+    /// Removing every file but those named.
     Sweep(HashSet<String>),
-    /// Lets go of logind's lock, once everything asked before is on disk.
-    Let(OwnedFd),
+}
+
+/// What the thread has yet to do. Each terminal has one job waiting at
+/// most: a newer one takes its place, where it waits, so a slow disk
+/// holds no more than a copy of each terminal's lines.
+#[derive(Default)]
+struct Queue {
+    order: VecDeque<Item>,
+    /// The job waiting for each terminal's file, by its key.
+    jobs: HashMap<String, Job>,
+    /// logind's locks, let go once nothing waits and the thread is idle.
+    locks: Vec<OwnedFd>,
+    /// The daemon let the thread go: it ends once nothing waits.
+    stopping: bool,
+}
+
+/// The queue, shared with the thread, which the daemon's loop holds only
+/// to put a job in.
+#[derive(Default)]
+struct Shared {
+    queue: Mutex<Queue>,
+    ready: Condvar,
+}
+
+impl Shared {
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The thread writing history files.
-#[derive(Debug)]
 pub(crate) struct Writer {
-    jobs: SyncSender<Job>,
+    shared: Arc<Shared>,
     /// Hears from the thread once it has done every job and ended.
     done: Receiver<()>,
+}
+
+impl std::fmt::Debug for Writer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Writer")
+    }
 }
 
 impl Writer {
@@ -288,65 +321,107 @@ impl Writer {
     pub(crate) fn start(dir: PathBuf, bytes: usize) -> io::Result<Self> {
         crate::recovery::make_dir(&dir)?;
         let bytes = bytes.min(MOST_WRITTEN);
-        let (jobs, received) = mpsc::sync_channel(QUEUED);
+        let shared = Arc::new(Shared::default());
         let (finished, done) = mpsc::channel();
+        let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("history".into())
             .spawn(move || {
-                run(&dir, bytes, &received);
+                run(&dir, bytes, &theirs);
                 let _ = finished.send(());
             })?;
-        Ok(Self { jobs, done })
+        Ok(Self { shared, done })
     }
 
-    /// Asks the thread to do `job`: `false` if too many wait already, or
-    /// the thread has gone.
-    pub(crate) fn send(&self, job: Job) -> bool {
-        match self.jobs.try_send(job) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                log::warn!("terminals' history waits to be written: the disk is slow");
-                false
-            }
-            Err(TrySendError::Disconnected(_)) => false,
+    /// Asks the thread to do `job` to the file `key` names: in place of
+    /// the one waiting for it, if one is.
+    pub(crate) fn send(&self, key: String, job: Job) {
+        let mut queue = self.shared.queue();
+        if queue.jobs.insert(key.clone(), job).is_none() {
+            queue.order.push_back(Item::File(key));
         }
+        drop(queue);
+        self.shared.ready.notify_one();
+    }
+
+    /// Asks the thread to remove every file but those `keep` names, once
+    /// it has done what it was asked before.
+    pub(crate) fn sweep(&self, keep: HashSet<String>) {
+        self.shared.queue().order.push_back(Item::Sweep(keep));
+        self.shared.ready.notify_one();
+    }
+
+    /// Has the thread let go of `lock`, logind's, once nothing waits for
+    /// it: whatever was asked before, and after, is on disk.
+    pub(crate) fn let_go(&self, lock: OwnedFd) {
+        self.shared.queue().locks.push(lock);
+        self.shared.ready.notify_one();
+    }
+
+    /// How many terminals' files have a job waiting.
+    #[cfg(test)]
+    fn waiting(&self) -> usize {
+        self.shared.queue().jobs.len()
     }
 
     /// Lets the thread finish what it was asked, waiting up to `wait` for
     /// it to. Says whether it did.
     pub(crate) fn stop(self, wait: Duration) -> bool {
-        drop(self.jobs);
+        self.shared.queue().stopping = true;
+        self.shared.ready.notify_one();
         self.done.recv_timeout(wait).is_ok()
     }
 }
 
 /// The thread: each job in turn, until the daemon lets it go.
-fn run(dir: &Path, bytes: usize, jobs: &Receiver<Job>) {
-    for job in jobs {
-        match job {
-            Job::Write { key, copy, only } => {
+fn run(dir: &Path, bytes: usize, shared: &Shared) {
+    loop {
+        let mut queue = shared.queue();
+        let (key, job) = loop {
+            match queue.order.pop_front() {
+                Some(Item::File(key)) => {
+                    let Some(job) = queue.jobs.remove(&key) else {
+                        continue;
+                    };
+                    break (key, job);
+                }
+                Some(Item::Sweep(keep)) => {
+                    drop(queue);
+                    if let Err(err) = sweep(dir, &keep) {
+                        log::warn!(
+                            "terminals' history no longer needed couldn't be removed: {err}"
+                        );
+                    }
+                    queue = shared.queue();
+                }
+                None => {
+                    // Everything asked is on disk.
+                    queue.locks.clear();
+                    if queue.stopping {
+                        return;
+                    }
+                    queue = shared
+                        .ready
+                        .wait(queue)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+        };
+        drop(queue);
+        let done = match job {
+            Job::Write { copy, only } => {
                 let lines = copy.lines(only.as_deref(), bytes);
                 drop(copy);
-                let done = if lines.is_empty() {
+                if lines.is_empty() {
                     remove_one(dir, &key).map_err(|err| err.to_string())
                 } else {
                     encode(lines, now()).and_then(|file| write_one(dir, &key, &file))
-                };
-                if let Err(err) = done {
-                    log::warn!("a terminal's history couldn't be kept ({key}): {err}");
                 }
             }
-            Job::Remove { key } => {
-                if let Err(err) = remove_one(dir, &key) {
-                    log::warn!("a terminal's history couldn't be removed ({key}): {err}");
-                }
-            }
-            Job::Sweep(keep) => {
-                if let Err(err) = sweep(dir, &keep) {
-                    log::warn!("terminals' history no longer needed couldn't be removed: {err}");
-                }
-            }
-            Job::Let(lock) => drop(lock),
+            Job::Remove => remove_one(dir, &key).map_err(|err| err.to_string()),
+        };
+        if let Err(err) = done {
+            log::warn!("a terminal's history couldn't be kept or removed ({key}): {err}");
         }
     }
 }
@@ -389,11 +464,13 @@ mod tests {
             0o700
         );
         let key = key(1, 2);
-        assert!(writer.send(Job::Write {
-            key: key.clone(),
-            copy: copy("one\r\n\x1b[32mtwo\x1b[m\r\nthree"),
-            only: None,
-        }));
+        writer.send(
+            key.clone(),
+            Job::Write {
+                copy: copy("one\r\n\x1b[32mtwo\x1b[m\r\nthree"),
+                only: None,
+            },
+        );
         assert!(writer.stop(Duration::from_secs(10)));
         let path = path_of(&dir, &key);
         assert_eq!(
@@ -424,11 +501,13 @@ mod tests {
         terminal.add_hints(1..2, clackatoo_term::Hints::NOSAVE);
         let writer = Writer::start(dir.path().to_owned(), usize::MAX).unwrap();
         let key = key(1, 2);
-        writer.send(Job::Write {
-            key: key.clone(),
-            copy: Box::new(terminal.copy_to_keep(100)),
-            only: None,
-        });
+        writer.send(
+            key.clone(),
+            Job::Write {
+                copy: Box::new(terminal.copy_to_keep(100)),
+                only: None,
+            },
+        );
         assert!(writer.stop(Duration::from_secs(10)));
         let lines = read(dir.path(), &key).unwrap().unwrap();
         assert_eq!(
@@ -451,11 +530,13 @@ mod tests {
         let history = dir.path().join("history");
         let writer = Writer::start(history.clone(), usize::MAX).unwrap();
         let key = key(1, 2);
-        writer.send(Job::Write {
-            key: key.clone(),
-            copy: copy("mine"),
-            only: None,
-        });
+        writer.send(
+            key.clone(),
+            Job::Write {
+                copy: copy("mine"),
+                only: None,
+            },
+        );
         assert!(writer.stop(Duration::from_secs(10)));
         assert!(read(&history, &key).unwrap().is_some());
         fs::set_permissions(&history, fs::Permissions::from_mode(0o755)).unwrap();
@@ -501,11 +582,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = Writer::start(dir.path().to_owned(), 40).unwrap();
         let key = key(1, 2);
-        writer.send(Job::Write {
-            key: key.clone(),
-            copy: copy("one\r\ntwo\r\nthree\r\nfour\r\nfive"),
-            only: None,
-        });
+        writer.send(
+            key.clone(),
+            Job::Write {
+                copy: copy("one\r\ntwo\r\nthree\r\nfour\r\nfive"),
+                only: None,
+            },
+        );
         assert!(writer.stop(Duration::from_secs(10)));
         let lines = read(dir.path(), &key).unwrap().unwrap();
         assert_eq!(lines.texts(), ["four", "five"]);
@@ -519,11 +602,13 @@ mod tests {
         let key = key(1, 2);
         std::os::unix::fs::symlink(&target, temporary_of(dir.path(), &key)).unwrap();
         let writer = Writer::start(dir.path().to_owned(), usize::MAX).unwrap();
-        writer.send(Job::Write {
-            key: key.clone(),
-            copy: copy("mine"),
-            only: None,
-        });
+        writer.send(
+            key.clone(),
+            Job::Write {
+                copy: copy("mine"),
+                only: None,
+            },
+        );
         assert!(writer.stop(Duration::from_secs(10)));
         assert_eq!(fs::read(&target).unwrap(), b"theirs");
         assert_eq!(read(dir.path(), &key).unwrap().unwrap().texts(), ["mine"]);
@@ -532,27 +617,58 @@ mod tests {
         assert!(read(dir.path(), &key).is_err());
     }
 
+    /// Each terminal has one job waiting at most, a newer one in the
+    /// older's place, so a stuck disk holds one copy of each terminal's
+    /// lines, not one for every time they were written.
+    #[test]
+    fn a_terminal_has_one_job_waiting_at_most() {
+        let (_, done) = mpsc::channel();
+        let writer = Writer {
+            shared: Arc::new(Shared::default()),
+            done,
+        };
+        for _ in 0..3 {
+            writer.send(
+                key(1, 1),
+                Job::Write {
+                    copy: copy("text"),
+                    only: None,
+                },
+            );
+        }
+        writer.send(key(1, 2), Job::Remove);
+        writer.send(key(1, 1), Job::Remove);
+        assert_eq!(writer.waiting(), 2);
+        let queue = writer.shared.queue();
+        assert_eq!(queue.order.len(), 2);
+        assert!(matches!(queue.jobs[&key(1, 1)], Job::Remove));
+    }
+
     #[test]
     fn files_go_when_removed_swept_or_left_with_nothing_and_the_lock_waits() {
         let dir = tempfile::tempdir().unwrap();
         let writer = Writer::start(dir.path().to_owned(), usize::MAX).unwrap();
         let (one, two, three) = (key(1, 1), key(1, 2), key(1, 3));
         for key in [&one, &two, &three] {
-            writer.send(Job::Write {
-                key: key.clone(),
-                copy: copy("text"),
-                only: None,
-            });
+            writer.send(
+                key.clone(),
+                Job::Write {
+                    copy: copy("text"),
+                    only: None,
+                },
+            );
         }
         let (lock, held) = rustix::pipe::pipe().unwrap();
-        writer.send(Job::Remove { key: one.clone() });
-        writer.send(Job::Write {
-            key: two.clone(),
-            copy: copy("text"),
-            only: Some(Vec::new()),
-        });
-        writer.send(Job::Sweep(HashSet::from([one.clone()])));
-        writer.send(Job::Let(held));
+        writer.send(one.clone(), Job::Remove);
+        writer.send(
+            two.clone(),
+            Job::Write {
+                copy: copy("text"),
+                only: Some(Vec::new()),
+            },
+        );
+        writer.sweep(HashSet::from([one.clone()]));
+        writer.let_go(held);
         // The lock is let go once all that's done.
         let mut byte = [0];
         assert_eq!(rustix::io::read(&lock, &mut byte).unwrap(), 0);
