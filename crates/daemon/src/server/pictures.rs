@@ -563,6 +563,25 @@ impl Daemon {
         kept
     }
 
+    /// Takes away the images a handover left in the runtime directory and
+    /// nothing read, as a daemon starting afresh finds them: after a crash
+    /// part way through an upgrade, say.
+    pub(super) fn forget_spilled_images(&self) {
+        let Some(dir) = self.runtime.as_ref().map(|runtime| runtime.join(SPILLED)) else {
+            return;
+        };
+        match std::fs::remove_dir_all(&dir) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                log::warn!(
+                    "images left by a handover can't be taken away: {}: {err}",
+                    dir.display()
+                );
+            }
+            Ok(()) => log::info!("images left by a handover taken away: {}", dir.display()),
+            Err(_) => {}
+        }
+    }
+
     /// Takes back the image layer handed over: the images, read from their
     /// files, which are taken away, and the picture panes.
     pub(super) fn resume_images(&mut self, images: handover::Images) {
@@ -945,6 +964,18 @@ mod tests {
             panic!("read past the most");
         };
         assert!(why.contains("at most"), "{why}");
+    }
+
+    /// Images a handover left, which nothing read, go as a daemon starts
+    /// afresh.
+    #[test]
+    fn a_daemon_starting_afresh_takes_away_images_a_handover_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let spilled = dir.path().join(SPILLED);
+        std::fs::create_dir(&spilled).unwrap();
+        std::fs::write(spilled.join("0123"), b"left").unwrap();
+        let _daemon = daemon_with_chat(dir.path());
+        assert!(!spilled.exists());
     }
 
     #[test]

@@ -1153,6 +1153,8 @@ impl Daemon {
         let mut daemon = Self::listening(listener, config, None)?;
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
+        // Images a handover before left, which nothing will read now.
+        daemon.forget_spilled_images();
         Ok(daemon)
     }
 
