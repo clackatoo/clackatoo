@@ -62,6 +62,16 @@ const SLICE: Duration = Duration::from_millis(2);
 
 const PRELUDE: &str = include_str!("prelude.luau");
 
+/// The last request any Lua of the process made. Numbered across them, so
+/// an answer to one a Lua run before a `:reload` made never resumes a
+/// coroutine of the Lua after.
+static REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A request's number, never one used before in the process.
+fn next_request() -> u64 {
+    REQUESTS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// What the core functions share.
 struct State {
     /// The world through each window, by its number.
@@ -1060,7 +1070,7 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                         )));
                     }
                 };
-                let request = s.next_id();
+                let request = next_request();
                 s.tell(
                     To::Window(window),
                     FromLua::Split {

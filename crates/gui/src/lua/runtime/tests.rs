@@ -236,3 +236,38 @@ fn a_stop_asked_for_as_a_run_ends_stops_nothing_after() {
     drain(&mut runtime, |_| {});
     assert_eq!(commands(&said), ["ran"]);
 }
+
+/// Requests are numbered across every Lua of the process, so one run again
+/// by `:reload` never takes an answer to the old one's for its own.
+#[test]
+fn requests_are_numbered_afresh_across_lua_run_again() {
+    let split = || {
+        let (mut runtime, said) = runtime();
+        load(
+            &mut runtime,
+            "client.keys.map('n', 's', function(ev) ev.pane:split('right', {kind = 'terminal'}) end)",
+        );
+        runtime.handle(ToLua::Bound {
+            seq: 1,
+            key: KeyInfo {
+                key: "s".into(),
+                keys: Some("s".into()),
+                text: None,
+                mode: KeyMode::Normal,
+                window: WINDOW,
+                guarded: false,
+                pane: Some(PaneId(1)),
+                count: None,
+            },
+            binding: 1,
+        });
+        (said.try_iter())
+            .find_map(|(_, _, said)| match said {
+                FromLua::Split { request, .. } => Some(request),
+                _ => None,
+            })
+            .expect("it split")
+    };
+    let (first, again) = (split(), split());
+    assert!(again > first, "{first} then {again}");
+}
