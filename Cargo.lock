@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "anyhow",
  "clackatoo-bench",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-bench"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-daemon"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "agent-client-protocol-schema",
  "argon2",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-gui"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "anyhow",
  "arboard",
@@ -663,11 +663,11 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-netem"
-version = "2026.11.18"
+version = "2026.11.19"
 
 [[package]]
 name = "clackatoo-protocol"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "clackatoo-term",
  "clackatoo-text",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-syntax"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "clackatoo-text",
  "log",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-term"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-text"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "imara-diff",
  "proptest",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-update"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "clackatoo-update",
  "flate2",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "clackatoo-web"
-version = "2026.11.18"
+version = "2026.11.19"
 dependencies = [
  "clackatoo-protocol",
  "clackatoo-term",

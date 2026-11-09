@@ -1,5 +1,77 @@
 # Changelog
 
+## 2026.11.19 (2026-11-09)
+
+### Features
+
+- **explorer:** say in an explorer's bar when inotify has run out (9a8d252f)
+- **term:** answer DECRQM, DA2, XTGETTCAP, DECRQSS and XTWINOPS, and keep mode 2026 (42343715)
+- **term:** keep the kitty keyboard protocol's flags (45d115f7)
+- **term:** keep how far a program says its task has got (OSC 9;4) (0877a6b5)
+- **protocol:** protocol 139 TERMINAL_STANDARDS: keyboard flags and progress in GridState (97b34a31)
+- **gui:** send keys in the kitty keyboard protocol, and show progress on tabs (1a3da7f2)
+- **daemon:** hold a terminal's views while its program draws a frame (mode 2026) (ec069229)
+- **daemon:** handover v46 carries what programs asked of terminals (add27718)
+- **term:** answer programs' colour questions (OSC 10/11/12, OSC 4) with the window's colours (e29981dd)
+- **remote:** :Agent@desk's start page asks desk what a chat there could be (63e5cc00)
+- **agents:** Sign in and New chat on a failed turn; names keep emoji joiners (f13f1002)
+- **daemon:** run ahead of the user's builds, and keep what it starts apart (CLACKA-231) (8adef551)
+- **daemon:** say how its priority went, and when lingering would help (CLACKA-231) (87ef1cb8)
+
+### Fixes
+
+- **daemon:** one inotify instance per daemon, shared by every watch (66509d0e)
+- **daemon:** an open file grown big is checked off the loop (f8bcdb8c)
+- **daemon:** two paths to one git directory share its index watch (ecbe651f)
+- **daemon:** read a flood of inotify events a little each turn (73c43675)
+- **daemon:** back off from making the inotify instance on every path (30af4052)
+- **daemon:** signs' and the display's watches take no explorer room (6b27a22a)
+- **daemon:** blame inotify only for buffers it couldn't watch (452da721)
+- **term-standards:** build fixes after the rebase, and the v46 fixture (9ca29827)
+- **gui:** F3 under disambiguate is CSI 13 ~, not Enter (68806d58)
+- **protocol:** the marks test sets aside the terminal-standards fields too (49ae81c1)
+- **term:** never say back what a program asked, and drop key flags a program left (4262ffd0)
+- **protocol:** TERMINAL_STANDARDS is 139, after the .19 batch's FILES_NOTICE (7d124a93)
+- **agents:** the user's Stop holds a chat until they write there again (0ca0a08e)
+- **agents:** a chat can't message one with the browser or a window it lacks (3b7e3c08)
+- **browser:** a page can't fill the daemon with dialogs or long addresses (4e991262)
+- **browser:** Off, Stop and closing stop what the agent asked the browser to do (56593609)
+- **browser:** a long-named container can't make an outline slow, nor hold up a stop (c03b9a16)
+- **agents:** finished activities are let go, so the caps never fill for good (7aefddea)
+- **agents:** a tool's long list is refused before its items are read (057ea28f)
+- **agents:** explore shows the chat's own explorer again, not a new pane each time (3c388e75)
+- **agents:** a tool naming thousands of files names 256, each once (20d8200c)
+- **agents:** a big file a tool changed is read off the loop (453a63f3)
+- **agents:** read what tools change through one regular open, bounded, never a stat first (75c5ba70)
+- **agents:** a chat stopped and at rest may be rewound, copied and switched (8a11fb6c)
+- **agents:** only the user's Stop again, with no turn since, drops what waits (193daeed)
+- **agents:** an activity's notice to a stopped chat waits for the user (4942968d)
+- **agents:** a stopped chat hears what an upgrade stopped, once the user writes (338ee338)
+- **agents:** a chat and one it started message each other whatever browser or window they hold (1f27df39)
+- **agents:** small things of Stop holding and the browser's dropped acts (fa6ad295)
+- **agents:** never let go of an activity whose outcome isn't seen (6de68fbe)
+- **agents:** an activity let go leaves its id, which never starts a job again (9e412537)
+- **agents:** a big file a tool changed is read from the handle opened on the loop (a4aa9550)
+- **remote:** a chat in a borrowed pane counts in the workspace that borrowed it (227b1024)
+- **remote:** a window typing puts back a phone's fit of another machine's terminal (bb4e2d1e)
+- **gui:** :Board@desk with no name lists and opens desk's boards (8e65e52f)
+- **remote:** another machine's terminal tabs are named from its own home (cf3b68f4)
+- **remote:** only a client following a relayed terminal fits it, and a fitter gone is forgotten (2c1f8f3d)
+- **remote:** where a connection not passed on keeps its files is told to no one (bba505c9)
+- **remote:** a daemon is taken at its word only about where its own files are (7c9319db)
+- **gui:** :Agent@desk from another machine's pane asks a daemon that can say (9570b084)
+- **remote:** a window here is still told where an unshared connection keeps its files (06c02d90)
+- **release:** the fuzz targets' lock file follows each release's version (f90f1851)
+- **daemon:** priority's leaves after upgrades, the lock, and quick spawns (CLACKA-231) (a44bb8b7)
+- **daemon:** pasted images' clipboard helper goes in the terminals' leaf (CLACKA-231) (3ea6aeb6)
+- **release:** only a tree with fuzz targets updates their lock file (62cdf40a)
+
+### Speed
+
+- **daemon:** check agents' big edits to open files off the loop (4caed0e3)
+- **daemon:** move programs into their leaves off the loop (CLACKA-231) (edbef497)
+- **daemon:** terminals and the browser are moved off the loop too, with what they've started (CLACKA-231) (f3bbb49e)
+
 ## 2026.11.18 (2026-11-09)
 
 ### Features
