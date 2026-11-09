@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{Error, Event, Notice, Notification, Response, TerminalId, Urgency, wire};
 use mio::Token;
 
-use super::{Daemon, Source};
+use super::{Daemon, Source, background};
 use crate::hosted::NoticeAllowance;
 use crate::web;
 
@@ -171,7 +171,7 @@ impl Daemon {
         let Some(notification) = Notification::new(&title, "", Urgency::Normal) else {
             return;
         };
-        self.notice_now_to(id, &Notice::Show(notification), phone);
+        self.notice_now_to(id, &Notice::Show(notification), phone, false);
     }
 
     /// Whether terminal `id`'s notifications reach the phone.
@@ -184,19 +184,53 @@ impl Daemon {
     /// Sends `notice` as [`send_notice`](Self::send_notice) does, now.
     fn notice_now(&mut self, id: TerminalId, notice: &Notice) {
         let phone = self.marked_for_phone(id);
-        self.notice_now_to(id, notice, phone);
+        self.notice_now_to(id, notice, phone, true);
+    }
+
+    /// What the phone titles a notification of terminal `id`'s that `said`
+    /// was the title of: what the terminal is called here, its tab's name
+    /// if it was given one, or else the title its program set, its
+    /// folder's name or its number, and then what was said, so a program
+    /// can't pass for another, nor for nothing (as windows title them).
+    fn titled(&mut self, id: TerminalId, said: &str) -> String {
+        let workspaces = self.workspaces.get();
+        let tab = (workspaces.pane_showing(id))
+            .and_then(|pane| workspaces.find_pane(pane))
+            .and_then(|(_, tab, _)| tab.name.clone());
+        let name = tab.or_else(|| {
+            let terminal = self.terminals.get_mut(&id)?.terminal.pty()?.emulator();
+            let title = terminal.title().trim();
+            if !title.is_empty() {
+                return Some(title.to_owned());
+            }
+            let cwd = std::path::Path::new(terminal.cwd()?);
+            Some(cwd.file_name()?.to_string_lossy().into_owned())
+        });
+        let name = (name.map(|name| background::shown_name(&name)))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("Terminal {id}"));
+        if said.trim().is_empty() {
+            name
+        } else {
+            format!("{name} \u{2014} {said}")
+        }
     }
 
     /// Sends `notice`, about terminal `id`, to the windows and relaying
     /// daemons that take it and may see it, and to the phone if `phone`:
     /// of a terminal lent to another machine, and not shown here, only to
-    /// its daemon, which says it where it's shown.
-    fn notice_now_to(&mut self, id: TerminalId, notice: &Notice, phone: bool) {
+    /// its daemon, which says it where it's shown. One a program asked
+    /// for, or a long command's end (`program`), is titled on the phone by
+    /// what the terminal is called (see [`titled`](Self::titled)).
+    fn notice_now_to(&mut self, id: TerminalId, notice: &Notice, phone: bool, program: bool) {
         let shown = match notice {
             Notice::Show(notification) => Some(notification),
             Notice::Close => None,
         };
         let phone = phone && self.lent_away(id).is_none();
+        let phone_title = (phone && program)
+            .then(|| shown.map(|notification| self.titled(id, &notification.title)))
+            .flatten();
         let told: Vec<Token> = (self.sources.iter())
             .filter_map(|(key, source)| match source {
                 Source::Client(client)
@@ -217,8 +251,8 @@ impl Daemon {
             self.send_event(token, event);
         }
         if let (Some(notification), true, Some(web)) = (shown, phone, &self.web) {
-            let payload =
-                web::push_payload_of_terminal(id.0, &notification.title, &notification.body);
+            let title = phone_title.as_deref().unwrap_or(&notification.title);
+            let payload = web::push_payload_of_terminal(id.0, title, &notification.body);
             let urgent = notification.urgency == clackatoo_protocol::Urgency::Critical;
             web.notify(&payload, &format!("term-{id}"), urgent);
         }
@@ -305,6 +339,48 @@ fn took_as_said(took: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_phone_titles_a_programs_notification_by_what_its_terminal_is_called() {
+        use clackatoo_protocol::{NewTerminal, PaneTerminal, Request, Size};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let new = Request::NewWorkspace {
+            name: None,
+            terminal: PaneTerminal::New(NewTerminal {
+                size: Size::new(20, 5).unwrap(),
+                command: Some(vec!["sleep".into(), "30".into()]),
+                cwd: None,
+                record_to: None,
+            }),
+            on: None,
+        };
+        let asker = Token(usize::MAX);
+        assert!(matches!(
+            daemon.respond(new, asker),
+            Response::PaneCreated(_)
+        ));
+        let tab = &daemon.workspaces.get().list[0].tabs[0];
+        let (tab, id) = (tab.id, tab.terminals()[0]);
+        // Its number, with nothing else to go by; never only what it said.
+        assert_eq!(daemon.titled(id, ""), format!("Terminal {id}"));
+        let terminal = daemon
+            .terminals
+            .get_mut(&id)
+            .unwrap()
+            .terminal
+            .pty()
+            .unwrap();
+        terminal.emulator_mut().advance(b"\x1b]2;cargo\x07");
+        assert_eq!(daemon.titled(id, "Done"), "cargo \u{2014} Done");
+        // A tab's own name before its program's.
+        let rename = Request::RenameTab {
+            tab,
+            name: "site".into(),
+        };
+        assert_eq!(daemon.respond(rename, asker), Response::Done);
+        assert_eq!(daemon.titled(id, "Done"), "site \u{2014} Done");
+    }
 
     #[test]
     fn at_most_ten_a_minute_are_sent_in_all() {

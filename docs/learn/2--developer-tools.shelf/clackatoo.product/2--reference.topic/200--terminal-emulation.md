@@ -386,7 +386,11 @@ does when it ends, in any of the three ways terminals read:
 | `OSC 99 ; <metadata> ; <payload> ST` | kitty's (<https://sw.kovidgoyal.net/kitty/desktop-notifications/>). The metadata is `key=value` pairs separated by `:`: `p=title` (as when it's left out) or `p=body` says which the payload is, `d=0` that more of it comes in the next, `e=1` that it's base64, `u=0`, `1` or `2` how urgent it is, and `i=<id>` names it, so that `p=close` with the same id takes it back. Buttons, icons, sounds and the rest are left out. |
 
 A window shows it while you aren't looking at the program's pane: it's in a
-tab not shown, or the window doesn't have the focus. It goes once you look, as
+tab not shown, or the window doesn't have the focus. Its title always starts
+with what the terminal is called, so a program can't pass for another: the
+tab's name if you gave it one, or else the pane's (the title its program set,
+or its folder), as `cargo — Build done`; with no title of its own, it's that
+name alone. The phone titles it the same way. It goes once you look, as
 the program asks, or as the program ends, and clicking it goes to the pane. It
 isn't sent at all while someone whose window has the focus, or whose phone
 shows the terminal, is looking at it. A low urgency (`u=0`) is shown as such;

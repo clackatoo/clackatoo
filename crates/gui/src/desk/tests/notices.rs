@@ -314,7 +314,11 @@ fn a_programs_notification_is_told_until_its_pane_is_looked_at() {
     desk.program_notice(TerminalId(3), program("make", "built"));
     assert_eq!(
         taken(&said),
-        [Said::Program(3, "make".into(), "built".into())]
+        [Said::Program(
+            3,
+            "Terminal 3 \u{2014} make".into(),
+            "built".into()
+        )]
     );
     desk.program_notice(TerminalId(3), clackatoo_protocol::Notice::Close);
     assert_eq!(taken(&said), [Said::Withdraw(3)]);
@@ -332,7 +336,11 @@ fn a_programs_notification_is_told_until_its_pane_is_looked_at() {
     desk.program_notice(TerminalId(2), program("vim", "saved"));
     assert_eq!(
         taken(&said),
-        [Said::Program(2, "vim".into(), "saved".into())]
+        [Said::Program(
+            2,
+            "Terminal 2 \u{2014} vim".into(),
+            "saved".into()
+        )]
     );
     desk.window_focus(true);
     assert_eq!(taken(&said), [Said::Withdraw(2)]);
@@ -341,7 +349,17 @@ fn a_programs_notification_is_told_until_its_pane_is_looked_at() {
     desk.terminal_exited(TerminalId(5), std::time::Instant::now());
     assert_eq!(
         taken(&said),
-        [Said::Program(5, "x".into(), "y".into()), Said::Withdraw(5)]
+        [
+            Said::Program(5, "Terminal 5 \u{2014} x".into(), "y".into()),
+            Said::Withdraw(5)
+        ]
+    );
+    // A tab given a name is called by it.
+    desk.workspaces.list[1].tabs[1].name = Some("site".into());
+    desk.program_notice(TerminalId(6), program("x", "y"));
+    assert_eq!(
+        taken(&said),
+        [Said::Program(6, "site \u{2014} x".into(), "y".into())]
     );
     // And none with notifications off.
     desk.options.notify = crate::options::Notify::Off;

@@ -131,8 +131,12 @@ impl Desk {
         {
             return;
         }
-        let name = (self.panes.get(&terminal))
-            .and_then(|pane| pane.name(self.home()))
+        // The tab's own name, if it was given one, or else the pane's.
+        let tab = (self.workspaces.pane_showing(terminal))
+            .and_then(|pane| self.workspaces.find_pane(pane))
+            .and_then(|(_, tab, _)| tab.name.as_deref());
+        let name = tab
+            .or_else(|| (self.panes.get(&terminal)).and_then(|pane| pane.name(self.home())))
             .unwrap_or_default();
         let notice = program_notice(&notification, name, terminal);
         if let Some(notifier) = &mut self.notices.notifier {
@@ -293,21 +297,26 @@ fn notice(title: &str, agent: &str, chat: TerminalId, why: Why) -> Notice {
 
 /// The notification terminal `terminal`'s program asked for, as
 /// `notification` says, already cleaned by the daemon, and cleaned again
-/// here as a tab's name is: with what it said for a title, or else what
-/// the terminal's tab is named (`name`), or its number. Its line is
-/// escaped as a chat's is.
+/// here as a tab's name is: titled by what the terminal is called here
+/// (`name`, or else its number), then what the program said for a title,
+/// so it can't pass for another program's, nor for nothing. Both lines
+/// are escaped as a chat's are.
 fn program_notice(
     notification: &clackatoo_protocol::Notification,
     name: &str,
     terminal: TerminalId,
 ) -> Notice {
-    let title = [notification.title.as_str(), name]
-        .into_iter()
-        .map(|title| shown_name(title, 100))
-        .find(|title| !title.trim().is_empty())
+    let name = Some(shown_name(name, 60))
+        .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| format!("Terminal {terminal}"));
+    let said = shown_name(&notification.title, 100);
+    let title = if said.trim().is_empty() {
+        name
+    } else {
+        format!("{name} \u{2014} {said}")
+    };
     Notice {
-        title,
+        title: escape(&title),
         body: escape(&shown_name(&notification.body, 300)),
         low: notification.urgency == Urgency::Low,
     }
@@ -339,9 +348,15 @@ mod tests {
             "<b>done</b> & \u{200b}ok",
             Urgency::Low,
         );
-        assert_eq!(notice.title, "make");
+        // Always after what the terminal is called, so a program can't
+        // pass for another.
+        assert_eq!(notice.title, "vim \u{2014} make");
         assert_eq!(notice.body, "&lt;b&gt;done&lt;/b&gt; &amp; ok");
         assert!(notice.low);
+        assert_eq!(
+            said("<i>Bank</i> & co", "x", Urgency::Normal).title,
+            "vim \u{2014} &lt;i&gt;Bank&lt;/i&gt; &amp; co"
+        );
         // With no title, the tab's name, or else the terminal's number.
         assert_eq!(said("", "x", Urgency::Critical).title, "vim");
         assert!(!said("", "x", Urgency::Critical).low, "never critical");
@@ -349,6 +364,14 @@ mod tests {
         assert_eq!(
             program_notice(&notification, " ", TerminalId(3)).title,
             "Terminal 3"
+        );
+        let notification = clackatoo_protocol::Notification {
+            title: "Update".into(),
+            ..clackatoo_protocol::Notification::default()
+        };
+        assert_eq!(
+            program_notice(&notification, "", TerminalId(3)).title,
+            "Terminal 3 \u{2014} Update"
         );
     }
 
