@@ -1481,6 +1481,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: ":Settings lists every option and key, where each was set, and changes and saves them; :mappersist saves keys",
     },
+    News {
+        id: "daemon-lua",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: "The daemon's config is Luau, daemon/init.lua: agents.toml, machine.toml and web.toml move into it once",
+    },
 ];
 
 impl News {

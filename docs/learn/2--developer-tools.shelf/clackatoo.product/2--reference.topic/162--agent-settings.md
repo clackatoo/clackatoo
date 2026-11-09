@@ -304,31 +304,37 @@ above the box rather than as words in the turn. Where Codex compacts its
 context, the turn has the
 [line](~clackatoo/reference/chat-view#what-else-a-turn-says) that says so.
 
-To add an agent that speaks ACP, or run a known one another way, list it in
-`~/.config/clackatoo/daemon/agents.toml`:
+To add an agent that speaks ACP, or run a known one another way, set it in the
+[daemon's config](~clackatoo/reference/config#the-daemon-s-config),
+`~/.config/clackatoo/daemon/init.lua`:
 
-```toml
-[agents.opencode]
-name = "OpenCode"            # what the chat shows; the name, if left out
-command = ["opencode", "acp"]
-mode = "build"               # the mode a new chat asks for, if offered
+```lua
+daemon.agents.opencode = {
+  name = "OpenCode",             -- what the chat shows; the name, if left out
+  command = { "opencode", "acp" },
+  mode = "build",                -- the mode a new chat asks for, if offered
+}
 
-[agents.claude]
-command = ["claude-agent-acp"]
-tasks = false                # don't ask what it runs in the background
+daemon.agents.claude = {
+  command = { "claude-agent-acp" },
+  tasks = false,                 -- don't ask what it runs in the background
+}
 
-[upgrade]
-keep_agents = false          # stop agents as the daemon upgrades
-
-[subagents]
-working = 16                 # see Subagent limits
+daemon.upgrade.keep_agents = false -- stop agents as the daemon upgrades
+daemon.subagents.working = 16      -- see Subagent limits
 ```
 
-The daemon reads it whenever a chat starts, and as it upgrades. Each agent
-there needs its `command`: one without it, or with a key of the wrong kind, is
-left out, and the daemon's log says why; the others are still added.
-`CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set
-for.
+An agent has `name`, `command`, `mode` and `tasks`, and needs its `command`, a
+list of strings. Anything else, or a field of the wrong kind, is a mistake,
+which stops the config at the line that set the agent: the daemon then keeps
+what it last ran, and says so in a window's bar. The daemon reads it as it
+starts and upgrades, so `clackatoo upgrade` takes a change in. A known
+agent's name, such as `claude`, runs it with your command, keeping its title
+and what clackatoo knows of it. `CLACKATOO_AGENT` gives Claude Code another
+command, for the daemon it's set for.
+
+Before, agents were set in `daemon/agents.toml`, which the daemon moved into
+`daemon/settings.lua` the first time it started with the Luau config.
 
 Each agent runs one process for all its chats, and stops when its last chat
 closes. Claude Code's adapter also runs a Claude Code process per chat, of

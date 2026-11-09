@@ -160,16 +160,21 @@ read-only. A model named in a profile is matched by its value, its name, or
 the one choice that has it in; if none matches, or several do, the agent's own
 choice stands, and the chat says so.
 
-Add or change profiles in `agents.toml`:
+Add or change profiles in the
+[daemon's config](~clackatoo/reference/config#the-daemon-s-config),
+`daemon/init.lua`. A profile of a built-in one's name changes only what it
+gives:
 
-```toml
-[profiles.review]
-about = "Reviews a change for bugs"
-agent = "codex"
-model = "gpt-6-luna"        # or by agent: { claude = "haiku" }; "inherit" for the parent's
-effort = "low"
-limits = "read-only"        # or "no-commands", or "none"
-prompt = "You review changes for bugs. Say what's wrong, briefly."
+```lua
+daemon.profiles.review = {
+  about = "Reviews a change for bugs",
+  agent = "codex",
+  model = "gpt-6-luna",   -- or by agent: { claude = "haiku" }; "inherit" for the parent's
+  effort = "low",
+  limits = "read-only",   -- or "no-commands", or "none"
+  prompt = "You review changes for bugs. Say what's wrong, briefly.",
+}
+daemon.profiles.explore = { model = { claude = "sonnet" } }
 ```
 
 A message from another chat shows quoted down the left, under "From chat 3 ·
@@ -291,26 +296,24 @@ another of your chats whose setting is no higher than its own chat's, and what
 that chat then starts counts against that chat's budget, not the sender's:
 that's by design, and `working` below bounds all of them together.
 
-The rest are set in `agents.toml`, in a table of their own:
+The rest are set in the daemon's config, as `daemon.subagents`:
 
-```toml
-[subagents]
-working = 16       # subagents working at once in all, under all your chats (1–64)
-default = 6        # the Subagents setting a new chat starts at (0, off, to working)
-open = 32          # open under one of your chats (1–256)
-started = 128      # started under one of your chats since you last wrote in it (1–10000)
-depth = 3          # how deep subagents go: yours is 0, its subagents 1 (1–8)
-hops = 6           # the longest chain of messages, each in the turn the one before started (1–64)
-notice_turns = 100 # turns notices start under one of your chats since you last wrote (1–10000)
+```lua
+daemon.subagents.working = 16       -- subagents working at once in all, under all your chats (1–64)
+daemon.subagents.default = 6        -- the Subagents setting a new chat starts at (0, off, to working)
+daemon.subagents.open = 32          -- open under one of your chats (1–256)
+daemon.subagents.started = 128      -- started under one of your chats since you last wrote in it (1–10000)
+daemon.subagents.depth = 3          -- how deep subagents go: yours is 0, its subagents 1 (1–8)
+daemon.subagents.hops = 6           -- the longest chain of messages, each in the turn the one before started (1–64)
+daemon.subagents.notice_turns = 100 -- turns notices start under one of your chats since you last wrote (1–10000)
 ```
 
-A value outside its range is ignored, and the default used, and the daemon's
-log says so once, until the table changes: it's never brought into range. So
-is a key it doesn't know. With `working` below 6 and no `default`, new chats
-start at `working`. The daemon reads the table as it starts and again as each
-chat starts, an agent's `start_chat` included, but never on an agent's other
-tool calls. Lowering `working` lowers any chat's Subagents setting that's
-above it. At a depth of 3, your chat's PM can start a builder, which can start
+A value outside its range is a mistake in the config, never brought into
+range: the daemon keeps what it last ran, and says so in a window's bar. So
+is a name it doesn't know, or a `default` above `working`. With `working`
+below 6 and no `default`, new chats start at `working`. The daemon reads them
+as it starts and upgrades. Lowering `working` lowers any chat's Subagents
+setting that's above it. At a depth of 3, your chat's PM can start a builder, which can start
 a helper of its own.
 
 `started` counts the subagents started under one of your chats since you last

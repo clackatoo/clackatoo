@@ -219,7 +219,7 @@ the window or the chat, disconnecting, or an upgrade ends it too.
 
 **Control lets the agent act as you.** It can edit and save any file the
 window can, its config included: your shell's startup files, Claude Code's or
-Codex's settings and hooks, `agents.toml`, and `init.lua`. What those run
+Codex's settings and hooks, and the window's and the daemon's `init.lua`. What those run
 later runs as you, unasked. Grant it only to an agent you'd let use your
 keyboard, and end it when the agent is done. `:agentaccess control` says so as
 it asks.

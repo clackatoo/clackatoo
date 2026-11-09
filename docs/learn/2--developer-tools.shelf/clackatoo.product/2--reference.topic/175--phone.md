@@ -15,24 +15,30 @@ can, tool approvals included. And your terminals, to read and type into.
 
 ## Turning it on
 
-It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The
-daemon reads it when it starts or upgrades (`clackatoo upgrade`), and logs any
-key in it that isn't a setting.
+It's off until the [daemon's config](~clackatoo/reference/config#the-daemon-s-config),
+`~/.config/clackatoo/daemon/init.lua`, says otherwise. The daemon reads it when
+it starts or upgrades (`clackatoo upgrade`). A name that isn't a setting, or a
+value one can't hold, is a mistake in the config, which keeps what it last ran
+and says so in a window's bar. Every setting is listed with
+[the daemon's options](~clackatoo/reference/config#the-web-app).
 
-```toml
-mode = "tailscale"   # or "public", or "off"
-login = "you@github" # tailscale: who's let in
-origin = "https://desktop.example.ts.net"
-expire_days = 90     # unpair devices unused this long
-password_days = 0    # ask for the password again after this many days
-ask = true           # devices may ask a window to let them in
-lock_after = 50      # wrong passwords in a row before password pairing locks (1 to 10000)
+```lua
+daemon.web.mode = "tailscale"   -- or "public", or "off"
+daemon.web.login = "you@github" -- tailscale: who's let in
+daemon.web.origin = "https://desktop.example.ts.net"
+daemon.web.expire_days = 90     -- unpair devices unused this long
+daemon.web.password_days = 0    -- ask for the password again after this many days
+daemon.web.ask = true           -- devices may ask a window to let them in
+daemon.web.lock_after = 50      -- wrong passwords in a row before password pairing locks (1 to 10000)
 ```
+
+Before, these were set in `daemon/web.toml`, which the daemon moved into
+`daemon/settings.lua` the first time it started with the Luau config.
 
 ### Through Tailscale
 
 The daemon listens on a socket only you can open,
-`~/.local/share/clackatoo/web/web.sock`, or where `socket` says. Give it to
+`~/.local/share/clackatoo/web/web.sock`, or where `daemon.web.socket` says. Give it to
 your tailnet over HTTPS with
 
 ```sh
@@ -41,7 +47,7 @@ tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
 
 and open `https://<machine>.<tailnet>.ts.net`. A request must come through
 `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that name
-must be `login`. Without `login` set, only a window can let the first device
+must be `daemon.web.login`. Without it set, only a window can let the first device
 in. The socket keeps other users of the machine out, but not your own
 programs: what lets a device in is the token it's given when it pairs.
 Connections are counted by the device sending each request, by its whole
@@ -52,16 +58,19 @@ is closed. Past 64 in all, room is made as from the network (below).
 
 ### Straight from the network
 
-```toml
-mode = "public"
-address = "0.0.0.0"
-port = 8765
-certificate = "/path/fullchain.pem"
-key = "/path/privkey.pem"
-origin = "https://example.com:8765"
+```lua
+daemon.web.mode = "public"
+daemon.web.address = "0.0.0.0"
+daemon.web.port = 8765
+daemon.web.certificate = "/path/fullchain.pem"
+daemon.web.key = "/path/privkey.pem"
+daemon.web.origin = "https://example.com:8765"
 ```
 
-This needs a password and `origin`, and `ask` is off unless you turn it on.
+This needs a password and `daemon.web.origin`, and `daemon.web.ask` is off
+unless you turn it on. Without the certificate, key or origin, the config
+goes wrong; without the password, the web app stays off, and the first
+window you're at says why.
 clackatoo doesn't get certificates by ACME, so you bring your own; it's read
 again when its files change. Prefer an ECDSA key, as certbot, acme.sh, and
 `tailscale cert` make by default: each new connection's TLS handshake is
@@ -92,7 +101,9 @@ follow your chats don't count.
 A device pairs once:
 
 - **with the password**, which `clackatoo web password` sets. Only its
-  Argon2id hash is kept, in web.toml. Tries are limited to five at once, then
+  Argon2id hash is kept, in `web-password` in clackatoo's state directory
+  (`~/.local/state/clackatoo`), which only you can read: never in the config,
+  which people keep in git. Tries are limited to five at once, then
   one a minute, from each address (IPv6 by /64 from the network, and by the
   whole address through Tailscale), and to about twenty a minute from
   everywhere together. After `lock_after` wrong passwords in a row (50 unless

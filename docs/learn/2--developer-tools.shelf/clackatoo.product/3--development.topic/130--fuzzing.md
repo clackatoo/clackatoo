@@ -24,7 +24,7 @@ libFuzzer and needs a nightly Rust.
 | `history` | several authors editing, undoing, and sending late edits | every edit the history gives fits the text; bringing an edit up to date keeps to its budget |
 | `handover` | a handover file of any version, from any bytes | it's read or refused, and what's read is made into workspaces, screens, buffers and chats |
 | `workspaces` | the saved workspaces file | what's read writes back the same |
-| `agents_toml` | `agents.toml` | its limits on subagents stay in their ranges |
+| `agents_toml` | an old `agents.toml`, moved into the daemon's Luau config as the first build with it moves one | what it's moved to runs, and its limits on subagents stay in their ranges |
 | `json_rpc` | what agents and language servers write, framed either way | read in pieces, or handed over midway, the messages are the same as read whole; the walkers keep to their caps |
 | `images` | what programs, agents and files send as an image | its header is read or refused; what's kept is of a size that may be; a small one decodes without panicking |
 

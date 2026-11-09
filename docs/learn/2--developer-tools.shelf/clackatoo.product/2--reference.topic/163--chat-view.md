@@ -396,7 +396,7 @@ does, and to such a client it reports some things differently:
 
 Commands' output, file changes, and images show as usual. To have none of this
 and no shelf, set `tasks = false` for Claude Code, beside its `command`, in
-[`agents.toml`](~clackatoo/reference/agent-settings#which-agent).
+the [daemon's config](~clackatoo/reference/agent-settings#which-agent).
 
 ### Claude Code's own subagents
 
@@ -549,7 +549,7 @@ workspace, on the chat's machine, which the window then shows:
   agent's own program where clackatoo installed it, as for Codex. What the
   turn says to run is the same command, each word quoted as a shell would need
   it. Sign in there, close the tab, and send the message again. An agent of
-  your own from `agents.toml`, under a name clackatoo doesn't know, has no
+  your own from the daemon's config, under a name clackatoo doesn't know, has no
   sign-in command it knows, so no button. A failure the agent gives by itself,
   on a turn it took by itself, offers it too.
 - **+ New chat**, and `gC`, when the conversation, or the answer, hit the

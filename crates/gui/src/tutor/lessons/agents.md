@@ -207,7 +207,7 @@ Each subagent starts as a profile, which gives it a role, limits, and an agent a
 - `plan` reads and thinks on a strong model, changes nothing, and returns a plan;
 - `general` works as your chat does, on its agent and model.
 
-Add your own, or change these, in the daemon's `agents.toml`, under `[profiles.NAME]`. Claude Code's own Task tool, whose helpers work inside one turn, folded under its card, is off unless you `:set claudetask`.
+Add your own, or change these, in the daemon's config, `daemon/init.lua`, as `daemon.profiles.NAME = { … }`. Claude Code's own Task tool, whose helpers work inside one turn, folded under its card, is off unless you `:set claudetask`.
 
 ## Claude Code's own helpers
 

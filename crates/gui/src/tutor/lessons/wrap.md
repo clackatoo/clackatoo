@@ -97,3 +97,7 @@ finder settings
 ```check
 not finder
 ```
+
+## The daemon's own
+
+The daemon, which runs your terminals and agents, has a config of its own: `daemon/init.lua`, beside `client/`. It sets the daemon's settings, as `daemon.machine.name = "desk"` or `daemon.history.lines = 20000`, adds agents, as `daemon.agents.opencode = { command = { "opencode", "acp" } }`, and sets up the web app, as `daemon.web.mode = "tailscale"`. It runs as the daemon starts and each time it upgrades, so `clackatoo upgrade` takes a change in, keeping every terminal. A mistake in it never stops the daemon: it keeps what last ran, and the bar says what's wrong, with its line. The old `agents.toml`, `machine.toml` and `web.toml` were moved into `daemon/settings.lua` the first time it started.

@@ -1,7 +1,7 @@
 ---
 title: Configuration
 type: reference
-description: The windows are configured in Lua, with an init.lua that runs once for every window, sets options, binds keys, listens for key presses and chats' turns ending, and splits, focuses and closes panes. Where the files go, how a key travels through handlers and bindings, how handlers are run, the options and :setlocal, the :Settings menu, the API so far, and what happens when the config goes wrong.
+description: The windows are configured in Lua, with an init.lua that runs once for every window, sets options, binds keys, listens for key presses and chats' turns ending, and splits, focuses and closes panes; the daemon has its own, in a sandbox, for its agents, its web app and this machine. Where the files go, how a key travels through handlers and bindings, how handlers are run, the options and :setlocal, the :Settings menu, the API so far, the daemon's config and its options, and what happens when the config goes wrong.
 related:
   - clackatoo/reference/window
   - clackatoo/reference/cli
@@ -45,10 +45,10 @@ end)
   client/init.lua           the window's config
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
-  daemon/agents.toml        agents chats can talk to, besides those clackatoo knows, and their limits
-  daemon/machine.toml       the name this machine's daemon goes by on other machines, its priority, and its terminals
-  daemon/web.toml           whether phones and browsers can reach it, and how
-  lua/                      modules shared with the daemon's config, once it has one
+  daemon/settings.lua       the daemon's settings clackatoo saved, run before its init.lua
+  daemon/init.lua           the daemon's config: its agents, this machine, the web app
+  daemon/lua/               modules for it to require
+  lua/                      modules shared by the window's config and the daemon's
 ```
 
 `require("theme")` loads `theme.lua` from `client/lua/`, or else `lua/`, or
@@ -83,45 +83,6 @@ runs the config for itself.
 for goes, the window's own keys come back first, and options go back to how
 they start, including those changed with `:set` and `:setlocal`.
 
-
-### The daemon's name
-
-`daemon/machine.toml` names this machine's daemon, as other machines show it:
-
-```toml
-name = "jack-desktop"
-```
-
-Without it, the daemon takes the machine's hostname. It's read when the daemon
-starts or upgrades.
-
-`priority = false` beside it has the daemon run as other programs do, rather
-than
-[ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
-
-### The daemon's terminals
-
-The `[terminals]` table in `daemon/machine.toml` says how the daemon's
-terminals behave, for every window:
-
-```toml
-[terminals]
-notify_after = 30
-```
-
-| Key | What it does | Default |
-|---|---|---|
-| `notify_after` | How many seconds a command must run for its end to be [told in a notification](~clackatoo/reference/terminal-emulation#long-commands) while you aren't looking at its terminal. 0 tells none. | `10` |
-| `vs16` | Whether [variation selector 16](~clackatoo/reference/terminal-emulation#screen-behavior) widens an emoji to two columns. Terminals already open keep what they started with. | `true` |
-
-It's read when the daemon starts or upgrades.
-
-Each daemon also has an ID of its own, chosen the first time it starts and
-kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`),
-or in `$CLACKATOO_MACHINE`. Deleting that file makes the daemon a new machine
-to every other; copying it to another machine makes the two refuse each other
-until one of them deletes it. `CLACKATOO_MACHINE=off` chooses a new ID at
-every start, as tests do.
 
 ## How a key travels
 
@@ -381,7 +342,7 @@ short name, as in Vim, which works everywhere the long one does.
 
 | Option | Short | Is | Starts |
 |---|---|---|---|
-| `agent` | `ag` | The agent `:Agent` and <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` open a chat with: `claude`, `codex`, `gemini`, or one in the daemon's [`agents.toml`](~clackatoo/reference/agent-settings#which-agent). Empty leaves it to the daemon. | `claude` |
+| `agent` | `ag` | The agent `:Agent` and <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` open a chat with: `claude`, `codex`, `gemini`, or one the [daemon's config](~clackatoo/reference/agent-settings#which-agent) adds. Empty leaves it to the daemon. | `claude` |
 | `agenttools` | `agt` | What a new chat's agent can do with [clackatoo's tools](~clackatoo/reference/agent-tools#what-the-agent-can-show-you): `ask` before running commands or typing, `allow` commands in its own terminals, or `off`. | `ask` |
 | `claudetask` | `ct` | A new Claude Code chat keeps Claude Code's own Task tool, which runs helpers inside one turn, folded under the Task's [card](~clackatoo/reference/chat-view#claude-code-s-own-subagents). Off, Claude hands work on only as [subagents](~clackatoo/reference/chats-together#subagents), which you can watch. Other agents have no such tool. | off |
 | `chatbrowser` | `cbr` | A new chat starts with its [Browser](~clackatoo/reference/agent-tools#the-browser) setting on, so its agent can drive a headless browser with a profile of its own. Off, a chat has none until you turn it on in its settings. | off |
@@ -700,6 +661,185 @@ Nothing is shown while `init.lua` first runs, so `client.focused` is nil then:
 handles are for handlers. The first window is in `client.windows` already, to
 listen to with `client.windows[1]:on`.
 
+## The daemon's config
+
+The daemon, which runs terminals, agents and the web app for every window, has
+a config of its own, also in Luau: `daemon/settings.lua`, which clackatoo
+writes, then `daemon/init.lua`, your own, which runs after it and outdoes it.
+Each sets settings through `daemon`, a table for each group of them:
+
+```lua
+-- ~/.config/clackatoo/daemon/init.lua
+
+daemon.machine.name = "jack-desktop"
+daemon.web.mode = "tailscale"
+daemon.history.lines = 20000
+
+-- An agent of your own, and Claude Code run another way.
+daemon.agents.opencode = { name = "OpenCode", command = { "opencode", "acp" } }
+daemon.agents.claude = { command = { "claude-agent-acp" }, tasks = false }
+
+-- A profile for chats agents start.
+daemon.profiles.review = {
+  about = "Reviews a change for bugs",
+  agent = "codex",
+  model = { codex = "gpt-6-luna", claude = "haiku" },
+  limits = "read-only",
+}
+```
+
+A setting reads back what it is, the default until something sets it, so
+`print(daemon.history.lines)` prints `10000`, and `nil` puts it back as it
+starts. `daemon.agents` and `daemon.profiles` are tables by name, so
+`daemon.agents.mine.tasks = false` changes one set above, `= nil` takes one
+out, and `for name, agent in daemon.agents do … end` goes through them. A
+name that isn't a word is written `daemon.agents["my agent"]`. What an agent
+and a profile can have is in
+[Which agent](~clackatoo/reference/agent-settings#which-agent) and
+[Profiles](~clackatoo/reference/chats-together#profiles).
+
+`require` loads modules from `daemon/lua/`, or else the `lua/` shared with the
+window's config, by a name of letters, digits, `_` and `-`, a dot being a
+folder, as the window's does. Where an option was set, the file and line, is
+kept, as for the window's.
+
+### When it runs
+
+The daemon runs its config as it starts, and each time it
+[upgrades](~clackatoo/reference/cli#upgrade), on a thread of its
+own, before it does anything else; a config of a few dozen lines takes about a
+millisecond. A change takes effect when the daemon next starts: `clackatoo
+upgrade`, which keeps every terminal and agent running, runs it again at once.
+
+It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
+`require`, and `require` reaches only those two folders. Luau's bytecode is
+never run, only text. A run may take half a second and 64 MB, or it's stopped
+where it is: a loop that never ends can't hold up the daemon.
+
+### When it goes wrong
+
+A mistake never stops the daemon. A value a setting can't hold, a name that
+isn't a setting, a Lua error, or a run stopped for taking too long, stops the
+config there, and none of what it set is used. Instead the daemon keeps what
+the config set the last time it ran without a mistake, kept in
+`daemon-config.lua` in clackatoo's state directory (`~/.local/state/clackatoo`),
+or with none kept, its defaults. It writes why in its log, and the first
+window you're at says so in its bar, with the file and line:
+
+```text
+the daemon's config went wrong, so it kept its settings from the last time it ran: daemon/init.lua:4: daemon.history.lines is a whole number from 1 to 1000000
+```
+
+Some settings are checked together, once the config has run, at the line that
+set the one that can't be: `daemon.subagents.default` more than
+`daemon.subagents.working`, `daemon.images.terminal_mb` more than
+`daemon.images.total_mb`, or a [web app](~clackatoo/reference/phone) set to
+`public` without its certificate, key and origin.
+
+### Moved from TOML
+
+The daemon was set before in `daemon/agents.toml`, `machine.toml` and
+`web.toml`. The first time a daemon with this config starts or upgrades, and
+finds them there and no `settings.lua`, it moves every value they set into
+`settings.lua`, a line each, with their comments, and keeps the old files
+beside it as `agents.toml.bak` and so on. A value the config can't hold, or a
+key that was never a setting, is written commented out, saying why, so the
+rest still runs. The web app's password goes to the state directory instead
+(see [the phone](~clackatoo/reference/phone)). The first window you're at
+says what was moved.
+
+That happens once. A TOML file there after it is passed over: the daemon's log
+and the first window you're at say so, and it can be deleted.
+
+### What outdoes it
+
+As for the window, the environment outdoes the config, for tests and CI:
+`CLACKATOO_HISTORY` (a folder, or `off`), `CLACKATOO_HISTORY_LINES`,
+`CLACKATOO_HISTORY_EVERY` and `CLACKATOO_IMAGE_MEMORY` (as `64,256`) over the
+settings below, and `CLACKATOO_AGENT` over the command of the agent a chat
+gets when it asks for none. `CLACKATOO_CONFIG` names a folder to take the
+config from in place of `~/.config/clackatoo`, or `off` for none, as tests'
+daemons run.
+
+### The daemon's name
+
+`daemon.machine.name` names this machine's daemon, as other machines show it.
+Without it, the daemon takes the machine's hostname.
+
+`daemon.machine.priority = false` has the daemon run as other programs do,
+rather than
+[ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
+
+Each daemon also has an ID of its own, chosen the first time it starts and
+kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`),
+or in `$CLACKATOO_MACHINE`. Deleting that file makes the daemon a new machine
+to every other; copying it to another machine makes the two refuse each other
+until one of them deletes it. `CLACKATOO_MACHINE=off` chooses a new ID at
+every start, as tests do.
+
+## The daemon's options
+
+Each is set as `daemon.` and its name, such as `daemon.web.mode = "public"`,
+and read as the daemon starts or upgrades.
+
+### This machine
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.machine.name` | The name other machines show this one by, as [connections](~clackatoo/reference/connections) list them. | none |
+| `daemon.machine.priority` | The daemon takes a higher priority and a place of its own, [ahead of other programs](~clackatoo/reference/cli#staying-quick-on-a-busy-machine). | on |
+
+### Agents
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.upgrade.keep_agents` | Agents go on through an upgrade, with what they run, rather than being stopped and started again (see [agents through upgrades](~clackatoo/reference/agents-lasting)). | on |
+
+### Chats agents start
+
+How far [chats agents start](~clackatoo/reference/chats-together#subagent-limits)
+may go.
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.subagents.working` | The most chats agents started that may work at once, in all, from 1 to 64. | 16 |
+| `daemon.subagents.default` | A new chat's Subagents setting, from 0 (off) to `working`. Unless it's set, it's no more than `working`. | 6 |
+| `daemon.subagents.open` | The most chats agents started open under one of yours, from 1 to 256. | 32 |
+| `daemon.subagents.started` | The most chats agents start under one of yours between two of your messages there, from 1 to 10000. | 128 |
+| `daemon.subagents.depth` | How deep chats agents start go, from 1 to 8. | 3 |
+| `daemon.subagents.hops` | The longest chain of messages between agents, from 1 to 64. | 6 |
+| `daemon.subagents.notice_turns` | The most turns notices of chats finishing start under one of yours between two of your messages there, from 1 to 10000. | 100 |
+
+### The web app
+
+How phones and browsers reach the daemon: see
+[the phone](~clackatoo/reference/phone).
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.web.mode` | `off`, `tailscale` (through `tailscale serve`) or `public` (straight from the network, over TLS). | `off` |
+| `daemon.web.socket` | With `tailscale`, the unix socket `tailscale serve` connects to. None is `web.sock` in the web app's data. | none |
+| `daemon.web.login` | With `tailscale`, the only Tailscale login let in. None is the first device's, which only a window can let in. | none |
+| `daemon.web.address` | With `public`, the IP address listened on. | `0.0.0.0` |
+| `daemon.web.port` | With `public`, the port listened on. | 8765 |
+| `daemon.web.certificate` | With `public`, the certificate chain's PEM file, read again when it changes. | none |
+| `daemon.web.key` | With `public`, the certificate's private key's PEM file. | none |
+| `daemon.web.origin` | The address the app is reached at, as `https://host:port`: requests for any other, or from a page anywhere else, are refused. Needed with `public`. | none |
+| `daemon.web.expire_days` | Days a device can go unused before it's unpaired, from 1 to 36500. | 90 |
+| `daemon.web.password_days` | Days before the password is asked for again, or 0 for never. | 0 |
+| `daemon.web.ask` | A device may ask to be let in from a window. | on with `tailscale`, off with `public` |
+| `daemon.web.lock_after` | Wrong passwords in a row before pairing with the password locks, from 1 to 10000. | 50 |
+
+### What terminals keep
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.history.keep` | Terminals' scrollback is kept [across restarts](~clackatoo/reference/workspaces#after-a-restart). | on |
+| `daemon.history.lines` | The most lines kept of each terminal, from 1 to 1000000. | 10000 |
+| `daemon.history.every` | How often, in seconds, the scrollback of terminals that changed is written, from 1 to 86400. | 30 |
+| `daemon.images.terminal_mb` | The most MiB of [images](~clackatoo/reference/images) each terminal, chat, picture pane or Markdown buffer may hold. | 64 |
+| `daemon.images.total_mb` | The most MiB of images they may hold together. | 256 |
+
 ## When it goes wrong
 
 A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane
@@ -721,12 +861,12 @@ stderr, for a window opened in a process of its own).
 
 ## Known limits
 
-- The daemon's only config files are `agents.toml`, `machine.toml` and
-  `web.toml`.
 - `init.lua` and `settings.lua` aren't run again when they change: use
-  `:reload`.
+  `:reload`. The daemon's are run again only as it starts or upgrades:
+  `clackatoo upgrade` runs them again, keeping every terminal.
+- The daemon's config only sets settings: it has no events or handles yet.
 - The settings menu has no colour options yet, as no option is a colour, and
-  lists none of the daemon's settings yet.
+  lists none of the daemon's settings yet: set them in `daemon/init.lua`.
 - The settings menu can't record <kbd>Enter</kbd>, <kbd>Esc</kbd> or
   <kbd>Backspace</kbd> as keys, nor <kbd>Ctrl</kbd>+<kbd>;</kbd>, which closes
   it.

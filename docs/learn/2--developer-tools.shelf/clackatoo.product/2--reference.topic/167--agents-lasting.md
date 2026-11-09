@@ -132,8 +132,8 @@ An agent is stopped instead, as the daemon upgrades, with all it runs, if:
   moves Claude Code's adapter on, or would declare other capabilities to it
   than it was told as it started, as when a build adds one;
 - it's set to: `CLACKATOO_LIVE_AGENTS=off` in the daemon's environment, or
-  `keep_agents = false` under `[upgrade]` in
-  [`agents.toml`](~clackatoo/reference/agent-settings#which-agent);
+  `daemon.upgrade.keep_agents = false` in the
+  [daemon's config](~clackatoo/reference/agent-settings#which-agent);
 - the agent is still starting, has stopped listening, has left a request
   unanswered for two minutes, has no chat, or what it runs from has gone;
 - one of its chats is opening its session, connecting to clackatoo's tools,
