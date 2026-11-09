@@ -324,7 +324,7 @@ pub struct GridState {
     pub restarted: Option<Restarted>,
     /// Whether the terminal is marked to have its notifications reach the
     /// phone too ([`Request::NotifyPhone`](crate::Request::NotifyPhone)).
-    /// `false` from a daemon older than protocol 143.
+    /// `false` from a daemon older than protocol 147.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
@@ -332,7 +332,7 @@ pub struct GridState {
     pub phone: bool,
     /// The rules the terminal lays its cells out by, which its lines must
     /// be rebuilt by (see [`Line::to_row`]): [`Widths::LEGACY`] from a
-    /// daemon older than protocol 143, which had none.
+    /// daemon older than protocol 147, which had none.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
@@ -340,7 +340,7 @@ pub struct GridState {
     pub widths: Widths,
     /// The mouse pointer's shape the program asked for over the terminal
     /// (OSC 22), if it asked: `None` for the window's own, and from a
-    /// daemon older than protocol 143.
+    /// daemon older than protocol 147.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
@@ -655,7 +655,7 @@ impl Line {
 
     /// `row`'s text and styles, from a terminal that lays its cells out
     /// by `widths`, for a peer that speaks `wire`: as
-    /// [`from_row`](Self::from_row), or for one from before protocol 143,
+    /// [`from_row`](Self::from_row), or for one from before protocol 147,
     /// which lays rows out by [`Widths::LEGACY`], as it would rebuild them
     /// in the same columns (see [`Row::push_text_as_before`]).
     #[must_use]

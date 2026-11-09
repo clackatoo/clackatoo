@@ -172,7 +172,7 @@ fn agent_parent_prefix(
     };
     // AgentTerminal ends GridState but for, since 136, whether it's fed (a
     // bool's byte), since 139, the keyboard's flags and the progress, and
-    // since 143, the phone's mark: the parent's varint, three bools and,
+    // since 147, the phone's mark: the parent's varint, three bools and,
     // since 124, an Option<u8> (one byte for the tag and one for Some).
     let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
         1 + usize::from(agent.close_in.is_some())

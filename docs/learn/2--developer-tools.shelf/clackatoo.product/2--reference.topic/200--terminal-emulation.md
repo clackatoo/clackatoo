@@ -182,7 +182,7 @@ desktop; nothing about it passes between machines.
   [`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) keeps
   it one column, for programs that count it so; each terminal keeps the rule
   it started with, through upgrades too, and one carried over from a build
-  before the rule keeps the old one. A window older than protocol 143 gets
+  before the rule keeps the old one. A window older than protocol 147 gets
   each widened emoji's second column as a space, so what follows it stays in
   its column.
 
@@ -198,7 +198,7 @@ desktop; nothing about it passes between machines.
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
 | DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 69 ([left and right margins](#left-and-right-margins)), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1016 (the mouse in pixels, as 1006 but where the pointer is in pixels from the text area's top left; a drag is told at every pixel it moves, and the wheel at its cell's top left), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)), 2048 ([resize reports](#resize-reports)) |
-| SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, overline (`53`, drawn along the cell's top; a window older than protocol 143 draws none), and their resets (`55` for the overline). Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
+| SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, overline (`53`, drawn along the cell's top; a window older than protocol 147 draws none), and their resets (`55` for the overline). Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
 | `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)), 22 ([pointer shapes](#pointer-shapes)) |
 
 ## Queries answered
@@ -258,7 +258,7 @@ A program asks a flag at a time:
 Meta aren't sent: the window can't tell them from the others, nor are Caps
 Lock and Num Lock, or modifier keys pressed alone. The keypad's keys have
 numbers of their own, but type their text without <kbd>Ctrl</kbd>,
-<kbd>Alt</kbd> or <kbd>Super</kbd>. A window older than protocol 143 sends
+<kbd>Alt</kbd> or <kbd>Super</kbd>. A window older than protocol 147 sends
 no repeats or releases, and the program is told flag 2 isn't set.
 
 A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends
@@ -290,7 +290,7 @@ the terminal's live screen, ahead of the arrow a program that takes the mouse
 gets; scrolled back, the pointer is clackatoo's again. Each screen keeps its
 own, so a full-screen program's goes with it, and the shell's next prompt
 (OSC 133 `A`) or a reset takes back what a program left. An upgrade in place
-forgets it; a window older than protocol 143 shows its own.
+forgets it; a window older than protocol 147 shows its own.
 
 ## Left and right margins
 

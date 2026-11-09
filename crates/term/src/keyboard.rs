@@ -31,7 +31,7 @@ pub const ALL_KEYS: u8 = 8;
 pub const TEXT: u8 = 16;
 
 /// The flags clackatoo's windows act on: every one there is. A window
-/// older than protocol 143 is told [`EVENT_TYPES`] isn't set, as it sends
+/// older than protocol 147 is told [`EVENT_TYPES`] isn't set, as it sends
 /// no repeats or releases.
 pub const SUPPORTED: u8 = DISAMBIGUATE | EVENT_TYPES | ALTERNATE_KEYS | ALL_KEYS | TEXT;
 

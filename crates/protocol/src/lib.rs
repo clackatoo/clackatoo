@@ -712,7 +712,7 @@ pub enum Event {
     /// daemons, unless a client whose user is there follows the terminal:
     /// a window shows it while it isn't showing the terminal's pane with
     /// the focus. How often a terminal's are sent is bounded. Only to a
-    /// client of protocol 143 or later ([`wire::TERMINAL_STANDARDS_2`]).
+    /// client of protocol 147 or later ([`wire::TERMINAL_STANDARDS_2`]).
     Notified {
         /// The terminal.
         terminal: TerminalId,
@@ -786,7 +786,7 @@ pub enum Request {
         /// How big the window asking draws a cell, in pixels, as `[width,
         /// height]`, for programs that ask the terminal's size in pixels.
         /// `None` from a client that doesn't say, or older than protocol
-        /// 143: the size it last said is kept.
+        /// 147: the size it last said is kept.
         #[serde(
             skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
             deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
@@ -1775,7 +1775,7 @@ pub enum Request {
     /// Marks `terminal` to have its notifications reach the phone too, or
     /// not, if `on` is false: what its program asks for, and its long
     /// commands ending. Answered with [`Response::Done`]. Only to a daemon
-    /// of protocol 143 or later ([`wire::TERMINAL_STANDARDS_2`]).
+    /// of protocol 147 or later ([`wire::TERMINAL_STANDARDS_2`]).
     NotifyPhone {
         /// The terminal, not a chat's.
         terminal: TerminalId,
