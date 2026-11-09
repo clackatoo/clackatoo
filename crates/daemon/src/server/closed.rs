@@ -25,7 +25,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use clackatoo_protocol::{
-    Content, Error, Layout, PaneId, Request, Response, Restored, Side, TabId, WorkspaceId,
+    Content, Error, Layout, PaneId, Request, Response, Restored, Side, TabId, TerminalId,
+    WorkspaceId,
 };
 use mio::Token;
 
@@ -220,11 +221,11 @@ impl Daemon {
         tab: &saved::Tab,
         beside: Option<PaneId>,
     ) -> Option<PaneId> {
-        let mut chats = HashMap::new();
+        let mut tab = tab.clone();
         let mut room = super::restore::MOST_PANES;
         let mut restored = Vec::new();
-        self.restore_chats(&tab.layout, &mut chats, &mut room);
-        let made = self.restore_tab(tab, &mut chats, &mut room, &mut restored)?;
+        let mut chats = self.chats_again(&mut tab.layout, &mut room);
+        let made = self.restore_tab(&tab, &mut chats, &mut room, &mut restored)?;
         let focused = self.add_reopened_tab(workspace, index, made, beside);
         self.offer_restored(restored);
         Some(focused)
@@ -233,13 +234,59 @@ impl Daemon {
     /// The panes of `layout` made again, and what they offer, or `None`
     /// if none could be.
     fn made_again(&mut self, layout: &saved::Layout) -> Option<(Layout, Vec<Restored>)> {
-        let mut chats = HashMap::new();
+        let mut layout = layout.clone();
         let mut room = super::restore::MOST_PANES;
         let mut restored = Vec::new();
         let mut panes = Vec::new();
-        self.restore_chats(layout, &mut chats, &mut room);
-        let made = self.restore_layout(layout, &mut chats, &mut room, &mut panes, &mut restored)?;
+        let mut chats = self.chats_again(&mut layout, &mut room);
+        let made = self.restore_layout(&layout, &mut chats, &mut room, &mut panes, &mut restored)?;
         Some((made, restored))
+    }
+
+    /// Makes the chats of `layout` again, as a restart does, and gives its
+    /// reviews theirs: by the number each had as it closed, a chat made
+    /// again, or one still open, as the chat of a review closed alone is.
+    /// A review whose chat is gone lists everything changed since the
+    /// branch's base instead, of no chat, rather than another chat's work.
+    fn chats_again(
+        &mut self,
+        layout: &mut saved::Layout,
+        room: &mut usize,
+    ) -> HashMap<u32, (TerminalId, bool)> {
+        let mut chats = HashMap::new();
+        self.restore_chats(layout, &mut chats, room);
+        self.reviews_again(layout, &mut chats);
+        chats
+    }
+
+    /// Gives the reviews of `layout` their chats, as
+    /// [`chats_again`](Self::chats_again) says.
+    fn reviews_again(
+        &self,
+        layout: &mut saved::Layout,
+        chats: &mut HashMap<u32, (TerminalId, bool)>,
+    ) {
+        match layout {
+            saved::Layout::Split { parts, .. } => {
+                for part in parts {
+                    self.reviews_again(part, chats);
+                }
+            }
+            saved::Layout::Pane(saved::Pane::Review { chat, scope, .. }) => {
+                let Some(id) = *chat else { return };
+                if chats.contains_key(&id) {
+                    return;
+                }
+                if self.chat_ref(TerminalId(id)).is_some() {
+                    // Open, and maybe in a pane: never shown in another.
+                    chats.insert(id, (TerminalId(id), true));
+                } else {
+                    *chat = None;
+                    *scope = saved::Scope::Base;
+                }
+            }
+            saved::Layout::Pane(_) => {}
+        }
     }
 
     /// Adds `made` as a tab of `workspace` at place `index`, or if that's
@@ -388,7 +435,67 @@ fn side_of(name: &str) -> Side {
 
 #[cfg(test)]
 mod tests {
+    use clackatoo_protocol::{NewReview, PaneTerminal, ReviewScope};
+
     use super::*;
+    use crate::server::agent_files::tests::daemon_with_chat;
+
+    const ASKER: Token = Token(usize::MAX);
+
+    /// The pane `answer` says was made.
+    fn made(answer: Response) -> PaneId {
+        match answer {
+            Response::PaneCreated(pane) => pane,
+            other => panic!("no pane made: {other:?}"),
+        }
+    }
+
+    /// The chat and scope of the review pane `pane` shows.
+    fn review_in(daemon: &Daemon, pane: PaneId) -> (Option<TerminalId>, ReviewScope) {
+        let Ok(Content::Review(review)) = daemon.workspaces.check_pane(pane) else {
+            panic!("pane {pane} isn't a review");
+        };
+        let (chat, scope, _) = daemon.review_of(review).expect("the review");
+        (chat, scope)
+    }
+
+    #[test]
+    fn a_review_opened_again_is_of_its_chat_or_once_that_has_gone_of_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        let new = Request::NewWorkspace {
+            name: None,
+            terminal: PaneTerminal::Existing(chat),
+            on: None,
+        };
+        let chat_pane = made(daemon.respond(new, ASKER));
+        let review = NewReview {
+            chat: Some(chat),
+            scope: ReviewScope::Chat,
+            cwd: Some(dir.path().display().to_string()),
+        };
+        let split = Request::Split {
+            pane: chat_pane,
+            side: Side::Right,
+            terminal: PaneTerminal::Review(review),
+            on: None,
+        };
+        let pane = made(daemon.respond(split, ASKER));
+        assert_eq!(review_in(&daemon, pane), (Some(chat), ReviewScope::Chat));
+        let close = |pane| Request::ClosePane { pane };
+        assert_eq!(daemon.respond(close(pane), ASKER), Response::Done);
+        let reopen = Request::Reopen {
+            beside: Some(chat_pane),
+        };
+        let again = made(daemon.respond(reopen, ASKER));
+        assert_eq!(review_in(&daemon, again), (Some(chat), ReviewScope::Chat));
+        // Its chat gone, it lists the branch's changes, of no chat.
+        assert_eq!(daemon.respond(close(again), ASKER), Response::Done);
+        let gone = Request::CloseTerminal { terminal: chat };
+        assert_eq!(daemon.respond(gone, ASKER), Response::Done);
+        let again = made(daemon.respond(Request::Reopen { beside: None }, ASKER));
+        assert_eq!(review_in(&daemon, again), (None, ReviewScope::Base));
+    }
 
     #[test]
     fn sides_are_kept_by_name() {
