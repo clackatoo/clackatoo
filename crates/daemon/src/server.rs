@@ -1095,6 +1095,8 @@ pub struct Daemon {
     web: Option<crate::web::Web>,
     /// The chats as a list, and the notifications they're to send.
     chat_watch: web::ChatWatch,
+    /// How many notifications terminals have sent, to bound them.
+    notice_limits: notices::Limits,
     /// Web connections with more to read or answer than one turn takes.
     web_unread: Vec<Token>,
     /// Connections windows on other machines forward.
@@ -1303,6 +1305,7 @@ impl Daemon {
             upgrade_args: Vec::new(),
             web: None,
             chat_watch: web::ChatWatch::default(),
+            notice_limits: notices::Limits::default(),
             web_unread: Vec::new(),
             forwards: forwards::Forwards::default(),
             recovery: recovery::Recovery::default(),
@@ -2064,6 +2067,7 @@ impl Daemon {
                     .chain(self.next_gone_server_due())
                     .chain(self.next_gone_agent_due())
                     .chain(self.next_web_due())
+                    .chain(self.notice_limits.due())
                     .chain(self.next_fit_due())
                     .chain(self.next_forward_due())
                     .chain(self.next_recovery_due())
@@ -2173,6 +2177,7 @@ impl Daemon {
             self.relay_chats();
             self.take_browser();
             self.web_chores();
+            self.send_held_notices();
             self.send_clipboard_writes();
             self.send_browser_frames();
             self.send_reviews();

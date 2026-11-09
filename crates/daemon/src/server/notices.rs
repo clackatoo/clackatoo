@@ -12,7 +12,10 @@
 //!   too, through the same push as chats'.
 //! - **Bounded.** What a program says is cleaned as names are, and a
 //!   terminal shows a few at once, then one every few seconds (see
-//!   `HostedTerminal::take_notice`).
+//!   `HostedTerminal::take_notice`); one on another machine too, as its
+//!   daemon passes them on. Whatever they come from, at most
+//!   [`MOST_A_MINUTE`] are sent in a minute; the rest are told together
+//!   when the minute is up, as "12 more notifications".
 //!
 //! A command that ran for longer than `DaemonConfig::long_commands` is
 //! told of too as it ends, the same way: the command, if the shell's
@@ -25,15 +28,85 @@
 //!
 //! [`Request::NotifyPhone`]: clackatoo_protocol::Request::NotifyPhone
 
-use std::time::Instant;
-
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Error, Event, Notice, Notification, Response, TerminalId, Urgency, wire};
 use mio::Token;
 
 use super::{Daemon, Source};
+use crate::hosted::NoticeAllowance;
 use crate::web;
+
+/// The most notifications terminals send in a minute, all together.
+pub(super) const MOST_A_MINUTE: usize = 10;
+
+/// The minute [`MOST_A_MINUTE`] counts in.
+const MINUTE: Duration = Duration::from_mins(1);
+
+/// The most terminals on other machines whose notifications' allowances
+/// are kept: those spent longest ago are let go past it.
+const MOST_RELAYED: usize = 256;
+
+/// How many notifications have been sent, and those held back, to bound
+/// them however many terminals ask.
+#[derive(Debug, Default)]
+pub(super) struct Limits {
+    /// When those sent in the last minute were, the oldest first.
+    sent: VecDeque<Instant>,
+    /// The notifications held back since, and the terminal of the latest,
+    /// which those told together are said to be of.
+    held: u32,
+    held_for: Option<TerminalId>,
+    /// Whether one of them was of a terminal marked for the phone.
+    held_phone: bool,
+    /// Each terminal on another machine's allowance, as a terminal's
+    /// here is kept by it, and when it was last spent.
+    relayed: HashMap<TerminalId, (NoticeAllowance, Instant)>,
+}
+
+impl Limits {
+    /// Whether one more may be sent at `now`, which counts it.
+    fn admit(&mut self, now: Instant) -> bool {
+        while (self.sent.front()).is_some_and(|&at| now.saturating_duration_since(at) >= MINUTE) {
+            self.sent.pop_front();
+        }
+        if self.sent.len() >= MOST_A_MINUTE {
+            return false;
+        }
+        self.sent.push_back(now);
+        true
+    }
+
+    /// Whether terminal `id`, on another machine, may show one more at
+    /// `now`, which spends it.
+    fn relayed_may(&mut self, id: TerminalId, now: Instant) -> bool {
+        if self.relayed.len() >= MOST_RELAYED && !self.relayed.contains_key(&id) {
+            let oldest = (self.relayed.iter())
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(&id, _)| id);
+            if let Some(oldest) = oldest {
+                self.relayed.remove(&oldest);
+            }
+        }
+        let (allowance, at) =
+            (self.relayed.entry(id)).or_insert_with(|| (NoticeAllowance::new(), now));
+        *at = now;
+        allowance.spend(now)
+    }
+
+    /// When those held back are to be told, if any are.
+    pub(super) fn due(&self) -> Option<Instant> {
+        if self.held == 0 {
+            return None;
+        }
+        Some(
+            self.sent
+                .front()
+                .map_or_else(Instant::now, |&at| at + MINUTE),
+        )
+    }
+}
 
 impl Daemon {
     /// Passes on the notification terminal `id`'s program asked for, if
@@ -50,15 +123,74 @@ impl Daemon {
 
     /// Sends `notice`, about terminal `id`, to the windows and relaying
     /// daemons that take it, and, for one shown, to the phone if `id` is
-    /// marked for it, unless someone is looking at it.
+    /// marked for it, unless someone is looking at it. One shown past the
+    /// terminal's allowance, if it's on another machine, isn't; one past
+    /// [`MOST_A_MINUTE`] is held back, to be told with the rest.
     pub(super) fn send_notice(&mut self, id: TerminalId, notice: &Notice) {
+        if let Notice::Show(_) = notice {
+            if self.looked_at(id) {
+                return;
+            }
+            let now = Instant::now();
+            let here = self.terminals.contains_key(&id);
+            if !here && !self.notice_limits.relayed_may(id, now) {
+                log::debug!("terminal {id}, on another machine, asks for notifications too often");
+                return;
+            }
+            if !self.notice_limits.admit(now) {
+                let phone = self.marked_for_phone(id);
+                let limits = &mut self.notice_limits;
+                limits.held = limits.held.saturating_add(1);
+                limits.held_for = Some(id);
+                limits.held_phone |= phone;
+                return;
+            }
+        }
+        self.notice_now(id, notice);
+    }
+
+    /// Tells of the notifications held back, together, once one more may
+    /// be sent.
+    pub(super) fn send_held_notices(&mut self) {
+        let limits = &mut self.notice_limits;
+        let Some(id) = limits.held_for else { return };
+        if !limits.admit(Instant::now()) {
+            return;
+        }
+        let held = std::mem::take(&mut limits.held);
+        let phone = std::mem::take(&mut limits.held_phone);
+        limits.held_for = None;
+        let title = if held == 1 {
+            "1 more notification".to_owned()
+        } else {
+            format!("{held} more notifications")
+        };
+        let Some(notification) = Notification::new(&title, "", Urgency::Normal) else {
+            return;
+        };
+        self.notice_now_to(id, &Notice::Show(notification), phone);
+    }
+
+    /// Whether terminal `id`'s notifications reach the phone.
+    fn marked_for_phone(&mut self, id: TerminalId) -> bool {
+        (self.terminals.get_mut(&id))
+            .and_then(|slot| slot.terminal.pty())
+            .is_some_and(|terminal| terminal.phone())
+    }
+
+    /// Sends `notice` as [`send_notice`](Self::send_notice) does, now.
+    fn notice_now(&mut self, id: TerminalId, notice: &Notice) {
+        let phone = self.marked_for_phone(id);
+        self.notice_now_to(id, notice, phone);
+    }
+
+    /// Sends `notice`, about terminal `id`, to the windows and relaying
+    /// daemons that take it, and to the phone if `phone`.
+    fn notice_now_to(&mut self, id: TerminalId, notice: &Notice, phone: bool) {
         let shown = match notice {
             Notice::Show(notification) => Some(notification),
             Notice::Close => None,
         };
-        if shown.is_some() && self.looked_at(id) {
-            return;
-        }
         let told: Vec<Token> = (self.sources.iter())
             .filter_map(|(key, source)| match source {
                 Source::Client(client)
@@ -77,9 +209,6 @@ impl Daemon {
             };
             self.send_event(token, event);
         }
-        let phone = (self.terminals.get_mut(&id))
-            .and_then(|slot| slot.terminal.pty())
-            .is_some_and(|terminal| terminal.phone());
         if let (Some(notification), true, Some(web)) = (shown, phone, &self.web) {
             let payload =
                 web::push_payload_of_terminal(id.0, &notification.title, &notification.body);
@@ -169,6 +298,38 @@ fn took_as_said(took: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn at_most_ten_a_minute_are_sent_in_all() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        for _ in 0..MOST_A_MINUTE {
+            assert!(limits.admit(start));
+        }
+        assert!(!limits.admit(start + Duration::from_secs(59)));
+        limits.held = 1;
+        assert_eq!(limits.due(), Some(start + MINUTE));
+        // A minute on, the first are forgotten.
+        assert!(limits.admit(start + MINUTE));
+    }
+
+    #[test]
+    fn a_terminal_on_another_machine_shows_a_few_then_one_now_and_then() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        let shown = (0..10)
+            .filter(|_| limits.relayed_may(TerminalId(7), now))
+            .count();
+        assert_eq!(shown, 3);
+        // Another's is its own.
+        assert!(limits.relayed_may(TerminalId(8), now));
+        assert!(limits.relayed_may(TerminalId(7), now + Duration::from_secs(10)));
+        // However many there are, few are kept.
+        for id in 0..1000 {
+            limits.relayed_may(TerminalId(100 + id), now);
+        }
+        assert!(limits.relayed.len() <= MOST_RELAYED);
+    }
 
     #[test]
     fn an_ended_command_says_how_and_after_how_long() {

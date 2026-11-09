@@ -122,7 +122,7 @@ pub(crate) struct Ended {
 /// then one every [`NOTICE_EVERY`], so a program asking in a loop shows a
 /// few, not thousands.
 #[derive(Debug)]
-struct NoticeAllowance {
+pub(crate) struct NoticeAllowance {
     /// What's left of the burst.
     left: u32,
     /// When the last was given back.
@@ -136,7 +136,7 @@ const NOTICE_BURST: u32 = 3;
 const NOTICE_EVERY: Duration = Duration::from_secs(10);
 
 impl NoticeAllowance {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             left: NOTICE_BURST,
             since: Instant::now(),
@@ -144,7 +144,7 @@ impl NoticeAllowance {
     }
 
     /// Whether one may be shown at `now`, which spends it.
-    fn spend(&mut self, now: Instant) -> bool {
+    pub(crate) fn spend(&mut self, now: Instant) -> bool {
         let back = now.saturating_duration_since(self.since).as_secs() / NOTICE_EVERY.as_secs();
         let back = u32::try_from(back).unwrap_or(u32::MAX).min(NOTICE_BURST);
         self.left = (self.left + back).min(NOTICE_BURST);

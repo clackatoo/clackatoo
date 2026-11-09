@@ -402,7 +402,10 @@ What a program says is cleaned as tab names are: control characters become
 spaces, what shows nothing but changes what's around it goes, runs of spaces
 become one, and a title is cut to 120 characters, a line to 300. A terminal
 shows three at once, then one every ten seconds; one asking more often is
-heard only as often. Nothing is ever said back to the program: kitty's
+heard only as often, and so is one on another machine, whatever its daemon
+passes on. However many terminals ask, at most ten notifications are shown in
+a minute; the rest are told together as the minute ends, as `4 more
+notifications`, and reach the phone if one of them would have. Nothing is ever said back to the program: kitty's
 questions about what's supported (`p=?`), and its reports of a notification
 clicked or closed, get no answer.
 

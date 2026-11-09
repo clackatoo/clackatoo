@@ -1683,6 +1683,30 @@ fn a_programs_notifications_reach_windows_while_no_one_present_looks() {
 }
 
 #[test]
+fn at_most_ten_notifications_a_minute_are_sent_whatever_asks() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.client();
+    a_window(&mut window);
+    // Four terminals asking three times each: each may, but not all.
+    let script = r"for n in one two three; do printf '\033]9;%s\007' $n; sleep 0.2; done; sleep 10";
+    let _terminals: Vec<_> = (0..4).map(|_| followed(&daemon, script, 1, 0)).collect();
+    let mut shown = 0;
+    window
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .unwrap();
+    loop {
+        match window.next_event() {
+            Ok(Event::View { terminal, .. }) => window.frame_done(terminal).unwrap(),
+            Ok(Event::Notified { .. }) => shown += 1,
+            Ok(Event::Workspaces(_)) => {}
+            Err(ClientError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(shown, 10);
+}
+
+#[test]
 fn a_long_command_ending_is_told_but_not_an_end_a_program_printed() {
     let daemon = TestDaemon::start_with(|_, config| {
         config.long_commands = Some(Duration::from_millis(300));
