@@ -124,6 +124,10 @@ const EVENTS: usize = 256;
 /// Bytes read per `read` call, from PTYs and clients alike.
 const READ_BUFFER_LEN: usize = 64 * 1024;
 
+/// How long an upgrade waits for images being kept, before it hands the
+/// rest over without them: a file read that hangs never holds it up.
+const HANDOVER_IMAGES_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The most output read from one PTY before giving the other terminals and
 /// clients a turn. Keeps a flood of output (`cat` of a huge file) from
 /// freezing everything else.
@@ -1673,7 +1677,7 @@ impl Daemon {
         // Images on their way into the store are kept first, so their
         // chats name them.
         self.keep_chat_images();
-        self.take_images(true);
+        self.take_images(Some(HANDOVER_IMAGES_WAIT));
         let mut chat_images = Vec::new();
         // Agents' changes to big files still being worked out go into the
         // edit log first, so the next build has them.
@@ -2017,6 +2021,7 @@ impl Daemon {
                     .chain(self.next_paste_due())
                     .chain(self.next_grace_due())
                     .chain(self.held_until())
+                    .chain(self.images.next_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -2067,7 +2072,7 @@ impl Daemon {
             self.take_renames();
             self.take_pastes();
             self.keep_chat_images();
-            self.take_images(false);
+            self.take_images(None);
             if self.take_boards() {
                 self.boards_read();
                 self.close_missing_boards();

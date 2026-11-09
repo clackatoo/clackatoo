@@ -330,7 +330,7 @@ impl Daemon {
     /// images read, chats' images kept, and copies made, telling each who
     /// asked. If `wait`, waits until it has done everything, as before a
     /// handover.
-    pub(super) fn take_images(&mut self, wait: bool) {
+    pub(super) fn take_images(&mut self, wait: Option<std::time::Duration>) {
         let (kept, ready) = self.images.take(wait);
         for kept in kept {
             match kept.why {
@@ -645,6 +645,9 @@ mod tests {
     /// Whoever asks, in these tests.
     const ASKER: Token = Token(usize::MAX);
 
+    /// How long tests wait for images to be read.
+    const WAIT: std::time::Duration = std::time::Duration::from_mins(1);
+
     /// A PNG `width` by `height`, each pixel `shade`.
     fn png(width: u32, height: u32, shade: u8) -> Vec<u8> {
         let rgba = vec![shade; (width * height * 4) as usize];
@@ -696,7 +699,7 @@ mod tests {
         std::fs::write(dir.path().join("plan.PNG"), &bytes).unwrap();
         let picture = open(&mut daemon, dir.path(), "plan.PNG");
         assert_eq!(shown(&mut daemon, picture), PictureState::Loading);
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         let PictureState::Shown(info) = shown(&mut daemon, picture) else {
             panic!("not read");
         };
@@ -717,7 +720,7 @@ mod tests {
         // text, as ever.
         std::fs::write(dir.path().join("fake.png"), "hello").unwrap();
         let fake = open(&mut daemon, dir.path(), "fake.png");
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         assert_eq!(
             shown(&mut daemon, fake),
             PictureState::Failed("it isn't an image".into())
@@ -751,7 +754,7 @@ mod tests {
         daemon.images = crate::images::Images::new(limits, None);
         std::fs::write(dir.path().join("plan.png"), png(40, 40, 5)).unwrap();
         let picture = open(&mut daemon, dir.path(), "plan.png");
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         let PictureState::Shown(read) = shown(&mut daemon, picture) else {
             panic!("not read");
         };
@@ -778,7 +781,7 @@ mod tests {
         assert!(daemon.images.info(read.id).is_none(), "let go");
         // Shown again: read again from its file.
         assert_eq!(shown(&mut daemon, picture), PictureState::Loading);
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         assert_eq!(shown(&mut daemon, picture), PictureState::Shown(read));
     }
 
@@ -824,7 +827,7 @@ mod tests {
                 "{refused}"
             );
         }
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         let Response::Image(ImageAnswer::Found(plan)) = asked(&mut daemon, "img/plan.png") else {
             panic!("not read");
         };
@@ -852,7 +855,7 @@ mod tests {
         let original = (daemon.chat(chat).unwrap().originals)
             .insert(crate::images::Source::Bytes(sent.clone()));
         daemon.keep_chat_images();
-        daemon.take_images(true);
+        daemon.take_images(Some(WAIT));
         let PictureState::Shown(info) = shown(&mut daemon, picture) else {
             panic!("not read");
         };

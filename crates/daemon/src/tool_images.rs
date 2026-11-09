@@ -1,6 +1,6 @@
 //! Image tool results: bounded decoding on one worker, never on the event loop.
 //! Inline ACP images and local resource links use the same thumbnail path.
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
@@ -233,15 +233,8 @@ fn local_path(uri: &str) -> Option<PathBuf> {
 fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, Vec<u8>)> {
     let bytes = match source {
         Source::Inline(data) => STANDARD.decode(data).ok()?,
-        Source::File(path) => {
-            let file = crate::regular::open(&cwd.join(path), crate::regular::Links::Follow).ok()?;
-            if file.metadata().ok()?.len() > BYTES as u64 {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            file.take(BYTES as u64 + 1).read_to_end(&mut bytes).ok()?;
-            bytes
-        }
+        // By a reader of its own, so one that hangs holds up only itself.
+        Source::File(path) => crate::images::read_in_time(cwd.join(path), BYTES as u64).ok()?,
     };
     if bytes.len() > BYTES {
         return None;

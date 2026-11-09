@@ -21,6 +21,7 @@ use std::ffi::OsStr;
 use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use clackatoo_protocol::{
@@ -49,6 +50,18 @@ const ONCE_KEPT: usize = 2;
 /// The most bytes an image is sent as it is, at a size it can't be made
 /// smaller at: past this, asking for it fails.
 const ORIGINAL_INSTEAD: u64 = 16 * MIB;
+
+/// How many files are read at once, each on a thread of its own, so a
+/// file that hangs, as on a mount gone away, holds up only its own.
+const READERS: usize = 4;
+
+/// How many files may wait to be read: past that, more are refused.
+const READ_QUEUE: usize = 64;
+
+/// How long a file is waited for, read or waiting to be, before it's
+/// given up on: a reader that hangs past it keeps its place until it
+/// comes back, but nothing waits for it.
+const READ_WAIT: Duration = Duration::from_secs(10);
 
 /// How many bytes sent to be kept may be on their way to the thread at
 /// once: past that, more are refused until it catches up.
@@ -139,9 +152,22 @@ pub(crate) enum Source {
         /// The pixels.
         rgba: Vec<u8>,
     },
+    /// For tests: a file that takes this long to read, as one on a mount
+    /// gone away hangs, then isn't there.
+    #[cfg(test)]
+    Hang(Duration),
 }
 
 impl Source {
+    /// Whether it's a file, read by a reader of its own.
+    fn is_file(&self) -> bool {
+        #[cfg(test)]
+        if matches!(self, Self::Hang(_)) {
+            return true;
+        }
+        matches!(self, Self::File(_) | Self::Below { .. })
+    }
+
     /// About how many bytes it holds on its way to the thread.
     fn weight(&self) -> u64 {
         match self {
@@ -149,6 +175,8 @@ impl Source {
             Self::Base64(data) => data.len() as u64,
             Self::Pixels { rgba, .. } => rgba.len() as u64,
             Self::File(_) | Self::Below { .. } => 0,
+            #[cfg(test)]
+            Self::Hang(_) => 0,
         }
     }
 }
@@ -215,8 +243,13 @@ enum Job {
     },
 }
 
-/// What the store's thread did.
+/// What the store's thread, or a reader, did.
 enum Done {
+    /// A reader read, looked at and hashed the file of read `read`.
+    Read {
+        read: u64,
+        kept: Result<(ImageInfo, Arc<[u8]>), String>,
+    },
     Kept {
         why: Why,
         owner: ImageFrom,
@@ -301,15 +334,31 @@ pub(crate) struct Images<T> {
     on_the_way: u64,
     /// Jobs sent to the thread and not done yet.
     pending: usize,
-    worker: Option<Worker>,
+    /// The store's thread, started when it's first needed.
+    jobs: Option<mpsc::Sender<Job>>,
+    /// What the thread and the readers have done.
+    done: (mpsc::Sender<Done>, mpsc::Receiver<Done>),
+    /// The files waiting to be read, oldest first, each with when it's
+    /// given up on.
+    to_read: VecDeque<(u64, ToRead)>,
+    /// The files being read, each with when it's given up on.
+    reading: HashMap<u64, (Why, ImageFrom, Instant)>,
+    /// How many readers are out, those given up on among them.
+    readers: usize,
+    /// The number the next file read gets.
+    next_read: u64,
+    /// How long a file is waited for: [`READ_WAIT`], less in tests.
+    read_wait: Duration,
     waker: Option<Arc<mio::Waker>>,
 }
 
-/// The store's thread, started when it's first needed.
+/// A file to read, as it waits.
 #[derive(Debug)]
-struct Worker {
-    jobs: mpsc::Sender<Job>,
-    done: mpsc::Receiver<Done>,
+struct ToRead {
+    why: Why,
+    owner: ImageFrom,
+    source: Source,
+    due: Instant,
 }
 
 impl std::fmt::Debug for Job {
@@ -342,7 +391,13 @@ impl<T: Clone + PartialEq> Images<T> {
             scaling: HashMap::new(),
             on_the_way: 0,
             pending: 0,
-            worker: None,
+            jobs: None,
+            done: mpsc::channel(),
+            to_read: VecDeque::new(),
+            reading: HashMap::new(),
+            readers: 0,
+            next_read: 0,
+            read_wait: READ_WAIT,
             waker,
         }
     }
@@ -361,6 +416,23 @@ impl<T: Clone + PartialEq> Images<T> {
         why: Why,
         source: Source,
     ) -> Result<(), String> {
+        if source.is_file() {
+            if self.to_read.len() >= READ_QUEUE {
+                return Err("too many files to read at once: try again in a moment".into());
+            }
+            self.next_read += 1;
+            // Waiting its turn, as long as three reads may take.
+            let due = Instant::now() + 3 * self.read_wait;
+            let read = ToRead {
+                why,
+                owner,
+                source,
+                due,
+            };
+            self.to_read.push_back((self.next_read, read));
+            self.start_reading();
+            return Ok(());
+        }
         let weight = source.weight();
         if self.on_the_way.saturating_add(weight) > ON_THE_WAY {
             return Err("too many images at once: try again in a moment".into());
@@ -382,10 +454,59 @@ impl<T: Clone + PartialEq> Images<T> {
         self.pending > 0
     }
 
+    /// Starts reading the files waiting, as readers come free: each on a
+    /// thread of its own, which wakes the loop once it's read.
+    fn start_reading(&mut self) {
+        while self.readers < READERS
+            && let Some((read, to_read)) = self.to_read.pop_front()
+        {
+            let ToRead {
+                why,
+                owner,
+                source,
+                due: _,
+            } = to_read;
+            let (done, waker) = (self.done.0.clone(), self.waker.clone());
+            let most = self.limits.per_owner;
+            let spawned = std::thread::Builder::new()
+                .name("image-reader".into())
+                .spawn(move || {
+                    let kept = read_source(source, most).and_then(|bytes| examine(bytes, most));
+                    let _ = done.send(Done::Read { read, kept });
+                    if let Some(waker) = &waker {
+                        let _ = waker.wake();
+                    }
+                });
+            match spawned {
+                Ok(_) => {
+                    self.readers += 1;
+                    let due = Instant::now() + self.read_wait;
+                    self.reading.insert(read, (why, owner, due));
+                }
+                Err(err) => {
+                    let why_not = format!("couldn't start reading it: {err}");
+                    self.reading.insert(read, (why, owner, Instant::now()));
+                    let _ = self.done.0.send(Done::Read {
+                        read,
+                        kept: Err(why_not),
+                    });
+                    self.readers += 1;
+                }
+            }
+        }
+    }
+
+    /// When the soonest file read, or waiting to be, is to be given up on.
+    pub(crate) fn next_due(&self) -> Option<Instant> {
+        (self.reading.values().map(|&(.., due)| due))
+            .chain(self.to_read.iter().map(|(_, to_read)| to_read.due))
+            .min()
+    }
+
     fn send(&mut self, job: Job) -> Result<(), String> {
-        if self.worker.is_none() {
+        if self.jobs.is_none() {
             let (jobs, receive) = mpsc::channel::<Job>();
-            let (done, taken) = mpsc::channel();
+            let done = self.done.0.clone();
             let waker = self.waker.clone();
             std::thread::Builder::new()
                 .name("images".into())
@@ -400,26 +521,41 @@ impl<T: Clone + PartialEq> Images<T> {
                     }
                 })
                 .map_err(|err| format!("couldn't start the images' thread: {err}"))?;
-            self.worker = Some(Worker { jobs, done: taken });
+            self.jobs = Some(jobs);
         }
-        let worker = self.worker.as_ref().expect("started above");
-        worker
-            .jobs
-            .send(job)
+        let jobs = self.jobs.as_ref().expect("started above");
+        jobs.send(job)
             .map_err(|_| "the images' thread has stopped".to_owned())?;
         self.pending += 1;
         Ok(())
     }
 
-    /// Takes in what the thread has done: the images kept, or not, for
-    /// their owners to act on, and the copies made, for who asked to be
-    /// told. If `wait`, waits until the thread has done everything.
-    pub(crate) fn take(&mut self, wait: bool) -> (Vec<Kept>, Vec<Ready<T>>) {
+    /// Takes in what the thread and the readers have done: the images
+    /// kept, or not, for their owners to act on, and the copies made, for
+    /// who asked to be told; and gives up on the files waited for too long.
+    /// With `wait`, waits that long at most for everything to be done, as
+    /// before a handover: what isn't done by then is given up on.
+    pub(crate) fn take(&mut self, wait: Option<Duration>) -> (Vec<Kept>, Vec<Ready<T>>) {
         let mut kept = Vec::new();
         let mut ready = Vec::new();
-        while let Some(done) = self.next_done(wait) {
-            self.pending = self.pending.saturating_sub(1);
+        let until = wait.map(|wait| Instant::now() + wait);
+        while let Some(done) = self.next_done(until) {
             match done {
+                Done::Read { read, kept: result } => {
+                    self.readers = self.readers.saturating_sub(1);
+                    // Given up on meanwhile: nothing waits for it.
+                    if let Some((why, owner, _)) = self.reading.remove(&read) {
+                        let result =
+                            result.and_then(|(info, bytes)| self.insert(owner, info, bytes));
+                        kept.push(Kept { why, kept: result });
+                    }
+                    self.start_reading();
+                    continue;
+                }
+                _ => self.pending = self.pending.saturating_sub(1),
+            }
+            match done {
+                Done::Read { .. } => {}
                 Done::Kept {
                     why,
                     owner,
@@ -460,17 +596,50 @@ impl<T: Clone + PartialEq> Images<T> {
                 }
             }
         }
+        self.give_up_reading(wait.is_some(), &mut kept);
         (kept, ready)
     }
 
-    /// What the thread has done next, if it's done anything: waiting for
-    /// it, if `wait`, while it has work.
-    fn next_done(&self, wait: bool) -> Option<Done> {
-        let worker = self.worker.as_ref()?;
-        if wait && self.pending > 0 {
-            worker.done.recv().ok()
-        } else {
-            worker.done.try_recv().ok()
+    /// What the thread or a reader has done next, if anything: waiting
+    /// for it until `until`, if there's work out.
+    fn next_done(&self, until: Option<Instant>) -> Option<Done> {
+        let working = self.pending > 0 || !self.reading.is_empty() || !self.to_read.is_empty();
+        match until {
+            Some(until) if working => {
+                let left = until.saturating_duration_since(Instant::now());
+                self.done.1.recv_timeout(left).ok()
+            }
+            _ => self.done.1.try_recv().ok(),
+        }
+    }
+
+    /// Gives up on the files waited for past their time, and, if `all`, on
+    /// every one: said as not kept, for their owners to act on.
+    fn give_up_reading(&mut self, all: bool, kept: &mut Vec<Kept>) {
+        let now = Instant::now();
+        let late: Vec<u64> = (self.reading.iter())
+            .filter(|&(_, &(.., due))| all || due <= now)
+            .map(|(&read, _)| read)
+            .collect();
+        for read in late {
+            if let Some((why, ..)) = self.reading.remove(&read) {
+                let kept_not = Err("its file took too long to read".to_owned());
+                kept.push(Kept {
+                    why,
+                    kept: kept_not,
+                });
+            }
+        }
+        while let Some((_, to_read)) = self.to_read.front() {
+            if !all && to_read.due > now {
+                break;
+            }
+            let (_, to_read) = self.to_read.pop_front().expect("looked at above");
+            let kept_not = Err("too many files to read at once".to_owned());
+            kept.push(Kept {
+                why: to_read.why,
+                kept: kept_not,
+            });
         }
     }
 
@@ -938,7 +1107,7 @@ fn work(job: Job) -> Done {
             most,
         } => {
             let weight = source.weight();
-            let kept = read(source, most).and_then(|bytes| examine(bytes, most));
+            let kept = read_source(source, most).and_then(|bytes| examine(bytes, most));
             Done::Kept {
                 why,
                 owner,
@@ -955,7 +1124,7 @@ fn work(job: Job) -> Done {
 }
 
 /// The bytes `source` holds, of no more than `most`.
-fn read(source: Source, most: u64) -> Result<Vec<u8>, String> {
+fn read_source(source: Source, most: u64) -> Result<Vec<u8>, String> {
     let too_big = || format!("it's over the {} MB limit for images", most / MIB);
     let whole = |file: std::fs::File| -> Result<Vec<u8>, String> {
         let len = file.metadata().map_err(|err| err.to_string())?.len();
@@ -989,11 +1158,33 @@ fn read(source: Source, most: u64) -> Result<Vec<u8>, String> {
             height,
             rgba,
         } => png_of(width, height, &rgba)?,
+        #[cfg(test)]
+        Source::Hang(wait) => {
+            std::thread::sleep(wait);
+            return Err("there's no such file".into());
+        }
     };
     if bytes.len() as u64 > most {
         return Err(too_big());
     }
     Ok(bytes)
+}
+
+/// The file at `path`, of no more than `most` bytes, read as a picture
+/// pane's is, by a reader of its own: given up on past [`READ_WAIT`], as a
+/// file on a mount gone away would hang, leaving its reader to come back
+/// when it may.
+pub(crate) fn read_in_time(path: PathBuf, most: u64) -> Result<Vec<u8>, String> {
+    let (send, receive) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("image-reader".into())
+        .spawn(move || {
+            let _ = send.send(read_source(Source::File(path), most));
+        })
+        .map_err(|err| format!("couldn't start reading it: {err}"))?;
+    receive
+        .recv_timeout(READ_WAIT)
+        .map_err(|_| "its file took too long to read".to_owned())?
 }
 
 /// What opening a file came to, said as a picture pane says it.
@@ -1145,6 +1336,9 @@ mod tests {
     }
 
     const CHAT: ImageFrom = ImageFrom::Terminal(TerminalId(1));
+
+    /// How long tests wait for the store's thread and readers.
+    const WAIT: Duration = Duration::from_mins(1);
     const OTHER: ImageFrom = ImageFrom::Terminal(TerminalId(2));
 
     #[test]
@@ -1298,7 +1492,7 @@ mod tests {
             ImageAnswer::Scaling
         );
         assert!(store.busy());
-        let (_, ready) = store.take(true);
+        let (_, ready) = store.take(Some(WAIT));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].image, info.id);
         assert_eq!(
@@ -1332,7 +1526,7 @@ mod tests {
         store.insert(CHAT, info, bytes).unwrap();
         let fit = Some([300, 300]);
         assert_eq!(store.fetch(1, CHAT, info.id, fit, 0), ImageAnswer::Scaling);
-        let (_, ready) = store.take(true);
+        let (_, ready) = store.take(Some(WAIT));
         assert_eq!(ready.len(), 1, "those waiting are told");
         for _ in 0..3 {
             assert!(matches!(
@@ -1346,7 +1540,7 @@ mod tests {
         store.keep_copies_within(10);
         let info = kept(&mut store, CHAT, png(1000, 500, 4)).unwrap();
         assert_eq!(store.fetch(1, CHAT, info.id, fit, 0), ImageAnswer::Scaling);
-        let (_, ready) = store.take(true);
+        let (_, ready) = store.take(Some(WAIT));
         assert_eq!(ready.len(), 1);
         let ImageAnswer::Part {
             info: copy, total, ..
@@ -1412,10 +1606,15 @@ mod tests {
             let n = u32::try_from(n).unwrap();
             store.keep(owner, Why::Test(n), source).unwrap();
         }
-        let (kept, _) = store.take(true);
-        let said: Vec<_> = (kept.iter())
+        let (kept, _) = store.take(Some(WAIT));
+        let mut said: Vec<_> = (kept.iter())
             .map(|kept| (kept.why.clone(), kept.kept.clone().map(|info| info.width)))
             .collect();
+        // Read each by a reader of its own, in whatever order.
+        said.sort_by_key(|(why, _)| match why {
+            Why::Test(n) => *n,
+            _ => u32::MAX,
+        });
         assert_eq!(said[0], (Why::Test(0), Ok(3)));
         assert_eq!(said[1], (Why::Test(1), Ok(3)));
         assert!(said[2].1.as_ref().unwrap_err().contains("link"), "{said:?}");
@@ -1429,6 +1628,50 @@ mod tests {
         );
         assert_eq!(said[5].1, Err("there's no such file".into()));
         assert_eq!(said[6].1, Err("it's a folder".into()));
+    }
+
+    /// A file that hangs, as on a mount gone away, holds up neither the
+    /// store's thread nor anything waiting for it: it's given up on in
+    /// its time, or at once before a handover; and only so many wait.
+    #[test]
+    fn a_file_that_hangs_is_given_up_on_and_holds_nothing_up() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store.read_wait = Duration::from_millis(50);
+        store
+            .keep(CHAT, Why::Test(1), Source::Hang(Duration::from_secs(2)))
+            .unwrap();
+        // The thread still keeps what it's sent meanwhile.
+        store
+            .keep(CHAT, Why::Test(2), Source::Bytes(png(2, 2, 1)))
+            .unwrap();
+        let (kept, _) = store.take(Some(Duration::from_millis(500)));
+        let said: Vec<_> = (kept.iter())
+            .map(|kept| (kept.why.clone(), kept.kept.clone().err()))
+            .collect();
+        assert!(said.contains(&(Why::Test(2), None)), "{said:?}");
+        assert!(
+            said.contains(&(Why::Test(1), Some("its file took too long to read".into()))),
+            "{said:?}"
+        );
+        assert!(store.next_due().is_none());
+        // Its time passed, it's given up on as the loop takes what's done.
+        store
+            .keep(CHAT, Why::Test(3), Source::Hang(Duration::from_secs(2)))
+            .unwrap();
+        assert!(store.next_due().is_some());
+        std::thread::sleep(Duration::from_millis(100));
+        let (kept, _) = store.take(None);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].kept.is_err());
+        // Only so many wait their turn.
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        for n in 0..(READERS + READ_QUEUE) {
+            let n = u32::try_from(n).unwrap();
+            let hang = Source::Hang(Duration::from_millis(200));
+            store.keep(CHAT, Why::Test(n), hang).unwrap();
+        }
+        let hang = Source::Hang(Duration::from_millis(200));
+        assert!(store.keep(CHAT, Why::Test(999), hang).is_err());
     }
 
     #[test]
@@ -1446,7 +1689,7 @@ mod tests {
         let (send, receive) = mpsc::channel();
         let path = fifo.clone();
         std::thread::spawn(move || {
-            let _ = send.send(read(Source::File(path), MIB));
+            let _ = send.send(read_source(Source::File(path), MIB));
         });
         let read = receive
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -1484,7 +1727,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (kept, _) = store.take(true);
+        let (kept, _) = store.take(Some(WAIT));
         let info = kept[0].kept.clone().unwrap();
         assert_eq!(
             (info.format, info.width, info.height),
