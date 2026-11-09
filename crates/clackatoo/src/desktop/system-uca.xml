@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE actions [
+  <!ELEMENT actions (action)*>
+  <!ELEMENT action (icon|name|unique-id|command|description|patterns|startup-notify|directories|text-files)*>
+
+  <!ELEMENT icon (#PCDATA)>
+  <!ELEMENT command (#PCDATA)>
+  <!ELEMENT patterns (#PCDATA)>
+
+  <!ELEMENT name (#PCDATA)>
+  <!ATTLIST name xml:lang CDATA #IMPLIED>
+
+  <!ELEMENT description (#PCDATA)>
+  <!ATTLIST description xml:lang CDATA #IMPLIED>
+
+  <!ELEMENT startup-notify EMPTY>
+  <!ELEMENT directories EMPTY>
+  <!ELEMENT text-files EMPTY>
+]>
+
+<!--
+  A system's custom actions, made for clackatoo's tests in the shape of
+  the one Thunar installs: an XML declaration, a document type with its
+  own declarations, this comment, and actions with no ID, one of them
+  named in another language too.
+-->
+
+<actions>
+
+  <action>
+    <icon>utilities-terminal</icon>
+    <patterns>*</patterns>
+    <name>Terminal here</name>
+    <name xml:lang="de">Terminal hier</name>
+    <command>x-terminal-emulator --working-directory %f</command>
+    <description>A terminal in the folder</description>
+    <description xml:lang="de">Ein Terminal im Ordner</description>
+    <startup-notify/>
+    <directories/>
+  </action>
+
+  <action>
+    <icon>edit-find</icon>
+    <patterns>*.txt;*.md</patterns>
+    <name>Count words</name>
+    <command>wc -w %F</command>
+    <description>How many words each file has</description>
+    <text-files/>
+  </action>
+
+</actions>

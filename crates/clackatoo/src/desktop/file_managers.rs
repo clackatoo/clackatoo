@@ -40,6 +40,22 @@ pub(crate) enum FileManager {
 impl FileManager {
     pub(crate) const ALL: [Self; 4] = [Self::Dolphin, Self::Nemo, Self::Thunar, Self::Files];
 
+    /// How it comes to show what's added, if it's running now and doesn't
+    /// see it by itself.
+    pub(crate) fn loads_it(self) -> Option<&'static str> {
+        match self {
+            Self::Dolphin | Self::Nemo => None,
+            Self::Thunar => Some(
+                "Thunar shows it from its next start: `thunar -q` stops one running, as one does \
+                 under `thunar --daemon`. Saving Thunar's custom actions in a window opened before \
+                 then takes it out again.",
+            ),
+            Self::Files => Some(
+                "GNOME Files shows it from its next start: `nautilus -q` stops the one running.",
+            ),
+        }
+    }
+
     /// Its name, to say what was added.
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -296,7 +312,16 @@ pub(crate) fn remove(places: &Places, force: bool) -> anyhow::Result<(Vec<PathBu
         Ok(text) => match Uca::read(&text) {
             Ok(uca) if uca.ours.is_empty() => {}
             Ok(uca) => {
-                write(&path, &uca.without_ours())?;
+                let kept = uca.without_ours();
+                // All that's left is what clackatoo started the file with:
+                // without it, Thunar shows the system's actions again.
+                let system = system_uca(places).and_then(|(_, text)| text.ok());
+                if kept == UCA_EMPTY || system.is_some_and(|system| kept == system) {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("couldn't remove {}", path.display()))?;
+                } else {
+                    write(&path, &kept)?;
+                }
                 removed.push(path);
             }
             Err(why) => left.push(format!(
@@ -341,8 +366,15 @@ fn dolphin(program: &str) -> String {
          Name={LABEL}\n\
          Icon=clackatoo\n\
          Exec={exec} open -- %F\n",
-        mime_types()
+        folders_and_text()
     )
+}
+
+/// The kinds of file the hooks are offered for: folders, which the desktop
+/// entry doesn't claim, so that the desktop never opens folders with
+/// clackatoo, and the kinds of text it does.
+fn folders_and_text() -> String {
+    format!("inode/directory;{}", mime_types())
 }
 
 /// Which of Nemo's two actions.
@@ -363,8 +395,8 @@ enum Nemo {
 fn nemo(program: &str, which: Nemo) -> String {
     let program = escape_value(&single_quoted(program).replace('%', "%%"));
     let (selection, mime, paths) = match which {
-        Nemo::Selected => ("notnone", mime_types(), "%F"),
-        Nemo::Here => ("none", "inode/directory;", "%P"),
+        Nemo::Selected => ("notnone", folders_and_text(), "%F"),
+        Nemo::Here => ("none", "inode/directory;".to_owned(), "%P"),
     };
     format!(
         "[Nemo Action]\n\
@@ -492,7 +524,8 @@ const UCA_ID: &str = "clackatoo-open";
 /// with `sh -c`, having put each path in `%F` in single quotes
 /// (`g_shell_quote`), so the program is quoted alike; Thunar takes `%%`
 /// for a `%`. It's offered for folders, the folder shown among them, and
-/// text files.
+/// text files. Thunar starts it as it would an app that reports its
+/// startup, giving it a token for the window to take the focus with.
 fn thunar_action(program: &str) -> String {
     let command = format!("{} open -- %F", single_quoted(program).replace('%', "%%"));
     format!(
@@ -505,6 +538,7 @@ fn thunar_action(program: &str) -> String {
          \t<description>{DESCRIPTION}</description>\n\
          \t<range></range>\n\
          \t<patterns>*</patterns>\n\
+         \t<startup-notify/>\n\
          \t<directories/>\n\
          \t<text-files/>\n\
          </action>\n",
@@ -531,11 +565,25 @@ fn xml_escaped(text: &str) -> String {
 /// What a new `uca.xml` holds before clackatoo's action is added.
 const UCA_EMPTY: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<actions>\n</actions>\n";
 
+/// The system's `uca.xml`, which Thunar shows while the user has none of
+/// their own: the first in `$XDG_CONFIG_DIRS` that's there, and what's in
+/// it, if it can be read.
+fn system_uca(places: &Places) -> Option<(PathBuf, io::Result<String>)> {
+    (places.system_config.iter())
+        .map(|dir| dir.join("Thunar/uca.xml"))
+        .find(|path| path.exists())
+        .map(|path| {
+            let text = fs::read_to_string(&path);
+            (path, text)
+        })
+}
+
 /// Adds clackatoo's action to Thunar's `uca.xml`, starting `program`, in
 /// place of any it has; returns the file if it changed it, or why it
 /// couldn't. With no file of the user's own, Thunar shows the actions in
 /// the system's (`/etc/xdg/Thunar/uca.xml`), which theirs would hide, so
-/// theirs starts as a copy of that.
+/// theirs starts as a copy of that; if that can't be read, none is
+/// written.
 fn add_to_thunar(
     places: &Places,
     program: &str,
@@ -543,10 +591,21 @@ fn add_to_thunar(
     let path = places.thunar();
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => (places.system_config.iter())
-            .find_map(|dir| fs::read_to_string(dir.join("Thunar/uca.xml")).ok())
-            .filter(|text| Uca::read(text).is_ok())
-            .unwrap_or_else(|| UCA_EMPTY.to_owned()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => match system_uca(places) {
+            None => UCA_EMPTY.to_owned(),
+            Some((_, Ok(text))) if Uca::read(&text).is_ok() => text,
+            Some((system, read)) => {
+                let why = match read {
+                    Ok(text) => Uca::read(&text).err().unwrap_or_default(),
+                    Err(err) => err.to_string(),
+                };
+                return Ok(Err(format!(
+                    "Thunar's actions in {} couldn't be read ({why}), and a file of your own \
+                     would hide them, so clackatoo added none to Thunar",
+                    system.display()
+                )));
+            }
+        },
         Err(err) if err.kind() == io::ErrorKind::InvalidData => {
             return Ok(Err(format!(
                 "Thunar's {} isn't UTF-8, so clackatoo left it as it is",
@@ -576,10 +635,68 @@ fn add_to_thunar(
     Ok(Ok(Some(path)))
 }
 
+/// `text` with what isn't markup clackatoo reads put out of the way, so
+/// that what's in it isn't taken for actions: the XML declaration and
+/// other processing instructions, the document type with its own
+/// declarations, comments and character data sections, each byte made a
+/// space, but for line breaks. So a place in what's returned is the same
+/// place in `text`. Something else beginning `<!`, or one that doesn't
+/// end, means the file isn't one clackatoo can be sure of.
+fn masked(text: &str) -> Result<String, String> {
+    let mut bytes = text.as_bytes().to_vec();
+    let mut at = 0;
+    while let Some(found) = text[at..].find('<') {
+        let start = at + found;
+        let rest = &text[start..];
+        let end = if rest.starts_with("<!--") {
+            rest.find("-->").map(|end| end + "-->".len())
+        } else if rest.starts_with("<![CDATA[") {
+            rest.find("]]>").map(|end| end + "]]>".len())
+        } else if rest.starts_with("<?") {
+            rest.find("?>").map(|end| end + "?>".len())
+        } else if rest.starts_with("<!DOCTYPE") {
+            doctype_end(rest)
+        } else if rest.starts_with("<!") {
+            return Err("it has markup clackatoo doesn't read".to_owned());
+        } else {
+            at = start + 1;
+            continue;
+        };
+        let end = start + end.ok_or("something in it doesn't end")?;
+        for byte in &mut bytes[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        at = end;
+    }
+    String::from_utf8(bytes).map_err(|_| "it isn't UTF-8".to_owned())
+}
+
+/// Where the document type declaration at the start of `text` ends, past
+/// its own declarations in brackets, if it has them.
+fn doctype_end(text: &str) -> Option<usize> {
+    let open = text.find(['[', '>'])?;
+    if text.as_bytes()[open] == b'>' {
+        return Some(open + 1);
+    }
+    let mut at = open;
+    loop {
+        at += text[at..].find(']')? + 1;
+        let after = &text[at..];
+        let spaces = after.len() - after.trim_start().len();
+        if after.trim_start().starts_with('>') {
+            return Some(at + spaces + 1);
+        }
+    }
+}
+
 /// Thunar's `uca.xml`, read only as far as needed to find clackatoo's
 /// action and where another goes: so that what isn't clackatoo's is kept
-/// byte for byte. Anything that could make that reading wrong, such as a
-/// comment, isn't read at all; Thunar itself never writes one.
+/// byte for byte, comments and the document type among it, as the file
+/// Thunar installs has. If anything else could make that reading wrong,
+/// such as an action with attributes, or one inside another, the file
+/// isn't read at all.
 struct Uca<'a> {
     text: &'a str,
     /// Where `</actions>` begins.
@@ -591,20 +708,11 @@ struct Uca<'a> {
 
 impl<'a> Uca<'a> {
     fn read(text: &'a str) -> Result<Self, String> {
-        for unread in ["<!--", "<![CDATA[", "<!DOCTYPE", "<!ENTITY"] {
-            if text.contains(unread) {
-                return Err(format!("it has {unread}, which clackatoo doesn't read"));
-            }
-        }
+        let original = text;
+        // Read past comments and the like, keeping where everything is.
+        let masked = masked(text)?;
+        let text = masked.as_str();
         let body = text.trim_start();
-        let body = match body.strip_prefix("<?xml") {
-            Some(rest) => rest
-                .split_once("?>")
-                .ok_or("its XML declaration doesn't end")?
-                .1
-                .trim_start(),
-            None => body,
-        };
         if !body.starts_with("<actions>") || text.matches("<actions").count() != 1 {
             return Err("it isn't a list of actions".to_owned());
         }
@@ -654,7 +762,11 @@ impl<'a> Uca<'a> {
             }
             ours.push((start, finish));
         }
-        Ok(Self { text, end, ours })
+        Ok(Self {
+            text: original,
+            end,
+            ours,
+        })
     }
 
     /// The file without clackatoo's actions.
@@ -753,7 +865,9 @@ mod tests {
         assert!(added.not.is_empty());
         let dolphin = read(&places.dolphin());
         assert_eq!(values(&dolphin, "Exec"), [format!("{PROGRAM} open -- %F")]);
-        assert_eq!(values(&dolphin, "MimeType"), [mime_types()]);
+        // Offered for folders, which the desktop entry doesn't claim.
+        assert_eq!(values(&dolphin, "MimeType"), [folders_and_text()]);
+        assert!(folders_and_text().starts_with("inode/directory;text/plain;"));
         assert!(is_ours(&dolphin));
         // Dolphin runs only service menus a user can run.
         let mode = fs::metadata(places.dolphin()).unwrap().permissions().mode();
@@ -784,12 +898,10 @@ mod tests {
         let (removed, left) = remove(&places, false).unwrap();
         assert_eq!(removed.len(), 5, "{removed:?}");
         assert!(left.is_empty());
+        // Thunar's file, which clackatoo made, goes too.
         assert_eq!(
             snapshot(home.path()),
-            [
-                (places.thunar(), UCA_EMPTY.as_bytes().to_vec()),
-                (mine.clone(), b"[Nemo Action]\nName=Mine\n".to_vec()),
-            ]
+            [(mine.clone(), b"[Nemo Action]\nName=Mine\n".to_vec())]
         );
         // Nothing left of clackatoo's: nothing to do.
         assert_eq!(remove(&places, false).unwrap(), (vec![], vec![]));
@@ -886,15 +998,72 @@ mod tests {
 
         assert!(read(&places.thunar()).contains("Open Terminal Here"));
         assert!(read(&places.thunar()).contains(UCA_ID));
+        // With clackatoo's taken out, it's the system's again, so it goes,
+        // and Thunar shows the system's as before.
         remove(&places, false).unwrap();
-        assert_eq!(read(&places.thunar()), USERS_UCA);
+        assert!(!places.thunar().exists());
         assert_eq!(read(&system), USERS_UCA);
+    }
+
+    /// A system's actions, installed as `/etc/xdg/Thunar/uca.xml`, in the
+    /// shape of the file Thunar installs: a document type with its own
+    /// declarations, a comment, actions with no ID, and names in another
+    /// language too.
+    const SYSTEM_UCA: &str = include_str!("system-uca.xml");
+
+    #[test]
+    fn thunars_system_actions_are_read_and_kept_comments_and_all() {
+        let (_home, places) = setup();
+        let system = places.system_config[0].join("Thunar/uca.xml");
+        write(&system, SYSTEM_UCA).unwrap();
+
+        let added = install(&places, PROGRAM, &[FileManager::Thunar]).unwrap();
+
+        assert_eq!(added.to, [FileManager::Thunar], "{:?}", added.not);
+        let seeded = read(&places.thunar());
+        let before = SYSTEM_UCA.len() - "</actions>\n".len();
+        assert!(seeded.starts_with(&SYSTEM_UCA[..before]), "{seeded}");
+        assert!(seeded.ends_with(&format!("{}</actions>\n", thunar_action(PROGRAM))));
+        // Installing again finds it there, and changes nothing.
+        let again = install(&places, PROGRAM, &[FileManager::Thunar]).unwrap();
+        assert!(again.written.is_empty());
+        assert_eq!(read(&places.thunar()), seeded);
+
+        // The user's own file, comments and document type kept.
+        let theirs = SYSTEM_UCA.replace("Terminal here", "My terminal");
+        write(&places.thunar(), &theirs).unwrap();
+        install(&places, PROGRAM, &[FileManager::Thunar]).unwrap();
+        remove(&places, false).unwrap();
+        assert_eq!(read(&places.thunar()), theirs);
+
+        // The system's, taken back out: the file goes.
+        write(&places.thunar(), &seeded).unwrap();
+        remove(&places, false).unwrap();
+        assert!(!places.thunar().exists());
+    }
+
+    #[test]
+    fn with_system_actions_it_cant_read_nothing_is_written_that_would_hide_them() {
+        let (_home, places) = setup();
+        let system = places.system_config[0].join("Thunar/uca.xml");
+        let odd = SYSTEM_UCA.replace("<action>", "<action id=\"1\">");
+        write(&system, &odd).unwrap();
+
+        let added = install(&places, PROGRAM, &[FileManager::Thunar]).unwrap();
+
+        assert!(added.to.is_empty());
+        assert_eq!(added.not.len(), 1);
+        assert!(added.not[0].contains("hide"), "{}", added.not[0]);
+        assert!(!places.thunar().exists());
+        assert_eq!(read(&system), odd);
     }
 
     #[test]
     fn a_uca_xml_clackatoo_cant_be_sure_of_is_left_as_it_is() {
         for odd in [
-            USERS_UCA.replace("<actions>\n", "<actions>\n<!-- mine -->\n"),
+            USERS_UCA.replace("<actions>\n", "<actions>\n<!-- mine\n"),
+            USERS_UCA.replace("<actions>\n", "<actions>\n<!ENTITY x \"y\">\n"),
+            USERS_UCA.replace("<action>\n", "<action>\n<action>\n"),
             USERS_UCA.replace("<action>", "<action id=\"1\">"),
             USERS_UCA.replace("</actions>\n", ""),
             "<toolbar></toolbar>\n".to_owned(),

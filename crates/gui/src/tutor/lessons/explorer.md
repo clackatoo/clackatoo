@@ -205,7 +205,7 @@ The wheel scrolls the pane under the pointer. Over a window bar, it scrolls the 
 
 `x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `Q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.
 
-Your desktop's file manager opens files here too: "Open With" clackatoo, or "Open in clackatoo" in its menu, opens each folder in a new terminal tab, in the folder, and each text file in a new editor tab, in the window you used last, which comes to the front. `clackatoo desktop install` sets it up; run it again after installing a file manager.
+Your desktop's file manager opens files here too: "Open in clackatoo" in its menu, or "Open With" clackatoo, opens each folder in a new terminal tab, in the folder, and each text file in a new editor tab, in the window you used last, which comes to the front. `clackatoo desktop install` sets it up; run it again after installing a file manager.
 
 Beside each file is what git says of it: `M` changed, `A` added, `?` untracked, `D` deleted, `!` in conflict. The daemon watches the folders open in the tree, so a file a terminal or an agent makes shows at once.
 

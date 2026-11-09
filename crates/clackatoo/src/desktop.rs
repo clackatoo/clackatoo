@@ -27,17 +27,21 @@
 //! window rewrites the entry when the machines connected to recently
 //! change (`desktop refresh-hosts`), if clackatoo wrote it.
 //!
-//! The entry says which kinds of file clackatoo opens (`MimeType`):
-//! folders, plain text, and the commonest kinds of source and data that
-//! are text, so file managers offer it in "Open With", and its `Exec` takes
-//! them (`clackatoo open -- %F`): a folder in a new terminal tab, a file
-//! in a new editor tab (see `open_paths` in `main.rs`). Started from the
-//! launcher, with no files, it opens a window. A window's `refresh-hosts`
-//! leaves both out of an entry that lacks them, as with `StartupNotify`,
-//! as the program it starts may have no `open`.
+//! The entry says which kinds of file clackatoo opens (`MimeType`): plain
+//! text, and the commonest kinds of source and data that are text, so file
+//! managers offer it in "Open With", and its `Exec` takes them (`clackatoo
+//! open -- %F`): a file in a new editor tab, and a folder, from a file
+//! manager that offers every app, in a new terminal tab (see `open_paths`
+//! in `main.rs`). It never claims folders (`inode/directory`): a desktop
+//! with no file manager set to open them would open every folder with
+//! clackatoo, `xdg-open` included. Started from the launcher, with no
+//! files, it opens a window. A window's `refresh-hosts` leaves both out of
+//! an entry that lacks them, as with `StartupNotify`, as the program it
+//! starts may have no `open`.
 //!
 //! `install` also adds "Open in clackatoo" to the menus of the file
-//! managers installed, which `remove` takes away (see `file_managers`).
+//! managers installed, for folders as well as text, which `remove` takes
+//! away (see `file_managers`).
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -126,13 +130,6 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
                             them(&theirs)
                         ),
                     }
-                    if opens_folders() {
-                        println!(
-                            "no file manager is set to open folders, so your desktop now opens them \
-                             with clackatoo; `xdg-mime default <its .desktop file> inode/directory` \
-                             sets one, such as org.gnome.Nautilus.desktop"
-                        );
-                    }
                     Ok(())
                 }
                 Outcome::Refused(theirs) => anyhow::bail!(
@@ -144,35 +141,42 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
                 ),
             }
         }
-        DesktopCommand::Remove { force } => match remove(&paths, force)? {
-            Outcome::Done(mut removed) => {
-                let (unhooked, left) = file_managers::remove(&places(&data)?, force)?;
-                for why in &left {
-                    eprintln!("clackatoo: {why}");
-                }
-                if removed.is_empty() && unhooked.is_empty() {
-                    println!("clackatoo isn't in the app launcher");
-                    return Ok(());
-                }
-                removed.extend(unhooked);
-                update_caches(&paths);
-                let removed: Vec<String> = (removed.iter())
-                    .map(|path| path.display().to_string())
-                    .collect();
-                println!(
-                    "took clackatoo out of the app launcher and file managers: removed or \
-                     changed {}",
-                    removed.join(", ")
-                );
-                Ok(())
+        DesktopCommand::Remove { force } => {
+            // File managers' menus are clackatoo's own whoever wrote the
+            // entry, so they go either way.
+            let (unhooked, left) = file_managers::remove(&places(&data)?, force)?;
+            for why in &left {
+                eprintln!("clackatoo: {why}");
             }
-            Outcome::Refused(theirs) => anyhow::bail!(
-                "{} clackatoo's, so nothing was removed; `clackatoo desktop remove --force` \
-                 removes {}",
-                are_not(&theirs),
-                them(&theirs)
-            ),
-        },
+            if !unhooked.is_empty() {
+                println!(
+                    "took \"Open in clackatoo\" out of file managers: removed or changed {}",
+                    listed(&unhooked)
+                );
+            }
+            match remove(&paths, force)? {
+                Outcome::Done(removed) if removed.is_empty() => {
+                    if unhooked.is_empty() {
+                        println!("clackatoo isn't in the app launcher");
+                    }
+                    Ok(())
+                }
+                Outcome::Done(removed) => {
+                    update_caches(&paths);
+                    println!(
+                        "took clackatoo out of the app launcher: removed {}",
+                        listed(&removed)
+                    );
+                    Ok(())
+                }
+                Outcome::Refused(theirs) => anyhow::bail!(
+                    "{} clackatoo's, so it was left in the app launcher; `clackatoo desktop \
+                     remove --force` removes {}",
+                    are_not(&theirs),
+                    them(&theirs)
+                ),
+            }
+        }
         DesktopCommand::Refresh => {
             let program = program()?;
             if refresh(&paths, &program, &hosts)? {
@@ -214,39 +218,35 @@ fn hook(
     )?))
 }
 
-/// Says what was added to file managers.
+/// `paths`, for a sentence.
+fn listed(paths: &[PathBuf]) -> String {
+    let names: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    names.join(", ")
+}
+
+/// Says what was added to file managers, and how each that's running now
+/// comes to show it.
 fn say_hooked(added: &file_managers::Added) {
     if !added.to.is_empty() {
         let names: Vec<&str> = added.to.iter().map(|manager| manager.name()).collect();
-        let files: Vec<String> = (added.written.iter())
-            .map(|path| path.display().to_string())
-            .collect();
-        let wrote = if files.is_empty() {
+        let wrote = if added.written.is_empty() {
             String::new()
         } else {
-            format!(": wrote {}", files.join(", "))
+            format!(": wrote {}", listed(&added.written))
         };
-        println!(
-            "added \"Open in clackatoo\" to {}{wrote}; a file manager open now shows it once \
-             it's opened again",
-            names.join(", ")
-        );
+        println!("added \"Open in clackatoo\" to {}{wrote}", names.join(", "));
+    }
+    for manager in &added.to {
+        if let Some(how) = manager.loads_it() {
+            println!("{how}");
+        }
     }
     for why in &added.not {
         eprintln!("clackatoo: {why}");
     }
-}
-
-/// Whether the desktop opens folders with clackatoo, as it does once the
-/// entry offers to if no file manager is set to (in `mimeapps.list`), as
-/// `xdg-mime` asks. Not if it can't tell.
-fn opens_folders() -> bool {
-    Command::new("xdg-mime")
-        .args(["query", "default", "inode/directory"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "clackatoo.desktop")
 }
 
 /// Where file managers' hooks go, beside the entry in `data`.
@@ -1114,12 +1114,14 @@ mod tests {
         assert_eq!(read(&paths.entry()), HANDMADE);
     }
 
-    /// File managers offer clackatoo for folders and kinds of text, and
-    /// never for a kind that isn't text, which it would show as garbage.
+    /// File managers offer clackatoo for kinds of text, and never for a
+    /// kind that isn't text, which it would show as garbage; nor does it
+    /// claim folders, which the desktop would then open with it.
     #[test]
-    fn the_entry_opens_folders_and_text_and_nothing_else() {
+    fn the_entry_opens_text_and_never_claims_folders() {
         let kinds: Vec<&str> = mime_types().strip_suffix(';').unwrap().split(';').collect();
-        assert_eq!(kinds[..2], ["inode/directory", "text/plain"]);
+        assert_eq!(kinds[0], "text/plain");
+        assert!(!mime_types().contains("inode/"));
         let text_like = [
             "application/javascript",
             "application/json",
@@ -1128,7 +1130,7 @@ mod tests {
             "application/toml",
             "application/x-shellscript",
         ];
-        for kind in &kinds[1..] {
+        for kind in &kinds {
             assert!(
                 kind.starts_with("text/") || text_like.contains(kind),
                 "{kind} may not be text"
@@ -1163,6 +1165,7 @@ mod tests {
         assert!(refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
         let updated = read(&paths.entry());
         assert_eq!(values(&updated, "MimeType"), [mime_types()]);
+        assert!(!updated.contains("inode/directory"));
         assert_eq!(values(&updated, "Exec")[0], format!("{PROGRAM} open -- %F"));
     }
 
