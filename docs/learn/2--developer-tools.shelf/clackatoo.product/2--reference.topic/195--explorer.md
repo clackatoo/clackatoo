@@ -18,6 +18,7 @@ A file explorer is a pane showing a folder, its root, as a tree. The daemon list
 | `:Explore`, `:Ex` | Opens one, or goes to it. |
 | `:Explore DIR` | The same, with `DIR` as its root. A relative `DIR` is from the root, and `~/` is your home directory. |
 | `:e` | With nothing after it: opens one at the folder you're in, or roots the tab's there, beside an empty file with no name yet (see [the editor](~clackatoo/reference/editor#opening-a-file)). |
+| `clackatoo files [DIR]` | From a shell: opens one at `DIR`, or the current directory, in a new tab (see [the clackatoo command](~clackatoo/reference/cli#files)). |
 
 Its root is the project the focused pane is in: the git repository of an editor's file or of the folder a terminal is in, or else that folder. Opened from an editor, the tree opens down to the editor's file, with the cursor on it. `:e` alone roots it at the folder you're in, not the project.
 

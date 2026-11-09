@@ -1301,6 +1301,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Click ↗ on a command's card, or go on it, to read what it printed in a terminal below the chat, colours and all",
     },
+    News {
+        id: "files-cli",
+        date: "2026-11-09",
+        lesson: "explorer",
+        what: "clackatoo files [DIR] opens a folder in an explorer, in a new tab, from a shell",
+    },
 ];
 
 impl News {

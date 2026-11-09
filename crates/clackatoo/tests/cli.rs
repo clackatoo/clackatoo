@@ -446,6 +446,81 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
 }
 
 #[test]
+fn files_shows_a_folder_in_an_explorer_and_the_current_one_with_no_path() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{Event, FilesUpdate, Request, Response};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("notes.txt"), "").unwrap();
+    let files = |args: &[&str]| {
+        Command::new(BINARY)
+            .env("CLACKATOO_WORKSPACES", "off")
+            .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
+            .arg("files")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .current_dir(project.path())
+            .output()
+            .expect("clackatoo runs")
+    };
+    let made = files(&["src"]);
+    assert!(made.status.success(), "{made:?}");
+    let made = files(&[]);
+    assert!(made.status.success(), "{made:?}");
+    // A file isn't a folder to show, and no pane is made for it.
+    let refused = files(&["notes.txt"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("isn't a directory"),
+        "{refused:?}"
+    );
+
+    let mut client = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    // Trees, not an editor's folder listings.
+    let explorers: Vec<_> = (workspaces.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .filter(|pane| !pane.content.is_folder())
+        .filter_map(|pane| pane.content.files())
+        .collect();
+    assert_eq!(explorers.len(), 2, "{workspaces:?}");
+    let mut roots = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for files in explorers {
+        let attached = client
+            .request(&Request::AttachFiles {
+                files,
+                changes: false,
+            })
+            .unwrap();
+        assert_eq!(attached, Response::Done);
+        loop {
+            if let Event::Files {
+                update: FilesUpdate::Root { path, .. },
+                ..
+            } = client.next_event().unwrap()
+            {
+                roots.push(std::path::PathBuf::from(path));
+                break;
+            }
+        }
+    }
+    let real = project.path().canonicalize().unwrap();
+    assert_eq!(roots, [real.join("src"), real]);
+    drop(runtime);
+    wait(daemon);
+}
+
+#[test]
 fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
     let home = tempfile::tempdir().unwrap();
     let password = |input: &str| {

@@ -26,7 +26,8 @@ use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
 use clackatoo_protocol::{
-    NewTerminal, OpenFile, PaneId, PaneTerminal, Request, Response, Size, TerminalId,
+    NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal, Request, Response, Size,
+    TerminalId,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -153,6 +154,9 @@ enum Command {
     /// brings to the front. With no window open, one opens on them. With
     /// no paths, opens a window, as `clackatoo` alone does.
     Open(Open),
+    /// Browse a folder in a file explorer, as a tree, in a new tab of the
+    /// workspace last used.
+    Files(Files),
     /// Type a command into a terminal and press Enter.
     Run(Run),
     /// Start a command in a new background tab of a workspace, where it
@@ -444,6 +448,17 @@ struct Open {
 }
 
 #[derive(Debug, Args)]
+struct Files {
+    /// The folder. A relative path is from the current directory, which
+    /// is the folder shown if there's none; one starting `~` is from the
+    /// home directory of the daemon's machine.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+#[derive(Debug, Args)]
 struct Ping {
     /// How many rounds to time.
     #[arg(short, long, default_value_t = 10)]
@@ -551,6 +566,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         ),
         Command::Edit(edit) => edit_file(edit),
         Command::Open(open) => open_paths(&open),
+        Command::Files(files) => explore(files),
         Command::Language(command) => language::run(command),
         Command::Desktop(command) => desktop::run(command),
         Command::Web(command) => web::run(&command),
@@ -948,6 +964,24 @@ fn edit_file(edit: Edit) -> anyhow::Result<()> {
     });
     let mut client = connect(&edit.connection)?;
     let pane = new_tabs(&mut client, vec![file])?;
+    client.focus(pane)?;
+    Ok(())
+}
+
+fn explore(files: Files) -> anyhow::Result<()> {
+    // `~` is the daemon's home, which may be on another machine, so it's
+    // left to the daemon; the rest is from here.
+    let dir = if files.path.starts_with("~") {
+        files.path
+    } else {
+        let cwd = std::env::current_dir().context("could not read the current directory")?;
+        cwd.join(files.path)
+    };
+    let explorer = PaneTerminal::Files(OpenFiles {
+        dir: Some(path_string(dir, "the path")?),
+    });
+    let mut client = connect(&files.connection)?;
+    let pane = new_tabs(&mut client, vec![explorer])?;
     client.focus(pane)?;
     Ok(())
 }
