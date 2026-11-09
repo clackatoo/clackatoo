@@ -290,6 +290,36 @@ mod tests {
     }
 
     #[test]
+    fn kept_lines_come_back_in_the_columns_they_had_by_the_terminals_rules() {
+        // An emoji VS16 widens, one at the edge it couldn't, and a ZWJ
+        // sequence, then text after each.
+        let output = "\u{2764}\u{FE0F}x\r\n\x1b[20G\u{2764}\u{FE0F}\r\n\u{1F469}\u{200D}\u{1F4BB}y\r\n\r\n\r\n\r\n";
+        let old = terminal(output);
+        assert!(Config::default().widths.vs16);
+        let cells = |row: &Row| -> Vec<(String, bool)> {
+            (0..row.width())
+                .map(|col| {
+                    let mut text = String::new();
+                    row.push_text(col, &mut text);
+                    (text, row.cells()[col].is_wide())
+                })
+                .collect()
+        };
+        let before: Vec<_> = (old.primary().scrollback_lines(0..3))
+            .map(|(_, row)| cells(&row))
+            .collect();
+        let kept = old.copy_to_keep(100).lines(Keeping::default(), usize::MAX);
+        let history = kept.history(&Config::default(), "--").unwrap();
+        let mut new = terminal("");
+        new.take_kept_history(history, 0);
+        let after: Vec<_> = (new.primary().scrollback_lines(0..3))
+            .map(|(_, row)| cells(&row))
+            .collect();
+        assert_eq!(after, before);
+        assert!(before[0][0].1, "widened");
+    }
+
+    #[test]
     fn lines_never_written_become_one_placeholder_and_other_hints_stay() {
         let mut old = terminal("a\r\npw1\r\npw2\r\nb\r\nc\r\nd\r\ne");
         old.add_hints(1..3, Hints::NOSAVE | Hints::NOAGENT);
