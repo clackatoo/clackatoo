@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026.11.13 (2026-11-09)
+
+### Fixes
+
+- **daemon:** read ignore files bounded, never through links, pipes or devices (a06526d7)
+- **daemon:** make a save's new file exclusively, at a name no one can guess (d67f3725)
+- **daemon:** open a buffer's file without waiting, and only if it's regular (cbc05be0)
+- **daemon:** find and run language servers only through PATH's absolute directories (29537c3c)
+- **gui:** count Markdown nesting without overflowing (a63a7872)
+- **gui:** ask before opening a link that isn't a plain web link (4a8affce)
+- **daemon:** read ignore files as git does, bounded, from where a walk really is (bcb4cb79)
+- **daemon:** look at a file before opening it, and read a said-empty file only so far (eae12108)
+- **daemon:** keep a save's new file's name within NAME_MAX (daa1e47a)
+- **daemon:** never give a child an empty PATH, and say so for agents (f9299f89)
+- **daemon:** an agent's write can't follow a link out of its project into a new folder (236c9cc9)
+- **gui:** show a link's hidden characters by the daemon's own list, and ask for mailto with % (0e4b308d)
+- **gui:** a link's question shows its target whole, and only a key pressed for it answers (8022bf50)
+- **daemon:** bound the ignore files a walk reads, and keep what's compiled for the next (d214e715)
+- **daemon:** reach agents' files from the project's root without links, and open only what was looked at (ba534874)
+- **gui:** show a link's target in ASCII alone, and open it only once it was drawn whole (f50cf945)
+- **daemon:** ask language servers to stop before waiting on the disk (94c2adf7)
+- **daemon:** write the known machines as the daemon stops only if they changed (cc4a1722)
+- **links:** say why the daemon there stopped, not the reset after it (76b399e8)
+- **daemon:** give the boards and recovery files their time before the disk waits (58a9296a)
+- **links:** write the keys learned once the connections' threads have ended (86ad376f)
+- **links:** only a machine's own key puts a connection in its place (795622b9)
+- **window:** hide what's typed for every ssh question but ssh's own about a new host (722cea84)
+- **known:** know so many machines' keys, and never set the file aside for its size (96b72696)
+- **relay:** look at another daemon's listening ports only so far (f2e540e7)
+- **links:** a connection keeps its machine, and proves a machine passed on by its vouched key (6b4884ad)
+- **known:** never replace a key known, and never turn a met key away for room (b631dfd1)
+- **links:** unproved claims stay unproved through upgrades, and give way only to the user's own (14c5ee94)
+
 ## 2026.11.12 (2026-11-08)
 
 ### Fixes
