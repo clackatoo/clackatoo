@@ -1070,7 +1070,7 @@ impl SettingsMenu {
         let Some(Editing::Font(fonts)) = &mut self.editing else {
             return;
         };
-        installed.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        installed.sort_by_key(|(family, _)| family.to_lowercase());
         installed.dedup_by(|a, b| a.0 == b.0);
         fonts.installed = Some(installed);
         fonts.fill(font);
@@ -1806,12 +1806,14 @@ mod tests {
 
     #[test]
     fn the_font_picker_lists_monospace_families_and_tab_lists_them_all() {
-        let mut fonts = FontPicker::default();
-        fonts.installed = Some(vec![
-            ("Mono A".to_owned(), true),
-            ("Sans B".to_owned(), false),
-            ("Serif C".to_owned(), false),
-        ]);
+        let mut fonts = FontPicker {
+            installed: Some(vec![
+                ("Mono A".to_owned(), true),
+                ("Sans B".to_owned(), false),
+                ("Serif C".to_owned(), false),
+            ]),
+            ..FontPicker::default()
+        };
         fonts.fill("Serif C");
         // The one in use is listed whatever it is, and picked.
         assert_eq!(fonts.families, ["Mono A", "Serif C"]);
@@ -1822,6 +1824,16 @@ mod tests {
         assert_eq!(fonts.picked().as_deref(), Some(""));
     }
 
+    fn facts<'a>(store: &'a Store, keys: &'a Keys) -> Facts<'a> {
+        Facts {
+            store,
+            window: 1,
+            keys,
+            dir: None,
+            automating: false,
+        }
+    }
+
     #[test]
     fn keys_are_taken_out_only_if_settings_lua_bound_them_in_every_mode() {
         let store = Store::default();
@@ -1830,15 +1842,6 @@ mod tests {
         let both = parse_modes("ni").unwrap();
         keys.bind(&both, &alt_t, Binding::Keys(parse_keys("x").unwrap()), None);
         keys.set_by(&both, &alt_t, &SetBy::SAVED);
-        fn facts<'a>(store: &'a Store, keys: &'a Keys) -> Facts<'a> {
-            Facts {
-                store,
-                window: 1,
-                keys,
-                dir: None,
-                automating: false,
-            }
-        }
         let mut menu = SettingsMenu::new("<A-t>", Case::default(), &facts(&store, &keys), 0);
         assert!(
             menu.picked()
