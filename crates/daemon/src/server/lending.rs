@@ -314,9 +314,10 @@ impl Daemon {
     }
 
     /// Refuses `request`, from the client at `token`, if it's about a
-    /// terminal, chat, pane, tab or workspace lent to another machine's
-    /// daemon than the client's, as if there were no such thing: no client
-    /// but that daemon may have one.
+    /// terminal, chat, pane, tab, workspace, buffer or picture lent to
+    /// another machine's daemon than the client's, as if there were no
+    /// such thing: no client but that daemon may have one.
+    #[allow(clippy::too_many_lines, reason = "a kind of request each")]
     pub(super) fn refuse_lent(&self, token: Token, request: &Request) -> Result<(), Error> {
         let terminal = |id: TerminalId| {
             if self.may_have(token, self.terminal_lent_to(id), true) {
@@ -348,20 +349,13 @@ impl Daemon {
         };
         // A buffer or a picture may be had if a pane the client may have
         // shows it, or none shows it.
-        let shown = |content: Content, refused: Error| {
-            let lents = self.workspaces.lents_showing(content);
-            if lents.is_empty() || lents.iter().any(|&lent| self.may_have(token, lent, true)) {
-                Ok(())
-            } else {
-                Err(refused)
-            }
-        };
         let picture = |id: clackatoo_protocol::PictureId| {
             let refused = Error::Other("there's no such picture".into());
-            shown(Content::Picture(id), refused)
+            self.may_have_shown(token, Content::Picture(id), refused)
         };
-        let buffer =
-            |id: clackatoo_protocol::BufferId| shown(Content::Buffer(id), Error::NoSuchBuffer(id));
+        let buffer = |id: clackatoo_protocol::BufferId| {
+            self.may_have_shown(token, Content::Buffer(id), Error::NoSuchBuffer(id))
+        };
         // Nothing's lent, as nearly always: nothing to look at.
         if !self.workspaces.has_lent() {
             return Ok(());
@@ -435,6 +429,18 @@ impl Daemon {
             }
             | Request::ImageAt { buffer: id, .. } => buffer(id),
             _ => Ok(()),
+        }
+    }
+
+    /// Refuses the client at `token` a buffer's or a picture's `content`,
+    /// as `refused` says, unless a pane it may have shows it, or none
+    /// does.
+    fn may_have_shown(&self, token: Token, content: Content, refused: Error) -> Result<(), Error> {
+        let lents = self.workspaces.lents_showing(content);
+        if lents.is_empty() || lents.iter().any(|&lent| self.may_have(token, lent, true)) {
+            Ok(())
+        } else {
+            Err(refused)
         }
     }
 

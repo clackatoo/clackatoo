@@ -1330,6 +1330,7 @@ pub(crate) fn look_at(bytes: &[u8]) -> Result<(ImageFormat, u32, u32), String> {
 }
 
 /// The ID `bytes` make.
+#[must_use]
 pub fn id_of(bytes: &[u8]) -> ImageId {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let mut id = [0; 16];

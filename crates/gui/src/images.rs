@@ -341,9 +341,7 @@ impl Cache {
 /// `side`, or why not.
 fn decode(info: ImageInfo, bytes: &[u8], side: u32) -> Result<Image, String> {
     #[cfg(test)]
-    if bytes == tests::PANICS {
-        panic!("as a decoder might");
-    }
+    assert!(bytes != tests::PANICS, "as a decoder might");
     if !info.decodable() {
         return Err("it's too big to show".into());
     }
