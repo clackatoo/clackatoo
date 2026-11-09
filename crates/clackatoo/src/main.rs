@@ -26,8 +26,7 @@ use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
 use clackatoo_protocol::{
-    NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal, Request, Response, Size,
-    TerminalId,
+    NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal, Request, Response, Size, TerminalId,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 

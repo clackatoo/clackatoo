@@ -1067,7 +1067,7 @@ impl Daemon {
                     files,
                     marks,
                     changes,
-                } => self.merged(files, marks, changes),
+                } => self.marks_merged(files, marks, changes),
                 Done::Op {
                     ticket,
                     changed,
@@ -1339,7 +1339,7 @@ impl Daemon {
 
     /// Has what explorer `files`' repositories say merged, on the thread
     /// for git, to send to the clients following it once it is (see
-    /// [`merged`](Self::merged)); or again once the merge going on is
+    /// [`marks_merged`](Self::marks_merged)); or again once the merge going on is
     /// done, as that was of what they said before.
     fn send_marks_to(&mut self, files: FilesId) {
         let Some(said) = self.explorers.said_of(files) else {
@@ -1367,7 +1367,7 @@ impl Daemon {
     /// every client following it that hasn't had it: to one that was sent
     /// the merge before and asked for changes, as what `changes` says
     /// changed since, if it says.
-    fn merged(&mut self, files: FilesId, marks: Arc<Marks>, changes: Option<MarksChanges>) {
+    fn marks_merged(&mut self, files: FilesId, marks: Arc<Marks>, changes: Option<MarksChanges>) {
         let Some(explorer) = self.explorers.list.get_mut(&files) else {
             return;
         };
