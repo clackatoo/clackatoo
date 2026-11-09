@@ -1772,7 +1772,10 @@ mod tests {
             links: Vec::new(),
             marks: crate::BlockMarks::default(),
         };
-        assert_eq!(patches_at(NEW, vec![patch.clone()]), [patch.clone()]);
+        assert_eq!(
+            patches_at(NEW, vec![patch.clone()]),
+            std::slice::from_ref(&patch)
+        );
         let read = patches_at(OLD, vec![patch]);
         let [Patch::Grid { state: older, .. }] = read.as_slice() else {
             panic!("not one grid patch: {read:?}");

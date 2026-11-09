@@ -1,6 +1,6 @@
 //! How far a long task has got, as the program doing it says with
-//! `OSC 9 ; 4 ; state ; percent`: ConEmu's sequence, which Windows
-//! Terminal, Ghostty, kitty and WezTerm show too, and systemd, winget and
+//! `OSC 9 ; 4 ; state ; percent`: the sequence `ConEmu` began, which
+//! Windows Terminal, Ghostty, kitty and `WezTerm` show too, and systemd, winget and
 //! more and more command-line tools print.
 
 /// How far a program's task has got.
@@ -21,6 +21,10 @@ impl TaskProgress {
     /// What `params`, those after `OSC 9 ; 4`, say: `Some(None)` takes
     /// the progress away (state 0, or none given), and `None` means they
     /// say nothing this terminal knows, which changes nothing.
+    #[allow(
+        clippy::option_option,
+        reason = "what the program says, which may be that there's none"
+    )]
     pub(crate) fn parse(params: &[&[u8]]) -> Option<Option<Self>> {
         let state = match params.first() {
             None => 0,
@@ -58,6 +62,7 @@ fn number(param: &[u8]) -> Option<u32> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::option_option, reason = "as TaskProgress::parse")]
     fn parsed(params: &str) -> Option<Option<TaskProgress>> {
         let params: Vec<&[u8]> = if params.is_empty() {
             Vec::new()

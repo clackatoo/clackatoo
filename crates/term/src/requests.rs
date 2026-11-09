@@ -110,19 +110,16 @@ pub(crate) fn capabilities(names: &[u8]) -> Vec<u8> {
                 .iter()
                 .find(|(known, _)| known.as_bytes() == decoded)
         });
-        match known {
-            Some((_, value)) => {
-                answer.extend_from_slice(b"\x1bP1+r");
-                answer.extend_from_slice(name);
-                if let Some(value) = value {
-                    answer.push(b'=');
-                    hex(value.as_bytes(), &mut answer);
-                }
+        if let Some((_, value)) = known {
+            answer.extend_from_slice(b"\x1bP1+r");
+            answer.extend_from_slice(name);
+            if let Some(value) = value {
+                answer.push(b'=');
+                hex(value.as_bytes(), &mut answer);
             }
-            None => {
-                answer.extend_from_slice(b"\x1bP0+r");
-                answer.extend_from_slice(name);
-            }
+        } else {
+            answer.extend_from_slice(b"\x1bP0+r");
+            answer.extend_from_slice(name);
         }
         answer.extend_from_slice(b"\x1b\\");
     }

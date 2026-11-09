@@ -803,6 +803,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each wire, update and number, checked whole"
+    )]
     fn agent_parent_translation_leaves_terminal_output_untouched() {
         use crate::{AgentTerminal, Event, Node, NodeId, Patch, View, ViewUpdate};
         let mut terminal = clackatoo_term::Terminal::new(

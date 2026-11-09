@@ -193,8 +193,8 @@ fn sequence(
     use std::fmt::Write;
 
     let mut sequence = String::from("\x1b[");
-    let bare = trailer != 'u' && number == 1 && modifiers == 1 && text.is_none();
-    if !bare {
+    let implied = trailer != 'u' && number == 1 && modifiers == 1 && text.is_none();
+    if !implied {
         write!(sequence, "{number}").expect("writing to a string never fails");
     }
     let written = match (shifted, base) {

@@ -1143,8 +1143,8 @@ fn a_frame_drawn_in_pieces_is_shown_whole() {
     wait_for_screen(&mut client, terminal, |text| text.contains("one"));
     // ...for as long as the frame takes, within the 150 ms it's given.
     let waited = start.elapsed();
-    if waited < Duration::from_millis(100) {
-        assert_quiet_for(&mut client, Duration::from_millis(100) - waited);
+    if let Some(left) = Duration::from_millis(100).checked_sub(waited) {
+        assert_quiet_for(&mut client, left);
     }
     // Ended, the frame is sent whole, in one update.
     client.send_input(terminal, b" two\x1b[?2026l").unwrap();
