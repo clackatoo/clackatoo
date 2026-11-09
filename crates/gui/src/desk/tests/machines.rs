@@ -250,6 +250,50 @@ fn the_start_page_for_another_machine_asks_that_machine() {
     assert_eq!(asked(&mut desk, "Agent"), (vec![None], vec![None]));
 }
 
+/// `:Board@desk` with no name, from a pane of this machine's, lists
+/// desk's boards, asked from a pane of desk's, and opens the one picked
+/// on desk (CLACKA-118).
+#[test]
+fn board_at_another_machine_lists_and_opens_that_machines_boards() {
+    use clackatoo_protocol::{BoardId, BoardScope, BoardSummary, Found, OpenBoard, Search};
+    let mut desk = desk(here(three()));
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    command(&mut desk, "Board@desk");
+    let asked = (desk.take_outbox().into_iter()).find_map(|message| match message {
+        ClientMessage::Find {
+            id,
+            pane,
+            search: Search::Boards,
+        } => Some((id, pane)),
+        _ => None,
+    });
+    let (id, pane) = asked.expect("the boards asked for");
+    assert_eq!(pane.and_then(|pane| desk.pane_machine(pane)), Some(DESK));
+    let board = BoardSummary {
+        id: BoardId(5),
+        name: "plan".into(),
+        purpose: "for it".into(),
+        scope: BoardScope::Global,
+        archived: false,
+        created: 0,
+        entries: 0,
+    };
+    assert!(desk.found(id, Found::Boards(vec![board])));
+    enter(&mut desk);
+    let opened: Vec<(PaneTerminal, Option<MachineId>)> = (answer_all(&mut desk).into_iter())
+        .filter_map(|request| match request {
+            Request::Split { terminal, on, .. } => Some((terminal, on)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened,
+        [(PaneTerminal::Board(OpenBoard::Id(BoardId(5))), Some(DESK))]
+    );
+}
+
 #[test]
 fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from() {
     // This machine's workspace, holding a terminal on desk beside its own.

@@ -26,6 +26,23 @@ use super::connecting::Elsewhere;
 use crate::command::Command;
 
 impl Desk {
+    /// A pane on machine `on`, to ask of it what's asked of a pane's
+    /// machine: the focused pane, if it's there, or else the first shown
+    /// there.
+    pub(super) fn pane_on(&self, on: MachineId) -> Option<PaneId> {
+        let own = self.own_machine().map(|own| own.id);
+        let on = Some(on).filter(|&on| Some(on) != own);
+        let shown = self.shown.map(|shown| shown.pane);
+        let panes = (self.workspaces.list.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .map(|pane| pane.id);
+        shown
+            .into_iter()
+            .chain(panes)
+            .find(|&pane| self.pane_machine(pane) == on)
+    }
+
     /// The machine `pane` is on, if it's another than the daemon's: a
     /// pane of the daemon's own machine in a workspace of another's, which
     /// that machine's daemon can't reach, is on the daemon's. A background

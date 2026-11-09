@@ -73,6 +73,21 @@ impl Desk {
         } else {
             None
         };
+        // `:Board@desk`: desk's boards, asked of a pane of desk's, as a
+        // search is asked of its pane's machine.
+        let boards_from = match (kind, self.opening_on) {
+            (Kind::Boards, Some(on)) => {
+                let Some(pane) = self.pane_on(on) else {
+                    let host = self.elsewhere_on(on).host;
+                    self.refuse(format!(
+                        "no pane of {host}'s is open here to ask its boards"
+                    ));
+                    return;
+                };
+                Some(pane)
+            }
+            _ => self.shown.map(|shown| shown.pane),
+        };
         let mut finder = Finder::new(kind, query, case);
         if let Some(id) = asked {
             finder.ask(id);
@@ -83,7 +98,13 @@ impl Desk {
             Kind::Buffers => self.search(Search::Buffers),
             Kind::Grep | Kind::ProjectSymbols => self.grep(),
             Kind::Diagnostics => self.search(Search::Diagnostics),
-            Kind::Boards => self.search(Search::Boards),
+            Kind::Boards => {
+                self.boards_on = self.opening_on;
+                let id = self.send_search_from(boards_from, Search::Boards);
+                if let Some(finder) = &mut self.finder {
+                    finder.searching(id);
+                }
+            }
             // Their places are given them, or asked for above.
             Kind::Places
             | Kind::Marks
@@ -124,6 +145,7 @@ impl Desk {
     pub(super) fn close_finder(&mut self) {
         self.start = None;
         self.grep_at = None;
+        self.boards_on = None;
         let Some(finder) = self.finder.take() else {
             return;
         };
@@ -197,6 +219,7 @@ impl Desk {
             Outcome::Forward(path) => self.forward_background(&path),
             Outcome::Open(opening) => {
                 let kind = self.finder.as_ref().map(Finder::kind);
+                let boards_on = self.boards_on;
                 self.close_finder();
                 if kind == Some(Kind::Background) {
                     self.bring_background(&opening.path);
@@ -206,7 +229,7 @@ impl Desk {
                     // The message itself, into the chat's box.
                     self.put_in_focused_chat(opening.path);
                 } else if kind == Some(Kind::Boards) {
-                    self.open_picked_board(&opening);
+                    self.open_picked_board(&opening, boards_on);
                 } else if matches!(kind, Some(Kind::Lessons | Kind::News)) {
                     // A lesson, or what's new, goes to the lesson.
                     self.open_lesson(&opening.path);
@@ -400,16 +423,19 @@ impl Desk {
     /// Opens the board picked in the finder, whose ID is the path it
     /// gave: beside the focused pane as Enter or Ctrl+V say, below for
     /// Ctrl+X, or in a new tab for Ctrl+T.
-    fn open_picked_board(&mut self, opening: &Opening) {
+    fn open_picked_board(&mut self, opening: &Opening, on: Option<clackatoo_protocol::MachineId>) {
         let Ok(id) = opening.path.parse() else { return };
         let place = match opening.place {
             Place::Here => Place::Beside(clackatoo_protocol::Side::Right),
             place => place,
         };
+        // On `on`, the machine whose boards were listed, as `@host` asked.
+        let asked = std::mem::replace(&mut self.opening_on, on);
         self.show_board(
             clackatoo_protocol::OpenBoard::Id(clackatoo_protocol::BoardId(id)),
             place,
         );
+        self.opening_on = asked;
     }
 
     /// Opens what was picked in the finder.

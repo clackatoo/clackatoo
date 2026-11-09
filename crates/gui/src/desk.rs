@@ -510,6 +510,9 @@ pub(crate) struct Desk {
     /// The machine `@host` named for the chat the start page starts, while
     /// it's open.
     start_on: Option<clackatoo_protocol::MachineId>,
+    /// The machine `@host` named for the boards the finder lists, while
+    /// it's open: the one picked opens there.
+    boards_on: Option<clackatoo_protocol::MachineId>,
     /// The daemon's connections to other machines, as last heard: where
     /// workspaces from them are, and how each is reached.
     connections: Vec<clackatoo_protocol::Connection>,
