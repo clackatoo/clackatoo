@@ -237,21 +237,22 @@ chat with an agent no one's signed in to says what to run. With a
 subscription, chats count toward its limits.
 
 If an agent hasn't opened a chat's session after 30 seconds, the chat says so,
-and what it might be waiting on: most often an MCP server in the agent's
-config that needs you to sign in. For Codex that's `~/.codex/config.toml` (or
-`$CODEX_HOME`), and the chat names the servers there reached over the network;
-for Claude Code, its settings in `~/.claude.json` or the project's
-`.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`,
-`claude mcp list`, or `gemini mcp list` in a terminal shows which can't start.
-An agent that hasn't answered at all is said not to have started; one run
-through `npx` is given two minutes, as npx might be fetching it. The chat goes
-on waiting, and asks whether to **Keep waiting**, which <kbd>Esc</kbd> picks,
-**Retry**, which stops the agent and starts it again, or **Stop**;
-<kbd>Ctrl</kbd>+<kbd>C</kbd> stops it too. A session that comes after you stop
-is closed unseen, and the next message asks again. While another chat is in
-the middle of a turn with the same agent, Retry only asks again rather than
-starting it again, which would cut that turn off. The model menu says the same
-of an agent that doesn't say what models it has within 20 seconds.
+and what it might be waiting on: most often a Model Context Protocol (MCP)
+server in the agent's config that needs you to sign in. For Codex that's
+`~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers
+there reached over the network; for Claude Code, its settings in
+`~/.claude.json` or the project's `.mcp.json`; for Gemini CLI,
+`~/.gemini/settings.json`. `codex mcp list`, `claude mcp list`, or
+`gemini mcp list` in a terminal shows which can't start. An agent that hasn't
+answered at all is said not to have started; one run through `npx` is given
+two minutes, as npx might be fetching it. The chat goes on waiting, and asks
+whether to **Keep waiting**, which <kbd>Esc</kbd> picks, **Retry**, which
+stops the agent and starts it again, or **Stop**; <kbd>Ctrl</kbd>+<kbd>C</kbd>
+stops it too. A session that comes after you stop is closed unseen, and the
+next message asks again. While another chat is in the middle of a turn with
+the same agent, Retry only asks again rather than starting it again, which
+would cut that turn off. The model menu says the same of an agent that doesn't
+say what models it has within 20 seconds.
 
 An agent that stops listening, say because its input broke, is still read for
 a moment for the rest of what it says, but nothing more is sent to it: a

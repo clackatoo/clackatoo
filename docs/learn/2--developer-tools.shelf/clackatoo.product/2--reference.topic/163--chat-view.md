@@ -56,7 +56,7 @@ the start of the bar, and <kbd>Ctrl</kbd>+<kbd>?</kbd> lists them:
 | `dG` | Rewinds the conversation to before the turn under the cursor, or the last (see [Rewinding and branches](~clackatoo/reference/agent-changes#rewinding-and-branches)). Other `d` and `c` commands say what the chat takes instead. |
 | `cc` `S` | Edits your message under the cursor: rewinds to before it, and puts it in the box to change and send. |
 | `[b` `]b` | The branch before or after where the conversation's branches part, at the turn under the cursor or the nearest above; with a count, that many. |
-| `K` | Opens Usage & limits. <kbd>Escape</kbd> or <kbd>Ctrl</kbd>+<kbd>;</kbd> closes it. |
+| `K` | Opens **Usage & limits**. <kbd>Escape</kbd> or <kbd>Ctrl</kbd>+<kbd>;</kbd> closes it. |
 | `R` | Sends the last message again, if its turn failed (see [When a turn fails](#when-a-turn-fails)). |
 | `gl` | Signs in to the agent again in a new tab, if the last turn failed for want of it (see [When a turn fails](#when-a-turn-fails)). |
 | `gC` | Starts a new chat with the same agent in the same folder, in a new tab, if the last turn hit the model's limit. |
@@ -269,9 +269,9 @@ upgraded.
 No program runs in it: the daemon writes what the agent says the command
 printed, as it says it, so it can't be typed into, and a key or a paste in it
 only says so in the bar. Agents run their commands themselves, in their own
-processes, and send their output to clackatoo over ACP as they go, which is
-all this shows: Codex sends it as it comes, and Claude Code all at once, as
-the command ends. Nothing opens by itself.
+processes, and send their output to clackatoo over the Agent Client Protocol
+(ACP) as they go, which is all this shows: Codex sends it as it comes, and
+Claude Code all at once, as the command ends. Nothing opens by itself.
 
 The daemon keeps the last 64 KB of what each command printed as it came,
 escapes and all, and 512 KB for each chat, letting the command that printed
@@ -407,9 +407,9 @@ card starts folded, with a line under its title saying what the helper is
 doing now and how many tools it has used, as
 `↳ Reading src/parse.rs · 3 tool uses`, and once it's done,
 `↳ Done · 12 tool uses`. Every file it set out to change, command it started
-and other tool that might change something, as an MCP server's, is counted
-there too, however it went and its own helpers' included, as
-`· edited 2 files · ran 1 command · used 1 other tool`: nothing that might
+and other tool that might change something, as a Model Context Protocol (MCP)
+server's, is counted there too, however it went and its own helpers' included,
+as `· edited 2 files · ran 1 command · used 1 other tool`: nothing that might
 have changed something is out of sight. When Claude Code asks you about one of
 the helper's tools, as before an edit in Manual mode, the cards it's under
 open, here and on the phone, so you see what you're asked about. Open it as

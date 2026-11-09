@@ -144,12 +144,13 @@ limits, and a default agent and model.
 | `plan` | Reads and thinks on a strong model (Opus; Codex at high effort). Read-only; returns a plan. |
 | `general` | Your chat's agent and model, with no limits of its own. The default. |
 
-Read-only gives Claude Code only its tools that read and search, and no MCP
-servers but clackatoo's, and puts Codex in its Read-only mode. `no-commands`
-gives Claude Code its reading and editing tools only, and puts Codex in its
-Read-only mode too, as Codex runs commands in its other modes without asking.
-For every agent, clackatoo refuses file writes through it, refuses its own
-command tools, and turns down the agent's questions about edits and commands.
+Read-only gives Claude Code only its tools that read and search, and no Model
+Context Protocol (MCP) servers but clackatoo's, and puts Codex in its
+Read-only mode. `no-commands` gives Claude Code its reading and editing tools
+only, and puts Codex in its Read-only mode too, as Codex runs commands in its
+other modes without asking. For every agent, clackatoo refuses file writes
+through it, refuses its own command tools, and turns down the agent's
+questions about edits and commands.
 
 A subagent never has fewer limits than the chat that started it. One started
 with another agent, which can't share its parent's mode, starts in that
@@ -222,7 +223,8 @@ it can never gain, through another chat, what its own chat isn't allowed:
   parent's mode; with another, that agent's safest. An agent that offers no
   modes as session settings can't be held to its safest, so a chat started
   with one fails to start, and says so, whenever its session opens. Modes an
-  agent offers only through ACP's older `modes` field aren't read.
+  agent offers only through the older `modes` field of the Agent Client
+  Protocol (ACP) aren't read.
 - What one agent sends another shows its control characters, and those that
   reorder the text around them, as `^G` or `<U+202E>`, so nothing in it hides
   from you. So do tag characters, which can spell out words unseen, unless

@@ -7,8 +7,8 @@ related:
   - clackatoo/reference/cli
 ---
 
-A chat talks to its agent through the agent's adapter, a program speaking ACP,
-the Agent Client Protocol: JSON-RPC messages, one a line, over the adapter's
+A chat talks to its agent through the agent's adapter, a program speaking the
+Agent Client Protocol (ACP): JSON-RPC messages, one a line, over the adapter's
 stdin and stdout. When a chat does something you didn't expect, the messages
 show whether the agent said it or clackatoo made it so.
 
@@ -51,7 +51,8 @@ A trace is meant to be shareable, so obvious secrets are replaced by
   cookies and credentials, told by the words in their names (`api_key`,
   `refreshToken`); a token to go on from, as `nextPageToken`, stays, as do
   `tokenizer` and counts like `inputTokens`;
-- every value of an MCP server's environment and headers (their names stay);
+- every value of a Model Context Protocol (MCP) server's environment and
+  headers (their names stay);
 - bearer tokens, and API keys by their prefixes, such as `sk-`, `ghp_` and
   `xoxb-`, wherever they start a word, as in `OPENAI_API_KEY=sk-…`;
 - the values of names for secrets given one in text: `GITHUB_TOKEN=…`,

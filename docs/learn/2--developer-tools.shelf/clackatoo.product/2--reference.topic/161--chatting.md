@@ -124,12 +124,12 @@ what's being composed shows in the box, at the cursor, until it's committed.
 ### Slash commands
 
 Agents take commands in a message that begins with `/`: Claude Code's
-`/compact` and `/init`, Codex's `/review`, your skills, and prompts your MCP
-servers offer. Type `/` at the start of a message and a menu opens over the
-box: the commands the agent says it has, then clackatoo's own (marked
-`clackatoo`). It narrows as you type the name, those starting with what you
-typed first, each with what it does and, if it takes something after it, a
-hint such as `‹branch name›`.
+`/compact` and `/init`, Codex's `/review`, your skills, and prompts your Model
+Context Protocol (MCP) servers offer. Type `/` at the start of a message and a
+menu opens over the box: the commands the agent says it has, then clackatoo's
+own (marked `clackatoo`). It narrows as you type the name, those starting with
+what you typed first, each with what it does and, if it takes something after
+it, a hint such as `‹branch name›`.
 
 | Key | Does |
 |---|---|
@@ -205,7 +205,7 @@ absolute path or one starting `~/`. Punctuation ending a sentence after it
 isn't part of it.
 
 When the message is sent, the daemon finds each file it mentions and sends it
-to the agent with the message, as ACP context:
+to the agent with the message, as Agent Client Protocol (ACP) context:
 
 | What's mentioned | Claude Code | Codex, Gemini, and others |
 |---|---|---|
