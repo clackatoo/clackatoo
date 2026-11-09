@@ -83,11 +83,6 @@ impl Store {
         Rc::new(RefCell::new(self))
     }
 
-    /// The options as the process started them.
-    pub(crate) fn start(&self) -> &Options {
-        &self.start
-    }
-
     /// How many times anything here has changed.
     pub(crate) fn changes(&self) -> u64 {
         self.changes
@@ -195,6 +190,22 @@ impl Store {
             .zip(self.locals.get(&window).into_iter().flatten())
         {
             if let Some((value, _)) = local {
+                // It was checked as it was set.
+                let _ = options.set(info, value.clone());
+            }
+        }
+        options
+    }
+
+    /// The options as `window` started them: as the process did, but for
+    /// what its command line set.
+    pub(crate) fn start_of(&self, window: u32) -> Options {
+        let mut options = self.start.clone();
+        for (info, opened) in ALL
+            .iter()
+            .zip(self.opened.get(&window).into_iter().flatten())
+        {
+            if let Some((value, _)) = opened {
                 // It was checked as it was set.
                 let _ = options.set(info, value.clone());
             }
@@ -338,9 +349,9 @@ impl View {
         self.store().set_by_in(self.window, info)
     }
 
-    /// The options as the process started them.
+    /// The options as this window started them.
     pub(crate) fn start(&self) -> Options {
-        self.store().start().clone()
+        self.store().start_of(self.window)
     }
 }
 

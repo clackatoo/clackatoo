@@ -2160,6 +2160,9 @@ impl Desk {
         {
             return true;
         } else if let Some(chord) = Chord::of(press) {
+            // Another window may have bound keys since this one last
+            // looked, in the same batch of events.
+            self.follow_client();
             // The config's keypress handlers come first, then the bindings.
             if handlers && !self.script.typing && self.keypress_handled(chord, press) {
                 self.disarm_focused_chat();

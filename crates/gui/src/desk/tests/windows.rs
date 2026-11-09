@@ -234,3 +234,30 @@ fn a_binding_that_propagates_lets_its_keys_go_on_at_once() {
         (desks[0].message.as_deref()).is_some_and(|said| said.contains("too late to stop"))
     });
 }
+
+#[test]
+fn a_windows_command_line_font_is_how_it_started() {
+    use crate::options::{Decimal, Options, find};
+    let client = Client::default();
+    let mut desk = window(&client);
+    // `--font-size 14`, which every other window doesn't start with.
+    let start = Options::drawing_with(&crate::FontOptions {
+        family: None,
+        size: 14.0,
+    });
+    desk.start_options(start, vec![find("fontsize").unwrap()]);
+    assert_eq!(desk.options.fontsize, Decimal::whole(14));
+    assert_eq!(client.options().borrow().fontsize, Decimal::whole(12));
+    command(&mut desk, "set");
+    assert_eq!(
+        desk.message.as_deref(),
+        Some("every option is as it started")
+    );
+    command(&mut desk, "verbose set fsz?");
+    assert_eq!(
+        desk.message.as_deref(),
+        Some(
+            "fontsize=14 · this window's own, as the window opened: startup.toml or the command line"
+        )
+    );
+}
