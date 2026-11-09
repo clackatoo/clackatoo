@@ -370,8 +370,16 @@ impl Daemon {
             }
             HistoryKeeping::Forget => {
                 // What it shows now is forgotten too: only what comes after,
-                // from the cursor's line on, is kept.
-                let line = emulator.primary().scrollback_end() + emulator.cursor().line as u64;
+                // from the cursor's line on, is kept. Behind a full-screen
+                // program, the main screen's cursor isn't where it shows,
+                // so all of that screen is.
+                let primary = emulator.primary();
+                let rows = if emulator.is_alternate_screen() {
+                    primary.height()
+                } else {
+                    emulator.cursor().line
+                };
+                let line = primary.scrollback_end() + rows as u64;
                 marks.from = marks.from.max(line);
                 marks.blocks.retain(|block| block.end > line);
                 format!("pane {pane}'s history kept so far is forgotten")
@@ -727,6 +735,47 @@ pub(in crate::server) mod tests {
         assert!(matches!(asked, Ok(Response::Text(_))), "{asked:?}");
         let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::On);
         assert!(asked.is_err(), "{asked:?}");
+    }
+
+    /// The lines terminal `terminal`'s history file holds, once what was
+    /// asked is written.
+    fn written(daemon: &mut Daemon, terminal: TerminalId) -> Vec<String> {
+        daemon.history_moved_on(terminal);
+        daemon.keep_histories(true);
+        daemon.histories_kept_last(Instant::now() + Duration::from_secs(10));
+        let dir = daemon.config.history.as_ref().unwrap().dir.clone();
+        let key = history::key(daemon.id, terminal.0);
+        (history::read(&dir, &key).unwrap())
+            .map(|lines| lines.texts().into_iter().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// Prints `output` in terminal `terminal`, as its program would.
+    fn print(daemon: &mut Daemon, terminal: TerminalId, output: &str) {
+        if let Some(Hosted::Pty(pty)) =
+            (daemon.terminals.get_mut(&terminal)).map(|slot| &mut slot.terminal)
+        {
+            pty.emulator_mut().advance(output.as_bytes());
+        }
+    }
+
+    /// Forgetting while a full-screen program shows forgets everything on
+    /// the main screen behind it, wherever the program's cursor is.
+    #[test]
+    fn forgetting_behind_a_full_screen_program_forgets_the_whole_main_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = keeping(dir.path(), true);
+        print(
+            &mut daemon,
+            terminal,
+            "secret one\r\nsecret two\r\nsecret three\r\n$ ",
+        );
+        // The program's cursor at its top left.
+        print(&mut daemon, terminal, "\x1b[?1049h\x1b[H");
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::Forget);
+        assert!(asked.is_ok(), "{asked:?}");
+        let kept = written(&mut daemon, terminal);
+        assert!(!kept.iter().any(|line| line.contains("secret")), "{kept:?}");
     }
 
     /// The user is told what they asked of a terminal's history is done
