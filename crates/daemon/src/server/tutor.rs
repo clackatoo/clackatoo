@@ -203,7 +203,8 @@ impl Lessons {
     }
 
     /// Writes the lesson `lesson`'s text in its folder `name` again: to a
-    /// new file, renamed over the old.
+    /// new file, renamed over the old. Only the text [`make`](Self::make)
+    /// wrote is written again: nothing else is made.
     fn rewrite(&self, name: &str, lesson: &str, text: &str) -> Result<(), String> {
         plain(lesson)?;
         if text.len() > MOST_BYTES {
@@ -211,6 +212,10 @@ impl Lessons {
         }
         let folder = open_dir(&self.folder, name).map_err(|err| err.to_string())?;
         let file = format!("{lesson}.txt");
+        let stat = rustix::fs::statat(&folder, file.as_str(), AtFlags::SYMLINK_NOFOLLOW);
+        if !stat.is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile) {
+            return Err(format!("there's no lesson ‘{lesson}’ in that folder"));
+        }
         let new = format!(".{file}.new");
         let written = (|| -> io::Result<()> {
             // Left by a write that failed part way.
@@ -517,6 +522,33 @@ mod tests {
     }
 
     #[test]
+    fn writing_a_lessons_text_again_makes_no_other_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let lessons = lessons(dir.path());
+        let (name, made) = lessons.make("basics", "# Basics\n", &[]).unwrap();
+        let listed = || {
+            let mut names: Vec<String> = (std::fs::read_dir(&made).unwrap())
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listed();
+        assert_eq!(before, ["basics", "basics.txt"]);
+        for lesson in ["wrap", "basics.txt", "basics/notes"] {
+            assert!(lessons.rewrite(&name, lesson, "x").is_err(), "{lesson}");
+        }
+        // Its practice folder isn't its text either.
+        std::fs::rename(Path::new(&made).join("basics.txt"), dir.path().join("t")).unwrap();
+        std::fs::create_dir(Path::new(&made).join("basics.txt")).unwrap();
+        assert!(lessons.rewrite(&name, "basics", "x").is_err());
+        std::fs::remove_dir(Path::new(&made).join("basics.txt")).unwrap();
+        std::fs::rename(dir.path().join("t"), Path::new(&made).join("basics.txt")).unwrap();
+        lessons.rewrite(&name, "basics", "# Again\n").unwrap();
+        assert_eq!(listed(), before);
+    }
+
+    #[test]
     fn nothing_is_written_through_a_link() {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
@@ -528,11 +560,13 @@ mod tests {
         std::os::unix::fs::symlink(&target, made.join(".basics.txt.new")).unwrap();
         lessons.rewrite(&name, "basics", "# Again\n").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
-        // The lesson's text a link to a file of the user's.
+        // The lesson's text a link to a file of the user's: it isn't the
+        // lesson's text any more.
         std::fs::remove_file(made.join("basics.txt")).unwrap();
         std::os::unix::fs::symlink(&target, made.join("basics.txt")).unwrap();
-        let _ = lessons.rewrite(&name, "basics", "# Again\n");
+        assert!(lessons.rewrite(&name, "basics", "# Again\n").is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+        assert!(made.join("basics.txt").is_symlink());
         // A lesson's folder that's a link isn't one.
         let linked = "20261109-101500-9";
         std::os::unix::fs::symlink(dir.path(), lessons.path.join(linked)).unwrap();
