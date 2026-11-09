@@ -599,8 +599,9 @@ impl Terminal {
     pub fn restore_margins(&mut self, (start, end): (u16, u16)) {
         let emulator = &mut self.emulator;
         let (start, end) = (usize::from(start), usize::from(end));
+        // As DECSLRM sets them: at least two columns apart.
         if emulator.modes.contains(Modes::LEFT_RIGHT_MARGINS)
-            && start < end
+            && start + 1 < end
             && end <= emulator.width()
         {
             emulator.margins = start..end;
@@ -692,6 +693,15 @@ impl Terminal {
     #[cfg(test)]
     pub(crate) fn use_simple_print(&mut self) {
         self.emulator.simple_print = true;
+    }
+
+    /// Sets the left and right margins to `margins` whatever they are, as
+    /// no sequence may: for checking what printing does with ones too
+    /// narrow.
+    #[cfg(test)]
+    pub(crate) fn force_margins(&mut self, margins: std::ops::Range<usize>) {
+        self.emulator.modes.insert(Modes::LEFT_RIGHT_MARGINS);
+        self.emulator.margins = margins;
     }
 
     /// Panics if any internal invariant is broken.
@@ -1212,9 +1222,12 @@ impl Emulator {
         start: usize,
         wrapped: bool,
     ) -> (usize, bool) {
-        let width = self.width();
-        // Where text wraps, as the margins say.
-        let (edge, _) = self.print_span();
+        // Where text wraps, as the margins say, and the columns between
+        // there and where it wraps to: never fewer than two, as margins are
+        // set, but a character wider than that is dropped all the same, as
+        // it would wrap for ever.
+        let (edge, wraps_to) = self.print_span();
+        let width = self.width().min(edge - wraps_to);
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let Self {
             primary,
@@ -1309,7 +1322,8 @@ impl Emulator {
                         None => false,
                     };
                 }
-                // A wide character can't fit a one-column terminal at all.
+                // A wide character can't fit a one-column terminal, or
+                // margins one column apart, at all.
                 Some(cells) if cells > width => {}
                 Some(cells) => {
                     let wide = cells == 2;
@@ -1353,7 +1367,8 @@ impl Emulator {
     /// Writes a character that takes up cells, at the cursor.
     fn print_cell(&mut self, ch: char, wide: bool) {
         let cells = if wide { 2 } else { 1 };
-        if cells > self.width() {
+        let (edge, wraps_to) = self.print_span();
+        if cells > self.width().min(edge - wraps_to) {
             return;
         }
         if self.cursor.pending_wrap {

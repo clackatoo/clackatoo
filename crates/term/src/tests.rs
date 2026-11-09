@@ -863,6 +863,33 @@ mod queries {
     }
 
     #[test]
+    fn margins_are_put_back_only_two_columns_apart_or_more() {
+        let mut t = terminal(10, 2);
+        t.advance(b"\x1b[?69h");
+        t.restore_margins((3, 4));
+        assert_eq!(t.margins(), None);
+        t.restore_margins((3, 3));
+        assert_eq!(t.margins(), None);
+        t.restore_margins((3, 5));
+        assert_eq!(t.margins(), Some((3, 5)));
+    }
+
+    #[test]
+    fn a_wide_character_margins_too_narrow_for_is_dropped_not_wrapped_for_ever() {
+        for simple in [false, true] {
+            let mut t = terminal(10, 2);
+            if simple {
+                t.use_simple_print();
+            }
+            t.force_margins(4..5);
+            t.advance("\x1b[1;5H字a字".as_bytes());
+            let row = t.grid().row(0);
+            assert_eq!(row.cells()[4].ch(), 'a', "simple: {simple}");
+            assert!(!row.cells()[4].is_wide(), "simple: {simple}");
+        }
+    }
+
+    #[test]
     fn an_end_is_kept_for_its_taker_though_the_next_prompt_follows_it() {
         // A command that printed nothing, its end and the next prompt in
         // one read: the latest block is the prompt's, but the end is kept.
