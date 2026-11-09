@@ -19414,6 +19414,86 @@ fn a_real_codex_chat_rewinds_forgetting_the_turns_cut_and_switches_back() {
     live_rewind("codex");
 }
 
+/// A command Codex leaves running as its turn ends goes on, on the shelf,
+/// its row still running; what it prints after, and its end, come after
+/// the turn's end, to its row (CLACKA-232). Codex's adapter lists its
+/// background terminals only to a client that asks as AIR does; to
+/// clackatoo the command's tool call stays open past `end_turn`. On Luna,
+/// from the install the daemon would run (or `CLACKATOO_REAL_CODEX`'s
+/// command), traced to `$TMPDIR/acp-codex-background`.
+///
+/// Recorded live (2026-11-09; codex-acp 2.2.2+clackatoo.1 on Luna, low):
+/// the prompt answered `end_turn` with the call `in_progress`; about 18 s
+/// later came a `terminal_output_delta` of `omega` and then `completed`
+/// with `terminal_exit` 0. `alpha`, which Codex read back itself before
+/// it answered, was never streamed as output.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_CODEX or install Codex, and run with --ignored"]
+fn a_real_codex_command_left_running_goes_on_on_the_shelf() {
+    let _left = CodexLeft::new();
+    let Some(command) = real_adapter("codex", "CLACKATOO_REAL_CODEX") else {
+        return;
+    };
+    let trace = live_trace("codex-background");
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("codex", command)];
+        config.agents.trace = Some(trace.clone());
+    });
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    for (setting, value) in [("model", "gpt-6-luna"), ("reasoning_effort", "low")] {
+        let set = ChatAction::Set {
+            setting: setting.into(),
+            value: value.into(),
+        };
+        client.chat(chat, set).unwrap();
+        wait_for_chat_for(&mut client, chat, minute, |node| {
+            (node.settings.iter()).any(|known| known.id == setting && known.value == value)
+        });
+    }
+    let text = "Run this shell command once, exactly as written: echo alpha; sleep 20; echo omega \
+                Don't wait for it to finish: as soon as it has printed alpha, reply with exactly \
+                the word started, and leave it running in the background.";
+    let node = live_send(&mut client, chat, text, 3 * minute);
+    eprintln!("tasks as the turn ended: {:#?}", node.tasks);
+    let task = (node.tasks.iter())
+        .find(|task| task.id.starts_with("tool:"))
+        .expect("a command left running")
+        .clone();
+    assert!(task.going() && !task.can_stop, "{task:#?}");
+    let id = task.id.strip_prefix("tool:").unwrap().to_owned();
+    let row = |node: &ChatNode| {
+        (node.turns.iter())
+            .flat_map(|turn| &turn.items)
+            .find_map(|item| match item {
+                Item::Tool(tool) if tool.id == id => Some(tool.clone()),
+                _ => None,
+            })
+            .expect("its row")
+    };
+    assert_eq!(row(&node).status, ToolStatus::Running);
+    let node = live_wait(&mut client, chat, 2 * minute, |node| {
+        (node.tasks.iter()).any(|known| known.id == task.id && !known.going())
+    });
+    eprintln!("tasks as it ended: {:#?}", node.tasks);
+    let ended = row(&node);
+    eprintln!("its row: {ended:#?}");
+    assert_eq!(ended.status, ToolStatus::Done);
+    let printed = (ended.content.iter()).any(|content| {
+        matches!(content, ToolContent::Output(text) | ToolContent::Text(text) if text.contains("omega"))
+    });
+    assert!(printed, "{ended:#?}");
+    // Nothing of it went into a turn of its own.
+    assert_eq!(node.turns.len(), 1, "{:#?}", node.turns);
+}
+
 /// Submits `text` as the window does, queued if the agent is busy.
 fn live_submit(client: &mut Client, chat: TerminalId, text: &str, steer: bool) {
     client

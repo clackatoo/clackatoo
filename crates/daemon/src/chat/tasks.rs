@@ -12,7 +12,7 @@
 //! # Commands left running in the background
 //!
 //! Codex's adapter says nothing of what Codex runs in the background (its
-//! `/ps`) but to a client that asks as JetBrains' AIR does, which it then
+//! `/ps`) but to a client that asks as `JetBrains`' AIR does, which it then
 //! sends no command's output (CLACKA-232). It shows anyway: a command
 //! still running as Codex ends its turn is one Codex left running, as the
 //! tool call that ran it stays open until the command ends, saying so
@@ -283,7 +283,7 @@ impl HostedChat {
         let mut tasks = self.node.tasks.clone();
         let ended = now();
         let mut lost = Vec::new();
-        for task in (tasks.iter_mut()).filter(|task| task.going() && which(&**task)) {
+        for task in (tasks.iter_mut()).filter(|task| task.going() && which(task)) {
             task.state = AgentTaskState::Lost;
             task.ended = Some(ended);
             lost.push(task.id.clone());
