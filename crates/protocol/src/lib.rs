@@ -667,7 +667,7 @@ pub enum Event {
     /// `said`: to every client that said it's a window
     /// ([`Request::Window`]), as it paired or as the window said so, until
     /// one says it has shown it, with [`Request::SeenPaired`]. Nothing else
-    /// that connects is told. Only to a client of protocol 133 or later
+    /// that connects is told. Only to a client of protocol 134 or later
     /// ([`wire::PAIRED`]).
     Paired {
         /// The device's number, as [`Request::RevokeDevice`] takes it.
