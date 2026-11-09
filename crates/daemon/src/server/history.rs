@@ -414,6 +414,10 @@ impl Daemon {
         if keys.is_empty() {
             return;
         }
+        if let Err(why) = history::readable_dir(&dir) {
+            log::warn!("terminals' history kept isn't read: {why}");
+            return;
+        }
         let started = Instant::now();
         let terminal = self.config.terminal.clone();
         let divider = divider(now_seconds());

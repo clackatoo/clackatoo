@@ -36,7 +36,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::Duration;
@@ -143,18 +143,42 @@ fn decode(bytes: &[u8]) -> Result<KeptLines, String> {
     Ok(body.lines)
 }
 
+/// Whether `dir` is a folder history can be read from: a folder, not a
+/// link to one, the user's own, and theirs alone, as the daemon makes it.
+/// Anything else might hold what someone else put there.
+pub(crate) fn readable_dir(dir: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(dir).map_err(|err| err.to_string())?;
+    if !metadata.is_dir() {
+        return Err(format!("{} isn't a folder", dir.display()));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err(format!("{} is another user's", dir.display()));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!("others can get into {}", dir.display()));
+    }
+    Ok(())
+}
+
 /// Reads the history file `key` names, in `dir`: `None` if there's none.
+/// Only from a folder [`readable_dir`] takes, and only a file of the
+/// user's own.
 pub(crate) fn read(dir: &Path, key: &str) -> Result<Option<KeptLines>, String> {
     if !is_key(key) {
         return Err(format!("{key:?} isn't the name of a history file"));
     }
+    readable_dir(dir)?;
     let path = path_of(dir, key);
     let file = match crate::regular::open(&path, crate::regular::Links::Refuse) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.to_string()),
     };
-    let len = file.metadata().map_err(|err| err.to_string())?.len();
+    let metadata = file.metadata().map_err(|err| err.to_string())?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err("it's another user's".into());
+    }
+    let len = metadata.len();
     if len > MOST_FILE {
         return Err("it's bigger than this build writes".into());
     }
@@ -329,8 +353,6 @@ fn run(dir: &Path, bytes: usize, jobs: &Receiver<Job>) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use clackatoo_term::{Config, Size, Terminal};
 
     use super::*;
@@ -421,18 +443,45 @@ mod tests {
         assert!(!body.windows(7).any(|bytes| bytes == b"hunter2"));
     }
 
+    /// Nothing is read from a folder others can get into, or that's a
+    /// link to one.
+    #[test]
+    fn nothing_is_read_from_a_folder_others_can_get_into_or_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join("history");
+        let writer = Writer::start(history.clone(), usize::MAX).unwrap();
+        let key = key(1, 2);
+        writer.send(Job::Write {
+            key: key.clone(),
+            copy: copy("mine"),
+            only: None,
+        });
+        assert!(writer.stop(Duration::from_secs(10)));
+        assert!(read(&history, &key).unwrap().is_some());
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = read(&history, &key).unwrap_err();
+        assert!(err.contains("others can get into"), "{err}");
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&history, &link).unwrap();
+        let err = read(&link, &key).unwrap_err();
+        assert!(err.contains("isn't a folder"), "{err}");
+    }
+
     /// A file bigger than this build writes isn't read, nor one whose
     /// body inflates past what it writes.
     #[test]
     fn files_too_big_or_inflating_too_far_arent_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().join("history");
+        crate::recovery::make_dir(&dir).unwrap();
         let key = key(1, 2);
-        let path = path_of(dir.path(), &key);
+        let path = path_of(&dir, &key);
         let mut big = MAGIC.to_vec();
         big.extend_from_slice(&VERSION.to_le_bytes());
         big.resize(usize::try_from(MOST_FILE).unwrap() + 1, 0);
         fs::write(&path, &big).unwrap();
-        let err = read(dir.path(), &key).unwrap_err();
+        let err = read(&dir, &key).unwrap_err();
         assert!(err.contains("bigger"), "{err}");
         let mut bomb = MAGIC.to_vec();
         bomb.extend_from_slice(&VERSION.to_le_bytes());
@@ -442,7 +491,7 @@ mod tests {
             deflate.write_all(&zeros).unwrap();
         }
         fs::write(&path, deflate.finish().unwrap()).unwrap();
-        let err = read(dir.path(), &key).unwrap_err();
+        let err = read(&dir, &key).unwrap_err();
         assert!(err.contains("bigger"), "{err}");
     }
 
