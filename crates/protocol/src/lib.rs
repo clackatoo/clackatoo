@@ -77,8 +77,9 @@ mod workspace;
 use std::fmt;
 
 pub use clackatoo_term::{
-    Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Palette,
-    Position, Selection, ShellState, Size, Style, TaskProgress, Underline, Which,
+    Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Notice,
+    Notification, Palette, Position, Selection, ShellState, Size, Style, TaskProgress, Underline,
+    Urgency, Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +155,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 146;
+pub const PROTOCOL_VERSION: u32 = 147;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -704,6 +705,19 @@ pub enum Event {
         picture: PictureId,
         /// What it shows now.
         shown: Picture,
+    },
+    /// The program in `terminal` asked for a notification to be shown,
+    /// or taken back (see `clackatoo_term::notify`), cleaned by the daemon.
+    /// Sent to every window watching the workspaces and to relaying
+    /// daemons, unless a client whose user is there follows the terminal:
+    /// a window shows it while it isn't showing the terminal's pane with
+    /// the focus. How often a terminal's are sent is bounded. Only to a
+    /// client of protocol 143 or later ([`wire::TERMINAL_STANDARDS_2`]).
+    Notified {
+        /// The terminal.
+        terminal: TerminalId,
+        /// What it asked.
+        notice: Notice,
     },
 }
 
@@ -1748,6 +1762,16 @@ pub enum Request {
         pane: PaneId,
         /// What's changed.
         how: HistoryKeeping,
+    },
+    /// Marks `terminal` to have its notifications reach the phone too, or
+    /// not, if `on` is false: what its program asks for, and its long
+    /// commands ending. Answered with [`Response::Done`]. Only to a daemon
+    /// of protocol 143 or later ([`wire::TERMINAL_STANDARDS_2`]).
+    NotifyPhone {
+        /// The terminal, not a chat's.
+        terminal: TerminalId,
+        /// Whether its notifications reach the phone.
+        on: bool,
     },
 }
 

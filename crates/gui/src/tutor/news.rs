@@ -1248,6 +1248,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs that ask get kitty's keyboard protocol (Shift+Enter, Ctrl+I, Esc as themselves) and whole frames",
     },
     News {
+        id: "program-notices",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs' notifications (OSC 9, 777, 99) show when you're not looking; :notify phone sends a pane's to the phone",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

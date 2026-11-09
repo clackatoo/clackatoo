@@ -203,9 +203,12 @@ impl Perform for Emulator {
             [b"11", asked @ ..] => self.report_colours(11, asked, bell_terminated),
             [b"12", asked @ ..] => self.report_colours(12, asked, bell_terminated),
             [b"4", asked @ ..] => self.report_palette(asked, bell_terminated),
-            // ConEmu's progress; any other OSC 9 is iTerm2's notification,
-            // which isn't shown.
+            // ConEmu's progress; any other OSC 9 is iTerm2's notification
+            // (see crate::notify).
             [b"9", b"4", progress @ ..] => self.set_progress(progress),
+            [b"9", text @ ..] => self.notifications.iterm(text),
+            [b"777", params @ ..] => self.notifications.urxvt(params),
+            [b"99", metadata, payload @ ..] => self.notifications.kitty(metadata, payload),
             _ => log::trace!(
                 "unhandled OSC {:?}",
                 params.first().map(|p| String::from_utf8_lossy(p))

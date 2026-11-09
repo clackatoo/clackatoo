@@ -1721,6 +1721,29 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::KEPT_HISTORY, sample)),
     );
+    // A program's notification, shown and taken back, and a terminal
+    // marked to have its notifications reach the phone (CLACKA-238).
+    samples.extend(
+        [
+            Server(ServerMessage::Event(Event::Notified {
+                terminal: TerminalId(5),
+                notice: crate::Notice::Show(crate::Notification {
+                    title: "cargo build".into(),
+                    body: "finished".into(),
+                    urgency: crate::Urgency::Critical,
+                }),
+            })),
+            Server(ServerMessage::Event(Event::Notified {
+                terminal: TerminalId(5),
+                notice: crate::Notice::Close,
+            })),
+            Client(ClientMessage::Request(Request::NotifyPhone {
+                terminal: TerminalId(5),
+                on: true,
+            })),
+        ]
+        .map(|sample| (crate::wire::TERMINAL_STANDARDS_2, sample)),
+    );
     // A terminal's search for the match a count says (CLACKA-171).
     samples.extend(
         [
@@ -4206,6 +4229,7 @@ fn grid_state() -> GridState {
         keyboard: 13,
         progress: Some(TaskProgress::Paused(Some(40))),
         restarted: None,
+        phone: true,
     }
 }
 

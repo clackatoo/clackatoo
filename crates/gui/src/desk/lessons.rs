@@ -1383,6 +1383,21 @@ impl Facts for DeskFacts<'_> {
             .count()
     }
 
+    fn phone_terminals(&self) -> usize {
+        let Some(tab) = self.desk.shown_tab() else {
+            return 0;
+        };
+        (tab.layout.panes().into_iter())
+            .filter_map(|pane| pane.content.terminal())
+            .filter(|terminal| {
+                self.desk
+                    .panes
+                    .get(terminal)
+                    .is_some_and(crate::pane::Pane::phone)
+            })
+            .count()
+    }
+
     fn last_exit(&self) -> Option<i32> {
         match self.open()?.exit {
             LastCommand::Exited(status) => Some(status),

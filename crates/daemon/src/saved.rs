@@ -278,6 +278,10 @@ pub(crate) enum Pane {
         /// over.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         history_off: bool,
+        /// Whether the user marked its notifications to reach the phone
+        /// too.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        phone: bool,
     },
     /// A chat with an agent.
     Chat {
@@ -861,6 +865,7 @@ mod tests {
     fn state() -> State {
         let terminal = |cwd: &str, ran: Option<&str>| {
             Layout::Pane(Pane::Terminal {
+                phone: false,
                 cwd: Some(cwd.to_owned()),
                 ran: ran.map(str::to_owned),
                 elsewhere: None,
@@ -1004,6 +1009,7 @@ mod tests {
         assert!(!encoded.contains("keep"), "{encoded}");
         let mut state = state();
         state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Terminal {
+            phone: false,
             cwd: Some("/home/jack/site".into()),
             ran: Some("trail serve".into()),
             elsewhere: None,
@@ -1027,6 +1033,7 @@ mod tests {
         state.workspaces[1].background = vec![Tab {
             name: Some("site".into()),
             layout: Layout::Pane(Pane::Terminal {
+                phone: false,
                 cwd: Some("/home/jack/site".into()),
                 ran: Some("trail serve".into()),
                 elsewhere: None,
@@ -1244,6 +1251,7 @@ mod tests {
     fn panes_on_other_machines_and_workspaces_lent_to_them_are_kept_by_their_numbers() {
         let mut kept = state();
         let borrowed = Pane::Terminal {
+            phone: false,
             cwd: None,
             ran: None,
             elsewhere: Some(Elsewhere {
@@ -1339,6 +1347,7 @@ mod tests {
         assert_eq!(
             tab.layout,
             Layout::Pane(Pane::Terminal {
+                phone: false,
                 cwd: None,
                 ran: None,
                 elsewhere: None,

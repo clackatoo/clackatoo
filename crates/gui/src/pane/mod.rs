@@ -320,6 +320,13 @@ impl Pane {
         }
     }
 
+    /// Whether it's marked to have its notifications reach the phone.
+    pub(crate) fn phone(&self) -> bool {
+        self.screen
+            .as_ref()
+            .is_some_and(|screen| screen.state.phone)
+    }
+
     /// How far its program says its task has got (OSC 9;4), if it says.
     pub(crate) fn progress(&self) -> Option<clackatoo_protocol::TaskProgress> {
         self.screen.as_ref()?.state.progress

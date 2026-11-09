@@ -399,6 +399,9 @@ mod tests {
         fn zoomed(&self) -> bool {
             false
         }
+        fn phone_terminals(&self) -> usize {
+            0
+        }
     }
 
     #[test]

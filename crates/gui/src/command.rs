@@ -317,6 +317,9 @@ pub(crate) enum Command {
     /// `:keep history [on|off]`, `:forget`: what's kept of the focused
     /// terminal's history across a restart.
     KeepHistory(clackatoo_protocol::HistoryKeeping),
+    /// `:notify phone`, `:notify nophone`: the focused terminal's
+    /// notifications reach the phone too, or not.
+    NotifyPhone(bool),
     /// `:trust [DIR]`, `:untrust [DIR]`, `:trusted`: a folder trusted to
     /// run its language servers, or not, or those marked listed.
     Trust {
@@ -528,6 +531,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
                 Some(argument) => Err(format!("forget takes nothing after it, but has {argument:?}")),
             };
         }
+        "notify" => return notify_command(argument),
         "trust" | "untrust" | "trusted" => return trust_command(word, argument),
         _ => {}
     }
@@ -589,6 +593,16 @@ fn keep_command(argument: Option<&str>) -> Result<Command, String> {
         Some("off") => Keeping::Off,
         Some(other) => return Err(format!("keep takes always, off or history, not {other:?}")),
     }))
+}
+
+/// `:notify`, with `argument` after it: whether the focused terminal's
+/// notifications reach the phone too.
+fn notify_command(argument: Option<&str>) -> Result<Command, String> {
+    match argument {
+        Some("phone") => Ok(Command::NotifyPhone(true)),
+        Some("nophone") => Ok(Command::NotifyPhone(false)),
+        _ => Err("Use :notify phone to have this terminal's notifications reach the phone too, or :notify nophone".into()),
+    }
 }
 
 /// `:trust`, `:untrust` or `:trusted`, as `word` says, with `argument`,
@@ -1072,6 +1086,7 @@ command_names! {
     "Background" => "Browse background tabs",
     "keep" => "Restart this terminal command when the daemon starts",
     "forget" => "Forget this terminal's history kept across a restart",
+    "notify" => "Have this terminal's notifications reach the phone, or not",
     "trust" => "Let this folder's language servers run its code",
     "untrust" => "Stop this folder's language servers running its code",
     "trusted" => "List the folders trusted to run language servers",
@@ -1208,6 +1223,7 @@ pub(crate) fn takes(word: &str) -> Takes {
         ]),
         "devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
         "keep" => Takes::Words(&["always", "off", "history"]),
+        "notify" => Takes::Words(&["phone", "nophone"]),
         "Review" => Takes::Words(&["chat", "turn", "base"]),
         "reviewkeep" | "reviewreject" => Takes::Words(&["file", "turn", "all"]),
         _ => Takes::Nothing,
@@ -1338,6 +1354,7 @@ mod tests {
         ("Background", ""),
         ("keep", ""),
         ("forget", ""),
+        ("notify", ""),
         ("trust", ""),
         ("untrust", ""),
         ("trusted", ""),

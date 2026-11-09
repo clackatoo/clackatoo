@@ -16,6 +16,7 @@ use crate::grid::Grid;
 use crate::keyboard;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
+use crate::notify::{Notice, Notifications};
 use crate::parser::Parser;
 use crate::progress::TaskProgress;
 use crate::requests::{self, Request};
@@ -155,6 +156,13 @@ impl Terminal {
     /// program, which may be waiting for it.
     pub fn take_clipboard(&mut self) -> Vec<ClipboardRequest> {
         self.emulator.clipboard.take()
+    }
+
+    /// Takes the notification the program last asked to be shown, or to
+    /// be taken back, since the last call (see [`crate::notify`]). How
+    /// often one is shown is the caller's to bound.
+    pub fn take_notice(&mut self) -> Option<Notice> {
+        self.emulator.notifications.take()
     }
 
     /// The terminal's size.
@@ -868,6 +876,8 @@ pub(crate) struct Emulator {
     pub(crate) replies: Vec<u8>,
     /// What the program asked of the clipboard, waiting to be taken.
     pub(crate) clipboard: clipboard::Requests,
+    /// The notifications the program asked for (see [`crate::notify`]).
+    pub(crate) notifications: Notifications,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
     /// History was cleared since [`Terminal::take_history_cleared`] last
@@ -918,6 +928,7 @@ impl Emulator {
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
             clipboard: clipboard::Requests::default(),
+            notifications: Notifications::default(),
             last_printed: None,
             history_cleared: false,
             names_kept: false,
@@ -1804,6 +1815,8 @@ impl Emulator {
         // What the program asked before the reset is still to be done.
         let replies = std::mem::take(&mut self.replies);
         let clipboard = std::mem::take(&mut self.clipboard);
+        let mut notifications = std::mem::take(&mut self.notifications);
+        notifications.reset();
         let generation = self.primary.history_generation();
         let (_, next_link) = self.links.parts();
         // Numbers run out only after four billion commands; then they start
@@ -1827,6 +1840,7 @@ impl Emulator {
         }
         self.replies = replies;
         self.clipboard = clipboard;
+        self.notifications = notifications;
         // Link IDs are never reused (see crate::links), nor are block
         // numbers, which windows know how blocks ended by.
         self.links = Links::from_parts([], next_link);

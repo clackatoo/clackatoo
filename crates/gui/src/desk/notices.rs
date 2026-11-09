@@ -17,13 +17,27 @@
 //! came, or while it was out of reach of the daemon, as a laptop asleep
 //! is, are only marked, so waking one isn't a burst of notifications.
 //!
-//! The `notify` option says which: `all`, `questions` or `off`.
+//! A terminal is told of as its program asks (`OSC 9`, `OSC 777` or
+//! kitty's `OSC 99`, which the daemon cleans and sends only while no one
+//! is looking at the terminal anywhere), unless this window shows its pane
+//! with the focus; its notification is taken back once it does, or as the
+//! program asks, or its program ends. Each says what the program said,
+//! never more.
+//!
+//! The `notify` option says which: `all`, `questions` or `off`. A
+//! program's notification is shown but for `off`: the program asked for
+//! it, as a chat asks a question.
 
 use std::collections::HashMap;
 
-use clackatoo_protocol::{ChatState, TerminalId};
+use clackatoo_protocol::{ChatState, Notice as Program, Request, TerminalId, Urgency, wire};
 
-use super::{Desk, shown_name};
+use super::{Asked, Desk, shown_name};
+use crate::pane::Pane;
+
+/// What a tab is marked with when a terminal in it is marked to have its
+/// notifications reach the phone.
+pub(super) const PHONE_MARK: &str = " 📱";
 use crate::notify::{Notice, Notifier};
 use crate::options::Notify;
 
@@ -39,6 +53,8 @@ enum Why {
     Ended,
     /// Its agent asks the user something.
     Asks,
+    /// It's a terminal whose program asked for it.
+    Program,
 }
 
 /// The window's notifications.
@@ -69,6 +85,12 @@ impl Desk {
             .map(|(&chat, &why)| (chat, why))
             .collect();
         for (chat, why) in shown {
+            if why == Why::Program {
+                if self.chat_shown(chat) || self.options.notify == Notify::Off {
+                    self.withdraw_notice(chat);
+                }
+                continue;
+            }
             match self.notice_wanted(chat) {
                 None => self.withdraw_notice(chat),
                 Some(now) if now != why => self.show_notice(chat, now),
@@ -84,6 +106,74 @@ impl Desk {
             }
             self.show_notice(chat, why);
         }
+    }
+
+    /// Terminal `terminal`'s program asked for a notification to be
+    /// shown, or taken back, as `asked` says, the daemon having cleaned
+    /// it: shown unless the window shows its pane with the focus, or
+    /// notifications are off.
+    pub(crate) fn program_notice(&mut self, terminal: TerminalId, asked: Program) {
+        let Program::Show(notification) = asked else {
+            if self.notices.shown.get(&terminal) == Some(&Why::Program) {
+                self.withdraw_notice(terminal);
+            }
+            return;
+        };
+        if self.options.notify == Notify::Off || self.chat_shown(terminal) {
+            return;
+        }
+        // A chat's notification says more than a program can.
+        if self
+            .notices
+            .shown
+            .get(&terminal)
+            .is_some_and(|&why| why != Why::Program)
+        {
+            return;
+        }
+        let name = (self.panes.get(&terminal))
+            .and_then(|pane| pane.name(self.home()))
+            .unwrap_or_default();
+        let notice = program_notice(&notification, name, terminal);
+        if let Some(notifier) = &mut self.notices.notifier {
+            notifier.show(terminal, &notice);
+            self.notices.shown.insert(terminal, Why::Program);
+        }
+    }
+
+    /// Terminal `terminal`'s program ended: what it asked to be shown
+    /// goes with it.
+    pub(super) fn program_ended(&mut self, terminal: TerminalId) {
+        if self.notices.shown.get(&terminal) == Some(&Why::Program) {
+            self.withdraw_notice(terminal);
+        }
+    }
+
+    /// `:notify phone` or `:notify nophone`: the focused terminal's
+    /// notifications reach the phone too, or not.
+    pub(super) fn notify_phone(&mut self, on: bool) {
+        if !self.needs_daemon(":notify phone", wire::TERMINAL_STANDARDS_2) {
+            return;
+        }
+        let Some(terminal) = self.focused_terminal() else {
+            return;
+        };
+        if self.chats.contains_key(&terminal) {
+            self.warn("a chat's notifications reach the phone already".into());
+            return;
+        }
+        self.request(
+            Request::NotifyPhone { terminal, on },
+            Asked::PhoneMarked(on),
+        );
+    }
+
+    /// Whether a terminal in a tab laid out as `layout` is marked to have
+    /// its notifications reach the phone.
+    pub(super) fn phone_marked(&self, layout: &clackatoo_protocol::Layout) -> bool {
+        (layout.panes().into_iter())
+            .filter_map(|pane| pane.content.terminal())
+            .any(|terminal| self.panes.get(&terminal).is_some_and(Pane::phone))
     }
 
     /// Takes every notification back, as the chats they're of are
@@ -192,10 +282,34 @@ fn notice(title: &str, agent: &str, chat: TerminalId, why: Why) -> Notice {
         Why::Failed => format!("{agent} stopped: something went wrong"),
         Why::Ended => format!("{agent} stopped: it needs a look"),
         Why::Asks => format!("{agent} asks you something"),
+        Why::Program => String::new(),
     };
     Notice {
         title,
         body: escape(&body),
+        low: false,
+    }
+}
+
+/// The notification terminal `terminal`'s program asked for, as
+/// `notification` says, already cleaned by the daemon, and cleaned again
+/// here as a tab's name is: with what it said for a title, or else what
+/// the terminal's tab is named (`name`), or its number. Its line is
+/// escaped as a chat's is.
+fn program_notice(
+    notification: &clackatoo_protocol::Notification,
+    name: &str,
+    terminal: TerminalId,
+) -> Notice {
+    let title = [notification.title.as_str(), name]
+        .into_iter()
+        .map(|title| shown_name(title, 100))
+        .find(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("Terminal {terminal}"));
+    Notice {
+        title,
+        body: escape(&shown_name(&notification.body, 300)),
+        low: notification.urgency == Urgency::Low,
     }
 }
 
@@ -209,6 +323,34 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_programs_notice_says_what_it_said_cleaned_and_escaped() {
+        let said = |title: &str, body: &str, urgency| {
+            let notification = clackatoo_protocol::Notification {
+                title: title.into(),
+                body: body.into(),
+                urgency,
+            };
+            program_notice(&notification, "vim", TerminalId(3))
+        };
+        let notice = said(
+            "make\u{202E}\u{1b}",
+            "<b>done</b> & \u{200b}ok",
+            Urgency::Low,
+        );
+        assert_eq!(notice.title, "make");
+        assert_eq!(notice.body, "&lt;b&gt;done&lt;/b&gt; &amp; ok");
+        assert!(notice.low);
+        // With no title, the tab's name, or else the terminal's number.
+        assert_eq!(said("", "x", Urgency::Critical).title, "vim");
+        assert!(!said("", "x", Urgency::Critical).low, "never critical");
+        let notification = clackatoo_protocol::Notification::default();
+        assert_eq!(
+            program_notice(&notification, " ", TerminalId(3)).title,
+            "Terminal 3"
+        );
+    }
 
     #[test]
     fn a_notice_says_the_title_and_what_happened_escaped() {

@@ -216,6 +216,7 @@ impl Desk {
     /// or Ctrl+D, if a key typed in this window reached it within
     /// [`KEYED_EXIT`]. A program an agent killed, or that crashed, isn't.
     pub(crate) fn terminal_exited(&mut self, terminal: TerminalId, now: Instant) {
+        self.program_ended(terminal);
         let since = now.checked_sub(KEYED_EXIT).unwrap_or(now);
         if self
             .pane(terminal)

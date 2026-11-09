@@ -322,6 +322,14 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::KEPT_HISTORY }, _, _>"
     )]
     pub restarted: Option<Restarted>,
+    /// Whether the terminal is marked to have its notifications reach the
+    /// phone too ([`Request::NotifyPhone`](crate::Request::NotifyPhone)).
+    /// `false` from a daemon older than protocol 143.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
+    )]
+    pub phone: bool,
 }
 
 /// Where a terminal's history kept across a restart ends (see
@@ -578,6 +586,7 @@ impl GridState {
             keyboard: terminal.keyboard(),
             progress: terminal.progress(),
             restarted: (terminal.primary().restarted()).map(|(line, at)| Restarted { line, at }),
+            phone: false,
         }
     }
 }
@@ -915,6 +924,7 @@ mod tests {
                         grid.state.fed = false;
                         grid.state.keyboard = 0;
                         grid.state.progress = None;
+                        grid.state.phone = false;
                     }
                     ViewUpdate::Patch(patches) => {
                         for patch in patches {
@@ -923,6 +933,7 @@ mod tests {
                                 state.fed = false;
                                 state.keyboard = 0;
                                 state.progress = None;
+                                state.phone = false;
                             }
                         }
                     }

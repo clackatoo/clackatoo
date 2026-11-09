@@ -171,9 +171,9 @@ fn agent_parent_prefix(
         return Ok(None);
     };
     // AgentTerminal ends GridState but for, since 136, whether it's fed (a
-    // bool's byte), and since 139, the keyboard's flags and the progress:
-    // the parent's varint, three bools and, since 124, an Option<u8> (one
-    // byte for the tag and one for Some).
+    // bool's byte), since 139, the keyboard's flags and the progress, and
+    // since 143, the phone's mark: the parent's varint, three bools and,
+    // since 124, an Option<u8> (one byte for the tag and one for Some).
     let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
         1 + usize::from(agent.close_in.is_some())
     } else {
@@ -182,7 +182,7 @@ fn agent_parent_prefix(
     let fed = usize::from(wire >= wire::FED_TERMINALS);
     // Since 146, where a restart was: a tag, and two varints with Some.
     let mut fields = [0; 32];
-    let later = if wire >= wire::KEPT_HISTORY {
+    let mut later = if wire >= wire::KEPT_HISTORY {
         postcard::to_slice(
             &(state.keyboard, state.progress, state.restarted),
             &mut fields,
@@ -193,6 +193,9 @@ fn agent_parent_prefix(
     } else {
         0
     };
+    if wire >= wire::TERMINAL_STANDARDS_2 {
+        later += postcard::to_slice(&state.phone, &mut fields)?.len();
+    }
     let end = payload
         .len()
         .checked_sub(after.len() + 3 + countdown + fed + later)
@@ -879,14 +882,15 @@ mod tests {
                     };
                     let fed = usize::from(wire >= wire::FED_TERMINALS);
                     // The flags' byte; Some, Running and its percent.
-                    // And since 146, None for where a restart was.
+                    // And since 146, None for where a restart was; then
+                    // what's since 147.
                     let later = if wire >= wire::KEPT_HISTORY {
                         1 + 3 + 1
                     } else if wire >= wire::TERMINAL_STANDARDS {
                         1 + 3
                     } else {
                         0
-                    };
+                    } + usize::from(wire >= wire::TERMINAL_STANDARDS_2);
                     let tail = 3 + countdown + fed + later;
                     assert_eq!(
                         view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),

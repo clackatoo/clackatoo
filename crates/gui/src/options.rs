@@ -811,7 +811,7 @@ options! {
     /// `off` of none. A notification is taken back once you look at its
     /// chat, and clicking it goes there. A subagent's finishing tells the
     /// chat that started it, not you, but its questions are yours.
-    notify("ntf", "Desktop notifications for chats you can’t see") in Agents: Notify = Notify::All;
+    notify("ntf", "Desktop notifications for chats and programs you can’t see") in Agents: Notify = Notify::All;
     /// What rewinding a chat's conversation, or switching it to another
     /// branch, does to the files the turns it takes out changed: `ask`
     /// asks each time; `undo` undoes them, as `u` undoes a turn; `keep`

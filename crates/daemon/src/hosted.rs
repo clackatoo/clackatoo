@@ -7,6 +7,7 @@ use std::io::{self, BufWriter, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     Error, NewTerminal, Node, Size, TerminalId, TerminalInfo, TerminalStatus, View,
@@ -79,6 +80,56 @@ pub(crate) struct HostedTerminal {
     /// [`crate::priority`]). Not handed over: one carried through an
     /// upgrade counts as the user's.
     for_agents: bool,
+    /// Whether its notifications reach the phone too: a mark only the
+    /// user sets (see [`Request::NotifyPhone`]).
+    ///
+    /// [`Request::NotifyPhone`]: clackatoo_protocol::Request::NotifyPhone
+    phone: bool,
+    /// How many notifications it may still show now.
+    notices: NoticeAllowance,
+}
+
+/// How many notifications a terminal may show: [`NOTICE_BURST`] at once,
+/// then one every [`NOTICE_EVERY`], so a program asking in a loop shows a
+/// few, not thousands.
+#[derive(Debug)]
+struct NoticeAllowance {
+    /// What's left of the burst.
+    left: u32,
+    /// When the last was given back.
+    since: Instant,
+}
+
+/// The most notifications a terminal shows at once.
+const NOTICE_BURST: u32 = 3;
+
+/// How often a terminal that has shown its burst may show one more.
+const NOTICE_EVERY: Duration = Duration::from_secs(10);
+
+impl NoticeAllowance {
+    fn new() -> Self {
+        Self {
+            left: NOTICE_BURST,
+            since: Instant::now(),
+        }
+    }
+
+    /// Whether one may be shown at `now`, which spends it.
+    fn spend(&mut self, now: Instant) -> bool {
+        let back = now.saturating_duration_since(self.since).as_secs() / NOTICE_EVERY.as_secs();
+        let back = u32::try_from(back).unwrap_or(u32::MAX).min(NOTICE_BURST);
+        self.left = (self.left + back).min(NOTICE_BURST);
+        self.since = if self.left == NOTICE_BURST {
+            now
+        } else {
+            self.since + NOTICE_EVERY * back
+        };
+        if self.left == 0 {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
 }
 
 /// Where a terminal the daemon writes an agent's command's output into
@@ -232,6 +283,8 @@ impl HostedTerminal {
             directory: std::cell::RefCell::default(),
             for_agents: leaf == crate::priority::Leaf::Agents,
             fed: None,
+            phone: false,
+            notices: NoticeAllowance::new(),
         })
     }
 
@@ -267,6 +320,8 @@ impl HostedTerminal {
             directory: std::cell::RefCell::default(),
             for_agents: false,
             fed: Some(Fed { ended: false }),
+            phone: false,
+            notices: NoticeAllowance::new(),
         }
     }
 
@@ -311,6 +366,7 @@ impl HostedTerminal {
         self.emulator.advance(&bytes);
         let _ = self.emulator.take_replies();
         let _ = self.emulator.take_clipboard();
+        let _ = self.emulator.take_notice();
     }
 
     /// Says on a line of its own that the command ended, with its exit
@@ -451,6 +507,8 @@ impl HostedTerminal {
             directory: std::cell::RefCell::default(),
             for_agents: false,
             fed: fed.then_some(Fed { ended: true }),
+            phone: false,
+            notices: NoticeAllowance::new(),
         };
         // Where its program is, found now rather than at the next writing
         // of the workspaces, which may never come: a shutdown that ends it
@@ -503,6 +561,34 @@ impl HostedTerminal {
     /// (see [`Terminal::set_palette`]).
     pub(crate) fn set_palette(&mut self, palette: Option<clackatoo_term::Palette>) {
         self.emulator.set_palette(palette);
+    }
+
+    /// The notification its program last asked for, or to take back,
+    /// if there's one to pass on: as many are shown as
+    /// [`NoticeAllowance`] lets, and none from a terminal the daemon
+    /// feeds what an agent's command printed.
+    pub(crate) fn take_notice(&mut self, now: Instant) -> Option<clackatoo_term::Notice> {
+        let notice = self.emulator.take_notice()?;
+        if self.fed.is_some() {
+            return None;
+        }
+        match notice {
+            clackatoo_term::Notice::Show(_) if !self.notices.spend(now) => {
+                log::debug!("terminal {} asks for notifications too often", self.id);
+                None
+            }
+            notice => Some(notice),
+        }
+    }
+
+    /// Whether its notifications reach the phone too.
+    pub(crate) fn phone(&self) -> bool {
+        self.phone
+    }
+
+    /// Marks it to have its notifications reach the phone too, or not.
+    pub(crate) fn set_phone(&mut self, on: bool) {
+        self.phone = on;
     }
 
     /// Puts back what the program asked of the terminal it was handed
@@ -960,6 +1046,25 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn a_terminal_shows_a_few_notifications_then_one_now_and_then() {
+        let mut allowance = NoticeAllowance::new();
+        let start = allowance.since;
+        for _ in 0..NOTICE_BURST {
+            assert!(allowance.spend(start));
+        }
+        assert!(!allowance.spend(start), "a burst at most");
+        assert!(!allowance.spend(start + NOTICE_EVERY / 2));
+        assert!(allowance.spend(start + NOTICE_EVERY), "one more in a while");
+        assert!(!allowance.spend(start + NOTICE_EVERY));
+        // A long while gives back a burst, no more.
+        let later = start + NOTICE_EVERY * 100;
+        for _ in 0..NOTICE_BURST {
+            assert!(allowance.spend(later));
+        }
+        assert!(!allowance.spend(later));
+    }
 
     /// A terminal running `script` in `sh`.
     fn running(script: &str) -> HostedTerminal {

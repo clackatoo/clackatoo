@@ -641,11 +641,15 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
     });
     if let Some(workers) = service_workers(window) {
         listen(&workers, "message", false, |event| {
-            let chat = (event.dyn_ref::<MessageEvent>())
-                .and_then(|message| Reflect::get(&message.data(), &"chat".into()).ok())
-                .and_then(|chat| chat.as_f64());
-            if let Some(chat) = chat {
+            let said = |key: &str| {
+                (event.dyn_ref::<MessageEvent>())
+                    .and_then(|message| Reflect::get(&message.data(), &key.into()).ok())
+                    .and_then(|id| id.as_f64())
+            };
+            if let Some(chat) = said("chat") {
                 with_app(|app| app.go(&format!("#chat/{chat}")));
+            } else if let Some(terminal) = said("terminal") {
+                with_app(|app| app.go(&format!("#term/{terminal}")));
             }
         });
     }

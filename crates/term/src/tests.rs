@@ -604,7 +604,7 @@ mod queries {
         }));
         for payload in payloads {
             let mut asked = Vec::new();
-            let frames: [(&[u8], &[u8]); 9] = [
+            let frames: [(&[u8], &[u8]); 13] = [
                 (b"\x1bP+q", b"\x1b\\"),
                 (b"\x1bP$q", b"\x1b\\"),
                 (b"\x1b]10;", b"\x07"),
@@ -614,6 +614,12 @@ mod queries {
                 (b"\x1b]52;c;", b"\x07"),
                 (b"\x1b]9;4;", b"\x07"),
                 (b"\x1b]2;", b"\x07\x1b[22t\x1b[23t\x1b[21t"),
+                // Notifications, and kitty's questions about them, which
+                // get no answer at all.
+                (b"\x1b]9;", b"\x07"),
+                (b"\x1b]777;notify;", b";body\x07"),
+                (b"\x1b]99;i=", b";title\x07"),
+                (b"\x1b]99;p=?:i=", b";\x07"),
             ];
             for (start, end) in frames {
                 asked.extend_from_slice(start);
@@ -637,6 +643,40 @@ mod queries {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn notifications_are_cleaned_bounded_and_never_answered() {
+        let mut t = terminal(10, 5);
+        let mut flood = Vec::new();
+        for n in 0..500 {
+            flood.extend_from_slice(
+                format!("\x1b]777;notify;\x01[31m{n}\u{202e}\r\n;\u{9b}\x15rm -rf ~\x07")
+                    .as_bytes(),
+            );
+            flood.extend_from_slice(b"\x1b]99;i=a:p=?;\x1b\\\x1b]99;i=a\x15:d=0;x\x07");
+        }
+        flood.extend_from_slice(format!("\x1b]9;{}\x07", "\u{200b}y".repeat(1 << 16)).as_bytes());
+        t.advance(&flood);
+        assert!(t.take_replies().is_empty(), "nothing is said back");
+        let Some(crate::Notice::Show(said)) = t.take_notice() else {
+            panic!("the last is kept");
+        };
+        assert!(said.title.is_empty());
+        assert_eq!(said.body.chars().count(), crate::notify::MOST_BODY);
+        assert!(said.body.chars().all(|ch| ch == 'y' || ch == '\u{FFFD}'));
+        assert_eq!(t.take_notice(), None, "only the latest waits");
+        t.advance("\x1b]777;notify;\x01[31mtitle\u{202e}\r\n;\u{9b}\x15rm -rf ~\x07".as_bytes());
+        let Some(crate::Notice::Show(said)) = t.take_notice() else {
+            panic!("shown");
+        };
+        assert_eq!(
+            (said.title.as_str(), said.body.as_str()),
+            ("[31mtitle", "rm -rf ~")
+        );
+        // A reset keeps what was asked before it.
+        t.advance(b"\x1b]9;before\x07\x1bc");
+        assert!(matches!(t.take_notice(), Some(crate::Notice::Show(_))));
     }
 
     #[test]

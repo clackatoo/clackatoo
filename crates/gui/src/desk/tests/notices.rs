@@ -15,6 +15,8 @@ use crate::notify::{Notice, Notifier};
 enum Said {
     /// Shown for a chat, with its line.
     Show(u32, String),
+    /// Shown for a terminal's program, with its title and line.
+    Program(u32, String, String),
     Withdraw(u32),
 }
 
@@ -23,10 +25,12 @@ struct Fake(Rc<RefCell<Vec<Said>>>);
 
 impl Notifier for Fake {
     fn show(&mut self, chat: TerminalId, notice: &Notice) {
-        assert_eq!(notice.title, format!("chat {}", chat.0));
-        self.0
-            .borrow_mut()
-            .push(Said::Show(chat.0, notice.body.clone()));
+        let said = if notice.title == format!("chat {}", chat.0) {
+            Said::Show(chat.0, notice.body.clone())
+        } else {
+            Said::Program(chat.0, notice.title.clone(), notice.body.clone())
+        };
+        self.0.borrow_mut().push(said);
     }
 
     fn withdraw(&mut self, chat: TerminalId) {
@@ -289,6 +293,60 @@ fn clicking_one_goes_to_its_chat_or_the_chat_above_it_in_a_pane() {
     desk.chats_changed(vec![summary(2, 1, Answering), sub]);
     desk.notice_clicked(TerminalId(9));
     assert_eq!(desk.shown.map(|shown| shown.tab), Some(TabId(2)));
+}
+
+/// A program's notification, as the daemon passes it on.
+fn program(title: &str, body: &str) -> clackatoo_protocol::Notice {
+    clackatoo_protocol::Notice::Show(clackatoo_protocol::Notification {
+        title: title.into(),
+        body: body.into(),
+        urgency: clackatoo_protocol::Urgency::Normal,
+    })
+}
+
+#[test]
+fn a_programs_notification_is_told_until_its_pane_is_looked_at() {
+    let (mut desk, said) = notified_desk();
+    // In view, with the focus: nothing.
+    desk.program_notice(TerminalId(1), program("make", "built"));
+    assert_eq!(taken(&said), []);
+    // In a tab not shown: told, and taken back as the program asks.
+    desk.program_notice(TerminalId(3), program("make", "built"));
+    assert_eq!(
+        taken(&said),
+        [Said::Program(3, "make".into(), "built".into())]
+    );
+    desk.program_notice(TerminalId(3), clackatoo_protocol::Notice::Close);
+    assert_eq!(taken(&said), [Said::Withdraw(3)]);
+    // Or as its pane is shown, with no title but the terminal's.
+    desk.program_notice(TerminalId(3), program("", "again"));
+    assert_eq!(
+        taken(&said),
+        [Said::Program(3, "Terminal 3".into(), "again".into())]
+    );
+    desk.show_tab(TabId(2));
+    assert_eq!(taken(&said), [Said::Withdraw(3)]);
+    // The window in the background: what's in view is told too, and taken
+    // back as the window has the focus again.
+    desk.window_focus(false);
+    desk.program_notice(TerminalId(2), program("vim", "saved"));
+    assert_eq!(
+        taken(&said),
+        [Said::Program(2, "vim".into(), "saved".into())]
+    );
+    desk.window_focus(true);
+    assert_eq!(taken(&said), [Said::Withdraw(2)]);
+    // Its program ending takes it back.
+    desk.program_notice(TerminalId(5), program("x", "y"));
+    desk.terminal_exited(TerminalId(5), std::time::Instant::now());
+    assert_eq!(
+        taken(&said),
+        [Said::Program(5, "x".into(), "y".into()), Said::Withdraw(5)]
+    );
+    // And none with notifications off.
+    desk.options.notify = crate::options::Notify::Off;
+    desk.program_notice(TerminalId(5), program("x", "y"));
+    assert_eq!(taken(&said), []);
 }
 
 #[test]

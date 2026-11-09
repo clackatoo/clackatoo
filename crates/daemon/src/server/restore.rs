@@ -557,6 +557,7 @@ impl Daemon {
     pub(super) fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
         if let Some(borrowed) = self.workspaces.borrowed().get(&id) {
             return Some(Pane::Terminal {
+                phone: false,
                 cwd: None,
                 ran: None,
                 keep: None,
@@ -609,6 +610,7 @@ impl Daemon {
                             command: kept.command.clone(),
                             always: kept.always,
                         }),
+                        phone: terminal.phone(),
                     })
                 }
                 Hosted::Chat(chat) => Some(Pane::Chat {
@@ -1446,6 +1448,7 @@ impl Daemon {
                 cwd,
                 history,
                 history_off,
+                phone,
                 ..
             } => {
                 // A stat, as opening a file is.
@@ -1463,6 +1466,13 @@ impl Daemon {
                 // printed anything.
                 if let Ok(Content::Terminal(id)) = made {
                     self.restore_history(id, history.as_deref(), *history_off);
+                }
+                // The user's mark comes back with it.
+                if let Ok(Content::Terminal(id)) = &made
+                    && let Some(terminal) =
+                        (self.terminals.get_mut(id)).and_then(|slot| slot.terminal.pty())
+                {
+                    terminal.set_phone(*phone);
                 }
                 made
             }

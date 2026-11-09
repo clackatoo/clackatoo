@@ -10,8 +10,8 @@ related:
 clackatoo emulates enough of xterm for shells, ncurses programs such as htop,
 and vim, under `TERM=xterm-256color`, with the extensions modern terminals
 such as kitty, foot, WezTerm and Ghostty share: the kitty keyboard protocol,
-synchronized output, styled and colored underlines, and a program's progress
-shown on its tab. Sequences it doesn't support are ignored, as xterm ignores
+synchronized output, styled and colored underlines, a program's progress
+shown on its tab, and the notifications programs ask for. Sequences it doesn't support are ignored, as xterm ignores
 ones it doesn't know.
 
 ## The environment
@@ -188,7 +188,7 @@ desktop; nothing about it passes between machines.
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
 | DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
-| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)) |
+| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)) |
 
 ## Queries answered
 
@@ -282,7 +282,41 @@ ends its name with ` 42%`, ` ✗` (and the percent, if given) failed, ` …` bus
 or ` ‖` paused: the focused pane's, or else the first of the tab's panes to
 say, in a tab shown or not. It goes once the program says it's done (state 0),
 or once the shell's next prompt shows the program has ended (OSC 133 `A`). Any
-other `OSC 9`, iTerm2's notification, is ignored.
+other `OSC 9` is iTerm2's [notification](#notifications).
+
+## Notifications
+
+A program can ask for a desktop notification, as a build or a long command
+does when it ends, in any of the three ways terminals read:
+
+| Sequence | What it says |
+|---|---|
+| `OSC 9 ; <text> ST` | iTerm2's: a line, with no title. ConEmu's numbered commands, whose first part is a number, aren't notifications. |
+| `OSC 777 ; notify ; <title> ; <body> ST` | urxvt's, as foot and Ghostty read it. |
+| `OSC 99 ; <metadata> ; <payload> ST` | kitty's (<https://sw.kovidgoyal.net/kitty/desktop-notifications/>). The metadata is `key=value` pairs separated by `:`: `p=title` (as when it's left out) or `p=body` says which the payload is, `d=0` that more of it comes in the next, `e=1` that it's base64, `u=0`, `1` or `2` how urgent it is, and `i=<id>` names it, so that `p=close` with the same id takes it back. Buttons, icons, sounds and the rest are left out. |
+
+A window shows it while you aren't looking at the program's pane: it's in a
+tab not shown, or the window doesn't have the focus. It goes once you look, as
+the program asks, or as the program ends, and clicking it goes to the pane. It
+isn't sent at all while someone whose window has the focus, or whose phone
+shows the terminal, is looking at it. A low urgency (`u=0`) is shown as such;
+a critical one (`u=2`) as a normal one, since critical ones break through Do
+Not Disturb. `:set notify=off` turns them off with chats', as the
+[`notify` option](~clackatoo/reference/config#options) says.
+
+`:notify phone` marks the focused terminal to have its notifications reach the
+[phone](~clackatoo/reference/phone#notifications) too, and `:notify nophone`
+takes the mark away. A tab with a terminal so marked ends its name with
+` 📱`. The mark goes on through an upgrade in place and a restart, as `:keep`
+does.
+
+What a program says is cleaned as tab names are: control characters become
+spaces, what shows nothing but changes what's around it goes, runs of spaces
+become one, and a title is cut to 120 characters, a line to 300. A terminal
+shows three at once, then one every ten seconds; one asking more often is
+heard only as often. Nothing is ever said back to the program: kitty's
+questions about what's supported (`p=?`), and its reports of a notification
+clicked or closed, get no answer.
 
 ## Not supported
 
@@ -291,8 +325,6 @@ These are ignored:
 - The kitty graphics protocol (`APC G`), sixels and other images.
 - Setting colors: `OSC 4`, `10`, `11`, `12`, `104`, and the others. Asking
   about them is [answered](#queries-answered).
-- Desktop notifications from programs: `OSC 99`, `OSC 777`, and iTerm2's
-  `OSC 9`.
 - Key repeats and releases (the kitty keyboard protocol's flag 2), and
   <kbd>Super</kbd>, Hyper and Meta as modifiers.
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and

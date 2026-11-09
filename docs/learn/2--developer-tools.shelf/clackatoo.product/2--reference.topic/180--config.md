@@ -370,7 +370,7 @@ short name, as in Vim, which works everywhere the long one does.
 | `chatbrowser` | `cbr` | A new chat starts with its [Browser](~clackatoo/reference/agent-tools#the-browser) setting on, so its agent can drive a headless browser with a profile of its own. Off, a chat has none until you turn it on in its settings. | off |
 | `chatcost` | `chc` | Under each chat turn, what it spent, its tokens and, where the agent says, its cost; and what the session cost, in the chat's usage detail (see [what else a turn says](~clackatoo/reference/chat-view#what-else-a-turn-says)). | on |
 | `carryover` | `co` | About the most of a chat's conversation, in tokens, that an agent the chat moves to hears, from 1000 to 50000, but never more than a quarter of its context. | 20000 |
-| `notify` | `ntf` | Which chats you can't see get a [desktop notification](~clackatoo/reference/chat-view#desktop-notifications): `all` (those that finish, fail, or ask something), `questions`, or `off`. | `all` |
+| `notify` | `ntf` | Which chats you can't see get a [desktop notification](~clackatoo/reference/chat-view#desktop-notifications): `all` (those that finish, fail, or ask something), `questions`, or `off`. A program's own [notifications](~clackatoo/reference/terminal-emulation#notifications) show unless it's `off`. | `all` |
 | `rewindfiles` | `rwf` | What [rewinding a chat](~clackatoo/reference/agent-changes#rewinding-and-branches), or switching its branch, does to the files the turns it takes out changed: `ask` each time, `undo` them, or `keep` them. `:rewind!` undoes them without asking. | `ask` |
 
 ### The window

@@ -4233,6 +4233,9 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Exited { terminal })) => {
                 self.desk.terminal_exited(terminal, Instant::now());
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Notified { terminal, notice })) => {
+                self.desk.program_notice(terminal, notice);
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Paired { device, said })) => {
                 self.desk.device_paired(device, &said);
                 self.request_redraw();

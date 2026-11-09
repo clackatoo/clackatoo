@@ -68,6 +68,18 @@ Run this, which says it failed 42% of the way, as a program might, and watch the
 exited 2
 ```
 
+## Notifications from programs
+
+A program can ask for a desktop notification, as a long build does when it ends: `OSC 9`, `OSC 777` and kitty's `OSC 99`. clackatoo shows it while you aren't looking at the program's pane: it's in another tab, or the window is in the background. It goes once you look. What it says is cleaned, as tab names are, and a program asking over and over shows a few, then one every ten seconds. `:set notify=off` turns them off with chats'.
+
+`:notify phone` marks the terminal so its notifications reach your phone too, through the web app, when no one is looking at it anywhere; `:notify nophone` takes the mark off. The tab's name ends with ` 📱` while one of its terminals is marked.
+
+In the terminal, type `:notify phone`.
+
+```check
+phone 1
+```
+
 ## Marking every command
 
 `:set blockmarks=all` marks the commands that worked too, with a faint `✓`; `none` marks none, and `failed`, as it starts, marks only those that failed. The tab's name is the shell's folder, while the program sets no title.

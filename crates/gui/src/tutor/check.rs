@@ -66,6 +66,7 @@ pub(crate) enum Check {
     Kept(usize),
     /// `zoomed`: the lesson's tab is zoomed to one of its panes.
     Zoomed,
+    Phoned(usize),
     Not(Box<Check>),
 }
 
@@ -177,6 +178,9 @@ pub(crate) trait Facts {
     }
     /// Whether the lesson's tab is zoomed to one of its panes.
     fn zoomed(&self) -> bool;
+    /// How many terminals of the tab shown are marked to have their
+    /// notifications reach the phone.
+    fn phone_terminals(&self) -> usize;
 }
 
 impl Check {
@@ -246,6 +250,7 @@ impl Check {
             ["background", count] => Self::Background(number(count)?),
             ["kept", count] => Self::Kept(number(count)?),
             ["zoomed"] => Self::Zoomed,
+            ["phone", count] => Self::Phoned(number(count)?),
             _ => return Err("that isn't a check".into()),
         })
     }
@@ -299,6 +304,7 @@ impl Check {
             Self::Background(count) => facts.background_tabs() == *count,
             Self::Kept(count) => facts.kept_terminals() == *count,
             Self::Zoomed => facts.zoomed(),
+            Self::Phoned(count) => facts.phone_terminals() == *count,
             Self::Not(check) => !check.holds(facts),
         }
     }
@@ -479,6 +485,9 @@ mod tests {
         }
         fn zoomed(&self) -> bool {
             false
+        }
+        fn phone_terminals(&self) -> usize {
+            0
         }
     }
 

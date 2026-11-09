@@ -456,6 +456,7 @@ fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
             elsewhere,
             keep,
             history_off,
+            phone,
             ..
         } => saved::Pane::Terminal {
             cwd,
@@ -465,6 +466,7 @@ fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
             // Its history went as it closed; whether to keep it stays.
             history: None,
             history_off,
+            phone,
         },
         saved::Pane::Chat {
             id,
@@ -703,6 +705,7 @@ mod tests {
             }),
             history: Some("0000000000000abc-3".into()),
             history_off: true,
+            phone: true,
         };
         assert_eq!(
             reopened(kept, false),
@@ -713,6 +716,7 @@ mod tests {
                 keep: None,
                 history: None,
                 history_off: true,
+                phone: true,
             }
         );
     }

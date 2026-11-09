@@ -253,6 +253,8 @@ fn argument_description(command: &str, word: &str) -> &'static str {
         ("keep", "always") => "Restart this command when it exits, too",
         ("keep", "off") => "Stop restarting this terminal command",
         ("keep", "history") => "Keep this terminal's history across a restart, on or off",
+        ("notify", "phone") => "Send this terminal's notifications to the phone too",
+        ("notify", "nophone") => "Keep this terminal's notifications off the phone",
         ("Review", "chat") => "Review all changes made by this chat",
         ("Review", "turn") => "Review the last turn, or a numbered turn",
         ("Review", "base") => "Review all changes since the branch’s base",

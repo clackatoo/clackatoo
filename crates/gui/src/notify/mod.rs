@@ -1,5 +1,6 @@
 //! Desktop notifications for chats the user can't see: one that finished,
-//! asks something, or failed. Which to show, and when to take one back,
+//! asks something, or failed; and for terminals the user can't see whose
+//! programs ask for one. Which to show, and when to take one back,
 //! is the window's call (see `desk/notices.rs`), made with what the tabs'
 //! marks go by; this is how they're shown.
 //!
@@ -48,6 +49,8 @@ pub(crate) struct Notice {
     pub(crate) title: String,
     /// What happened, as "Claude Code finished".
     pub(crate) body: String,
+    /// It can wait, as a program may say: shown with low urgency.
+    pub(crate) low: bool,
 }
 
 /// What shows the window's notifications: [`Desktop`], or in tests, one
@@ -546,10 +549,10 @@ fn notify_body(replaces: u32, notice: &Notice) -> Body {
     body.string("desktop-entry");
     body.variant_string("clackatoo");
     body.begin_struct();
-    // Normal, never critical, even for a question: critical ones break
-    // through Do Not Disturb.
+    // Normal, never critical, even for a question or a program that asks
+    // for it: critical ones break through Do Not Disturb.
     body.string("urgency");
-    body.variant_byte(1);
+    body.variant_byte(u8::from(!notice.low));
     body.end_array(hints);
     // The server's choice of how long it shows.
     body.i32(-1);
@@ -737,6 +740,7 @@ mod tests {
         let notice = Notice {
             title: "notes".to_owned(),
             body: "Claude Code finished".to_owned(),
+            low: false,
         };
         let body = notify_body(5, &notice);
         let bytes = body.as_bytes();

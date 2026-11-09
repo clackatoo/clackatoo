@@ -81,6 +81,7 @@ mod lending;
 mod lent_background;
 mod links;
 mod mentions;
+mod notices;
 mod offers;
 mod pastes;
 mod pictures;
@@ -836,9 +837,13 @@ impl Subscription {
         agent: Option<clackatoo_protocol::AgentTerminal>,
     ) -> Option<ViewUpdate> {
         match hosted {
-            Hosted::Pty(terminal) => {
-                self.update_agent(terminal.emulator(), wire, agent, terminal.is_fed())
-            }
+            Hosted::Pty(terminal) => self.update_agent(
+                terminal.emulator(),
+                wire,
+                agent,
+                terminal.is_fed(),
+                terminal.phone(),
+            ),
             Hosted::Chat(chat) => chat.catch_up(&mut self.chat),
         }
     }
@@ -848,18 +853,19 @@ impl Subscription {
     /// `None` if nothing changed.
     #[cfg(test)]
     fn update(&mut self, terminal: &Terminal, wire: u32) -> Option<ViewUpdate> {
-        self.update_agent(terminal, wire, None, false)
+        self.update_agent(terminal, wire, None, false, false)
     }
 
     /// As [`update`](Self::update), for a terminal an agent started, as
     /// `agent` says, or one the daemon writes an agent's command's output
-    /// into, if `fed`.
+    /// into, if `fed`, or one marked to notify the phone, if `phone`.
     fn update_agent(
         &mut self,
         terminal: &Terminal,
         wire: u32,
         agent: Option<clackatoo_protocol::AgentTerminal>,
         fed: bool,
+        phone: bool,
     ) -> Option<ViewUpdate> {
         // Countdown-only changes must not send identical patches to old windows.
         let agent = agent.map(|mut agent| {
@@ -872,10 +878,14 @@ impl Subscription {
         let mut state = GridState::of(terminal);
         state.agent = agent;
         state.fed = fed;
+        state.phone = phone;
         // Nor are changes an older window can't read sent to it alone.
         if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS {
             state.keyboard = 0;
             state.progress = None;
+        }
+        if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS_2 {
+            state.phone = false;
         }
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
@@ -892,6 +902,7 @@ impl Subscription {
             if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
                 grid.state.agent = agent;
                 grid.state.fed = fed;
+                grid.state.phone = state.phone;
             }
             return Some(ViewUpdate::Snapshot(view));
         }
@@ -1424,6 +1435,13 @@ impl Daemon {
                 pty.restore_asked(&asked.asked);
             }
         }
+        // What the user marked them with.
+        for marks in &state.marks {
+            let slot = daemon.terminals.get_mut(&TerminalId(marks.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.set_phone(marks.phone);
+            }
+        }
         daemon.restate_backgrounds();
         daemon.restate_lent_backgrounds();
         // The terminals kept running always, as they were, and how running
@@ -1705,6 +1723,7 @@ impl Daemon {
         let mut exes = Vec::new();
         let mut asked = Vec::new();
         let mut histories = Vec::new();
+        let mut marks = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
@@ -1734,7 +1753,14 @@ impl Daemon {
                     let exe = terminal.exe();
                     let programs_asked = terminal.emulator().asked_snapshot();
                     histories.extend(self.hand_over_history(terminal.id(), terminal.emulator()));
+                    let phone = terminal.phone();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
+                    if phone {
+                        marks.push(handover::Marks {
+                            terminal: terminal.id,
+                            phone,
+                        });
+                    }
                     if programs_asked != clackatoo_term::AskedSnapshot::default() {
                         asked.push(handover::Asked {
                             terminal: terminal.id,
@@ -1912,6 +1938,7 @@ impl Daemon {
                 }),
                 images,
                 histories,
+                marks,
             },
             fds,
             version: handover::VERSION,
@@ -2523,6 +2550,7 @@ impl Daemon {
             return;
         }
         self.serve_clipboard(id);
+        self.serve_notice(id);
         self.schedule_compaction(id);
         self.note_frame(id);
         self.collect_damage(id);
@@ -3856,6 +3884,7 @@ impl Daemon {
             Request::SeenPaired { device } => self.seen_paired(token, device),
             Request::Tutor(files) => self.tutor_files(token, files),
             Request::KeepHistory { pane, how } => self.serve_keep_history(token, pane, how),
+            Request::NotifyPhone { terminal, on } => self.notify_phone(terminal, on),
             Request::Connect {
                 host,
                 command,
@@ -5161,11 +5190,11 @@ mod tests {
                 close_in: Some(60),
             };
             assert!(matches!(
-                sent.update_agent(&terminal, wire, Some(agent), false),
+                sent.update_agent(&terminal, wire, Some(agent), false, false),
                 Some(ViewUpdate::Snapshot(_))
             ));
             agent.close_in = Some(59);
-            let update = sent.update_agent(&terminal, wire, Some(agent), false);
+            let update = sent.update_agent(&terminal, wire, Some(agent), false, false);
             if wire >= wire::TERMINAL_COUNTDOWN {
                 let Some(ViewUpdate::Patch(patches)) = update else {
                     panic!("a countdown patch")
@@ -5180,13 +5209,13 @@ mod tests {
                 );
             }
             assert!(
-                sent.update_agent(&terminal, wire, Some(agent), false)
+                sent.update_agent(&terminal, wire, Some(agent), false, false)
                     .is_none()
             );
             agent.retained = true;
             agent.close_in = None;
             assert!(
-                sent.update_agent(&terminal, wire, Some(agent), false)
+                sent.update_agent(&terminal, wire, Some(agent), false, false)
                     .is_some()
             );
         }

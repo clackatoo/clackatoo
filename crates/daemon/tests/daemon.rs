@@ -1625,6 +1625,90 @@ fn assert_copied(client: &mut Client, terminal: TerminalId) {
     }
 }
 
+/// The next notification `window` is told of, past view updates and the
+/// workspaces changing.
+fn next_program_notice(window: &mut Client) -> (TerminalId, clackatoo_protocol::Notice) {
+    loop {
+        match next_other_event(window) {
+            Event::Workspaces(_) => {}
+            Event::Notified { terminal, notice } => return (terminal, notice),
+            other => panic!("expected a notification, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_programs_notifications_reach_windows_while_no_one_present_looks() {
+    use clackatoo_protocol::Urgency::{Low, Normal};
+    let daemon = TestDaemon::start();
+    let mut window = daemon.client();
+    a_window(&mut window);
+    // Each `read` waits for Enter: a notification, then another while
+    // someone present looks, then one after they've gone.
+    let script = r"printf '\033]777;notify;make;built \033[2J\033\\'; read a; \
+                   printf '\033]9;seen\007seen'; read b; \
+                   printf '\033]99;i=1:u=0;\025rm\007'; read c; \
+                   printf '\033]99;i=1:p=close;\033\\'; sleep 5";
+    let (terminal, mut clients) = followed(&daemon, script, 1, 0);
+    let shown = |title: &str, body: &str, urgency| {
+        clackatoo_protocol::Notice::Show(clackatoo_protocol::Notification {
+            title: title.into(),
+            body: body.into(),
+            urgency,
+        })
+    };
+    // The escape sequence ended the string: the rest was never said.
+    assert_eq!(
+        next_program_notice(&mut window),
+        (terminal, shown("make", "built", Normal))
+    );
+    say_present(&mut clients[0], true);
+    clients[0].send_input(terminal, b"\r").unwrap();
+    wait_for_screen(&mut clients[0], terminal, |text| text.contains("seen"));
+    say_present(&mut clients[0], false);
+    clients[0].send_input(terminal, b"\r").unwrap();
+    // A control character said is a space, trimmed.
+    assert_eq!(
+        next_program_notice(&mut window),
+        (terminal, shown("rm", "", Low))
+    );
+    // Taking it back goes whoever looks.
+    say_present(&mut clients[0], true);
+    clients[0].send_input(terminal, b"\r").unwrap();
+    assert_eq!(
+        next_program_notice(&mut window),
+        (terminal, clackatoo_protocol::Notice::Close)
+    );
+}
+
+#[test]
+fn a_terminal_is_marked_for_the_phone_and_its_view_says_so() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    let mark = |client: &mut Client, terminal, on| {
+        client
+            .request(&Request::NotifyPhone { terminal, on })
+            .unwrap()
+    };
+    assert_eq!(mark(&mut client, terminal, true), Response::Done);
+    client.attach(terminal).unwrap();
+    let Event::View {
+        update: ViewUpdate::Snapshot(view),
+        ..
+    } = client.next_event().unwrap()
+    else {
+        panic!("a snapshot");
+    };
+    assert!(view.grid().unwrap().state.phone);
+    client.frame_done(terminal).unwrap();
+    assert_eq!(mark(&mut client, terminal, false), Response::Done);
+    assert!(matches!(
+        mark(&mut client, TerminalId(999), true),
+        Response::Error(Error::NoSuchTerminal(_))
+    ));
+}
+
 #[test]
 fn text_a_program_puts_on_the_clipboard_goes_to_the_window_that_typed_into_it() {
     let daemon = TestDaemon::start();
@@ -6627,6 +6711,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Paired { .. }
             | Event::Image(_)
             | Event::Picture { .. }
+            | Event::Notified { .. }
             | Event::NativeRequest { .. }
             | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {

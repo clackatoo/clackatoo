@@ -1231,7 +1231,7 @@ impl Daemon {
 
     /// Whether someone present is looking at chat `id`: a client whose
     /// user is there follows it.
-    fn looked_at(&self, id: TerminalId) -> bool {
+    pub(super) fn looked_at(&self, id: TerminalId) -> bool {
         let now = Instant::now();
         self.terminals.get(&id).is_some_and(|slot| {
             slot.viewers.iter().any(|token| {

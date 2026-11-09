@@ -139,6 +139,9 @@ enum Asked {
     BackgroundPreview(TabId),
     /// `:keep`, whose answer is said in the bar.
     Kept,
+    /// `:notify phone`, or `nophone` if false, whose answer is said in the
+    /// bar.
+    PhoneMarked(bool),
     /// `:trust`, `:untrust`, `:trusted` or an answer to whether to trust
     /// a folder, whose answer is said in the bar.
     Trusted,
@@ -864,6 +867,10 @@ impl Desk {
                 // A terminal kept running, as the user marked it.
                 if let Some(mark) = self.kept_mark(&tab.layout) {
                     name.push_str(mark);
+                }
+                // A terminal whose notifications reach the phone.
+                if self.phone_marked(&tab.layout) {
+                    name.push_str(notices::PHONE_MARK);
                 }
                 // How far a program in it says its task has got.
                 if let Some(progress) = self.tab_progress(tab) {
@@ -1859,6 +1866,14 @@ impl Desk {
                     Response::Text(said) => self.say(said.replace('\n', "; ")),
                     Response::Error(err) => self.warn(err.to_string()),
                     _ => {}
+                }
+                true
+            }
+            Some(Asker::Window(Asked::PhoneMarked(on))) => {
+                match response {
+                    Response::Error(err) => self.warn(err.to_string()),
+                    _ if on => self.say("this terminal's notifications reach the phone too".into()),
+                    _ => self.say("this terminal's notifications stay off the phone".into()),
                 }
                 true
             }
@@ -3004,6 +3019,7 @@ impl Desk {
             Command::BackgroundStart(command) => self.start_in_background(command),
             Command::Keep(how) => self.keep_running(how),
             Command::KeepHistory(how) => self.keep_history(how),
+            Command::NotifyPhone(on) => self.notify_phone(on),
             Command::Trust { action, folder } => self.trust_command(action, folder),
             Command::Reload
             | Command::Set { .. }

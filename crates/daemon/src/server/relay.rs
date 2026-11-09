@@ -47,8 +47,8 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
     BackgroundAction, BoardId, BufferId, ChatAction, ChatSummary, ClientMessage, Error, Event,
-    FilesId, ImageFrom, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId,
-    ServerMessage, TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
+    FilesId, ImageFrom, Notice, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response,
+    ReviewId, ServerMessage, TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -909,6 +909,20 @@ impl Daemon {
                     };
                 };
                 Routed::Answered(self.relay_keys(token, at, terminal, remote, bytes))
+            }
+            Request::NotifyPhone { terminal, on } => {
+                let Some((at, remote)) = self.relayed_terminal(terminal) else {
+                    return Routed::Here(Request::NotifyPhone { terminal, on });
+                };
+                if self.link_wire(at) < wire::TERMINAL_STANDARDS_2 {
+                    let error = self.too_old(at, "marking a terminal for the phone");
+                    return Routed::Answered(Response::Error(error));
+                }
+                let mark = Request::NotifyPhone {
+                    terminal: remote,
+                    on,
+                };
+                self.wait_for(token, at, mark, Then::Pass)
             }
             Request::Resize { terminal, size } => {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
@@ -3095,6 +3109,21 @@ impl Daemon {
                 for token in viewers {
                     self.send_event(token, Event::Exited { terminal: local });
                 }
+            }
+            Event::Notified { terminal, notice } => {
+                let mirror = &self.links.list[at].relayed.mirror;
+                let Some(local) = mirror.terminal_numbers.local(terminal.0) else {
+                    return;
+                };
+                // Cleaned again: the daemon there isn't trusted to have.
+                let notice = match notice {
+                    Notice::Show(notification) => match notification.recleaned() {
+                        Some(notification) => Notice::Show(notification),
+                        None => return,
+                    },
+                    Notice::Close => Notice::Close,
+                };
+                self.send_notice(TerminalId(local), &notice);
             }
             Event::Show { pane, at: place } => {
                 let mirror = &self.links.list[at].relayed.mirror;

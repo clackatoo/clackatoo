@@ -430,6 +430,11 @@ gates! {
     /// line between; and changing what's kept, `Request::KeepHistory`
     /// (`HistoryKeeping`), which only such a window sends.
     KEPT_HISTORY = 146,
+    /// Round two of the terminal standards (CLACKA-238): notifications
+    /// programs ask for, `Event::Notified`, sent only to a window of
+    /// this protocol, and the mark that has a terminal's reach the phone,
+    /// `Request::NotifyPhone` and `GridState`'s `phone`.
+    TERMINAL_STANDARDS_2 = 147,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -779,6 +784,7 @@ impl Since for Event {
             Self::NativeRequest { .. } | Self::NativeGrantAck { .. } => HARNESS,
             Self::Paired { .. } => PAIRED,
             Self::Image(_) | Self::Picture { .. } => IMAGES,
+            Self::Notified { .. } => TERMINAL_STANDARDS_2,
         }
     }
 }
@@ -1767,6 +1773,7 @@ impl Downgrade for ServerMessage {
                 | Event::Paired { .. }
                 | Event::Image(_)
                 | Event::Picture { .. }
+                | Event::Notified { .. }
                 | Event::Files {
                     update:
                         FilesUpdate::Changed { .. }
@@ -2633,9 +2640,10 @@ mod tests {
         // a window that reads it is sent; and what an explorer's bar is
         // told, which an older window does without;
         // and the question whether to trust a
-        // folder, which only a client that can answer it is asked; and
-        // what came of image work, and what a picture pane shows, which
-        // only a client that asked is sent.
+        // folder, which only a client that can answer it is asked; what
+        // came of image work, and what a picture pane shows, which only a
+        // client that asked is sent; and a program's notification, which
+        // only a newer window is sent.
         matches!(
             message,
             ServerMessage::Event(
@@ -2647,6 +2655,7 @@ mod tests {
                 } | Event::Paired { .. }
                     | Event::Image(_)
                     | Event::Picture { .. }
+                    | Event::Notified { .. }
                     | Event::NativeRequest { .. }
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }

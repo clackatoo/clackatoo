@@ -407,6 +407,17 @@ fn send(agent: &ureq::Agent, vapid: &Vapid, random: &SystemRandom, push: &Push) 
 /// What the app's service worker is sent: the chat it's about, and what
 /// to show.
 pub(crate) fn payload(chat: u32, title: &str, body: &str) -> Vec<u8> {
+    payload_about("chat", chat, title, body)
+}
+
+/// What a notification about terminal `terminal` says, as
+/// [`payload`] does for a chat: its title and body, which its program
+/// asked for, already cleaned, and the terminal, which tapping it opens.
+pub(crate) fn payload_of_terminal(terminal: u32, title: &str, body: &str) -> Vec<u8> {
+    payload_about("terminal", terminal, title, body)
+}
+
+fn payload_about(kind: &str, id: u32, title: &str, body: &str) -> Vec<u8> {
     let cut = |text: &str, most: usize| -> String {
         let mut cut: String = text.chars().take(most).collect();
         if cut.len() < text.len() {
@@ -415,7 +426,7 @@ pub(crate) fn payload(chat: u32, title: &str, body: &str) -> Vec<u8> {
         cut
     };
     serde_json::json!({
-        "chat": chat,
+        kind: id,
         "title": cut(title, 80),
         "body": cut(body, 120),
     })

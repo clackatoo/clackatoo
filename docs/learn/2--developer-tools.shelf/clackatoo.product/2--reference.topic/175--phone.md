@@ -348,6 +348,11 @@ push services. A window on a desktop shows its own
 besides, on the computer it runs on; one without the focus says nothing of a
 turn you watched end on the phone.
 
+A terminal you mark with `:notify phone` sends the phone the
+[notifications its program asks for](~clackatoo/reference/terminal-emulation#notifications)
+too, while no one whose window or phone shows it is looking. Tapping one opens
+the terminal.
+
 ## What's kept
 
 `~/.local/share/clackatoo/web/`: `devices.json`, with names, token hashes,

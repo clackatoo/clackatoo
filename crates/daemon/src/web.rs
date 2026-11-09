@@ -50,6 +50,7 @@ pub(crate) use auth::Refused;
 pub(crate) use conn::{Filled, HttpConn, Peer, Read, Standing, State, WebLink, Who};
 pub(crate) use http::{Method, Request, Response};
 pub(crate) use push::payload as push_payload;
+pub(crate) use push::payload_of_terminal as push_payload_of_terminal;
 pub(crate) use socket::{Stream, Transport};
 
 use push::{Gone, Push};
