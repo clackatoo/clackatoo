@@ -512,8 +512,6 @@ pub(crate) fn git(dir: &Path) -> Result<Command, &'static str> {
         // In a process group of its own, so one killed for taking too
         // long takes what it started with it (see [`crate::group`]).
         .process_group(0);
-    // What the user sees: at the usual priority, as the user's own.
-    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
     Ok(command)
 }
 
@@ -551,9 +549,19 @@ fn kill(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Starts git as `command` says, and puts it with what the daemon runs
+/// for the user (see [`crate::priority`]).
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    crate::priority::spawn(command, crate::priority::Leaf::Terminals)
+}
+
 /// What git printed, if it ran and succeeded.
 fn output(command: &mut Command) -> Option<Vec<u8>> {
-    match command.output() {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match spawn(command).and_then(std::process::Child::wait_with_output) {
         Ok(output) if output.status.success() => Some(output.stdout),
         Ok(_) => None,
         Err(err) => {
@@ -567,10 +575,7 @@ fn output(command: &mut Command) -> Option<Vec<u8>> {
 /// takes longer, as on a hung network file system, is killed, so the
 /// thread asking goes on to what's waiting behind it.
 pub(crate) fn output_within(command: &mut Command, patience: Duration) -> Option<Vec<u8>> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut child = spawn(command.stdout(Stdio::piped()).stderr(Stdio::null()))
         .map_err(|err| log::debug!("git didn't run: {err}"))
         .ok()?;
     // Read as it's written, so a lot of it never fills the pipe and holds
@@ -609,13 +614,14 @@ pub(crate) fn output_fed(
     input: Vec<u8>,
     patience: Duration,
 ) -> Option<Vec<u8>> {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| log::debug!("git didn't run: {err}"))
-        .ok()?;
+    let mut child = spawn(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|err| log::debug!("git didn't run: {err}"))
+    .ok()?;
     // Written and read at once, so neither pipe fills and holds git up.
     let mut stdin = child.stdin.take()?;
     let writer = thread::spawn(move || std::io::Write::write_all(&mut stdin, &input));
@@ -931,13 +937,14 @@ fn quoted(path: &str) -> String {
 /// Applies `patch` to the index of the work tree whose top is `top`, or
 /// says why git wouldn't.
 fn apply(top: &Path, patch: &str) -> Result<(), String> {
-    let mut child = git(top)?
-        .args(["apply", "--cached", "--whitespace=nowarn", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("git didn't run: {err}"))?;
+    let mut child = spawn(
+        git(top)?
+            .args(["apply", "--cached", "--whitespace=nowarn", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|err| format!("git didn't run: {err}"))?;
     // A patch is a hunk's lines, small enough to write before reading
     // what git says; git reads all of it before it says anything.
     if let Some(mut stdin) = child.stdin.take()

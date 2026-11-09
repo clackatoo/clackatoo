@@ -206,8 +206,8 @@ pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<T
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
-    let mut child = command.spawn().map_err(run)?;
+    let mut child =
+        crate::priority::spawn(&mut command, crate::priority::Leaf::Terminals).map_err(run)?;
     let deadline = std::time::Instant::now() + VERSIONS_TIMEOUT;
     while child.try_wait().map_err(run)?.is_none() {
         if std::time::Instant::now() > deadline {
@@ -317,9 +317,9 @@ fn serve_signalled(
     restore: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
-    // Before anything is started, on the thread that runs the loop: its
-    // priority, and the daemon's place, if `clackatoo daemon` asked.
-    crate::priority::begin(runtime.path());
+    // Before anything is started: what is, is noted, to go in the daemon's
+    // place once it has one, if `clackatoo daemon` asked for one.
+    crate::priority::early();
     let resumed = if resume {
         receive()
             .and_then(|handover| resume_from(handover, config))
@@ -335,6 +335,10 @@ fn serve_signalled(
         let lock = runtime.lock()?;
         (lock, Daemon::bind(&runtime.socket_path(), config.clone())?)
     };
+    // Once the lock is held, on the thread that runs the loop: its
+    // priority, and the daemon's place, saying how it went in the
+    // directory, which is ours now.
+    crate::priority::begin(runtime.path());
     daemon.set_upgrade_args(args);
     // Once the lock is held: the directory is ours.
     daemon.install_shell_integration(runtime.path().join("shell"), afresh);

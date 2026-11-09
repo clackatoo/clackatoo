@@ -328,6 +328,10 @@ fn spawn(
     let writes = rustix::io::fcntl_dupfd_cloexec(browser_writes.as_fd(), 10)?;
     drop((browser_reads, browser_writes));
     let mut command = Command::new(program);
+    // In the agents' leaf, never at the daemon's priority: before the
+    // hook below, so it runs before that puts the pipes at 3 and 4.
+    let leaf = crate::priority::Leaf::Agents;
+    let readied = crate::priority::ready_first(&mut command, leaf);
     command
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(ARGS)
@@ -351,7 +355,9 @@ fn spawn(
             Ok(())
         });
     }
-    crate::priority::spawn(&mut command, crate::priority::Leaf::Agents)
+    let child = command.spawn()?;
+    crate::priority::spawned(&child, leaf, readied);
+    Ok(child)
 }
 
 /// What reads the browser's pipe, on a thread of its own.

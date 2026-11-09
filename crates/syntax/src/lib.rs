@@ -39,27 +39,41 @@ pub use pieces::Ask;
 pub use server::{Server, git_root};
 pub use worker::{Answered, Coloured, Found, Highlighted, Key, Reply, Snippet, Syntax};
 
-use std::ffi::OsStr;
-use std::process::Command;
+use std::io;
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 
-/// What's done to each program installing runs (curl, npm, tar and the
-/// like) before it starts, if anything is: see [`prepare_programs_with`].
-static PREPARE: OnceLock<fn(&mut Command)> = OnceLock::new();
+/// What's told the pid of each program installing runs (curl, npm, tar
+/// and the like) as it starts, if anything is: see
+/// [`note_programs_with`].
+static NOTE: OnceLock<fn(u32)> = OnceLock::new();
 
-/// Has `prepare` done to each program installing runs before it starts,
+/// Has `note` told the pid of each program installing runs as it starts,
 /// from now on: the daemon puts them where the programs it starts for
-/// agents go, at the usual priority. Only the first call counts.
-pub fn prepare_programs_with(prepare: fn(&mut Command)) {
-    let _ = PREPARE.set(prepare);
+/// agents go. Only the first call counts.
+pub fn note_programs_with(note: fn(u32)) {
+    let _ = NOTE.set(note);
 }
 
-/// A program for installing to run, prepared as
-/// [`prepare_programs_with`] says.
-pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
-    let mut command = Command::new(program);
-    if let Some(prepare) = PREPARE.get() {
-        prepare(&mut command);
+/// Starts `command` and notes it (see [`note_programs_with`]).
+fn spawn(command: &mut Command) -> io::Result<std::process::Child> {
+    let child = command.spawn()?;
+    if let Some(note) = NOTE.get() {
+        note(child.id());
     }
+    Ok(child)
+}
+
+/// Runs `command` as [`Command::output`] does, noting it as it starts.
+pub(crate) fn output(command: &mut Command) -> io::Result<Output> {
     command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn(command)?.wait_with_output()
+}
+
+/// Runs `command` as [`Command::status`] does, noting it as it starts.
+pub(crate) fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    spawn(command)?.wait()
 }

@@ -40,9 +40,12 @@
 //! rule: only the daemon itself). So the loop's thread is first set to
 //! `SCHED_RESET_ON_FORK`, which starts every process and thread it starts
 //! at the usual scheduling and nice 0; and every program the daemon
-//! starts, from any thread, is readied by `prepare`: between fork and
-//! exec it puts its nice back to 0 if it was raised, and moves itself
-//! into its leaf, writing to the leaf's `cgroup.procs`, kept open for it.
+//! starts, from any thread, goes into its leaf: moved by the daemon as
+//! soon as it has started, or, for those with a hook of their own between
+//! fork and exec anyway (a terminal's, the browser's), moving itself
+//! there, and putting a raised nice back, before that hook (see `spawn`
+//! and `ready_first`). Those started before the daemon has leaves are
+//! noted, and moved once it has.
 //!
 //! The scope ends with the user manager, which stops when the user's last
 //! login does, unless they linger (`loginctl enable-linger`). A daemon
@@ -52,7 +55,8 @@
 //!
 //! An upgrade execs the next build in place, which keeps the thread's
 //! nice and the process's cgroup: the next build finds itself in its
-//! scope's `daemon` leaf, and uses the leaves as they are. Without
+//! scope's `daemon` leaf, or in the scope itself, if it came while the
+//! scope was being divided, and finishes dividing it. Without
 //! rtkit, a user manager, lingering, or cgroups as systemd delegates them,
 //! as in tests (whose daemons never call [`enable`]), under
 //! `CLACKATOO_DISPLAY=off` or `CLACKATOO_PRIORITY=off`, or with
@@ -134,6 +138,9 @@ static WANTED: AtomicBool = AtomicBool::new(false);
 /// Whether [`begin_for`] has run, which it does once.
 static BEGUN: AtomicBool = AtomicBool::new(false);
 
+/// Whether the programs the daemon starts are noted, from [`early`] on.
+static NOTING: AtomicBool = AtomicBool::new(false);
+
 /// Whether a thread of this process was raised, so the programs it
 /// starts are readied to put their nice back.
 static RAISED: AtomicBool = AtomicBool::new(false);
@@ -157,9 +164,19 @@ enum Place {
     Nowhere,
     /// Not known yet, as the daemon is given its place: those started
     /// meanwhile, to be moved into their leaves once there are some.
-    Pending(Vec<(Pid, Leaf)>),
+    Pending(Vec<Early>),
     /// Into their leaves.
     Leaves(Leaves),
+}
+
+/// A program started before the daemon had leaves.
+#[derive(Clone, Copy, Debug)]
+struct Early {
+    pid: Pid,
+    leaf: Leaf,
+    /// When it started, as `/proc/PID/stat` says, so another program
+    /// given its pid once it has ended is never moved in its place.
+    since: Option<u64>,
 }
 
 /// The leaves the daemon's children go in.
@@ -199,44 +216,73 @@ pub fn enable() {
     WANTED.store(true, Ordering::SeqCst);
 }
 
-/// Begins taking the daemon's priority and place, if [`enable`] asked,
-/// for the calling thread, the one that runs its loop, saying how it went
-/// in `runtime`, the daemon's runtime directory. Before the daemon starts
-/// anything.
+/// Before the daemon has its runtime directory's lock, and starts
+/// anything, if [`enable`] asked: the programs it starts from now on are
+/// noted, to be moved into its leaves once it has some (see [`begin`]).
+/// Writes nothing and asks nothing, so a daemon that finds another
+/// running changes nothing.
+pub(crate) fn early() {
+    if WANTED.load(Ordering::SeqCst) {
+        note_early();
+    }
+}
+
+/// Notes the programs the daemon starts from now on, installs included,
+/// until it has its place, or is to have none. Once only.
+fn note_early() {
+    if NOTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    clackatoo_syntax::note_programs_with(|pid| started(pid, Leaf::Agents));
+    *lock(&PLACE) = Place::Pending(Vec::new());
+}
+
+/// Once the daemon has its runtime directory's lock, if [`enable`]
+/// asked: takes its priority and place, for the calling thread, the one
+/// that runs its loop, saying how it went in `runtime`, the daemon's
+/// runtime directory.
 pub(crate) fn begin(runtime: &Path) {
     if !WANTED.load(Ordering::SeqCst) {
         return;
     }
-    match this_thread() {
-        Some(thread) => begin_for(thread, Some(runtime)),
-        None => tell(Status::usual("its thread can't be found"), Some(runtime)),
+    if let Some(thread) = this_thread() {
+        begin_for(thread, Some(runtime));
+    } else {
+        no_place();
+        tell(Status::usual("its thread can't be found"), Some(runtime));
     }
 }
 
-/// Begins taking the daemon's priority, for `loop_thread`, and its place:
-/// at once, if it has one already, as after an upgrade, or else on a
-/// thread of its own, while the daemon starts. Its programs started
-/// meanwhile are moved into their leaves once there are some. How it
-/// went is said in the log, and in `runtime`, if given (see
+/// Takes the daemon's priority, for `loop_thread`, and its place: at
+/// once, if it's in a scope of its own already, as after an upgrade, or
+/// else on a thread of its own, while the daemon starts. Its programs
+/// started meanwhile are moved into their leaves once there are some.
+/// How it went is said in the log, and in `runtime`, if given (see
 /// [`STATUS_FILE`]). Once only.
 #[doc(hidden)]
 pub fn begin_for(loop_thread: Pid, runtime: Option<&Path>) {
     if BEGUN.swap(true, Ordering::SeqCst) {
         return;
     }
+    note_early();
     let runtime = runtime.map(Path::to_owned);
-    // Installs put where agents' programs go, however this goes.
-    clackatoo_syntax::prepare_programs_with(|command| {
-        prepare(command, Leaf::Agents);
+    // In its scope already, divided or halfway, as an upgrade can come
+    // while it's divided: it finishes, at once, even when switched off,
+    // so its programs keep out of its own leaf.
+    let scope = own_scope().and_then(|(dir, unit)| {
+        divide(&dir, &unit, std::process::id())
+            .map(|leaves| settle_into(leaves, None))
+            .inspect_err(|err| log::warn!("{} couldn't be divided: {err}", dir.display()))
+            .ok()
     });
-    // Even when switched off: a daemon upgraded in its scope stays in it,
-    // and its programs must still keep out of its own leaf.
-    let found = found_leaves();
-    let scope = found.as_ref().map(|leaves| leaves.unit.clone());
-    if let Some(leaves) = found {
-        *lock(&PLACE) = Place::Leaves(leaves);
-    }
     if let Some(why) = switched_off() {
+        if scope.is_none() {
+            no_place();
+        }
+        // Raised by the build before, which was on.
+        if rustix::process::getpriority_process(Some(loop_thread)).is_ok_and(|nice| nice < 0) {
+            let _ = rustix::process::setpriority_process(Some(loop_thread), 0);
+        }
         let place = scope.map_or_else(|| "off".to_owned(), |scope| placed_in(&scope));
         let status = Status {
             priority: format!("off: {why}"),
@@ -264,9 +310,6 @@ pub fn begin_for(loop_thread: Pid, runtime: Option<&Path>) {
         }));
         return;
     }
-    if scope.is_none() {
-        *lock(&PLACE) = Place::Pending(Vec::new());
-    }
     let asking = runtime.clone();
     let settling = std::thread::Builder::new()
         .name("priority".into())
@@ -274,11 +317,7 @@ pub fn begin_for(loop_thread: Pid, runtime: Option<&Path>) {
     match settling {
         Ok(settling) => *lock(&SETTLING) = Some(Settling::Going(settling)),
         Err(err) => {
-            let mut place = lock(&PLACE);
-            if matches!(*place, Place::Pending(_)) {
-                *place = Place::Nowhere;
-            }
-            drop(place);
+            no_place();
             tell(
                 Status::usual(&format!("no thread to ask from: {err}")),
                 runtime.as_deref(),
@@ -325,19 +364,13 @@ fn settle(loop_thread: Pid, scope: Option<String>, runtime: Option<&Path>) -> Se
     let placed = if let Some(scope) = scope {
         Ok(scope)
     } else {
-        let placed = take_place();
-        let mut place = lock(&PLACE);
-        let early = match std::mem::replace(&mut *place, Place::Nowhere) {
-            Place::Pending(early) => early,
-            _ => Vec::new(),
-        };
-        placed.map(|(leaves, mut user)| {
-            let unit = leaves.unit.clone();
-            *place = Place::Leaves(leaves);
-            drop(place);
-            move_early(&early, &unit, &mut user);
-            unit
-        })
+        match take_place() {
+            Ok((leaves, mut user)) => Ok(settle_into(leaves, Some(&mut user))),
+            Err(not) => {
+                no_place();
+                Err(not)
+            }
+        }
     };
     let status = Status {
         priority: match &nice {
@@ -354,6 +387,28 @@ fn settle(loop_thread: Pid, scope: Option<String>, runtime: Option<&Path>) -> Se
     Settled {
         nice: nice.ok(),
         scope: placed.ok(),
+    }
+}
+
+/// Has the programs the daemon starts go into `leaves` from now on, and
+/// moves those started before, through the user manager `user` for any
+/// outside the scope. Returns the scope's unit.
+fn settle_into(leaves: Leaves, user: Option<&mut Bus>) -> String {
+    let unit = leaves.unit.clone();
+    let early = match std::mem::replace(&mut *lock(&PLACE), Place::Leaves(leaves)) {
+        Place::Pending(early) => early,
+        _ => Vec::new(),
+    };
+    move_early(&early, &unit, user);
+    unit
+}
+
+/// The daemon has no place of its own: the programs it started meanwhile
+/// stay where they are, and the rest start where it is.
+fn no_place() {
+    let mut place = lock(&PLACE);
+    if matches!(*place, Place::Pending(_)) {
+        *place = Place::Nowhere;
     }
 }
 
@@ -560,52 +615,73 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 // --- What the daemon starts ----------------------------------------------
+//
+// Most programs are started the quick way, `posix_spawn`, and moved into
+// their leaf by the daemon as soon as they have started: a hook between
+// fork and exec makes std fork instead, which copies the daemon's page
+// tables, about 2 ms at 50 MiB resident and 20 ms at 300 MiB, against a
+// tenth of a millisecond. Their nice is put back by the kernel, as the
+// raised thread has `SCHED_RESET_ON_FORK`. Only programs that fork anyway,
+// for a hook of their own (a terminal's, the browser's), move themselves,
+// before that hook runs.
 
-/// Readies `command` to start as a child of the daemon's: never at the
-/// raised priority of the thread starting it, and in `leaf`, once the
-/// daemon has leaves. Returns whether it moves itself there as it starts.
-///
-/// When the daemon is as it always was, nothing is added, so std can go
-/// on starting it the quick way (`posix_spawn`, which doesn't copy the
-/// daemon's memory as `fork` does).
-pub(crate) fn prepare(command: &mut Command, leaf: Leaf) -> bool {
-    let procs = match &*lock(&PLACE) {
-        Place::Leaves(leaves) => Some(leaves.procs(leaf).as_raw_fd()),
-        Place::Pending(_) => None,
-        Place::Nowhere if RAISED.load(Ordering::SeqCst) => None,
-        Place::Nowhere => return false,
-    };
-    ready(command, procs);
-    procs.is_some()
-}
-
-/// Starts `command` as a child of the daemon's, in `leaf`: see
-/// [`prepare`]. One started before the daemon has leaves is moved into
-/// its leaf once it has.
+/// Starts `command` as a child of the daemon's, the quick way, and puts
+/// it in `leaf`: at once, or once the daemon has leaves.
 ///
 /// # Errors
 ///
 /// If it can't be started.
 pub(crate) fn spawn(command: &mut Command, leaf: Leaf) -> io::Result<Child> {
-    let moves_itself = prepare(command, leaf);
     let child = command.spawn()?;
-    if !moves_itself {
-        started(child.id(), leaf);
-    }
+    started(child.id(), leaf);
     Ok(child)
 }
 
-/// Notes `pid`, a child that didn't move itself into `leaf` as it
-/// started: to be moved once there are leaves, or now, if there are.
-fn started(pid: u32, leaf: Leaf) {
+/// Readies `command`, which has a hook of its own between fork and exec,
+/// to start in `leaf`, and never at the raised priority of the thread
+/// starting it: called before its own hook is added, so this one runs
+/// first, before that hook moves any fds about. Returns what [`spawned`]
+/// is to be told once it has.
+pub(crate) fn ready_first(command: &mut Command, leaf: Leaf) -> Readied {
+    let procs = match &*lock(&PLACE) {
+        Place::Leaves(leaves) => Some(leaves.procs(leaf).as_raw_fd()),
+        Place::Pending(_) => None,
+        Place::Nowhere if RAISED.load(Ordering::SeqCst) => None,
+        Place::Nowhere => return Readied(false),
+    };
+    ready(command, procs);
+    Readied(procs.is_some())
+}
+
+/// Whether a program readied by [`ready_first`] moves itself into its
+/// leaf as it starts.
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub(crate) struct Readied(bool);
+
+/// Says that `child`, readied by [`ready_first`] as `readied`, has
+/// started in `leaf`: one that didn't move itself is moved once there
+/// are leaves.
+pub(crate) fn spawned(child: &Child, leaf: Leaf, readied: Readied) {
+    if !readied.0 {
+        started(child.id(), leaf);
+    }
+}
+
+/// Puts `pid`, a child that has just started and isn't reaped yet, in
+/// `leaf`: now, if there are leaves, or once there are.
+pub(crate) fn started(pid: u32, leaf: Leaf) {
     let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return;
     };
     match &mut *lock(&PLACE) {
-        Place::Pending(early) => early.push((pid, leaf)),
-        // Leaves made since it was readied: it started with the daemon, in
-        // its leaf, unless just before the daemon went there, which is
-        // passed over.
+        Place::Pending(early) => early.push(Early {
+            pid,
+            leaf,
+            since: start_time(pid),
+        }),
+        // It started with the daemon, in its leaf, unless just before the
+        // daemon went there, which is passed over.
         Place::Leaves(leaves) => {
             if let Err(err) = write_pid(leaves.procs(leaf), pid) {
                 log::debug!("pid {pid} couldn't go in {}: {err}", leaf.name());
@@ -624,7 +700,8 @@ fn ready(command: &mut Command, procs: Option<RawFd>) {
     // three raw system calls through rustix, getpriority, setpriority and
     // write, with no allocation, locking or shared state. The fd it
     // writes to is never closed: `PLACE` keeps it, once set, for the life
-    // of the process.
+    // of the process, at 64 or above, out of the way of the fds hooks
+    // after it put in place.
     unsafe {
         command.pre_exec(move || {
             // A nice of 0 or more is the user's choice, kept.
@@ -648,26 +725,48 @@ fn write_pid(procs: &OwnedFd, pid: Pid) -> io::Result<()> {
     Ok(())
 }
 
+/// When process `pid` started, in clock ticks since boot: field 22 of
+/// `/proc/PID/stat`. `None` once it has gone.
+fn start_time(pid: Pid) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    start_time_in(&stat)
+}
+
+/// Field 22, the start time, of `stat`, a `/proc/PID/stat`: counted from
+/// the state, the 3rd, after the name in brackets, which may hold spaces.
+fn start_time_in(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
 /// Moves the programs started before the daemon had leaves into theirs:
 /// those it started once it was in its scope from there, the rest
-/// through systemd, as they're in the cgroup where the daemon started,
-/// which isn't the user's to change. One that has ended meanwhile is
-/// passed over.
-fn move_early(early: &[(Pid, Leaf)], unit: &str, user: &mut Bus) {
+/// through the user manager `user`, if given, as they're in the cgroup
+/// where the daemon started, which isn't the user's to change. One that
+/// has ended meanwhile, its pid perhaps another's by now, is passed over.
+fn move_early(early: &[Early], unit: &str, user: Option<&mut Bus>) {
+    let still = |early: &Early| early.since.is_some() && start_time(early.pid) == early.since;
     let place = lock(&PLACE);
     let Place::Leaves(leaves) = &*place else {
         return;
     };
     let mut elsewhere = Vec::new();
-    for &(pid, leaf) in early {
-        if write_pid(leaves.procs(leaf), pid).is_err() {
-            elsewhere.push((pid, leaf));
+    for early in early.iter().filter(|early| still(early)) {
+        if write_pid(leaves.procs(early.leaf), early.pid).is_err() {
+            elsewhere.push(*early);
         }
     }
     drop(place);
-    for (pid, leaf) in elsewhere {
-        if let Err(err) = attach(user, unit, pid, leaf) {
-            log::debug!("pid {pid} couldn't go in {}: {err}", leaf.name());
+    let Some(user) = user else {
+        return;
+    };
+    for early in elsewhere.iter().filter(|early| still(early)) {
+        if let Err(err) = attach(user, unit, early.pid, early.leaf) {
+            log::debug!(
+                "pid {} couldn't go in {}: {err}",
+                early.pid,
+                early.leaf.name()
+            );
         }
     }
 }
@@ -679,6 +778,11 @@ fn move_early(early: &[(Pid, Leaf)], unit: &str, user: &mut Bus) {
 fn raise(thread: Pid) -> Result<i32, String> {
     let nice = rustix::process::getpriority_process(Some(thread))
         .map_err(|err| format!("its nice can't be read: {err}"))?;
+    // SAFETY: only reads the thread's policy.
+    let policy = unsafe { libc::sched_getscheduler(thread.as_raw_pid()) };
+    if let Some(chosen) = chosen_scheduling(policy, nice) {
+        return Err(format!("kept as it was started, {chosen}"));
+    }
     if nice < 0 {
         // Raised already, as it stays through an upgrade.
         RAISED.store(true, Ordering::SeqCst);
@@ -711,6 +815,26 @@ fn raise(thread: Pid) -> Result<i32, String> {
     RAISED.store(true, Ordering::SeqCst);
     rustix::process::getpriority_process(Some(thread))
         .map_err(|err| format!("its nice can't be read: {err}"))
+}
+
+/// What the user chose for the thread's scheduling, if they chose
+/// anything but the usual, which is then theirs and left alone: `policy`
+/// other than `SCHED_OTHER`, as `chrt --idle` or `--batch` start one with,
+/// or a `nice` above 0, as `nice` does. A negative nice is taken to be
+/// rtkit's, raised before an upgrade.
+fn chosen_scheduling(policy: libc::c_int, nice: i32) -> Option<String> {
+    let policy = policy & !libc::SCHED_RESET_ON_FORK;
+    if policy >= 0 && policy != libc::SCHED_OTHER {
+        let named = match policy {
+            libc::SCHED_BATCH => "SCHED_BATCH".to_owned(),
+            libc::SCHED_IDLE => "SCHED_IDLE".to_owned(),
+            libc::SCHED_FIFO => "SCHED_FIFO".to_owned(),
+            libc::SCHED_RR => "SCHED_RR".to_owned(),
+            other => format!("scheduling policy {other}"),
+        };
+        return Some(format!("with {named}"));
+    }
+    (nice > 0).then(|| format!("at nice {nice}"))
 }
 
 /// Sets `thread` to start every process and thread at the usual
@@ -783,7 +907,14 @@ fn take_place() -> Result<(Leaves, Bus), NotPlaced> {
     let mut user = connect(&address).map_err(|err| format!("the session bus: {err}"))?;
     let pid = std::process::id();
     let unit = format!("{SCOPE_PREFIX}{pid}.scope");
-    start_scope(&mut user, &unit, pid).map_err(|err| format!("systemd: {err}"))?;
+    match start_scope(&mut user, &unit, pid) {
+        // Asked for by the build before, which upgraded before systemd
+        // moved it in: it's moved in still.
+        Err(err) if err.to_string().contains("UnitExists") => {
+            log::debug!("{unit} is there already: {err}");
+        }
+        started => started.map_err(|err| format!("systemd: {err}"))?,
+    }
     let scope = wait_to_be_in(&unit)?;
     let leaves = divide(&scope, &unit, pid)
         .map_err(|err| format!("{} couldn't be divided: {err}", scope.display()))?;
@@ -874,7 +1005,8 @@ fn wait_to_be_in(unit: &str) -> Result<PathBuf, String> {
 /// Divides `scope`, the daemon's, which it's in alone but for what it
 /// started meanwhile: makes the leaves, moves the daemon into its own and
 /// the rest into `terminals`, hands the scope's controllers down to them,
-/// and weighs them.
+/// and weighs them. Each step is the same done again, so a scope divided
+/// already, or halfway, as an upgrade can leave one, is finished.
 fn divide(scope: &Path, unit: &str, pid: u32) -> io::Result<Leaves> {
     for leaf in [DAEMON, Leaf::Terminals.name(), Leaf::Agents.name()] {
         if let Err(err) = fs::create_dir(scope.join(leaf))
@@ -884,25 +1016,13 @@ fn divide(scope: &Path, unit: &str, pid: u32) -> io::Result<Leaves> {
         }
     }
     write(&scope.join(DAEMON).join("cgroup.procs"), &pid.to_string())?;
-    let offered = fs::read_to_string(scope.join("cgroup.controllers"))?;
-    // The scope can hand its controllers down only with no processes of
-    // its own, and a program the daemon started as it moved may be there.
-    let mut handed = false;
-    for _ in 0..8 {
-        move_strays(scope)?;
-        match hand_down(scope, &offered) {
-            Ok(()) => {
-                handed = true;
-                break;
-            }
-            Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {}
-            Err(err) => return Err(err),
-        }
-    }
-    if !handed {
-        return Err(io::Error::other(
-            "programs kept starting in the scope itself",
-        ));
+    // In its leaf now: the leaves are finished as far as they can be,
+    // never left half made with it in one and its programs beside it.
+    if let Err(err) = hand_down_all(scope) {
+        log::warn!(
+            "{}'s leaves have no weights of their own: {err}",
+            scope.display()
+        );
     }
     let daemon = scope.join(DAEMON);
     weigh(&daemon.join("cpu.weight"), DAEMON_WEIGHT);
@@ -911,7 +1031,43 @@ fn divide(scope: &Path, unit: &str, pid: u32) -> io::Result<Leaves> {
     let agents = scope.join(Leaf::Agents.name());
     weigh(&agents.join("cpu.weight"), AGENTS_WEIGHT);
     weigh(&agents.join("io.weight"), AGENTS_WEIGHT);
-    open_leaves(scope, unit)
+    open_leaves(scope, unit).inspect_err(|_| leave_leaf(scope, pid))
+}
+
+/// Moves what's in `scope` itself into `terminals`, then hands the
+/// scope's controllers down to its leaves: it can only with no processes
+/// of its own, and a program the daemon started as it moved may be there.
+fn hand_down_all(scope: &Path) -> io::Result<()> {
+    let offered = fs::read_to_string(scope.join("cgroup.controllers"))?;
+    for _ in 0..8 {
+        move_strays(scope)?;
+        match hand_down(scope, &offered) {
+            Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {}
+            handed => return handed,
+        }
+    }
+    Err(io::Error::other(
+        "programs kept starting in the scope itself",
+    ))
+}
+
+/// Takes the daemon, `pid`, out of its leaf of `scope` and back into the
+/// scope itself, as it has no leaves after all: its controllers taken back
+/// first, as the scope can't have processes of its own while it hands them
+/// down. As far as that can be done.
+fn leave_leaf(scope: &Path, pid: u32) {
+    for controller in ["pids", "memory", "io", "cpu"] {
+        let _ = write(
+            &scope.join("cgroup.subtree_control"),
+            &format!("-{controller}"),
+        );
+    }
+    if let Err(err) = write(&scope.join("cgroup.procs"), &pid.to_string()) {
+        log::warn!(
+            "the daemon couldn't leave its leaf of {}: {err}",
+            scope.display()
+        );
+    }
 }
 
 /// Moves whatever is in `scope` itself into its `terminals` leaf.
@@ -966,21 +1122,18 @@ fn write(file: &Path, value: &str) -> io::Result<()> {
         .write_all(value.as_bytes())
 }
 
-/// The daemon's leaves, as it's in its scope's `daemon` leaf after an
-/// upgrade in place, if it is.
-fn found_leaves() -> Option<Leaves> {
+/// The daemon's scope, its directory and unit, if it's in one already:
+/// in its `daemon` leaf, or in the scope itself, as when an upgrade came
+/// while it was being divided.
+fn own_scope() -> Option<(PathBuf, String)> {
     let own = own_cgroup().ok()?;
-    if own.file_name()? != DAEMON {
-        return None;
-    }
-    let scope = own.parent()?;
-    let unit = scope.file_name()?.to_str()?;
-    if !is_daemons_scope(unit) {
-        return None;
-    }
-    open_leaves(scope, unit)
-        .inspect_err(|err| log::warn!("the leaves of {unit} can't be opened: {err}"))
-        .ok()
+    let scope = if own.file_name()? == DAEMON {
+        own.parent()?.to_owned()
+    } else {
+        own
+    };
+    let unit = scope.file_name()?.to_str()?.to_owned();
+    is_daemons_scope(&unit).then_some((scope, unit))
 }
 
 /// Whether `unit` is a scope a daemon made itself: see [`SCOPE_PREFIX`].
@@ -990,8 +1143,14 @@ fn is_daemons_scope(unit: &str) -> bool {
         .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// The lowest fd a leaf's `cgroup.procs` is kept at: above those a
+/// child's own hook puts in place, as the browser's puts its pipes at 3
+/// and 4, which a daemon just upgraded, with only 0 to 2 open, would
+/// otherwise open the leaves at.
+const LEAF_FDS: RawFd = 64;
+
 /// Opens the leaves of `scope`, the scope `unit`, for the daemon's
-/// children to move themselves into.
+/// children to move themselves into, at [`LEAF_FDS`] or above.
 fn open_leaves(scope: &Path, unit: &str) -> io::Result<Leaves> {
     // Closed on exec, as std opens every file: only a child between fork
     // and exec writes to it.
@@ -999,7 +1158,7 @@ fn open_leaves(scope: &Path, unit: &str) -> io::Result<Leaves> {
         let file = OpenOptions::new()
             .write(true)
             .open(scope.join(leaf.name()).join("cgroup.procs"))?;
-        Ok(OwnedFd::from(file))
+        Ok(rustix::io::fcntl_dupfd_cloexec(&file, LEAF_FDS)?)
     };
     Ok(Leaves {
         unit: unit.to_owned(),
@@ -1208,7 +1367,59 @@ mod tests {
     #[test]
     fn nothing_is_added_to_a_program_while_the_daemon_is_as_it_always_was() {
         // Tests never begin: their daemons are as they always were.
-        assert!(!prepare(&mut Command::new("true"), Leaf::Terminals));
+        assert!(!ready_first(&mut Command::new("true"), Leaf::Terminals).0);
+    }
+
+    /// The leaves are kept out of the way of the fds a child's own hook
+    /// puts in place, as the browser's does at 3 and 4, even in a daemon
+    /// just upgraded, with only 0 to 2 open below them.
+    #[test]
+    fn the_leaves_are_kept_at_64_or_above() {
+        let scope = tempfile::tempdir().unwrap();
+        for leaf in [Leaf::Terminals, Leaf::Agents] {
+            let dir = scope.path().join(leaf.name());
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("cgroup.procs"), "").unwrap();
+        }
+        let leaves = open_leaves(scope.path(), "app-clackatoo-7.scope").unwrap();
+        for leaf in [Leaf::Terminals, Leaf::Agents] {
+            assert!(leaves.procs(leaf).as_raw_fd() >= LEAF_FDS, "{leaves:?}");
+        }
+        assert_eq!(leaves.unit, "app-clackatoo-7.scope");
+    }
+
+    /// A pid is moved only while it's still the program given it: its
+    /// start time is field 22, past a name that may hold spaces and `)`.
+    #[test]
+    fn a_start_time_is_read_past_a_name_with_brackets() {
+        let stat = "42 (a b) c)) S 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 10";
+        assert_eq!(start_time_in(stat), Some(98765));
+        assert_eq!(start_time_in("42 (short) S 1"), None);
+        let ours = Pid::from_raw(i32::try_from(std::process::id()).unwrap()).unwrap();
+        assert!(start_time(ours).is_some());
+    }
+
+    /// What a user chose with `nice` or `chrt` is theirs: rtkit isn't asked.
+    #[test]
+    fn a_users_own_scheduling_is_left_alone() {
+        assert_eq!(chosen_scheduling(libc::SCHED_OTHER, 0), None);
+        assert_eq!(
+            chosen_scheduling(libc::SCHED_OTHER | libc::SCHED_RESET_ON_FORK, -15),
+            None,
+            "rtkit's, before an upgrade"
+        );
+        assert_eq!(
+            chosen_scheduling(libc::SCHED_OTHER, 15).as_deref(),
+            Some("at nice 15")
+        );
+        assert_eq!(
+            chosen_scheduling(libc::SCHED_IDLE, 0).as_deref(),
+            Some("with SCHED_IDLE")
+        );
+        assert_eq!(
+            chosen_scheduling(libc::SCHED_BATCH, 5).as_deref(),
+            Some("with SCHED_BATCH")
+        );
     }
 
     /// The hook a child runs between fork and exec, with a plain file in

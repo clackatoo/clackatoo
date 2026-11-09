@@ -292,9 +292,6 @@ fn ssh_command(
         remote.command,
         if replace { " --replace" } else { "" }
     ));
-    // A daemon's link to another machine is the user's: at the usual
-    // priority. Elsewhere, as for a window, this does nothing.
-    crate::priority::prepare(&mut ssh, crate::priority::Leaf::Terminals);
     ssh
 }
 
@@ -349,10 +346,14 @@ fn dial(
         .stdin(Stdio::from(OwnedFd::from(theirs.try_clone()?)))
         .stdout(Stdio::from(OwnedFd::from(theirs)))
         .stderr(Stdio::piped());
-    let child = command.spawn().map_err(|source| RemoteError::Spawn {
-        program: command.get_program().to_string_lossy().into_owned(),
-        source,
-    })?;
+    // A daemon's link to another machine is the user's: with what it runs
+    // for them. Elsewhere, as for a window, this does nothing.
+    let leaf = crate::priority::Leaf::Terminals;
+    let child =
+        crate::priority::spawn(&mut command, leaf).map_err(|source| RemoteError::Spawn {
+            program: command.get_program().to_string_lossy().into_owned(),
+            source,
+        })?;
     // The command holds ssh's end of the socket, which must close here for
     // ssh exiting to be noticed.
     drop(command);

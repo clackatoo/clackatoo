@@ -271,8 +271,7 @@ fn probe_read(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    crate::priority::prepare(&mut command, crate::priority::Leaf::Agents);
-    let mut child = command.spawn().ok()?;
+    let mut child = crate::priority::spawn(&mut command, crate::priority::Leaf::Agents).ok()?;
     let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).ok()?)?;
     let group = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
         .ok()

@@ -859,8 +859,7 @@ fn read_source(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
-    let mut child = command.spawn()?;
+    let mut child = crate::priority::spawn(&mut command, crate::priority::Leaf::Terminals)?;
     let pid = rustix::process::Pid::from_child(&child);
     if let Ok(pidfd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
         *reading.lock().unwrap_or_else(PoisonError::into_inner) = Some(pidfd);

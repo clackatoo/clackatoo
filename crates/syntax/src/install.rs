@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::process::Command;
 
 /// A language clackatoo knows where to get.
 #[derive(Debug)]
@@ -185,11 +186,12 @@ fn download_all(files: &[Download]) -> Result<Vec<u8>, InstallError> {
 
 /// Downloads `file` with curl, and checks it.
 pub(crate) fn download(file: &Download) -> Result<Vec<u8>, InstallError> {
-    let output = crate::command("curl")
-        .args(["--fail", "--silent", "--show-error", "--location"])
-        .args(["--max-time", "300", file.url])
-        .output()
-        .map_err(InstallError::NoCurl)?;
+    let output = crate::output(
+        Command::new("curl")
+            .args(["--fail", "--silent", "--show-error", "--location"])
+            .args(["--max-time", "300", file.url]),
+    )
+    .map_err(InstallError::NoCurl)?;
     if !output.status.success() {
         return Err(InstallError::Download {
             url: file.url,

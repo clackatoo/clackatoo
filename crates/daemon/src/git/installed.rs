@@ -101,7 +101,6 @@ fn run(installed: &Installed, args: &[&str], env: &[(&str, &str)]) -> Option<Vec
         .env("PATH", &installed.path)
         .current_dir("/")
         .stdin(Stdio::null());
-    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
     super::output_within(&mut command, super::PATIENCE)
 }
 
