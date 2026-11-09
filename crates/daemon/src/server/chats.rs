@@ -1648,7 +1648,7 @@ impl Daemon {
     fn login_of(&self, name: &str) -> Option<agents::Login> {
         let running = (self.agents.running.values()).find(|slot| slot.spec.name == name);
         let spec = running.map_or_else(|| self.agent_spec(name), |slot| slot.spec.clone());
-        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = self.config.agents.login_path();
         agents::login_command(&spec, self.config.agents.dir.as_deref(), &path)
     }
 
@@ -1734,7 +1734,7 @@ impl Daemon {
     /// the agent is one clackatoo knows how to log in to.
     fn login_hint(&self, agent: AgentId) -> Option<String> {
         let slot = self.agents.running.get(&agent)?;
-        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = self.config.agents.login_path();
         let login = agents::login_command(&slot.spec, self.config.agents.dir.as_deref(), &path)?;
         Some(format!(
             "no one's signed in to it. Sign in with `{}` in a terminal, then send a \

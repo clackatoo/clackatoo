@@ -3357,7 +3357,13 @@ fn last_failure(chat: &ChatNode) -> (String, Option<String>) {
 
 #[test]
 fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own() {
-    let daemon = with_fake_codex(&[]);
+    // Agents' programs are looked for only in the daemon's `bin`, which
+    // has no `claude` yet, whatever this machine has installed.
+    let daemon = with_fake_codex_and(&[], |dir, config| {
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        config.agents.path = Some(bin.into());
+    });
     let mut client = daemon.client();
     let (claude, _) = start_chat_with(&mut client, "claude");
     // Claude Code's adapter, asked for AIR's `sessionFailure`, ends the
@@ -3384,14 +3390,18 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     let (why, raw) = last_failure(&node);
     assert!(why.contains("needs you to sign in again"), "{why}");
     assert_eq!(raw.as_deref(), Some("Authentication required"));
-    // And offers to sign in, as clackatoo knows the agent's login command
-    // (CLACKA-233).
-    let end = node.turns.last().and_then(|turn| turn.end.as_ref());
-    assert_eq!(
-        end.and_then(|end| end.remedy),
-        Some(clackatoo_protocol::Remedy::SignIn),
-        "{end:?}"
-    );
+    // But offers no sign-in, as the program that signs in isn't there.
+    let remedy = |node: &ChatNode| {
+        let end = node.turns.last().and_then(|turn| turn.end.as_ref());
+        end.and_then(|end| end.remedy)
+    };
+    assert_eq!(remedy(&node), None);
+    // Once it's installed, it offers to sign in, as clackatoo knows the
+    // agent's login command (CLACKA-233).
+    script(&daemon.dir.path().join("bin/claude"), "exit 0");
+    let node = ask(&mut client, claude, "signed-out");
+    assert!(last_failure(&node).0.contains("needs you to sign in again"));
+    assert_eq!(remedy(&node), Some(clackatoo_protocol::Remedy::SignIn));
     // Codex's usage limit, in its words.
     let pane = focused_pane(&mut client);
     client
@@ -4415,6 +4425,15 @@ fn an_accounts_limits_show_in_every_chat_of_its_agent_kept_to_sense() {
 /// A daemon whose chats talk to the fake agent as Claude Code, and as
 /// Codex, run with `codex_flags` besides `--codex`.
 fn with_fake_codex(codex_flags: &'static [&'static str]) -> TestDaemon {
+    with_fake_codex_and(codex_flags, |_, _| {})
+}
+
+/// As [`with_fake_codex`], with the daemon's config changed by `change`
+/// too, given its directory.
+fn with_fake_codex_and(
+    codex_flags: &'static [&'static str],
+    change: impl FnOnce(&Path, &mut DaemonConfig),
+) -> TestDaemon {
     TestDaemon::start_with(move |dir, config| {
         let fake = |flags: &[&str], log: &str| -> Vec<std::ffi::OsString> {
             std::iter::once(fake_agent().into_os_string())
@@ -4427,6 +4446,7 @@ fn with_fake_codex(codex_flags: &'static [&'static str]) -> TestDaemon {
             custom_agent("claude", fake(&[], "agent.log")),
             custom_agent("codex", fake(&codex, "codex.log")),
         ];
+        change(dir, config);
     })
 }
 

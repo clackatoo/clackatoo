@@ -309,8 +309,9 @@ pub struct AgentConfig {
     /// Where known agents' adapters are installed, one directory each.
     /// `None` installs none.
     pub dir: Option<PathBuf>,
-    /// Where adapters, `npx` and `npm` are looked for, as `PATH` lists
-    /// directories. `None` is the daemon's own `PATH`.
+    /// Where adapters, `npx` and `npm`, and the programs that log in to
+    /// agents, are looked for, as `PATH` lists directories. `None` is the
+    /// daemon's own `PATH`.
     pub path: Option<OsString>,
     /// A directory every message to and from each agent is written to, a
     /// file for each agent started, with obvious secrets taken out (see
@@ -600,6 +601,15 @@ impl AgentConfig {
 
     pub(crate) fn usage_node(&self) -> Option<PathBuf> {
         self.program("node")
+    }
+
+    /// Where the program that logs in to an agent is looked for (see
+    /// [`login_command`]): [`path`](Self::path), or else the daemon's own
+    /// `PATH`.
+    pub(crate) fn login_path(&self) -> OsString {
+        (self.path.clone())
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default()
     }
 
     /// The program called `name`, as the daemon finds it.
