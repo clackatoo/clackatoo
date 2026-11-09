@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026.11.18 (2026-11-09)
+
+### Features
+
+- **web:** every window is told when a device pairs (f91b204d)
+- **web:** windows are told of each device paired until one has shown it (protocol 134) (3db89569)
+- **agents:** Codex's background commands on the shelf, branches of closed chats off the start page (protocol 135, CLACKA-232) (6b42090b)
+- **agents:** a command's output in a terminal pane below its chat (CLACKA-24) (05101714)
+- **cli:** clackatoo files opens a folder in an explorer, in a new tab (c6fa30a3)
+- **explorer:** send what git says of an explorer's files as what changed (f9c72788)
+
+### Fixes
+
+- **web:** a device can't list devices or unpair another (bfd8b320)
+- **web:** no notifications for devices that aren't let in (a72dfc58)
+- **web:** count connections by /64, and make room by closing the oldest idle (f1df3437)
+- **web:** limit how fast connections open and how many handshakes a turn does (99cf655e)
+- **web:** say refused connections in the log once a minute, take 64 a turn (b95ce5a8)
+- **web:** Ctrl+Enter steers while the agent is starting, as the buttons do (9c8e86a6)
+- **web:** a daemon started afresh never gets drafts or keys meant for its old chats (569c84b0)
+- **web:** a reload shows its kept draft before connecting, and drops it for a new run (9a2945f2)
+- **web:** act on nothing by number until the workspaces confirm the run (1f78dac1)
+- **web:** the connection limits can't be used to keep a device out (bb7071da)
+- **web:** a device paired while no window is open is told to the next (48a55f6e)
+- **web:** say nothing to the daemon until the run is confirmed the same (01b87719)
+- **web:** a connection that shows a device's token outranks any that doesn't (55f552ac)
+- **agents:** clippy's doc and deref, and a live check of a command Codex leaves running (CLACKA-232) (24a24d04)
+- **agents:** background commands survive a live upgrade, never stray once let go, and branches keep their agent (CLACKA-232) (eba8ca0f)
+- **agents:** a command's streamed output is kept under its tool's own id (9729c4e4)
+- **explorer:** rooting an explorer where it's rooted answers the asker (758fdfd7)
+- **explorer:** name the loop's handler of merged marks marks_merged (88bd7ad5)
+- **explorer:** a rerooted explorer keeps no marks of where it was, and the first comes at once (49719e24)
+
+### Speed
+
+- **explorer:** merge and diff what git says on the thread for git (f8bb260c)
+
 ## 2026.11.17 (2026-11-09)
 
 ### Features
