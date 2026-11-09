@@ -102,6 +102,24 @@ impl ImageInfo {
             && height <= Self::MOST_SIDE
             && u64::from(width) * u64::from(height) <= Self::MOST_PIXELS
     }
+
+    /// The most bytes decoding an image may take.
+    pub const DECODING_BYTES: u64 = Self::MOST_PIXELS * 4 + 64 * 1024 * 1024;
+
+    /// Whether it may be decoded within
+    /// [`DECODING_BYTES`](Self::DECODING_BYTES): it's [`sized`](Self::sized)
+    /// as an image may be; and a JPEG, whose decoder's buffers the decoding
+    /// library's limit doesn't cover, takes no more at three bytes a pixel
+    /// decoded and two for each of three components' coefficients, as a
+    /// progressive one keeps.
+    #[must_use]
+    pub fn decodable(&self) -> bool {
+        const JPEG_BYTES: u64 = 3 + 3 * 2;
+        Self::sized(self.width, self.height)
+            && (self.format != ImageFormat::Jpeg
+                || u64::from(self.width) * u64::from(self.height) * JPEG_BYTES
+                    <= Self::DECODING_BYTES)
+    }
 }
 
 /// Identifies a picture pane: one image file shown. One pane shows each.
@@ -257,6 +275,22 @@ pub fn image_words(width: u32, height: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jpeg_too_big_to_decode_within_the_limit_isnt_decoded() {
+        let info = |format, width, height| ImageInfo {
+            id: ImageId([0; 16]),
+            width,
+            height,
+            format,
+            bytes: 1,
+        };
+        // 8192 × 8192 is 64 Mi pixels: a PNG is decoded, a JPEG isn't.
+        assert!(info(ImageFormat::Png, 8192, 8192).decodable());
+        assert!(!info(ImageFormat::Jpeg, 8192, 8192).decodable());
+        assert!(info(ImageFormat::Jpeg, 6000, 4000).decodable());
+        assert!(!info(ImageFormat::Png, 16385, 1).decodable());
+    }
 
     #[test]
     fn paths_are_written_plainly_and_never_go_up_out_of_where_they_start() {

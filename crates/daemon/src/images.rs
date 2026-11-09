@@ -1298,6 +1298,9 @@ pub(crate) fn id_of(bytes: &[u8]) -> ImageId {
 /// The image `bytes` decoded, within its size, as an image whose header
 /// `info` read.
 pub(crate) fn decode(info: ImageInfo, bytes: &[u8]) -> Option<image::DynamicImage> {
+    if !info.decodable() {
+        return None;
+    }
     let format = match info.format {
         ImageFormat::Png => image::ImageFormat::Png,
         ImageFormat::Jpeg => image::ImageFormat::Jpeg,
@@ -1306,7 +1309,7 @@ pub(crate) fn decode(info: ImageInfo, bytes: &[u8]) -> Option<image::DynamicImag
     };
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(ImageInfo::MOST_PIXELS * 4 + 64 * MIB);
+    limits.max_alloc = Some(ImageInfo::DECODING_BYTES);
     limits.max_image_width = Some(ImageInfo::MOST_SIDE);
     limits.max_image_height = Some(ImageInfo::MOST_SIDE);
     reader.limits(limits);

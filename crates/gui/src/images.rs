@@ -302,7 +302,7 @@ impl Cache {
 /// `bytes`, the image `info` describes, decoded, no wider or taller than
 /// `side`, or why not.
 fn decode(info: ImageInfo, bytes: &[u8], side: u32) -> Result<Image, String> {
-    if !ImageInfo::sized(info.width, info.height) {
+    if !info.decodable() {
         return Err("it's too big to show".into());
     }
     let format = match info.format {
@@ -313,7 +313,7 @@ fn decode(info: ImageInfo, bytes: &[u8], side: u32) -> Result<Image, String> {
     };
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(ImageInfo::MOST_PIXELS * 4 + 64 * 1024 * 1024);
+    limits.max_alloc = Some(ImageInfo::DECODING_BYTES);
     limits.max_image_width = Some(ImageInfo::MOST_SIDE);
     limits.max_image_height = Some(ImageInfo::MOST_SIDE);
     reader.limits(limits);
