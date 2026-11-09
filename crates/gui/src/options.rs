@@ -193,10 +193,6 @@ pub(crate) enum Category {
 
 impl Category {
     /// Its name, as a heading.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the settings menu shows it (CLACKA-237 phase 2)")
-    )]
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Font => "Font",

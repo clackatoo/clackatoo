@@ -122,6 +122,29 @@ impl Store {
         self.configured[info.index()].as_ref()
     }
 
+    /// Notes that `info`'s option was saved in its file as `value`, or
+    /// taken out of it with none: it's configured so now, as the config
+    /// run again would set it. Not if the user's own config sets it as it
+    /// loads, which outdoes what's saved.
+    pub(crate) fn saved(&mut self, info: &'static Info, value: Option<Value>) {
+        let configured = &mut self.configured[info.index()];
+        if configured.as_ref().is_some_and(|(_, by)| by.config_loading()) {
+            return;
+        }
+        *configured = value.map(|value| (value, SetBy::SAVED));
+        self.changes += 1;
+    }
+
+    /// What `info`'s option is configured to for every window, whatever's
+    /// been set since: as the config set it as it loaded, or it's been
+    /// saved since, or else as the process started it.
+    pub(crate) fn configured_value(&self, info: &Info) -> Value {
+        match self.configured(info) {
+            Some((value, _)) => value.clone(),
+            None => self.start.get(info),
+        }
+    }
+
     /// Puts `info`'s option back as the process started it, for every
     /// window, forgetting what set it since. Returns whether that changed
     /// it.

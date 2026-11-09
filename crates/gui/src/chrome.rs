@@ -813,7 +813,7 @@ impl Chrome {
         if let Some((layout, view)) = &self.finder
             && layout.panel.contains(point)
         {
-            return Hit::Finder(layout.row_at(point, view.rows.len()));
+            return Hit::Finder(layout.view_row_at(point, view));
         }
         if !maximised && let Some(direction) = self.edge(point) {
             return Hit::Resize(direction);

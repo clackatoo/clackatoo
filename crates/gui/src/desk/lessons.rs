@@ -1399,6 +1399,9 @@ impl Facts for DeskFacts<'_> {
         if self.desk.start.is_some() {
             return Some("agent");
         }
+        if self.desk.settings.is_some() {
+            return Some("settings");
+        }
         Some(match self.desk.finder.as_ref()?.kind() {
             finder::Kind::Files => "files",
             finder::Kind::Grep => "grep",

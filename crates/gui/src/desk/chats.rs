@@ -467,7 +467,7 @@ impl Desk {
     /// the keys that answer it (see [`ChatPane::answers_question`]), which
     /// a key held down mustn't repeat.
     pub(crate) fn answers_question(&self, press: &KeyPress<'_>) -> bool {
-        if self.input.is_some() || self.finder.is_some() || self.start.is_some() {
+        if self.input.is_some() || self.finding() {
             return false;
         }
         self.focused_chat()

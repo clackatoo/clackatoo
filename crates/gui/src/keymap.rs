@@ -45,6 +45,15 @@ impl KeyMode {
     fn index(self) -> usize {
         self as usize
     }
+
+    /// `modes` written as their letters, in the order modes go, as
+    /// [`parse_modes`] reads them: `"niv"`.
+    pub(crate) fn letters(modes: &[Self]) -> String {
+        (Self::ALL.into_iter())
+            .filter(|mode| modes.contains(mode))
+            .map(Self::letter)
+            .collect()
+    }
 }
 
 /// The modes written as their letters, such as `"niv"`.
@@ -588,6 +597,18 @@ impl<T: Clone> Keymap<T> {
             .collect();
         keys.sort_by_key(|keys| keys.len());
         keys
+    }
+
+    /// Every binding in `mode`, by its keys, each with its label.
+    pub(crate) fn bound(&self, mode: KeyMode) -> impl Iterator<Item = (&[Chord], &T, Option<&str>)> {
+        (self.modes[mode.index()].iter())
+            .map(|(keys, entry)| (keys.as_slice(), &entry.action, entry.label.as_deref()))
+    }
+
+    /// What `keys` are bound to in `mode`, and its label, if they are.
+    pub(crate) fn get(&self, mode: KeyMode, keys: &[Chord]) -> Option<(&T, Option<&str>)> {
+        let entry = self.modes[mode.index()].get(keys)?;
+        Some((&entry.action, entry.label.as_deref()))
     }
 
     pub(crate) fn intercepts(&self, mode: KeyMode, keys: &[Chord]) -> bool {

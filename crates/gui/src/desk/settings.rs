@@ -8,7 +8,7 @@ use std::time::Instant;
 use super::Desk;
 use crate::fonts::Fonts;
 use crate::lua::ToLua;
-use crate::options::persist::{self, Saved};
+use crate::options::persist::{self, Change, Saved};
 use crate::options::{self, Decimal, Info, SetBy, Setting, Store, Value, View};
 
 /// The `font` and `fontsize` the window draws text in.
@@ -190,7 +190,7 @@ impl Desk {
 
     /// Takes this window's own value of `info`'s option away, so it has
     /// every window's again, as `:set nu<` does.
-    fn drop_local_option(&mut self, info: &'static Info) {
+    pub(super) fn drop_local_option(&mut self, info: &'static Info) {
         let (_, changed) = self
             .options
             .change(|store, window| store.drop_local(window, info));
@@ -352,12 +352,18 @@ impl Desk {
     /// Has `info`'s option saved as `value`, or with none, taken out of
     /// its file, off the window's thread; [`settings_saved`](Self::settings_saved) says what
     /// came of it.
-    fn persist(&mut self, info: &'static Info, value: Option<Value>) {
+    pub(super) fn persist(&mut self, info: &'static Info, value: Option<Value>) {
+        self.save_change(Change::Option { info, value });
+    }
+
+    /// Has `change` saved in its file, off the window's thread;
+    /// [`settings_saved`](Self::settings_saved) says what came of it.
+    pub(super) fn save_change(&mut self, change: Change) {
         let (client, _) = self.client();
         let (Some(dir), Some(wake)) = (client.config_dir(), client.waker()) else {
             return self.warn("there's no config directory to save settings in".into());
         };
-        persist::save(&dir, info, value, self.saving.reply.clone(), wake);
+        persist::save(&dir, change, self.saving.reply.clone(), wake);
     }
 
     /// clackatoo's config directory, if the window has one.
@@ -378,14 +384,28 @@ impl Desk {
 
     pub(super) fn said_saved(&mut self, saved: Saved) {
         let Saved {
-            info,
-            value,
+            change,
             file,
             result,
         } = saved;
+        let (info, value) = match change {
+            Change::Option { info, value } => (info, value),
+            Change::Keys { mapping, bound } => {
+                let keys = crate::keymap::display(&mapping.keys);
+                return match result {
+                    Err(why) => self.warn(format!("{keys} wasn't saved: {why}")),
+                    Ok(()) if bound => self.say(format!("saved {keys} in {file}")),
+                    Ok(()) => self.say(format!("{keys} is saved in {file} no more")),
+                };
+            }
+        };
         if let Err(why) = result {
             return self.warn(format!("{} wasn't saved: {why}", info.name));
         }
+        // What it's configured to, now, as the menu says it.
+        let ((), _) = self
+            .options
+            .change(|store, _| store.saved(info, value.clone()));
         let later = if info.restart {
             ", for windows opened after"
         } else {

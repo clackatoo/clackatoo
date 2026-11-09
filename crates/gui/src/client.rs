@@ -26,7 +26,8 @@ use crate::desk::{Binding, Keys};
 use crate::lua::{
     self, DECISION_TIME, FromLua, Listen, Lua, Origin, Said, Scope, Source, To, ToLua,
 };
-use crate::options::{Shared, Store};
+use crate::options::settings_lua::Mapping;
+use crate::options::{SetBy, Shared, Store};
 
 /// How many daemon events are remembered, to tell each one once.
 const HEARD: usize = 256;
@@ -430,6 +431,36 @@ impl Client {
     /// The bindings every window goes by, and what bound each.
     pub(crate) fn keys(&self) -> Ref<'_, Keys> {
         self.0.keys.borrow()
+    }
+
+    /// Binds `mapping`'s keys to its keys to type, as the settings menu
+    /// and `:mappersist` do, noting `by` as what bound them; or if not
+    /// `bound`, puts them back as the window starts them.
+    pub(crate) fn map_keys(&self, mapping: &Mapping, bound: bool, by: &SetBy) {
+        let Mapping {
+            modes,
+            keys,
+            to,
+            desc,
+        } = mapping;
+        let mut map = self.0.keys.borrow_mut();
+        if bound {
+            let desc = desc.as_deref().and_then(said_in_panel);
+            map.bind(modes, keys, Binding::Keys(to.clone()), desc.as_deref());
+        } else {
+            let defaults = crate::desk::Bindings::default();
+            for &mode in modes {
+                match defaults.get(mode, keys) {
+                    Some((binding, label)) => map.bind(&[mode], keys, binding.clone(), label),
+                    None => {
+                        map.unbind(&[mode], keys);
+                    }
+                }
+            }
+        }
+        map.set_by(modes, keys, by);
+        drop(map);
+        self.keys_changed();
     }
 
     /// How many times the bindings have changed, for a window to know when

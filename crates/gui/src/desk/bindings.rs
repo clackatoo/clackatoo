@@ -232,10 +232,6 @@ impl Keys {
 
     /// What last bound or unbound `keys` in `mode`: the default, if it's
     /// as the window starts it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the settings menu shows it (CLACKA-237 phase 2)")
-    )]
     pub(crate) fn bound_by(&self, mode: KeyMode, keys: &[Chord]) -> SetBy {
         (self.set_by.get(&(mode, keys.to_vec())))
             .cloned()

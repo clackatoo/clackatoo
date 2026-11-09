@@ -71,6 +71,15 @@ impl SetBy {
     /// options.
     pub(crate) const RUNTIME: Self = Self::by(Source::Runtime);
 
+    /// Saved in its file, by the settings menu or `:setpersist`, as the
+    /// config run again would set it.
+    pub(crate) const SAVED: Self = Self {
+        source: Source::Settings,
+        loading: true,
+        at: None,
+        inner: None,
+    };
+
     const fn by(source: Source) -> Self {
         Self {
             source,

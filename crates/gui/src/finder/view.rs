@@ -31,6 +31,27 @@ pub(crate) struct FinderView {
     /// What the list says, quietly in its middle, when there's nothing
     /// in it: that nothing matches what's typed.
     pub(crate) empty: Option<String>,
+    /// What goes down the list's left side, if anything, as the settings
+    /// menu lists its sections there.
+    pub(crate) side: Option<SideView>,
+}
+
+/// A column down the left of the list, as the settings menu's sections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SideView {
+    pub(crate) rows: Vec<Row>,
+    /// Which of them is picked out, as the section of the row picked.
+    pub(crate) selected: Option<usize>,
+    /// How many cells wide its rows are: the list's rows are as many,
+    /// and two more, narrower.
+    pub(crate) cols: usize,
+}
+
+impl SideView {
+    /// How many of the list's cells it takes, the gap after it too.
+    pub(crate) fn cells(&self) -> usize {
+        self.cols + 2
+    }
 }
 
 /// One line of text, in runs of ink.
@@ -256,6 +277,8 @@ pub(crate) struct Layout {
     preview: Option<Rect>,
     /// How tall a row of the list is.
     row_height: f32,
+    /// How wide a cell of the terminal's font is.
+    cell_width: f32,
     /// How wide the title is, in the interface font, which what's typed
     /// goes after.
     pub(crate) title_width: f32,
@@ -331,6 +354,7 @@ impl Layout {
             list,
             preview,
             row_height,
+            cell_width,
             title_width: 0.0,
             rows,
             cols: cols_of(list.width),
@@ -350,6 +374,17 @@ impl Layout {
         }
         let row = ((point[1] - self.list.y) / self.row_height) as usize;
         (row < rows).then_some(row)
+    }
+
+    /// The row of `view`'s list that `point` is over, if it's over one,
+    /// and not over the side beside it.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn view_row_at(&self, point: [f32; 2], view: &FinderView) -> Option<usize> {
+        let side = view.side.as_ref().map_or(0, SideView::cells) as f32;
+        if point[0] < self.list.x + side * self.cell_width {
+            return None;
+        }
+        self.row_at(point, view.rows.len())
     }
 
     /// The panel's rectangles and text, showing `view`.
@@ -409,16 +444,39 @@ impl Layout {
             Paint::PaletteEdge,
         ));
 
+        // The side, then the list beside it.
+        let mut list = self.list;
+        if let Some(side) = &view.side {
+            let width = (side.cells() as f32 * cell_width).min(list.width).round();
+            for (index, row) in side.rows.iter().enumerate() {
+                let y = list.y + index as f32 * self.row_height;
+                if side.selected == Some(index) {
+                    painted.over.push(Fill::rounded(
+                        [list.x, y, width - padding, self.row_height],
+                        Paint::Chosen,
+                        (1.5 * padding).round(),
+                    ));
+                }
+                let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
+                push_row(row, origin, cell_width, painted);
+            }
+            painted.over.push(Fill::solid(
+                [list.x + width, list.y, geometry.edge, list.height],
+                Paint::PaletteEdge,
+            ));
+            list.x += width + padding;
+            list.width = (list.width - width - padding).max(0.0);
+        }
         for (index, row) in view.rows.iter().enumerate() {
-            let y = self.list.y + index as f32 * self.row_height;
+            let y = list.y + index as f32 * self.row_height;
             if view.selected == Some(index) {
                 painted.over.push(Fill::rounded(
-                    [self.list.x, y, self.list.width, self.row_height],
+                    [list.x, y, list.width, self.row_height],
                     Paint::Chosen,
                     (1.5 * padding).round(),
                 ));
             }
-            let origin = [self.list.x + 2.0 * padding, (y + padding / 2.0).round()];
+            let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
             push_row(row, origin, cell_width, painted);
         }
         // Nothing listed says why, in the middle of where the list goes,
@@ -554,7 +612,8 @@ mod tests {
         let layout = Layout::new(&geometry);
         let why = "Nothing matches ‘zz’";
         let mut view = FinderView {
-            title: "Files",
+                        side: None,
+title: "Files",
             place: None,
             query: "zz▏".into(),
             count: "0 / 2".into(),

@@ -290,6 +290,14 @@ impl Fonts {
         Ok(())
     }
 
+    /// The font families installed, as fontconfig finds them, which
+    /// `fc-list : family` lists too: those the `font` option can name.
+    pub(crate) fn families(&mut self) -> Vec<String> {
+        (self.font_cx.collection.family_names())
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The terminal's size, in points.
     pub(crate) fn points(&self) -> f32 {
         self.points

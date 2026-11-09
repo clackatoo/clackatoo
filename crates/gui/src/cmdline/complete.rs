@@ -579,7 +579,10 @@ mod tests {
     #[test]
     fn the_first_word_completes_commands_and_after_a_mark_panes() {
         assert_eq!(choices("Ex", &none()), ["Explore"]);
-        assert_eq!(choices("se", &none()), ["set", "setlocal", "setpersist"]);
+        assert_eq!(
+            choices("se", &none()),
+            ["set", "setlocal", "setpersist", "Settings"]
+        );
         assert_eq!(
             choices("Re", &none()),
             [
@@ -616,7 +619,7 @@ mod tests {
         assert_eq!(choices("f", &none()), ["Files", "forget", "fork", "format"]);
         assert_eq!(
             choices("M", &none()),
-            ["markdown", "Marks", "Messages", "move"]
+            ["mappersist", "markdown", "Marks", "Messages", "move"]
         );
         assert_eq!(choices("SET nu", &none()), choices("set nu", &none()));
         assert_eq!(choices("rEvIeWkEeP f", &none()), ["file"]);

@@ -235,6 +235,12 @@ pub(crate) enum Command {
     /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
     /// lesson; with `new`, what's new.
     Tutor(Option<String>),
+    /// `:Settings`: the settings menu, with what to search for typed.
+    Settings(String),
+    /// `:mappersist MODES KEYS TO`: binds keys in these modes to keys to
+    /// type, as `client.keys.map` with a string does, and saves the
+    /// binding in settings.lua.
+    MapPersist(crate::options::settings_lua::Mapping),
     /// Grant or revoke agent access to this window.
     AgentAccess(clackatoo_protocol::NativeAccess),
     /// Inspect this chat's live harness capabilities.
@@ -508,6 +514,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control lets the agent act as you in this window, files and config included.".into()),
         },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
+        "Settings" => return Ok(Command::Settings(argument.unwrap_or_default().to_owned())),
+        "mappersist" | "mapp" => return map_persist(argument).map(Command::MapPersist),
         "devices" => return devices_command(argument).map(Command::Devices),
         "portforward" | "portforward!" => {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
@@ -1094,6 +1102,8 @@ command_names! {
     "normal" => "Run Normal-mode keys on editor lines",
     "Explore" => "Open the file explorer",
     "Tutor" => "Open an interactive lesson",
+    "Settings" => "Browse and change settings and keys",
+    "mappersist" => "Bind keys to keys to type, and save it",
     "Capabilities" => "Inspect this chat's tools, permissions and discovery status",
     "agentaccess" => "Grant this chat inspect/control access to this window, or revoke it (off)",
     "devices" => "Manage paired web devices",
@@ -1136,7 +1146,7 @@ command_names! {
 pub(crate) fn canonical(name: &str) -> &str {
     const ALIASES: &[&str] = &[
         "ws", "se", "setp", "setl", "verb", "reg", "display", "di", "mes", "rec", "q", "w", "x",
-        "e", "Ex", "noh", "bd",
+        "e", "Ex", "noh", "bd", "mapp",
     ];
     NAMES
         .iter()
@@ -1202,6 +1212,21 @@ pub(crate) fn takes(word: &str) -> Takes {
         "reviewkeep" | "reviewreject" => Takes::Words(&["file", "turn", "all"]),
         _ => Takes::Nothing,
     }
+}
+
+/// The binding `:mappersist`'s `argument` asks for: modes, keys, and the
+/// keys to type, the rest of the line, as Vim's `:map` takes it.
+fn map_persist(argument: Option<&str>) -> Result<crate::options::settings_lua::Mapping, String> {
+    const USAGE: &str = "mappersist takes modes, keys, and keys to type: :mappersist n <A-t> <C-b>c";
+    let argument = argument.ok_or(USAGE)?;
+    let (modes, rest) = argument.split_once(char::is_whitespace).ok_or(USAGE)?;
+    let (keys, to) = rest.trim_start().split_once(char::is_whitespace).ok_or(USAGE)?;
+    Ok(crate::options::settings_lua::Mapping {
+        modes: crate::keymap::parse_modes(modes)?,
+        keys: crate::keymap::parse_keys(keys)?,
+        to: crate::keymap::parse_keys(to.trim())?,
+        desc: None,
+    })
 }
 
 /// What `:Review`'s `argument` asks to review.
@@ -1297,6 +1322,9 @@ mod tests {
         ("connect", ""),
         ("disconnect", ""),
         ("Tutor", ""),
+        ("Settings", ""),
+        ("mappersist", ""),
+        ("mapp", "mappersist"),
         ("Capabilities", ""),
         ("agentaccess", ""),
         ("devices", ""),

@@ -2339,6 +2339,13 @@ impl App {
             self.fit_panes();
             self.send_outbox();
         }
+        // The settings menu's font picker lists the fonts installed.
+        if self.desk.wants_font_families()
+            && let Some(frame) = &mut self.frame
+        {
+            let families = frame.fonts.families();
+            self.desk.font_families(families);
+        }
         let Some(chrome) = self.chrome() else {
             return;
         };

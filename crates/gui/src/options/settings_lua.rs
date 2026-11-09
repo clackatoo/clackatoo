@@ -8,7 +8,13 @@
 //! ```lua
 //! client.opt.number = false
 //! client.opt.colorcolumn = { 80, 120 }
+//! client.keys.map("niv", "<A-t>", "<C-b>c", { desc = "new tab" })
 //! ```
+//!
+//! Keys the settings menu or `:mappersist` bind are lines of their own,
+//! binding keys to keys to type, as `client.keys.map` with a string does,
+//! which may be another binding's: a binding to a function is the user's
+//! own code, which this file never holds.
 //!
 //! Saving reads the file again and changes only the lines of the one
 //! option, so a window saving never undoes what another saved, and the rest
@@ -16,7 +22,8 @@
 //! comment after an option's value, and options this build doesn't know,
 //! saved by a newer one. A line for an option not saved before goes after
 //! the options that end the file, among them in the order options are
-//! declared. A block comment, `--[[ … ]]`, is kept whole, so an option
+//! declared; a binding not saved before goes at the end of the file. A
+//! block comment, `--[[ … ]]`, is kept whole, so an option
 //! commented out in one stays so. A line clackatoo didn't write, or a
 //! block comment it can't follow, is never thrown away: the file isn't
 //! written, and the line is named.
@@ -24,6 +31,7 @@
 use std::fmt::Write as _;
 
 use super::{Info, Kind, Value, lookup};
+use crate::keymap::{Chord, KeyMode, display, parse_keys, parse_modes};
 
 /// What a new file starts with.
 pub(crate) const HEADER: &str = "\
@@ -53,6 +61,36 @@ enum Line {
         /// The line as it was read, while it's unchanged.
         read: Option<String>,
     },
+    /// One that binds keys, to keys to type.
+    Maps {
+        /// What it binds; none if this build can't read its modes or
+        /// keys, as a newer one's, when it's kept as it was written.
+        mapping: Option<Mapping>,
+        /// What follows the call: nothing, or a comment, with the blanks
+        /// before it.
+        comment: String,
+        /// The line as it was read, while it's unchanged.
+        read: Option<String>,
+    },
+}
+
+/// Keys bound in some modes to keys to type, as settings.lua saves them:
+/// `client.keys.map("niv", "<A-t>", "<C-b>c", { desc = "new tab" })`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Mapping {
+    pub(crate) modes: Vec<KeyMode>,
+    pub(crate) keys: Vec<Chord>,
+    pub(crate) to: Vec<Chord>,
+    /// What it does, as the panel of keys says it.
+    pub(crate) desc: Option<String>,
+}
+
+impl Mapping {
+    /// Whether it binds the same keys in the same modes as `other`, so
+    /// one written after the other replaces it.
+    fn same_keys(&self, other: &Self) -> bool {
+        self.keys == other.keys && KeyMode::letters(&self.modes) == KeyMode::letters(&other.modes)
+    }
 }
 
 /// An option's value, as the file has it.
@@ -117,6 +155,16 @@ impl Model {
             }
             if trimmed.is_empty() {
                 lines.push(Line::Kept(line.to_owned()));
+                continue;
+            }
+            if trimmed.starts_with("client.keys.map(") {
+                let mut maps = maps(trimmed).ok_or_else(|| {
+                    format!("line {number} isn't one clackatoo wrote: {trimmed}")
+                })?;
+                if let Line::Maps { read, .. } = &mut maps {
+                    *read = Some(line.to_owned());
+                }
+                lines.push(maps);
                 continue;
             }
             let named = (trimmed.strip_prefix("client.opt."))
@@ -184,21 +232,79 @@ impl Model {
             comment: String::new(),
             read: None,
         };
-        // Among the options that end the file, in the order they're
-        // declared; those this build doesn't know count as after them all.
-        let run = (self.lines.iter())
+        // Among the options that end the file, before the bindings that
+        // follow them, in the order they're declared; those this build
+        // doesn't know count as after them all.
+        let end = (self.lines.iter())
+            .rposition(|line| !matches!(line, Line::Maps { .. }))
+            .map_or(0, |last| last + 1);
+        let run = (self.lines[..end].iter())
             .rposition(|line| !matches!(line, Line::Sets { .. }))
             .map_or(0, |kept| kept + 1);
-        let at = (run..self.lines.len())
+        let at = (run..end)
             .find(|&index| match &self.lines[index] {
                 Line::Sets { name, .. } => {
                     lookup(name).is_none_or(|other| other.index() > info.index())
                 }
-                Line::Kept(_) => false,
+                Line::Kept(_) | Line::Maps { .. } => false,
             })
-            .unwrap_or(self.lines.len());
+            .unwrap_or(end);
         self.lines.insert(at, line);
         Ok(())
+    }
+
+    /// Saves `mapping`, replacing what bound the same keys in the same
+    /// modes; or with no keys to type in `to`, saves the keys bound in
+    /// `modes` no more. Only those keys' lines change, and a binding not
+    /// saved before goes at the end.
+    pub(crate) fn bind(&mut self, mapping: Mapping, to: bool) {
+        let its = |line: &Line| {
+            matches!(line, Line::Maps { mapping: Some(saved), .. } if saved.same_keys(&mapping))
+        };
+        let mut found: Vec<usize> = (self.lines.iter().enumerate())
+            .filter(|(_, line)| its(line))
+            .map(|(index, _)| index)
+            .collect();
+        if !to {
+            for index in found.into_iter().rev() {
+                self.lines.remove(index);
+            }
+            return;
+        }
+        // Lua binds them in turn, so the last is what counts.
+        if let Some(last) = found.pop() {
+            for &index in found.iter().rev() {
+                self.lines.remove(index);
+            }
+            if let Some(Line::Maps {
+                mapping: saved,
+                read,
+                ..
+            }) = self.lines.get_mut(last - found.len())
+                && saved.as_ref() != Some(&mapping)
+            {
+                *saved = Some(mapping);
+                *read = None;
+            }
+            return;
+        }
+        self.lines.push(Line::Maps {
+            mapping: Some(mapping),
+            comment: String::new(),
+            read: None,
+        });
+    }
+
+    /// The bindings it saves, in the order it binds them.
+    #[cfg(test)]
+    pub(crate) fn mappings(&self) -> impl Iterator<Item = &Mapping> {
+        self.lines.iter().filter_map(|line| match line {
+            Line::Maps {
+                mapping: Some(mapping),
+                ..
+            } => Some(mapping),
+            _ => None,
+        })
     }
 
     /// The file's text: its lines, those of options not changed as they
@@ -210,7 +316,37 @@ impl Model {
                 Line::Kept(line)
                 | Line::Sets {
                     read: Some(line), ..
+                }
+                | Line::Maps {
+                    read: Some(line), ..
                 } => text.push_str(line),
+                Line::Maps {
+                    mapping: Some(mapping),
+                    comment,
+                    read: None,
+                } => {
+                    let Mapping {
+                        modes,
+                        keys,
+                        to,
+                        desc,
+                    } = mapping;
+                    write!(
+                        text,
+                        "client.keys.map({}, {}, {}",
+                        quoted(&KeyMode::letters(modes)),
+                        quoted(&display(keys)),
+                        quoted(&display(to)),
+                    )
+                    .expect("writing to a String");
+                    if let Some(desc) = desc {
+                        write!(text, ", {{ desc = {} }}", quoted(desc))
+                            .expect("writing to a String");
+                    }
+                    write!(text, "){comment}").expect("writing to a String");
+                }
+                // Read, so never without the line it was.
+                Line::Maps { mapping: None, .. } => {}
                 Line::Sets {
                     name,
                     saved,
@@ -256,6 +392,58 @@ fn sets(trimmed: &str) -> Option<Line> {
     Some(Line::Sets {
         name: name.to_owned(),
         saved,
+        comment: comment.trim_end().to_owned(),
+        read: None,
+    })
+}
+
+/// The line `client.keys.map("MODES", "KEYS", "TO")`, perhaps with
+/// `{ desc = "…" }` after the keys to type, and a comment after it, as
+/// `trimmed` is, if it is one.
+fn maps(trimmed: &str) -> Option<Line> {
+    /// The string at the start of `text`, and what follows it.
+    fn string(text: &str) -> Option<(String, &str)> {
+        let text = text.trim_start();
+        if !text.starts_with('"') {
+            return None;
+        }
+        let end = literal_end(text)?;
+        Some((unquoted(&text[1..end - 1])?, &text[end..]))
+    }
+    /// What follows `token` at the start of `text`, blanks before it
+    /// passed over.
+    fn token<'a>(text: &'a str, token: &str) -> Option<&'a str> {
+        text.trim_start().strip_prefix(token)
+    }
+    let rest = trimmed.strip_prefix("client.keys.map(")?;
+    let (modes, rest) = string(rest)?;
+    let (keys, rest) = string(token(rest, ",")?)?;
+    let (to, mut rest) = string(token(rest, ",")?)?;
+    let mut desc = None;
+    if let Some(options) = token(rest, ",") {
+        let options = token(token(token(options, "{")?, "desc")?, "=")?;
+        let (said, options) = string(options)?;
+        let options = token(options, ",").unwrap_or(options);
+        rest = token(options, "}")?;
+        desc = Some(said);
+    }
+    let comment = token(rest, ")")?;
+    let after = comment.trim_start();
+    let commented =
+        after.is_empty() || (after.starts_with("--") && long_bracket(&after[2..]).is_none());
+    if !commented {
+        return None;
+    }
+    let mapping = (|| {
+        Some(Mapping {
+            modes: parse_modes(&modes).ok()?,
+            keys: parse_keys(&keys).ok()?,
+            to: parse_keys(&to).ok()?,
+            desc,
+        })
+    })();
+    Some(Line::Maps {
+        mapping,
         comment: comment.trim_end().to_owned(),
         read: None,
     })
@@ -467,7 +655,7 @@ mod tests {
             (self.lines.iter())
                 .filter_map(|line| match line {
                     Line::Sets { name, saved, .. } => Some((name.as_str(), saved)),
-                    Line::Kept(_) => None,
+                    Line::Kept(_) | Line::Maps { .. } => None,
                 })
                 .collect()
         }
@@ -638,6 +826,10 @@ mod tests {
             "client.opt.nu = false; client.opt.rnu = false",
             "client.opt.nu = false client.opt.rnu = false",
             "client.keys.map('n', 'x', 'dd')",
+            "client.keys.map(\"n\", \"x\", function() end)",
+            "client.keys.map(\"n\", \"x\", \"dd\") print(1)",
+            "client.keys.map(\"n\", \"x\", \"dd\", { desc = \"a\", propagate = true })",
+            "client.keys.map(\"n\", \"x\", \"dd\") --[[ a ]]",
         ] {
             let err = Model::parse(&format!("client.opt.wrap = true\n{line}\n")).unwrap_err();
             assert!(
@@ -690,5 +882,88 @@ mod tests {
         );
         assert_eq!(unquoted("\\1234").as_deref(), Some("{4"));
         assert_eq!(unquoted("\\256"), None);
+    }
+
+    fn mapping(modes: &str, keys: &str, to: &str, desc: Option<&str>) -> Mapping {
+        Mapping {
+            modes: parse_modes(modes).unwrap(),
+            keys: parse_keys(keys).unwrap(),
+            to: parse_keys(to).unwrap(),
+            desc: desc.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn bindings_go_at_the_end_and_options_stay_before_them() {
+        let mut model = Model::default();
+        model.bind(mapping("niv", "<A-t>", "<C-b>c", Some("new tab")), true);
+        model.set(info("nu"), Some(Value::Bool(false))).unwrap();
+        model.bind(mapping("n", "<lt>x", "\"ay", None), true);
+        model.set(info("wrap"), Some(Value::Bool(false))).unwrap();
+        let text = model.render();
+        assert_eq!(
+            text,
+            format!(
+                "{HEADER}\n\
+                 client.opt.number = false\n\
+                 client.opt.wrap = false\n\
+                 client.keys.map(\"niv\", \"<A-t>\", \"<C-b>c\", {{ desc = \"new tab\" }})\n\
+                 client.keys.map(\"n\", \"<lt>x\", \"\\\"ay\")\n"
+            )
+        );
+        let mut read = Model::parse(&text).unwrap();
+        assert_eq!(read.render(), text, "read as it was");
+        let mappings: Vec<&Mapping> = read.mappings().collect();
+        assert_eq!(
+            mappings,
+            [
+                &mapping("niv", "<A-t>", "<C-b>c", Some("new tab")),
+                &mapping("n", "<lt>x", "\"ay", None),
+            ]
+        );
+        // Bound again, in the same modes, it's written once, in its place;
+        // taken out, its line goes.
+        read.bind(mapping("vin", "<A-t>", "<C-b>]", None), true);
+        read.bind(mapping("n", "<lt>x", "x", None), false);
+        assert_eq!(
+            read.render(),
+            format!(
+                "{HEADER}\n\
+                 client.opt.number = false\n\
+                 client.opt.wrap = false\n\
+                 client.keys.map(\"niv\", \"<A-t>\", \"<C-b>]\")\n"
+            )
+        );
+    }
+
+    #[test]
+    fn comments_round_bindings_are_kept_and_what_isnt_read_is_kept_as_written() {
+        let text = "-- My keys.\n\
+                    client.keys.map(\"n\",\"<A-t>\" , \"<C-b>c\")   -- tabs\n\
+                    --[[\n\
+                    client.keys.map(\"n\", \"<A-x>\", \"dd\")\n\
+                    ]]\n\
+                    client.keys.map(\"nz\", \"<A-y>\", \"yy\", { desc = \"newer\", })\n\
+                    -- After.\n";
+        let mut model = Model::parse(text).unwrap();
+        assert_eq!(model.render(), text, "read as it was");
+        // The one in a block comment is no binding; the one with a mode
+        // this build doesn't know is kept, never matched.
+        assert_eq!(model.mappings().count(), 1);
+        model.bind(mapping("n", "<A-t>", "<C-b>]", Some("next tab")), true);
+        model.bind(mapping("n", "<A-x>", "x", None), true);
+        model.set(info("nu"), Some(Value::Bool(false))).unwrap();
+        assert_eq!(
+            model.render(),
+            "-- My keys.\n\
+             client.keys.map(\"n\", \"<A-t>\", \"<C-b>]\", { desc = \"next tab\" })   -- tabs\n\
+             --[[\n\
+             client.keys.map(\"n\", \"<A-x>\", \"dd\")\n\
+             ]]\n\
+             client.keys.map(\"nz\", \"<A-y>\", \"yy\", { desc = \"newer\", })\n\
+             -- After.\n\
+             client.opt.number = false\n\
+             client.keys.map(\"n\", \"<A-x>\", \"x\")\n"
+        );
     }
 }

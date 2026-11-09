@@ -627,7 +627,8 @@ impl StartPage {
             let _ = write!(count, " · b lists {left_out} {branches}");
         }
         FinderView {
-            title: "Agent",
+                        side: None,
+title: "Agent",
             place: self
                 .folders
                 .get(self.folder)

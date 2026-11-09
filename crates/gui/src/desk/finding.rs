@@ -137,13 +137,14 @@ impl Desk {
     /// Whether the finder is open, or the start page, which takes keys
     /// as it does.
     pub(super) fn finding(&self) -> bool {
-        self.finder.is_some() || self.start.is_some()
+        self.finder.is_some() || self.start.is_some() || self.settings.is_some()
     }
 
     /// Closes the finder, stopping the searches it was waiting on, or the
     /// start page.
     pub(super) fn close_finder(&mut self) {
         self.start = None;
+        self.settings = None;
         self.grep_at = None;
         self.boards_on = None;
         let Some(finder) = self.finder.take() else {
@@ -159,6 +160,9 @@ impl Desk {
         if self.start.is_some() {
             return self.start_key(press);
         }
+        if self.settings.is_some() {
+            return self.settings_key(press);
+        }
         let Some(finder) = &mut self.finder else {
             return;
         };
@@ -169,7 +173,9 @@ impl Desk {
     /// A click on row `row` of the finder's list, or a double click if
     /// `open`, which opens what it shows.
     pub(crate) fn finder_click(&mut self, row: usize, open: bool) {
-        if let Some(page) = &mut self.start {
+        if self.settings.is_some() {
+            self.settings_click(row, open);
+        } else if let Some(page) = &mut self.start {
             let outcome = page.click(row, open);
             self.start_did(outcome);
         } else if let Some(finder) = &mut self.finder {
@@ -182,7 +188,9 @@ impl Desk {
     /// none, moves to things before.
     pub(crate) fn finder_wheel(&mut self, lines: i64) {
         let by = isize::try_from(-lines).unwrap_or_default();
-        if let Some(page) = &mut self.start {
+        if self.settings.is_some() {
+            self.settings_wheel(by);
+        } else if let Some(page) = &mut self.start {
             let outcome = page.scroll(by);
             self.start_did(outcome);
         } else if let Some(finder) = &mut self.finder {
@@ -193,7 +201,9 @@ impl Desk {
 
     /// Types `text` into the finder.
     pub(super) fn paste_into_finder(&mut self, text: &str) {
-        if let Some(page) = &mut self.start {
+        if self.settings.is_some() {
+            self.paste_into_settings(text);
+        } else if let Some(page) = &mut self.start {
             let outcome = page.paste(text);
             self.start_did(outcome);
         } else if let Some(finder) = &mut self.finder {
@@ -406,6 +416,9 @@ impl Desk {
         if let Some(page) = &mut self.start {
             return Some(page.view(list, preview));
         }
+        if self.settings.is_some() {
+            return self.settings_view(list, preview);
+        }
         self.grep_if_due(Instant::now());
         self.expire_dismissing(Instant::now());
         let mut view = self.finder.as_mut()?.view(list, preview);
@@ -439,7 +452,7 @@ impl Desk {
     }
 
     /// Opens what was picked in the finder.
-    fn open_picked(&mut self, opening: Opening) {
+    pub(super) fn open_picked(&mut self, opening: Opening) {
         let Some(shown) = self.shown else { return };
         let Opening { path, at, place } = opening;
         let landing = at.map(|(line, col)| FileLocation {

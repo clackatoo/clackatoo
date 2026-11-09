@@ -208,6 +208,7 @@ pub(crate) use restored::Offer;
 mod reviews;
 mod script;
 mod settings;
+mod settings_menu;
 mod shortcuts;
 mod starting;
 mod subagents;
@@ -215,7 +216,7 @@ mod trust;
 mod typing;
 mod updating;
 
-pub(crate) use bindings::{Binding, Keys};
+pub(crate) use bindings::{Binding, Bindings, Keys};
 pub(crate) use mode::WindowMode;
 pub(crate) use pasting::PasteTo;
 
@@ -483,6 +484,11 @@ pub(crate) struct Desk {
     finder: Option<Finder>,
     /// The start page `:Agent` opens, while it's open.
     start: Option<crate::start::StartPage>,
+    /// The settings menu, while it's open.
+    settings: Option<crate::settings::SettingsMenu>,
+    /// What the settings menu has changed, to undo, kept while it's
+    /// closed.
+    settings_history: crate::settings::History,
     /// What the last new chat started from the start page had, for the
     /// next to start with.
     last_chat: crate::start::LastChat,
@@ -2837,6 +2843,8 @@ impl Desk {
             Command::PortForward(forwarding) => return self.port_forward(forwarding),
             Command::On { host, command } => return self.run_on(&host, *command),
             Command::Workspace(name) => return self.switch_workspace(name),
+            Command::Settings(query) => return self.open_settings(&query),
+            Command::MapPersist(mapping) => return self.map_persist(mapping),
             _ => {}
         }
         let Some(shown) = self.shown else {
@@ -3004,7 +3012,9 @@ impl Desk {
             | Command::Disconnect(_)
             | Command::PortForward(_)
             | Command::On { .. }
-            | Command::Workspace(_) => {}
+            | Command::Workspace(_)
+            | Command::Settings(_)
+            | Command::MapPersist(_) => {}
         }
     }
 
@@ -3142,6 +3152,7 @@ mod tests {
     mod restored;
     mod scrolling;
     mod settings;
+    mod settings_menu;
     mod shared;
     mod shortcuts;
     mod subagents;

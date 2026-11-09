@@ -33,6 +33,12 @@ impl Desk {
             crate::shortcuts::bindings::paste(&mut context, "Paste into query");
             return context;
         }
+        if let Some(menu) = &self.settings {
+            let mut context = menu.shortcut_context();
+            crate::shortcuts::bindings::normal(&mut context, "Close the menu");
+            crate::shortcuts::bindings::paste(&mut context, "Paste into the search");
+            return context;
+        }
         if let Some(finder) = self.finder.as_ref().filter(|_| self.finding()) {
             let mut context = finder.shortcut_context();
             crate::shortcuts::bindings::normal(&mut context, "Close picker");

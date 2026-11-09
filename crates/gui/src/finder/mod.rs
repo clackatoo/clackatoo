@@ -929,7 +929,8 @@ impl Finder {
             .collect();
         let preview = preview.and_then(|size| self.preview_view(size));
         FinderView {
-            title: self.kind.title(),
+                        side: None,
+title: self.kind.title(),
             place: self.root.as_ref().map(|(_, name)| name.clone()),
             query: picker::drawn(self.picker.query()),
             count: self.note.clone().unwrap_or_else(|| self.count()),

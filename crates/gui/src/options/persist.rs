@@ -1,5 +1,7 @@
-//! Saving options where they're kept, as `:setpersist` asks: the window's
-//! in `client/settings.lua`, startup.toml's in `client/startup.toml`.
+//! Saving options where they're kept, as `:setpersist` and the settings
+//! menu ask: the window's in `client/settings.lua`, startup.toml's in
+//! `client/startup.toml`; and keys bound, as `:mappersist` and the menu
+//! ask, in `client/settings.lua`.
 //!
 //! The files are written off the window's thread, by one thread for the
 //! whole process, in the order they're asked for, each by reading it
@@ -13,27 +15,46 @@ use std::sync::mpsc::{self, Sender};
 
 use anyhow::Context;
 
-use super::settings_lua::Model;
+use super::settings_lua::{Mapping, Model};
 use super::{Info, Scope, Value};
 use crate::lua::Wake;
 
-/// What came of saving an option.
+/// What's to be saved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// An option, as `value`, or with none, taken out.
+    Option {
+        info: &'static Info,
+        value: Option<Value>,
+    },
+    /// Keys bound to keys to type, or if not `bound`, taken out.
+    Keys { mapping: Mapping, bound: bool },
+}
+
+impl Change {
+    /// The file it's kept in, from the config directory.
+    pub(crate) fn file(&self) -> &'static str {
+        match self {
+            Self::Option { info, .. } => file(info),
+            Self::Keys { .. } => "client/settings.lua",
+        }
+    }
+}
+
+/// What came of saving a change.
 #[derive(Debug)]
 pub(crate) struct Saved {
-    pub(crate) info: &'static Info,
-    /// What it was saved as; none if it was taken out.
-    pub(crate) value: Option<Value>,
+    pub(crate) change: Change,
     /// The file it went in, from the config directory: `client/settings.lua`.
     pub(crate) file: &'static str,
     /// Whether it was, or why not.
     pub(crate) result: Result<(), String>,
 }
 
-/// One option to save.
+/// One change to save.
 struct Job {
     dir: PathBuf,
-    info: &'static Info,
-    value: Option<Value>,
+    change: Change,
     reply: Sender<Saved>,
     wake: Wake,
 }
@@ -47,16 +68,9 @@ pub(crate) fn file(info: &Info) -> &'static str {
     }
 }
 
-/// Saves `info`'s option as `value`, or with none, takes it out, in the
-/// config directory `dir`, then sends what came of it on `reply` and calls
-/// `wake`.
-pub(crate) fn save(
-    dir: &Path,
-    info: &'static Info,
-    value: Option<Value>,
-    reply: Sender<Saved>,
-    wake: Wake,
-) {
+/// Saves `change` in the config directory `dir`, then sends what came of
+/// it on `reply` and calls `wake`.
+pub(crate) fn save(dir: &Path, change: Change, reply: Sender<Saved>, wake: Wake) {
     static WRITER: OnceLock<Option<Sender<Job>>> = OnceLock::new();
     let writer = WRITER.get_or_init(|| {
         let (send, receive) = mpsc::channel::<Job>();
@@ -64,11 +78,10 @@ pub(crate) fn save(
             .name("settings".into())
             .spawn(move || {
                 for job in receive {
-                    let result = write(&job.dir, job.info, job.value.clone());
+                    let result = write(&job.dir, &job.change);
                     let saved = Saved {
-                        info: job.info,
-                        value: job.value,
-                        file: file(job.info),
+                        file: job.change.file(),
+                        change: job.change,
                         result: result.map_err(|err| format!("{err:#}")),
                     };
                     if job.reply.send(saved).is_ok() {
@@ -86,8 +99,7 @@ pub(crate) fn save(
     });
     let job = Job {
         dir: dir.to_owned(),
-        info,
-        value,
+        change,
         reply,
         wake,
     };
@@ -97,9 +109,8 @@ pub(crate) fn save(
     };
     if let Some(job) = refused {
         let saved = Saved {
-            info,
-            value: job.value,
-            file: file(info),
+            file: job.change.file(),
+            change: job.change,
             result: Err("there's no thread to save settings".into()),
         };
         if job.reply.send(saved).is_ok() {
@@ -108,15 +119,29 @@ pub(crate) fn save(
     }
 }
 
-/// Saves `info`'s option in its file in `dir`, under a lock on the folder.
-fn write(dir: &Path, info: &'static Info, value: Option<Value>) -> anyhow::Result<()> {
+/// Saves `change` in its file in `dir`, under a lock on the folder.
+fn write(dir: &Path, change: &Change) -> anyhow::Result<()> {
+    let client = dir.join("client");
+    let settings = client.join("settings.lua");
+    let (info, value) = match change {
+        Change::Option { info, value } => (*info, value.clone()),
+        Change::Keys { mapping, bound } => {
+            return locked(&client, || {
+                settings_lua(&settings, *bound, |model| {
+                    model.bind(mapping.clone(), *bound);
+                    Ok(())
+                })
+            });
+        }
+    };
     // Whoever asked, nothing an option can't hold is written.
     if let Some(value) = &value {
         info.check(value).map_err(anyhow::Error::msg)?;
     }
-    let client = dir.join("client");
     locked(&client, || match info.scope {
-        Scope::Window => settings_lua(&client.join("settings.lua"), info, value),
+        Scope::Window => settings_lua(&settings, value.is_some(), |model| {
+            model.set(info, value)
+        }),
         Scope::Startup(_) => crate::startup::persist(&client.join("startup.toml"), info, value),
         Scope::Daemon => anyhow::bail!(
             "{} is the daemon's, which has no settings file yet",
@@ -141,19 +166,25 @@ pub(crate) fn locked<T>(
     change()
 }
 
-/// Saves `info`'s option in `settings.lua` at `path`.
-fn settings_lua(path: &Path, info: &Info, value: Option<Value>) -> anyhow::Result<()> {
+/// Changes `settings.lua` at `path` as `change` changes what it says,
+/// which `adds` something, or only takes something out, which needs no
+/// file made.
+fn settings_lua(
+    path: &Path,
+    adds: bool,
+    change: impl FnOnce(&mut Model) -> Result<(), String>,
+) -> anyhow::Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err).with_context(|| format!("couldn't read {}", path.display())),
     };
-    if text.is_none() && value.is_none() {
+    if text.is_none() && !adds {
         return Ok(());
     }
     let mut model = Model::parse(text.as_deref().unwrap_or_default())
         .map_err(|why| anyhow::anyhow!("settings.lua's {why}, so it wasn't changed"))?;
-    model.set(info, value).map_err(anyhow::Error::msg)?;
+    change(&mut model).map_err(anyhow::Error::msg)?;
     let rendered = model.render();
     if text.as_deref() == Some(rendered.as_str()) {
         return Ok(());
@@ -247,7 +278,8 @@ mod tests {
     /// Saves as the window does, and waits for it.
     fn saved(dir: &Path, name: &str, value: Option<Value>) -> Saved {
         let (reply, answers) = mpsc::channel();
-        save(dir, find(name).unwrap(), value, reply, Box::new(|| {}));
+        let info = find(name).unwrap();
+        save(dir, Change::Option { info, value }, reply, Box::new(|| {}));
         answers
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("saved")
