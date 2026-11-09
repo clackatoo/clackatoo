@@ -891,12 +891,16 @@ mod tests {
                     }) => {
                         grid.state.agent = None;
                         grid.state.fed = false;
+                        grid.state.keyboard = 0;
+                        grid.state.progress = None;
                     }
                     ViewUpdate::Patch(patches) => {
                         for patch in patches {
                             if let Patch::Grid { state, .. } = patch {
                                 state.agent = None;
                                 state.fed = false;
+                                state.keyboard = 0;
+                                state.progress = None;
                             }
                         }
                     }
