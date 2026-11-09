@@ -1119,3 +1119,47 @@ fn a_pane_kept_for_a_killed_program_closes_as_the_daemon_upgrades() {
     let mut client = daemon.client();
     assert_eq!(workspace_names(&mut client), ["stays"], "{}", daemon.log());
 }
+
+/// A program a shutdown ends after an upgrade comes back where it was, as
+/// one ended before the upgrade would: the next build finds where each
+/// terminal's program is as it starts, not at the next writing of the
+/// workspaces, which a shutdown may come before (CLACKA-241).
+#[test]
+fn a_program_a_shutdown_ends_after_an_upgrade_comes_back_where_it_was() {
+    let mut daemon = Process::start(&Setup::default());
+    let mut client = daemon.client();
+    let folder = daemon.root().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let folder = folder.canonicalize().unwrap();
+    let sleeping = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(vec!["sleep".to_owned(), "1000".to_owned()]),
+        cwd: Some(folder.display().to_string()),
+        record_to: None,
+    });
+    client.new_workspace(Some("kept".into()), sleeping).unwrap();
+    let kept = daemon.root().join("state/clackatoo/workspaces");
+    eventually("the workspace is kept", || {
+        std::fs::read_to_string(&kept).is_ok_and(|text| text.contains("\"kept\""))
+    });
+    drop(client);
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+
+    let mut client = daemon.client();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    rustix::process::kill_process(pid_of(&mut client, terminal), Signal::TERM).unwrap();
+    eventually("the daemon sees sleep go", || ended(&mut client, terminal));
+    drop(client);
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+
+    let mut client = daemon.client();
+    assert_eq!(workspace_names(&mut client), ["kept"], "{}", daemon.log());
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let pid = pid_of(&mut client, terminal);
+    eventually("the new shell is where sleep was", || {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|now| now == folder)
+    });
+}

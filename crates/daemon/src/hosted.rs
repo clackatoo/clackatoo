@@ -436,7 +436,7 @@ impl HostedTerminal {
         if fed {
             emulator.keep_names();
         }
-        Ok(Self {
+        let resumed = Self {
             id: TerminalId(terminal.id),
             emulator,
             pty,
@@ -451,7 +451,12 @@ impl HostedTerminal {
             directory: std::cell::RefCell::default(),
             for_agents: false,
             fed: fed.then_some(Fed { ended: true }),
-        })
+        };
+        // Where its program is, found now rather than at the next writing
+        // of the workspaces, which may never come: a shutdown that ends it
+        // first still brings it back there (CLACKA-241).
+        resumed.own_directory();
+        Ok(resumed)
     }
 
     /// Its emulator, to feed what a program would print, in a test.
@@ -593,15 +598,22 @@ impl HostedTerminal {
     /// it last changed to, whatever runs in front of it. Once it has
     /// ended, where it was last found, as the workspaces were last kept,
     /// if it was: so a shell a shutdown ended comes back where it was,
-    /// even one that doesn't say where it is (CLACKA-236).
+    /// even one that doesn't say where it is (CLACKA-236). That includes
+    /// one that has ended but not yet been reaped, which `/proc` has no
+    /// directory for either, as when a shutdown ends it just as the daemon
+    /// stops (CLACKA-241).
     pub(crate) fn own_directory(&self) -> Option<String> {
-        if self.process.is_none() {
-            return self.directory.borrow().clone();
+        let found = (self.process.is_some())
+            .then(|| std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok())
+            .flatten()
+            .and_then(|cwd| cwd.into_os_string().into_string().ok());
+        match found {
+            Some(cwd) => {
+                self.directory.replace(Some(cwd.clone()));
+                Some(cwd)
+            }
+            None => self.directory.borrow().clone(),
         }
-        let cwd = std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
-        let cwd = cwd.into_os_string().into_string().ok()?;
-        self.directory.replace(Some(cwd.clone()));
-        Some(cwd)
     }
 
     pub(crate) fn view(&self) -> View {
@@ -951,6 +963,27 @@ mod tests {
             most = most.max(terminal.input.len());
         }
         most
+    }
+
+    /// A program that has ended but isn't reaped yet has no directory in
+    /// `/proc`, as when a shutdown ends it just as the daemon stops: where
+    /// it was last found stands in (CLACKA-241).
+    #[test]
+    fn a_program_ended_but_not_reaped_is_where_it_was_last_found() {
+        let terminal = running("exec sleep 1000");
+        assert_eq!(terminal.own_directory().as_deref(), Some("/"));
+        let pid = rustix::process::Pid::from_raw(i32::try_from(terminal.pid).unwrap()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(format!("/proc/{}/stat", terminal.pid)).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z'))
+        }) {
+            assert!(Instant::now() < deadline, "sleep never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(std::fs::read_link(format!("/proc/{}/cwd", terminal.pid)).is_err());
+        assert_eq!(terminal.own_directory().as_deref(), Some("/"));
     }
 
     #[test]
