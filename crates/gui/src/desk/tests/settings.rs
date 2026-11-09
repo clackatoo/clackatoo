@@ -156,6 +156,10 @@ fn verbose_set_says_what_set_each_option_and_bindings_know_theirs() {
         desk.message.as_deref(),
         Some("nowrap · set with :set or a key")
     );
+    // As the wrap lesson has it: back as it starts, nothing set it.
+    command(&mut desk, "set wrap&");
+    command(&mut desk, "verbose set wrap?");
+    assert_eq!(desk.message.as_deref(), Some("wrap · as it starts"));
     press(
         &mut desk,
         Key::Character("q".into()),

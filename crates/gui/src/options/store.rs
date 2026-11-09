@@ -96,6 +96,14 @@ impl Store {
         self.configured[info.index()].as_ref()
     }
 
+    /// Puts `info`'s option back as the window started it, forgetting what
+    /// set it since. Returns whether that changed it.
+    pub(crate) fn restore(&mut self, info: &'static Info) -> bool {
+        let start = self.start.get(info);
+        self.set_by[info.index()] = None;
+        self.now.set(info, start).unwrap_or(false)
+    }
+
     /// Puts the options back as they started, as a config run again from
     /// the start does.
     pub(crate) fn reset(&mut self) {
@@ -137,6 +145,13 @@ mod tests {
         // What config set as it loaded stays known past later changes.
         assert_eq!(store.configured(nu), Some(&(Value::Bool(false), init)));
         assert!(store.set(nu, Value::Number(1), SetBy::RUNTIME).is_err());
+        // Put back as it started, nothing set it since; what config set as
+        // it loaded is still known.
+        store.set(nu, Value::Bool(false), SetBy::RUNTIME).unwrap();
+        assert!(store.restore(nu));
+        assert!(store.number);
+        assert_eq!(store.set_by(nu), SetBy::DEFAULT);
+        assert!(store.configured(nu).is_some());
         store.reset();
         assert_eq!(store.set_by(nu), SetBy::DEFAULT);
         assert_eq!(store.configured(nu), None);

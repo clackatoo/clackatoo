@@ -1248,7 +1248,7 @@ pub(crate) enum Setting {
     Flip(&'static Info),
     /// Say what it is: `nu?`, or a number's name alone.
     Show(&'static Info),
-    /// Put it back to its default: `nu&`.
+    /// Put it back as the window started it: `nu&`.
     Default(&'static Info),
 }
 

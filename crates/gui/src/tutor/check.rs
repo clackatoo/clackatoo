@@ -22,6 +22,7 @@
 //! | `file "NAME"` | The focused editor's file is called NAME. |
 //! | `recording R` | A macro is being recorded into register R. |
 //! | `messages` | `:Messages` shows what the bar has said lately. |
+//! | `said "TEXT"` | The bottom bar says something with TEXT in it. |
 //! | `saved` | The practice file has no changes that aren't written. |
 //! | `rendered` | The focused editor shows its Markdown rendered. |
 //! | `background N` | The workspace shown has N background tabs. |
@@ -57,6 +58,8 @@ pub(crate) enum Check {
     File(String),
     Recording(char),
     Messages,
+    /// What the bottom bar says has this in it.
+    Said(String),
     Saved,
     Rendered,
     Background(usize),
@@ -163,6 +166,10 @@ pub(crate) trait Facts {
     fn background_tabs(&self) -> usize;
     /// How many terminals of the workspace shown are kept running.
     fn kept_terminals(&self) -> usize;
+    /// What the bottom bar says, if anything.
+    fn said(&self) -> Option<String> {
+        None
+    }
 }
 
 impl Check {
@@ -226,6 +233,7 @@ impl Check {
             ["file", name] => Self::File((*name).to_owned()),
             ["recording", name] => Self::Recording(register(name)?),
             ["messages"] => Self::Messages,
+            ["said", text] if !text.is_empty() => Self::Said((*text).to_owned()),
             ["saved"] => Self::Saved,
             ["rendered"] => Self::Rendered,
             ["background", count] => Self::Background(number(count)?),
@@ -275,6 +283,9 @@ impl Check {
             Self::File(name) => facts.file().is_some_and(|file| file == *name),
             Self::Recording(name) => facts.recording() == Some(*name),
             Self::Messages => facts.messages_shown(),
+            Self::Said(text) => facts
+                .said()
+                .is_some_and(|said| said.contains(text.as_str())),
             Self::Saved => facts.practice_saved() == Some(true),
             Self::Rendered => facts.rendered(),
             Self::Background(count) => facts.background_tabs() == *count,
@@ -385,6 +396,7 @@ mod tests {
         messages: bool,
         rendered: bool,
         background: usize,
+        said: Option<String>,
     }
 
     impl Facts for Made {
@@ -451,6 +463,9 @@ mod tests {
         }
         fn kept_terminals(&self) -> usize {
             0
+        }
+        fn said(&self) -> Option<String> {
+            self.said.clone()
         }
     }
 
@@ -582,5 +597,17 @@ mod tests {
         assert!(!holds(r#"rooted ".""#, &facts));
         assert!(Check::parse("option nothing").is_err());
         assert!(Check::parse("finder windows").is_err());
+    }
+
+    #[test]
+    fn checks_on_what_the_bar_says() {
+        let facts = Made {
+            said: Some("nowrap · set with :set or a key".into()),
+            ..Made::default()
+        };
+        assert!(holds(r#"said "nowrap · set with""#, &facts));
+        assert!(!holds(r#"said "wrap · as it starts""#, &facts));
+        assert!(!holds(r#"said "nowrap""#, &Made::default()));
+        assert!(Check::parse(r#"said """#).is_err());
     }
 }

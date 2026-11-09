@@ -1329,6 +1329,10 @@ impl Facts for DeskFacts<'_> {
     fn messages_shown(&self) -> bool {
         self.desk.messages_listed().is_some()
     }
+
+    fn said(&self) -> Option<String> {
+        self.desk.message.clone()
+    }
 }
 
 impl Desk {

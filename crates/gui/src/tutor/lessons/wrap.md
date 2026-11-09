@@ -44,18 +44,24 @@ Three options shape it, all on to begin with but the last: `linebreak` breaks be
 
 `g0` and `g$` go to the screen row's first and last character, and Ctrl+D and Ctrl+U move by half a page of screen rows, Ctrl+E and Ctrl+Y the view by a row. `H`, `M` and `L` go to the first line in view, the middle and the last shown whole, keeping `scrolloff` rows from the edges. A click beside a row goes to that row's start.
 
+## Where an option was set
+
+`:set nolinebreak` breaks long lines at the last cell that fits, for now. `:verbose set linebreak?` says how it is, and what set it last: `:set` or a key, a line of your `init.lua`, `settings.lua`, or nothing, as it starts.
+
+```check
+said "nolinebreak · set with :set or a key"
+```
+
+## As it starts
+
+`:set linebreak&` puts an option back as it starts. Ask `:verbose set linebreak?` again, to see it say so.
+
+```check
+said "linebreak · as it starts"
+```
+
 ## Keep it
 
-`:set` lasts until the window closes. `:setpersist`, or `:setp`, sets an option and saves it as well, in `client/settings.lua` beside your `init.lua`, so every window opened after starts with it. Try it on `linebreak`: `:setp nolinebreak`.
+`:set` lasts until the window closes. `:setpersist`, or `:setp`, sets an option and saves it as well, in `client/settings.lua` beside your `init.lua`, so every window opened after starts with it: `:setp nolinebreak`. `:setp linebreak&` takes it out again. This lesson doesn't save anything, as that changes your own config.
 
-```check
-option nolinebreak
-```
-
-## And let it go
-
-`:verbose set linebreak?` says where it was last set. `:setp linebreak&` puts it back as it starts, and takes it out of `settings.lua` again. An option your `init.lua` sets as it loads isn't saved, as `init.lua` would outdo it: `:setp` sets it for now, and the bar names your line that sets it.
-
-```check
-option linebreak
-```
+An option your `init.lua` sets as it loads isn't saved, as `init.lua` runs after `settings.lua` and would outdo it: `:setp` sets it for now, and the bar names your line that sets it. Font, font size, `renderer` and `priority` are saved in `startup.toml` instead, as the window needs them before any Lua runs.

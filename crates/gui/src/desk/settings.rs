@@ -165,6 +165,19 @@ impl Desk {
         });
     }
 
+    /// Puts `info`'s option back as the window started it, forgetting what
+    /// set it since, as `:set nu&` does, telling Lua and the panes if that
+    /// changes it.
+    fn restore_option(&mut self, info: &'static Info) {
+        if self.options.restore(info) {
+            self.options_changed();
+        }
+        self.tell_lua(ToLua::Option {
+            option: info,
+            value: self.options.get(info),
+        });
+    }
+
     /// Carries out `:set` with `words` after it, saving what it sets where
     /// it's kept too if `persist`, as `:setpersist` does, and saying what
     /// set each option it shows if `verbose`, as `:verbose set` does.
@@ -215,8 +228,10 @@ impl Desk {
                 self.warn(why);
                 continue;
             }
-            let now = value.clone().unwrap_or_else(|| info.default_value());
-            self.set_option(info, now, by.clone());
+            match &value {
+                Some(now) => self.set_option(info, now.clone(), by.clone()),
+                None => self.restore_option(info),
+            }
             if persist {
                 self.persist_unless_configured(info, value);
             }
