@@ -2630,6 +2630,9 @@ impl Daemon {
         if !std::mem::take(&mut self.views_pending) {
             return;
         }
+        // No daemon relaying is sent what's kept from it, whenever it
+        // followed it (CLACKA-118).
+        self.let_go_kept_views();
         let now = Instant::now();
         let mut ready = Vec::new();
         for (key, source) in &mut self.sources {
@@ -3381,7 +3384,12 @@ impl Daemon {
                     if let Some(subscription) = client.views.get_mut(&terminal) {
                         subscription.awaiting_ack = false;
                         self.views_pending = true;
-                    } else {
+                    } else if self
+                        .refuse_kept(token, &ClientMessage::FrameDone { terminal })
+                        .is_ok()
+                    {
+                        // As any message of a daemon relaying, nothing of a
+                        // machine kept from it (CLACKA-118).
                         self.relayed_frame_done(token, terminal);
                     }
                     continue;
@@ -3426,6 +3434,13 @@ impl Daemon {
                     }
                     continue;
                 }
+            };
+            // A daemon relaying is told only what it may be (CLACKA-118).
+            let reply = match reply {
+                ServerMessage::Response(response) if self.relays(token) => {
+                    ServerMessage::Response(self.response_for_relay(token, response))
+                }
+                reply => reply,
             };
 
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
@@ -4045,11 +4060,12 @@ impl Daemon {
                 // A window opening while devices ask hears of them.
                 self.tell_of_asks(token);
                 let mut shown = self.shown_workspaces();
-                if self.relays(token) {
-                    if let Some(without) = self.without_parked(&shown) {
-                        shown = without;
-                    }
-                    shown.homes = self.shared_homes();
+                // As a daemon relaying is told them, with the machines
+                // passed on once it has said which it is.
+                if self.machine_of_client(token).is_some() {
+                    shown = self.relays_shown(token, &shown);
+                } else if self.relays(token) {
+                    shown = self.relaying_shown(token, &shown);
                 }
                 Ok(Response::Workspaces(
                     self.with_lent(token, &shown).unwrap_or(shown),

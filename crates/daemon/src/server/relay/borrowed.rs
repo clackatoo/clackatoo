@@ -96,6 +96,10 @@ impl Daemon {
     /// Where `request`, a new pane or workspace, from the client at
     /// `token`, is made: on the machine it names, or else the one of the
     /// pane it's made from.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per kind of new pane, each short"
+    )]
     pub(super) fn route_new_pane(&mut self, token: Token, request: Request) -> Routed {
         let own = self.machine.id;
         // A pane another machine put in a layout here goes where it's put:
@@ -125,6 +129,9 @@ impl Daemon {
         };
         let borrowed = from.and_then(|pane| self.workspaces.borrowed().get(&pane).copied());
         let on = on.or(borrowed.map(|borrowed| borrowed.machine));
+        if let Err(err) = self.refuse_unshared_pane(token, on, mirrored) {
+            return Routed::Answered(Response::Error(err));
+        }
         let request = without_on(request);
         if let Some(at) = mirrored {
             // Another machine's layout: made there, or here, for one of
@@ -230,7 +237,8 @@ impl Daemon {
             Placing::Split(pane, side) => self.workspaces.check_split(pane, side),
             Placing::Edge(tab, side, _) => self.workspaces.check_split_tab(tab, side),
         };
-        let asked = checked
+        let asked = (self.refuse_unshared(token, at))
+            .and(checked)
             .and_then(|()| {
                 if self.link_wire(at) < wire::LEND {
                     let host = &self.links.list[at].remote.host;
@@ -245,7 +253,7 @@ impl Daemon {
                          update it"
                     )));
                 }
-                self.can_ask(at)?;
+                self.can_ask(token, at)?;
                 self.relayed_content(at, content)
             })
             .and_then(|content| Ok((self.fresh_key(at)?, content)));
@@ -700,6 +708,28 @@ impl Daemon {
         }
     }
 
+    /// As [`pane_elsewhere`](Self::pane_elsewhere), for the client at
+    /// `token` to ask something of: refused it on a machine kept from it
+    /// (see [`refuse_unshared`](Self::refuse_unshared)).
+    pub(in crate::server) fn pane_elsewhere_for(
+        &self,
+        token: Token,
+        local: PaneId,
+    ) -> Option<Result<(usize, PaneId), Error>> {
+        let found = self.pane_elsewhere(local)?;
+        // One borrowed from it is refused before it's said why it can't be
+        // reached, which would name it.
+        let at = match found {
+            Ok((at, _)) => Some(at),
+            Err(_) => (self.workspaces.borrowed().get(&local))
+                .and_then(|borrowed| self.link_to(borrowed.machine)),
+        };
+        if let Some(Err(err)) = at.map(|at| self.refuse_unshared(token, at)) {
+            return Some(Err(err));
+        }
+        Some(found)
+    }
+
     /// The connection to `machine`, if there is one.
     pub(in crate::server) fn link_to(&self, machine: MachineId) -> Option<usize> {
         (self.links.list.iter())
@@ -755,9 +785,12 @@ impl Daemon {
         let mut event = crate::server::Broadcast::new(&event, "what's said");
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
+            // Not a daemon relaying, which shows its own windows nothing
+            // said here, and may be told nothing of what's kept from it.
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
+                && !client.relays
                 && !matches!(client.link, Link::Web(_))
                 && let Some(bytes) = event.to(client.wire)
             {

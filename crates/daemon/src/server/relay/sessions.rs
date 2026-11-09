@@ -16,6 +16,7 @@
 //! its `resume` passes on unchanged.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::Path;
 
 use clackatoo_protocol::{
@@ -57,18 +58,19 @@ pub(in crate::server) struct Listings {
 
 impl Daemon {
     /// Where [`Request::ChatChoices`] goes, for a chat beside `pane` on
-    /// machine `on`, if not here: the daemon there, asked about the pane
-    /// if it's that machine's, or else about its home directory, as a new
-    /// pane of its beside one of another machine's starts there. `None`
-    /// if this daemon answers.
+    /// machine `on`, if not here, asked by the client at `token`: the
+    /// daemon there, asked about the pane if it's that machine's, or else
+    /// about its home directory, as a new pane of its beside one of another
+    /// machine's starts there. `None` if this daemon answers.
     ///
     /// [`Request::ChatChoices`]: clackatoo_protocol::Request::ChatChoices
     pub(super) fn route_chat_choices(
         &self,
+        token: Token,
         pane: Option<PaneId>,
         on: Option<MachineId>,
     ) -> Option<Result<(usize, Asked), Error>> {
-        let elsewhere = pane.and_then(|pane| self.pane_elsewhere(pane));
+        let elsewhere = pane.and_then(|pane| self.pane_elsewhere_for(token, pane));
         let machine = on.filter(|&machine| machine != self.machine.id);
         let theirs =
             |at: usize| (self.links.list[at].machine.as_ref()).map(|known| known.id) == machine;
@@ -152,7 +154,7 @@ impl Daemon {
                 self.machine_named(machine)
             )));
         };
-        self.can_ask(at)?;
+        self.can_ask(token, at)?;
         let listings = &mut self.links.list[at].relayed.sessions;
         let number = listings.numbers.number(token, id);
         // Only those still waiting for an answer are kept.
@@ -245,10 +247,10 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: what other daemons list for it
-    /// goes nowhere.
-    pub(super) fn forget_sessions_client(&mut self, token: Token) {
-        for linked in &mut self.links.list {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: what other daemons list for it goes nowhere.
+    pub(super) fn forget_sessions_client(&mut self, token: Token, links: Range<usize>) {
+        for linked in &mut self.links.list[links] {
             let listings = &mut linked.relayed.sessions;
             listings.numbers.forget_client(token);
             let numbers = &listings.numbers;

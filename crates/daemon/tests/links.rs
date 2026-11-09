@@ -5450,7 +5450,7 @@ fn a_machine_not_passed_on_refuses_streams_and_cuts_those_open() {
     // Refused from now on.
     let refused = daemon.reach(server).unwrap_err();
     assert!(
-        refused.to_string().contains("asked not to pass"),
+        refused.to_string().contains("that machine isn't shared"),
         "{refused}"
     );
     // And the one open is cut.
@@ -5761,6 +5761,86 @@ fn a_connection_asked_not_to_be_passed_on_isnt_and_is_again_once_asked() {
         std::thread::sleep(Duration::from_millis(50));
         kept = std::fs::read_to_string(world.host("desk").join("workspaces")).unwrap_or_default();
     }
+}
+
+/// Laptop, connected to desk, connected to server with `--no-share`,
+/// connected to other (CLACKA-118): neither server nor other, which server
+/// passes on, ever reaches a daemon connected to desk, from the first thing
+/// it's told, as it connects, and nothing it asks reaches them.
+#[test]
+fn a_machine_not_passed_on_and_what_it_passes_on_are_kept_from_daemons_relaying() {
+    let world = World::new();
+    let other = world.start("other");
+    other
+        .client()
+        .new_workspace(Some("oth".into()), shell())
+        .unwrap();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    let mut at_server = server.client();
+    connect(&mut at_server, "other");
+    wait_for_workspaces(&mut at_server, |shown| theirs(shown, "oth").is_some());
+    let desk = world.start("desk");
+    let mut at_desk = desk.client();
+    let unshared = Request::Connect {
+        host: "server".into(),
+        command: Some(example("daemon").display().to_string()),
+        share: Some(false),
+    };
+    assert_eq!(at_desk.request(&unshared).unwrap(), Response::Done);
+    // Desk itself reaches both, other through server.
+    let shown = wait_for_workspaces(&mut at_desk, |shown| {
+        theirs(shown, "srv").is_some() && theirs(shown, "oth").is_some()
+    });
+    let oth = first_terminal(theirs(&shown, "oth").unwrap());
+    let kept = [server.machine().id, other.machine().id];
+    let names_one = |told: &Workspaces| {
+        (told.list.iter()).any(|workspace| workspace.home.is_some_and(|home| kept.contains(&home)))
+            || (told.homes.iter()).any(|home| kept.contains(&home.id))
+            || (told.others.iter()).any(|named| kept.contains(&named.id))
+            || (told.passed.iter()).any(|passed| kept.contains(&passed.id))
+    };
+    // A daemon connecting to desk, as a daemon's connection does, is told
+    // nothing of either, from the first.
+    let mut probe = remote_client(&world, "desk");
+    let told = probe.watch_workspaces_relaying().unwrap();
+    assert!(!names_one(&told), "{told:?}");
+    let relay = Request::RelayAs {
+        machine: clackatoo_protocol::Machine {
+            id: MachineId([0xd4; 16]),
+            name: "probe".into(),
+            run: 1,
+        },
+    };
+    assert_eq!(probe.request(&relay).unwrap(), Response::Done);
+    let deadline = Instant::now() + PATIENCE;
+    let told = loop {
+        assert!(Instant::now() < deadline, "never told the workspaces again");
+        if let Event::Workspaces(told) = probe.next_event().unwrap() {
+            break told;
+        }
+    };
+    assert!(!names_one(&told), "{told:?}");
+    // Nor reaches either, nor types into either, told only that it isn't
+    // shared.
+    for machine in kept {
+        let refused = probe.reach(machine).unwrap_err().to_string();
+        assert!(refused.contains("that machine isn't shared"), "{refused}");
+    }
+    let refused = probe.send_input(oth, b"echo hi\r").unwrap_err().to_string();
+    assert!(refused.contains("that machine isn't shared"), "{refused}");
+    // And a laptop connected to desk shows neither.
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    going(&mut window, "desk", &[]);
+    std::thread::sleep(Duration::from_secs(1));
+    let shown = window.watch_workspaces().unwrap();
+    assert!(theirs(&shown, "srv").is_none() && theirs(&shown, "oth").is_none());
+    assert_eq!(window.watch_connections(false).unwrap().len(), 1);
 }
 
 #[test]

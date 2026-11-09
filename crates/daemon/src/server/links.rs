@@ -197,6 +197,13 @@ pub(super) struct Links {
     pub(super) typed_parked: std::collections::BTreeSet<(clackatoo_protocol::MachineId, u64)>,
     /// What the daemons connected to this one were last told it passes on.
     pub(super) passed_told: Vec<Passed>,
+    /// What's kept from the daemons relaying, as of the last look
+    /// (CLACKA-118).
+    pub(super) kept_told: super::relay::unshared::Kept,
+    /// What's kept from the daemon relaying whose request is being routed,
+    /// worked out once for it, and forgotten after (see
+    /// [`kept_for`](super::Daemon::kept_for)).
+    pub(super) asking: Option<(Token, super::relay::unshared::Kept)>,
     /// Connections to machines no longer passed on, or reached another
     /// way, are to be ended, at the end of the turn, rather than while
     /// what found them holds places in the list.
@@ -241,6 +248,8 @@ impl Default for Links {
             forward_news: Arc::default(),
             typed_parked: std::collections::BTreeSet::new(),
             passed_told: Vec::new(),
+            kept_told: super::relay::unshared::Kept::default(),
+            asking: None,
             unpassed: false,
             pins: Pins::default(),
         }
@@ -714,6 +723,7 @@ impl Daemon {
         }
         self.keep_soon();
         self.tell_connections();
+        // And what's kept from the daemons relaying, as it may have changed.
         self.sharing_changed();
         Ok(Response::Done)
     }
@@ -725,6 +735,16 @@ impl Daemon {
         if self.is_web_device(token) {
             return Err(Error::Other(
                 "a device on the web app can't end the daemon's connections".to_owned(),
+            ));
+        }
+        // Nor a daemon relaying, told whatever it asks after: not even
+        // whether there's such a connection (CLACKA-118).
+        if matches!(
+            self.sources.get(token.0),
+            Some(Source::Client(client)) if client.relays || client.machine.is_some()
+        ) {
+            return Err(Error::Other(
+                "only this machine's own windows and commands end its connections".to_owned(),
             ));
         }
         let Some(at) = self.links.find(host) else {
@@ -758,7 +778,8 @@ impl Daemon {
     /// questions from now on, and connections waiting for a window to ask
     /// through are tried again. Devices on the web app are refused: what
     /// connections say holds what ssh said, which is for the machine's
-    /// own windows.
+    /// own windows. So are daemons relaying, which would learn of those
+    /// not passed on (CLACKA-118).
     pub(super) fn watch_connections(
         &mut self,
         token: Token,
@@ -770,6 +791,11 @@ impl Daemon {
         if matches!(client.link, Link::Web(_)) {
             return Err(Error::Other(
                 "a device on the web app can't watch the daemon's connections".to_owned(),
+            ));
+        }
+        if client.relays {
+            return Err(Error::Other(
+                "only this machine's own windows and commands watch its connections".to_owned(),
             ));
         }
         client.watching_connections = true;
@@ -1985,8 +2011,8 @@ impl Linked {
 /// Connects by the best of `ways` that opens and proves to be the machine
 /// it's known as, calling `used` as each carrier it goes by is taken on,
 /// saying it speaks protocol `speaks`: logs in, greets the daemon there,
-/// checks who's there, and starts watching its workspaces, which say which
-/// daemon it is. On a thread of its own: it may take minutes.
+/// checks who's there, says it relays, and starts watching its workspaces,
+/// which say which daemon it is. On a thread of its own: it may take minutes.
 fn try_connecting(
     ways: &Arc<Ways>,
     used: &Arc<dyn Fn(Vec<MachineId>) + Send + Sync>,
@@ -2056,7 +2082,7 @@ fn try_connecting(
         };
         let watched = (client.set_read_timeout(Some(ANSWER_WAIT)))
             .map_err(ClientError::from)
-            .and_then(|()| client.watch_workspaces())
+            .and_then(|()| client.watch_workspaces_relaying())
             .and_then(|workspaces| {
                 client.set_read_timeout(None)?;
                 Ok(workspaces)

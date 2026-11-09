@@ -140,9 +140,52 @@ other, or in a ring, each show the others once, and never themselves. The
 mouse over such a workspace says the way, as `on server, through desk`.
 
 `:connect server --no-share` keeps a machine, such as a server others share,
-from the daemons connected to yours, refuses them a way through, and cuts any
-open; `:connect server --share` passes it on again, and the bar says when one
-goes. Your daemon keeps this with its connections. Each machine needs this
+from the daemons connected to yours. It keeps the server's whole subtree too:
+every machine the server passes on to your daemon, every machine your daemon
+reaches only by a way through the server, and so on at any depth. A machine
+you connected to yourself is its own, even if the server passes it on too, or
+your daemon's way to it goes through the server. `--no-share` keeps the
+server from the daemons connected to yours. It doesn't keep their traffic off
+the server's wire, so such a machine is passed on as any other, without naming
+the server in its way. A machine passed on both by the server and by a machine
+you share is kept, unless you connected to it yourself. For the daemons
+connected to yours, all these machines are treated the same way:
+
+- Your daemon doesn't pass them on, refuses them a way through, and cuts any
+  way already open.
+- Your daemon tells them nothing of these machines: not their workspaces,
+  chats, home folders, notices, ports, names or machine IDs. A pane of yours
+  borrowed from one shows to them as a pane they can't show, on no machine.
+  A pane of yours lent to one isn't shown to them at all. They can't watch or
+  end your daemon's connections, or list what it lends.
+- Nothing they ask goes through your daemon to these machines: keys, a
+  terminal's screen, files, the finder, the editor, forwarded ports, agents'
+  sessions and chats, or new panes and workspaces there. This holds wherever
+  the thing they name is shown: in the machine's own layout, in a pane of
+  yours borrowed from it, in a pane of yours lent to it, or in another
+  machine's layout.
+- They can't close, restart or dismiss anything there either, even by way of
+  your own layout. They can't close a pane borrowed from the server, or a tab
+  or workspace holding one, and can't bring back or dismiss a background tab
+  the server lends you.
+
+Each refusal comes before anything else is done. It says only "that machine
+isn't shared with other machines", naming no machine. That something is
+refused rather than unknown does still say that something is there. Said of a
+machine already connected, or as what's kept changes, it also drops whatever
+those daemons were following there, and what they were waiting for from it.
+
+Your own windows, scripts and phone still reach these machines as before. So
+does the server's own daemon, if it connects to yours: what you lend it, and
+what it passes on, are its own. That only holds once your daemon's own
+connection to the server has proved, by the server's key, that it is that
+machine. A daemon that merely says it's the server, or says it passes the
+server on, gets nothing for it. A daemon counts as one connected to yours only
+once it says it relays for
+windows of its own, as every clackatoo since protocol 92 does before it's told
+anything. A daemon older than that is treated as a window.
+`:connect server --share` passes it on again, and the bar says when one goes.
+Your daemon keeps this with its connections. Each machine needs this
 release of clackatoo or later to pass machines on or be passed on.
 
 ## A pane on another machine

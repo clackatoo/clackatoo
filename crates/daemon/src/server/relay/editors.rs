@@ -54,6 +54,7 @@
 //! never loses what was typed, as it doesn't when its own connection is.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ops::Range;
 use std::time::Instant;
 
 use clackatoo_protocol::frame::{self, SnapshotTail};
@@ -317,6 +318,9 @@ impl Daemon {
         resume: Option<Resume>,
     ) -> Option<Routed> {
         let (at, _) = self.relayed_buffer(local)?;
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return Some(Routed::Answered(Response::Error(err)));
+        }
         let linked = self.is_linked(at);
         let followed = (self.links.list[at].relayed.buffers)
             .entry(local)
@@ -346,7 +350,7 @@ impl Daemon {
             // Attached there once the connection's made again.
             return Some(Routed::Answered(Response::Done));
         }
-        if let Err(err) = self.can_ask(at) {
+        if let Err(err) = self.can_ask(token, at) {
             return Some(Routed::Answered(Response::Error(err)));
         }
         let Some(ticket) = self.take_place(token) else {
@@ -374,7 +378,7 @@ impl Daemon {
     /// Stops the client at `token` following this daemon's buffer `local`,
     /// of the connection at `at`: the daemon there stops sending it once
     /// no client follows it.
-    fn unfollow_buffer(&mut self, token: Token, at: usize, local: BufferId) {
+    pub(super) fn unfollow_buffer(&mut self, token: Token, at: usize, local: BufferId) {
         let relayed = &mut self.links.list[at].relayed;
         let Some(followed) = relayed.buffers.get_mut(&local) else {
             return;
@@ -654,12 +658,13 @@ impl Daemon {
 
     /// Gives up on the answers to the attaches clients asked for, of the
     /// buffers of the connection at `at`, still waiting to be sent, that
-    /// `late` says have waited too long: each client is told `why`, and
-    /// the attach is still made, in its turn, as the relay's own.
+    /// `pick` picks, by the client and when it asked: each client is told
+    /// `why`, and the attach is still made, in its turn, as the relay's
+    /// own.
     pub(super) fn give_up_on_attaches(
         &mut self,
         at: usize,
-        late: impl Fn(Instant) -> bool,
+        pick: impl Fn(Token, Instant) -> bool,
         why: &str,
     ) {
         let mut given_up = Vec::new();
@@ -667,7 +672,7 @@ impl Daemon {
             for queued in &mut followed.queue {
                 if let Queued::Attach { asked, .. } = queued
                     && let Some((token, ticket, when)) = *asked
-                    && late(when)
+                    && pick(token, when)
                 {
                     *asked = None;
                     given_up.push((token, ticket));
@@ -753,7 +758,9 @@ impl Daemon {
             },
             message => return Some(message),
         };
-        if let Err(err) = self.send_upstream(at, &message, Expect::Nothing) {
+        let sent = (self.refuse_unshared(token, at))
+            .and_then(|()| self.send_upstream(at, &message, Expect::Nothing));
+        if let Err(err) = sent {
             let failed = BufferUpdate::Answer {
                 id,
                 version,
@@ -1523,10 +1530,11 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: it follows none of other
-    /// daemons' buffers, and asks nothing of them, any more.
-    pub(super) fn forget_buffer_client(&mut self, token: Token) {
-        for at in 0..self.links.list.len() {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: it follows none of other daemons' buffers, and asks nothing of
+    /// them, any more.
+    pub(super) fn forget_buffer_client(&mut self, token: Token, links: Range<usize>) {
+        for at in links {
             let followed: Vec<BufferId> = (self.links.list[at].relayed.buffers.iter())
                 .filter(|(_, followed)| followed.viewers.iter().any(|viewer| viewer.token == token))
                 .map(|(&local, _)| local)

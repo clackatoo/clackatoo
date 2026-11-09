@@ -823,11 +823,13 @@ impl WorkspaceState {
     }
 
     /// Who the workspaces of the panes showing `content` are lent to, a
-    /// pane at a time: `None` for a pane in a workspace not lent.
+    /// pane at a time, background tabs' too: `None` for a pane in a
+    /// workspace not lent.
     pub(crate) fn lents_showing(&self, content: Content) -> Vec<Option<Lent>> {
         (self.workspaces.list.iter())
             .flat_map(|workspace| {
-                (workspace.tabs.iter())
+                let background = workspace.background.iter().map(|one| &one.tab);
+                (workspace.tabs.iter().chain(background))
                     .flat_map(|tab| tab.layout.panes())
                     .filter(|pane| pane.content == content)
                     .map(|_| workspace.lent)

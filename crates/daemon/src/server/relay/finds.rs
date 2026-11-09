@@ -11,6 +11,8 @@
 //! rather than this daemon hold a backlog of it: it's told what came is
 //! all it gets.
 
+use std::ops::Range;
+
 use clackatoo_protocol::frame;
 use clackatoo_protocol::{ClientMessage, Done, Event, Found, PaneId, Search};
 use mio::Token;
@@ -43,7 +45,7 @@ impl Daemon {
         pane: Option<PaneId>,
         search: &Search,
     ) -> bool {
-        let Some(found) = pane.and_then(|pane| self.pane_elsewhere(pane)) else {
+        let Some(found) = pane.and_then(|pane| self.pane_elsewhere_for(token, pane)) else {
             return false;
         };
         let refused = match found {
@@ -167,10 +169,10 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: its searches on other machines
-    /// are stopped.
-    pub(super) fn forget_finds_client(&mut self, token: Token) {
-        for at in 0..self.links.list.len() {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: its searches on other machines are stopped.
+    pub(super) fn forget_finds_client(&mut self, token: Token, links: Range<usize>) {
+        for at in links {
             let finds = &mut self.links.list[at].relayed.finds;
             let numbers: Vec<u64> = finds.numbers_of(token);
             finds.forget_client(token);

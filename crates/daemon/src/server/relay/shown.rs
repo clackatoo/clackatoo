@@ -13,6 +13,7 @@
 //! own is.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use clackatoo_protocol::{
@@ -424,11 +425,12 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: it follows none of other
-    /// daemons' boards, reviews or chats' pages any more.
-    pub(super) fn forget_shown_client(&mut self, token: Token) {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: it follows none of other daemons' boards, reviews or chats'
+    /// pages any more.
+    pub(super) fn forget_shown_client(&mut self, token: Token, links: Range<usize>) {
         use clackatoo_protocol::Request;
-        for at in 0..self.links.list.len() {
+        for at in links {
             let relayed = &self.links.list[at].relayed;
             let boards: Vec<BoardId> = (relayed.boards.iter())
                 .filter(|(_, viewers)| viewers.contains(&token))

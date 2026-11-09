@@ -257,6 +257,17 @@ impl Family {
 }
 
 impl Daemon {
+    /// The chats whose agents made this daemon's own changes numbered
+    /// `ids`, in open buffers or closed files.
+    pub(super) fn hunk_chats(&self, ids: &[u64]) -> Vec<TerminalId> {
+        let open = (self.buffers.values()).flat_map(|slot| slot.agents.all().iter());
+        let closed = (self.reviews.closed.values()).flat_map(|closed| closed.hunks.all().iter());
+        (open.chain(closed))
+            .filter(|hunk| ids.contains(&hunk.id))
+            .map(|hunk| TerminalId(hunk.chat))
+            .collect()
+    }
+
     // --- Hunks as files change -------------------------------------------
 
     /// Puts in an agent's edit `edit` to buffer `id`, which the text now

@@ -118,7 +118,7 @@ impl Daemon {
             }
             BackgroundAction::Tab { tab } => self.send_tab_to_background(tab),
             BackgroundAction::Pane { pane } => self.send_pane_to_background(pane),
-            BackgroundAction::Bring { tab } => self.bring_back(tab),
+            BackgroundAction::Bring { tab } => self.bring_back(token, tab),
             BackgroundAction::Dismiss { tab } => self.dismiss_background(tab),
             BackgroundAction::Seen { workspace } => {
                 // Those another machine lends say so there.
@@ -132,7 +132,7 @@ impl Daemon {
                         .collect();
                 for (_, borrowed) in borrowed {
                     let seen = clackatoo_protocol::LentBackgroundAction::Seen;
-                    let _ = self.ask_lent_background(borrowed, seen);
+                    let _ = self.ask_lent_background(Some(token), borrowed, seen);
                 }
                 if self.workspaces.seen(workspace)? {
                     self.workspaces_changed();
@@ -223,15 +223,17 @@ impl Daemon {
 
     /// Brings background tab `tab` back into its workspace's tab bar. Each
     /// of its terminals whose program has ended becomes a new shell in its
-    /// directory, offering to run again what it ran.
-    fn bring_back(&mut self, tab: TabId) -> Result<Response, Error> {
+    /// directory, offering to run again what it ran. Asked by the client
+    /// at `token`.
+    fn bring_back(&mut self, token: Token, tab: TabId) -> Result<Response, Error> {
         if self.workspaces.get().find_background(tab).is_none() {
             return Err(Error::NoSuchTab(tab));
         }
         // A shell another machine lends is brought back only as that
-        // machine hears it is, or it would go on keeping it once it ends.
+        // machine hears it is, or it would go on keeping it once it ends;
+        // and never for a daemon relaying, if that machine is kept from it.
         for (_, borrowed) in self.workspaces.background_borrowed(tab) {
-            self.can_ask_lender(borrowed)?;
+            self.can_ask_lender(Some(token), borrowed)?;
         }
         let focused = self.workspaces.bring_back(tab)?;
         self.renew_ended(tab);
@@ -254,7 +256,7 @@ impl Daemon {
         }
         for (_, borrowed) in borrowed {
             let bring = clackatoo_protocol::LentBackgroundAction::Bring;
-            if let Err(err) = self.ask_lent_background(borrowed, bring) {
+            if let Err(err) = self.ask_lent_background(None, borrowed, bring) {
                 log::warn!("a background tab another machine lends: {err}");
             }
         }

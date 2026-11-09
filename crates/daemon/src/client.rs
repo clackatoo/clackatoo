@@ -935,6 +935,25 @@ impl Client {
         }
     }
 
+    /// As [`watch_workspaces`](Self::watch_workspaces), for a daemon
+    /// connected to another: says first that it relays for clients of its
+    /// own (to a daemon of protocol 92 or later), so it's told only what a
+    /// daemon relaying may be from the first, never what that daemon keeps
+    /// from the daemons connected to it (CLACKA-118).
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn watch_workspaces_relaying(&mut self) -> Result<Workspaces, ClientError> {
+        if self.wire() >= wire::RELAY {
+            match self.request(&Request::Relay)? {
+                Response::Done => {}
+                other => return Err(unexpected(other)),
+            }
+        }
+        self.watch_workspaces()
+    }
+
     /// Makes a workspace whose one pane shows `terminal`.
     ///
     /// # Errors

@@ -18,6 +18,7 @@
 //! whole of it.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use clackatoo_protocol::{
     BackgroundAction, ClientMessage, Error, Event, Listening, ListeningPort, NewTerminal, PaneId,
@@ -209,7 +210,7 @@ impl Daemon {
             Ok(command) => command.to_owned(),
             Err(err) => return Some(Routed::Answered(Response::Error(err))),
         };
-        let (at, remote) = match self.borrowed_pane(beside)? {
+        let (at, remote) = match self.pane_elsewhere_for(token, beside)? {
             Ok(found) => found,
             Err(err) => return Some(Routed::Answered(Response::Error(err))),
         };
@@ -224,9 +225,12 @@ impl Daemon {
     }
 
     /// Whether the daemon that lent this one `borrowed` can be asked about
-    /// it now, or why not.
+    /// it now, for the client at `asker`, if any asked, or why not: never
+    /// for a daemon relaying one kept from it (see
+    /// [`refuse_unshared`](Self::refuse_unshared)).
     pub(in crate::server) fn can_ask_lender(
         &self,
+        asker: Option<Token>,
         borrowed: crate::workspaces::Borrowed,
     ) -> Result<usize, Error> {
         let Some(at) = self.link_to(borrowed.machine) else {
@@ -235,18 +239,23 @@ impl Daemon {
                 self.machine_named(borrowed.machine)
             )));
         };
-        self.can_ask(at)?;
+        match asker {
+            Some(token) => self.can_ask(token, at)?,
+            None => self.answers(at)?,
+        }
         Ok(at)
     }
 
     /// Asks the daemon that lent this one `borrowed`, a shell in a
-    /// background tab here, as `action` says, if it can be.
+    /// background tab here, as `action` says, for the client at `asker`,
+    /// if any asked, if it can be.
     pub(in crate::server) fn ask_lent_background(
         &mut self,
+        asker: Option<Token>,
         borrowed: crate::workspaces::Borrowed,
         action: clackatoo_protocol::LentBackgroundAction,
     ) -> Result<(), Error> {
-        let at = self.can_ask_lender(borrowed)?;
+        let at = self.can_ask_lender(asker, borrowed)?;
         let ask = Request::LentBackground {
             key: borrowed.key,
             action,
@@ -305,7 +314,7 @@ impl Daemon {
                 .any(|workspace| !workspace.background.is_empty());
             if !shows_background
                 || self.link_wire(at) < wire::BACKGROUND
-                || self.can_ask(at).is_err()
+                || self.can_ask(token, at).is_err()
             {
                 continue;
             }
@@ -339,9 +348,10 @@ impl Daemon {
         self.tell_ports(waiting);
     }
 
-    /// Forgets the client at `token`, gone: it waits for no ports.
-    pub(super) fn forget_ports_client(&mut self, token: Token) {
-        for linked in &mut self.links.list {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: it waits for no ports.
+    pub(super) fn forget_ports_client(&mut self, token: Token, links: Range<usize>) {
+        for linked in &mut self.links.list[links] {
             linked
                 .relayed
                 .ports_waiting

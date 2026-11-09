@@ -16,6 +16,7 @@
 //! told to the client that last asked about them.
 
 use std::fmt::Write as _;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -57,6 +58,9 @@ impl Daemon {
             };
             at
         };
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return Some(Routed::Answered(Response::Error(err)));
+        }
         // Only a window on this machine forwards this machine's ports.
         let local = matches!(
             self.sources.get(token.0),
@@ -178,10 +182,10 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: it's told nothing more of the
-    /// ports forwarded, which go on.
-    pub(super) fn forget_forwards_client(&mut self, token: Token) {
-        for linked in &mut self.links.list {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: it's told nothing more of the ports forwarded, which go on.
+    pub(super) fn forget_forwards_client(&mut self, token: Token, links: Range<usize>) {
+        for linked in &mut self.links.list[links] {
             if let Some(forwarded) = &mut linked.relayed.forwards {
                 forwarded.asker.take_if(|asker| *asker == token);
             }

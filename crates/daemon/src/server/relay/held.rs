@@ -85,13 +85,16 @@ impl Daemon {
         from: Option<PaneId>,
     ) -> Routed {
         let error = |err| Routed::Answered(Response::Error(err));
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return error(err);
+        }
         let host = self.links.list[at].remote.host.clone();
         if self.link_wire(at) < wire::MIXED {
             return error(Error::Other(format!(
                 "‘{host}’ is too old to show a pane from this machine: update clackatoo there"
             )));
         }
-        if let Err(err) = self.can_ask(at) {
+        if let Err(err) = self.can_ask(token, at) {
             return error(err);
         }
         let Some(machine) = self.links.list[at].machine.clone() else {
@@ -741,22 +744,36 @@ impl Daemon {
     /// this daemon has no connection to, as they say them, the nearest
     /// first.
     fn homes_shown(&self, shown: &mut Workspaces) {
-        self.homes_into(&mut shown.homes, false);
+        self.homes_into(&mut shown.homes, None);
     }
 
     /// The home directories of the other machines shown, as daemons
     /// relaying for clients of their own are told them: none of a
     /// connection asked not to be passed on, nor of what it passes on.
+    #[cfg(test)]
     pub(in crate::server) fn shared_homes(&self) -> Vec<clackatoo_protocol::MachineHome> {
+        self.shared_homes_but(&self.kept())
+    }
+
+    /// As [`shared_homes`](Self::shared_homes), for a daemon relaying from
+    /// which what's `kept` is kept.
+    pub(in crate::server) fn shared_homes_but(
+        &self,
+        kept: &super::unshared::Kept,
+    ) -> Vec<clackatoo_protocol::MachineHome> {
         let mut homes = Vec::new();
-        self.homes_into(&mut homes, true);
+        self.homes_into(&mut homes, Some(kept));
         homes
     }
 
     /// Adds to `homes` those of the other machines shown, as
-    /// [`homes_shown`](Self::homes_shown) says, but, if `shared`, of the
-    /// connections that may be passed on alone.
-    fn homes_into(&self, homes: &mut Vec<clackatoo_protocol::MachineHome>, shared: bool) {
+    /// [`homes_shown`](Self::homes_shown) says, but of the connections
+    /// `kept` doesn't keep, if it's said.
+    fn homes_into(
+        &self,
+        homes: &mut Vec<clackatoo_protocol::MachineHome>,
+        kept: Option<&super::unshared::Kept>,
+    ) {
         let own = self.machine.id;
         let mut add = |id: MachineId, home: &str| {
             if id != own && !homes.iter().any(|known| known.id == id) {
@@ -770,7 +787,11 @@ impl Daemon {
             (self.links.list.iter())
                 .any(|linked| (linked.machine.as_ref()).is_some_and(|machine| machine.id == id))
         };
-        let links = || (self.links.list.iter()).filter(|linked| !(shared && linked.unshared));
+        let links = || {
+            (self.links.list.iter().enumerate())
+                .filter(|&(at, _)| !kept.is_some_and(|kept| kept.link(at)))
+                .map(|(_, linked)| linked)
+        };
         for linked in links() {
             if let (Some(machine), Some(home)) = (&linked.machine, &linked.relayed.mirror.home) {
                 add(machine.id, home);
@@ -1104,7 +1125,7 @@ mod tests {
         daemon.links.list[0].unshared = true;
         assert!(
             daemon
-                .relays_shown(&daemon.shown_workspaces())
+                .relays_shown_but(&daemon.shown_workspaces(), &daemon.kept())
                 .homes
                 .is_empty()
         );

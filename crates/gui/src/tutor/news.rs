@@ -1499,6 +1499,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: "A cog at the top bar's right opens the settings menu, and closes it again",
     },
+    News {
+        id: "no-share-asks",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: ":connect HOST --no-share also refuses what other daemons ask of HOST through yours, and hides its chats",
+    },
 ];
 
 impl News {

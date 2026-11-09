@@ -1131,6 +1131,22 @@ impl Daemon {
 
     /// Sends `event` to the client at `token`.
     pub(super) fn send_event(&mut self, token: Token, event: Event) {
+        // A daemon relaying is told only what it may be (CLACKA-118).
+        let event = if self.relays(token) {
+            match self.event_for_relay(token, event) {
+                Some(event) => event,
+                None => return,
+            }
+        } else {
+            event
+        };
+        self.send_event_as_is(token, event);
+    }
+
+    /// Sends `event` to the client at `token`, as it is, whoever it is: for
+    /// what a daemon relaying is told as it's refused, which names only
+    /// what it named itself (see [`relay::unshared`](super::relay::unshared)).
+    pub(super) fn send_event_as_is(&mut self, token: Token, event: Event) {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };

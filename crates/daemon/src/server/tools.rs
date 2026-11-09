@@ -1313,6 +1313,16 @@ impl Daemon {
     /// `pane`, and put its cursor on `at`, in its file. Never to move the
     /// keyboard focus.
     fn show(&mut self, pane: PaneId, at: Option<FileLocation>) {
+        // Not to a daemon relaying, if it's on a machine kept from it
+        // (CLACKA-118).
+        let kept_from: Vec<Token> = (self.sources.iter())
+            .filter(|(_, source)| matches!(source, Source::Client(client) if client.relays))
+            .map(|(key, _)| Token(key))
+            .filter(|&token| {
+                let kept = self.kept_for(token);
+                kept.any() && self.unshared_pane(&kept, pane)
+            })
+            .collect();
         let event = ServerMessage::Event(clackatoo_protocol::Event::Show { pane, at });
         let mut event = Broadcast::new(&event, "a pane to show");
         let mut watchers = Vec::new();
@@ -1320,6 +1330,7 @@ impl Daemon {
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
+                && !kept_from.contains(&Token(key))
                 && let Some(bytes) = event.to(client.wire)
             {
                 client.outgoing.extend_from_slice(bytes);

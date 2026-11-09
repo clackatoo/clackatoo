@@ -44,6 +44,9 @@
 //! - **On unless asked not to.** A connection asked for with `share`
 //!   off, as for a server shared with others, isn't passed on, and a
 //!   stream asking to reach it is refused, and those that did are ended.
+//!   Nor is anything else of it, either way: what the daemons connected
+//!   to this one are told, and what they ask through it (see
+//!   [`unshared`](super::relay::unshared)).
 //! - **Only for daemons.** Only a client that said which machine it is
 //!   may ask to reach another, so a way back through it is always seen;
 //!   reaching this daemon itself makes a client that may only greet it and
@@ -85,12 +88,21 @@ impl Daemon {
     /// daemon so vouches for. Each is named by its host, without the user
     /// ssh logs in as or a port.
     pub(super) fn passed_on(&self) -> Vec<Passed> {
+        self.passed_on_but(&self.kept())
+    }
+
+    /// As [`passed_on`](Self::passed_on), but for what's `kept` from the
+    /// daemon told: never a connection kept from it, and a way through a
+    /// machine kept from it named without that machine, as the way one
+    /// asked for here may go, which is the asker's to keep, not passing
+    /// on through it (CLACKA-118).
+    pub(super) fn passed_on_but(&self, kept: &super::relay::unshared::Kept) -> Vec<Passed> {
         let mut passed: Vec<Passed> = Vec::new();
-        for linked in &self.links.list {
+        for (at, linked) in self.links.list.iter().enumerate() {
             let Some(machine) = linked.machine.as_ref() else {
                 continue;
             };
-            let usable = !linked.unshared
+            let usable = !kept.link(at)
                 && !matches!(linked.state, ConnectionState::Stopped { .. })
                 && linked
                     .wire
@@ -103,7 +115,9 @@ impl Daemon {
                 id: machine.id,
                 name: bare_host(&linked.remote.host),
                 run: machine.run,
-                through: linked.through.clone(),
+                through: (linked.through.iter().copied())
+                    .filter(|&id| !kept.machine(id))
+                    .collect(),
                 reached,
                 key: self.links.pin(machine.id).map(|pin| pin.key),
             };
@@ -181,21 +195,30 @@ impl Daemon {
 
     /// Tells the daemons connected to this one what it passes on, if that
     /// changed since they were told: the streams reaching a machine no
-    /// longer passed on end.
+    /// longer passed on end. And if what's kept from them changed, they're
+    /// told what they may be now, and let go of what they may not (see
+    /// [`shared_anew`](Self::shared_anew)).
     pub(super) fn sharing_changed(&mut self) {
+        let kept = self.kept();
+        let kept_changed = kept != self.links.kept_told;
+        self.links.kept_told = kept;
         let passed = self.passed_on();
-        if passed == self.links.passed_told {
-            return;
+        if passed != self.links.passed_told {
+            let gone: Vec<MachineId> = (self.links.passed_told.iter())
+                .filter(|told| !passed.iter().any(|now| now.id == told.id))
+                .map(|told| told.id)
+                .collect();
+            self.links.passed_told = passed;
+            for machine in gone {
+                self.abandon_reaching(machine);
+            }
+            if !kept_changed {
+                self.tell_workspaces();
+            }
         }
-        let gone: Vec<MachineId> = (self.links.passed_told.iter())
-            .filter(|told| !passed.iter().any(|now| now.id == told.id))
-            .map(|told| told.id)
-            .collect();
-        self.links.passed_told = passed;
-        for machine in gone {
-            self.abandon_reaching(machine);
+        if kept_changed {
+            self.shared_anew();
         }
-        self.tell_workspaces();
     }
 
     /// Takes in what the daemon of the connection at `at` passes on, as
@@ -233,6 +256,9 @@ impl Daemon {
         if taken != self.links.list[at].passed {
             self.links.list[at].passed = taken;
             self.sync_chained();
+            // What's kept from the daemons relaying goes with what a kept
+            // connection passes on (CLACKA-118).
+            self.sharing_changed();
         }
     }
 
@@ -752,6 +778,11 @@ impl Daemon {
             return Ok(Reaching::Here(ours));
         }
         let own = &self.machine.name;
+        // Kept from it, it's told nothing of which machine (CLACKA-118).
+        let kept = self.kept_but(Some(asker));
+        if kept.machine(machine) {
+            return Err(super::relay::unshared::not_shared());
+        }
         // The connected connection to it, if there are two, and never one
         // stopped.
         let to_it = |linked: &&Linked| {
@@ -768,12 +799,10 @@ impl Daemon {
             )));
         };
         let linked = &self.links.list[at];
-        let host = &linked.remote.host;
-        if linked.unshared {
-            return Err(Error::Other(format!(
-                "‘{own}’ was asked not to pass ‘{host}’ on"
-            )));
+        if kept.link(at) {
+            return Err(super::relay::unshared::not_shared());
         }
+        let host = &linked.remote.host;
         if asker == machine || linked.through.contains(&asker) {
             return Err(Error::Other(format!(
                 "‘{own}’ reaches ‘{host}’ through the machine asking, round a loop"

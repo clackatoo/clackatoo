@@ -1092,6 +1092,11 @@ impl Daemon {
         }
         // The next change goes to every watcher, whatever was sent before.
         self.chat_watch.sent = None;
+        Response::Chats(self.chats_told(token))
+    }
+
+    /// The chats, as the client at `token` is told them.
+    pub(super) fn chats_told(&self, token: Token) -> Vec<ChatSummary> {
         // Those lent to another machine's daemon are its alone.
         let mut chats = self.chats_for(token, &self.chat_summaries());
         // A client from before federation is shown only this daemon's.
@@ -1100,7 +1105,13 @@ impl Daemon {
         {
             chats.retain(|chat| self.chat_ref(chat.chat).is_some());
         }
-        Response::Chats(chats)
+        // A daemon relaying isn't told those of a connection asked not to
+        // be passed on.
+        if self.relays(token) {
+            let unshared = self.unshared_chats(token, &chats);
+            chats.retain(|chat| !unshared.contains(&chat.chat));
+        }
+        chats
     }
 
     /// Every chat, summed up, in the order they were made: this daemon's,
@@ -1226,6 +1237,13 @@ impl Daemon {
 
     /// Notes that the chats may have moved between workspaces.
     pub(super) fn chats_moved(&mut self) {
+        self.chat_watch.dirty = true;
+    }
+
+    /// Notes that what some clients are told of the chats changed, though
+    /// the chats didn't: every client watching them is told again.
+    pub(super) fn chats_told_anew(&mut self) {
+        self.chat_watch.sent = None;
         self.chat_watch.dirty = true;
     }
 
@@ -1356,6 +1374,12 @@ impl Daemon {
         let mut event = Broadcast::new(&event, "the chats");
         let older = ServerMessage::Event(Event::Chats(own));
         let mut older = Broadcast::new(&older, "the chats");
+        // Nor is a daemon relaying told those on a machine kept from it.
+        let unshared: HashMap<Token, BTreeSet<TerminalId>> = (self.sources.iter())
+            .filter(|(_, source)| matches!(source, Source::Client(client) if client.relays))
+            .map(|(key, _)| (Token(key), self.unshared_chats(Token(key), &chats)))
+            .filter(|(_, unshared)| !unshared.is_empty())
+            .collect();
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
             let Source::Client(client) = source else {
@@ -1366,9 +1390,11 @@ impl Daemon {
             }
             let borrower = client.machine.as_ref().map(|machine| machine.id);
             let theirs = borrower.is_some_and(|machine| lent.values().any(|&to| to == machine));
-            if theirs && client.wire >= wire::FEDERATION {
+            let kept_from = unshared.get(&Token(key));
+            if (theirs || kept_from.is_some()) && client.wire >= wire::FEDERATION {
                 let with: Vec<ChatSummary> = (chats.iter())
                     .filter(|chat| lent.get(&chat.chat).is_none_or(|&to| Some(to) == borrower))
+                    .filter(|chat| !kept_from.is_some_and(|kept| kept.contains(&chat.chat)))
                     .cloned()
                     .collect();
                 match frame::encode(client.wire, &ServerMessage::Event(Event::Chats(with))) {

@@ -42,6 +42,7 @@
 //! until then.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, Head};
@@ -67,6 +68,7 @@ pub(super) mod mirror;
 pub(super) mod sessions;
 pub(super) mod shown;
 pub(super) mod unpack;
+pub(super) mod unshared;
 pub(super) mod upgrade;
 
 use mirror::{Fresh, InUse, Mirror};
@@ -462,6 +464,7 @@ enum Route {
 type Renumbered = Result<(Request, Then), Error>;
 
 /// Where a request from a client goes.
+#[derive(Debug)]
 pub(super) enum Routed {
     /// This daemon answers it: it's about its own.
     Here(Request),
@@ -630,12 +633,29 @@ impl Daemon {
     /// change only to other machines' workspaces: nothing of this daemon's
     /// own is kept again for it.
     pub(super) fn tell_workspaces(&mut self) {
+        // Nothing a daemon relaying follows outlives what it may have.
+        self.let_go_kept();
         let shown = self.shown_workspaces();
-        let relayed = self.relays_shown(&shown);
-        // A daemon lent workspaces is told them, and no one else.
-        let lent: BTreeMap<Token, Vec<u8>> = if (self.workspaces.get().list.iter())
-            .any(|workspace| workspace.lent.is_some())
-        {
+        let kept = self.kept();
+        let relayed = self.relays_shown_but(&shown, &kept);
+        // A daemon lent workspaces is told them, and no one else; while
+        // anything's kept, each daemon relaying is told what it may be.
+        let lent: BTreeMap<Token, Vec<u8>> = if kept.any() {
+            (self.sources.iter())
+                .filter(|(_, source)| matches!(source, Source::Client(client) if client.relays))
+                .filter_map(|(key, _)| {
+                    let own = self.machine_of_client(Token(key)).map(|machine| machine.id);
+                    let told =
+                        self.relays_shown_but(&shown, &self.kept_from_but(kept.clone(), own));
+                    let told = self.with_lent(Token(key), &told).unwrap_or(told);
+                    let wire = self.client_wire(Token(key))?;
+                    frame::encode(wire, &ServerMessage::Event(Event::Workspaces(told)))
+                        .inspect_err(|err| log::error!("encoding the workspaces failed: {err}"))
+                        .ok()
+                        .map(|bytes| (Token(key), bytes))
+                })
+                .collect()
+        } else if (self.workspaces.get().list.iter()).any(|workspace| workspace.lent.is_some()) {
             (self.sources.iter())
                 .filter_map(|(key, _)| Some((Token(key), self.lent_frame(Token(key), &relayed)?)))
                 .collect()
@@ -674,13 +694,35 @@ impl Daemon {
         }
     }
 
-    /// `shown`, as a daemon relaying for clients of its own is told it:
-    /// without what's parked here, and with the machines this daemon
-    /// passes on, which only such a daemon is told.
-    pub(super) fn relays_shown(&self, shown: &Workspaces) -> Workspaces {
+    /// `shown`, as the daemon relaying for clients of its own at `token` is
+    /// told it: without what's parked here, nor what's kept from it, and
+    /// with the machines this daemon passes on, which only such a daemon is
+    /// told.
+    pub(super) fn relays_shown(&self, token: Token, shown: &Workspaces) -> Workspaces {
+        self.relays_shown_but(shown, &self.kept_for(token))
+    }
+
+    /// As [`relays_shown`](Self::relays_shown), for a daemon relaying from
+    /// which what's `kept` is kept.
+    fn relays_shown_but(&self, shown: &Workspaces, kept: &unshared::Kept) -> Workspaces {
+        let mut relayed = self.relaying_shown_but(shown, kept);
+        relayed.passed = self.passed_on_but(kept);
+        relayed
+    }
+
+    /// `shown`, as the daemon relaying at `token`, if it hasn't said which
+    /// machine it is, is told it: as [`relays_shown`](Self::relays_shown)
+    /// says, but for the machines passed on.
+    pub(super) fn relaying_shown(&self, token: Token, shown: &Workspaces) -> Workspaces {
+        self.relaying_shown_but(shown, &self.kept_for(token))
+    }
+
+    /// As [`relaying_shown`](Self::relaying_shown), for a daemon relaying
+    /// from which what's `kept` is kept.
+    fn relaying_shown_but(&self, shown: &Workspaces, kept: &unshared::Kept) -> Workspaces {
         let mut relayed = self.without_parked(shown).unwrap_or_else(|| shown.clone());
-        relayed.passed = self.passed_on();
-        relayed.homes = self.shared_homes();
+        relayed.homes = self.shared_homes_but(kept);
+        self.leave_out_unshared(&mut relayed, kept);
         relayed
     }
 
@@ -724,6 +766,24 @@ impl Daemon {
         token: Token,
         message: ClientMessage,
     ) -> Option<ClientMessage> {
+        self.asking(Some(token));
+        let routed = self.route_message_kept(token, message);
+        self.asking(None);
+        routed
+    }
+
+    /// As [`route_message`](Self::route_message), once what's kept from
+    /// the asker is worked out (CLACKA-118).
+    fn route_message_kept(
+        &mut self,
+        token: Token,
+        message: ClientMessage,
+    ) -> Option<ClientMessage> {
+        // Before anything is done of it, as for a request (CLACKA-118).
+        if let Err(err) = self.refuse_kept(token, &message) {
+            self.tell_refused(token, &message, &err);
+            return None;
+        }
         let message = self.held_message(message);
         match message {
             ClientMessage::Edit {
@@ -754,6 +814,11 @@ impl Daemon {
             }
             ClientMessage::Board { board, action } => match self.relayed_board(board) {
                 Some((at, remote)) => {
+                    if let Err(err) = self.refuse_unshared(token, at) {
+                        let update = clackatoo_protocol::BoardUpdate::Refused(err.to_string());
+                        self.send_event(token, Event::Board { board, update });
+                        return None;
+                    }
                     let act = ClientMessage::Board {
                         board: remote,
                         action,
@@ -765,6 +830,12 @@ impl Daemon {
             },
             ClientMessage::Place { pane, place } => match self.pane_elsewhere(pane) {
                 Some(Ok((at, remote))) => {
+                    // Neither a place nor a dismissal is answered, so one
+                    // refused is only noted.
+                    if let Err(why) = self.refuse_unshared(token, at) {
+                        log::info!("pane {pane}'s place isn't passed on: {why}");
+                        return None;
+                    }
                     let place = ClientMessage::Place {
                         pane: remote,
                         place,
@@ -790,6 +861,10 @@ impl Daemon {
             }
             ClientMessage::Dismiss { pane } => match self.pane_elsewhere(pane) {
                 Some(Ok((at, remote))) => {
+                    if let Err(why) = self.refuse_unshared(token, at) {
+                        log::info!("pane {pane}'s offer isn't dismissed there: {why}");
+                        return None;
+                    }
                     let dismiss = ClientMessage::Dismiss { pane: remote };
                     let _ = self.send_upstream(at, &dismiss, Expect::Nothing);
                     None
@@ -815,11 +890,17 @@ impl Daemon {
             Request::DetachFiles { files } => return self.route_detach_files(token, files),
             Request::AttachBoard { board: local } => {
                 let (at, board) = self.relayed_board(local)?;
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Some(Routed::Answered(Response::Error(err)));
+                }
                 self.follow_board(token, at, local, true);
                 (at, Request::AttachBoard { board })
             }
             Request::AttachReview { review: local } => {
                 let (at, review) = self.relayed_review(local)?;
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Some(Routed::Answered(Response::Error(err)));
+                }
                 self.follow_review(token, at, local, true);
                 (at, Request::AttachReview { review })
             }
@@ -829,6 +910,9 @@ impl Daemon {
                 height,
             } => {
                 let (at, chat) = self.relayed_terminal(local)?;
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Some(Routed::Answered(Response::Error(err)));
+                }
                 self.follow_browser(token, at, local, true);
                 (self.links.list[at].relayed.browser_sizes).insert(local, [width, height]);
                 (
@@ -868,12 +952,18 @@ impl Daemon {
             Request::Review(ref action) => {
                 return Some(match self.relayed_review_action(action)? {
                     (at, Ok((request, then))) => self.wait_for(token, at, request, then),
-                    (_, Err(err)) => Routed::Answered(Response::Error(err)),
+                    (at, Err(err)) => {
+                        let err = self.refuse_unshared(token, at).err().unwrap_or(err);
+                        Routed::Answered(Response::Error(err))
+                    }
                 });
             }
             _ => return None,
         };
         let (at, request) = routed;
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return Some(Routed::Answered(Response::Error(err)));
+        }
         if !self.links.list[at].relayed.relays {
             return Some(Routed::Answered(Response::Error(self.too_old(at, "it"))));
         }
@@ -881,9 +971,28 @@ impl Daemon {
     }
 
     /// Where `request`, from the client at `token`, goes: to the daemon on
-    /// another machine, if it's about something of its, renumbered.
-    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
+    /// another machine, if it's about something of its, renumbered. What's
+    /// kept from it, if it's a daemon relaying, is worked out once for it
+    /// first (CLACKA-118).
     pub(super) fn route_request(&mut self, token: Token, request: Request) -> Routed {
+        self.asking(Some(token));
+        let routed = self.route_request_kept(token, request);
+        self.asking(None);
+        routed
+    }
+
+    /// As [`route_request`](Self::route_request), once what's kept from
+    /// the asker is worked out.
+    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
+    fn route_request_kept(&mut self, token: Token, request: Request) -> Routed {
+        // Before anything is done of it: what a daemon relaying may not ask
+        // of a machine kept from it, nor do to one by way of this daemon's
+        // own layout (CLACKA-118).
+        let refused = (self.refuse_kept_request(token, &request))
+            .and_then(|()| self.refuse_unshared_layout(token, &request));
+        if let Err(err) = refused {
+            return Routed::Answered(Response::Error(err));
+        }
         let request = self.held_request(request);
         match request {
             Request::PasteImage {
@@ -897,7 +1006,9 @@ impl Daemon {
                         Err(err) => Routed::Answered(Response::Error(err)),
                     };
                 };
-                if let Err(err) = self.refuse_phones_clipboard(token, how) {
+                let refused = (self.refuse_unshared(token, at))
+                    .and_then(|()| self.refuse_phones_clipboard(token, how));
+                if let Err(err) = refused {
                     return Routed::Answered(Response::Error(err));
                 }
                 if self.link_wire(at) < wire::PASTE_IMAGE {
@@ -939,6 +1050,9 @@ impl Daemon {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
                     return Routed::Here(Request::NotifyPhone { terminal, on });
                 };
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Routed::Answered(Response::Error(err));
+                }
                 if self.link_wire(at) < wire::TERMINAL_STANDARDS_2 {
                     let error = self.too_old(at, "marking a terminal for the phone");
                     return Routed::Answered(Response::Error(error));
@@ -961,6 +1075,9 @@ impl Daemon {
                         cell,
                     });
                 };
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Routed::Answered(Response::Error(err));
+                }
                 // Sizes asked for while it's down are of no use later.
                 let resize = Request::Resize {
                     terminal: remote,
@@ -979,6 +1096,9 @@ impl Daemon {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
                     return Routed::Here(request);
                 };
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Routed::Answered(Response::Error(err));
+                }
                 let recent = recent && self.link_wire(at) >= wire::CHAT_HISTORY;
                 self.follow(token, at, terminal);
                 let viewer = self.links.list[at]
@@ -1063,6 +1183,9 @@ impl Daemon {
                     self.links.active = None;
                     return Routed::Here(Request::Focus { pane, looking });
                 };
+                if let Err(err) = self.refuse_unshared(token, at) {
+                    return Routed::Answered(Response::Error(err));
+                }
                 // A phone only looks, and the daemon there must know so,
                 // as the asker it sees is this daemon.
                 let looking = looking || self.is_web_device(token);
@@ -1351,7 +1474,9 @@ impl Daemon {
                 let action = action.clone();
                 (at, Ok((Request::Chat { terminal, action }, then)))
             }),
-            &Request::ChatChoices { pane, on } => self.route_chat_choices(pane, on).map(flip),
+            &Request::ChatChoices { pane, on } => {
+                self.route_chat_choices(token, pane, on).map(flip)
+            }
             Request::NewTab {
                 workspace: local,
                 terminal: content,
@@ -1486,39 +1611,50 @@ impl Daemon {
                 };
                 (at, Ok((resize, Then::Pass)))
             }),
-            Request::OpenHere { pane: local, file } => self
-                .pane_elsewhere(*local)
+            // Each keeps the connection it found, so a refusal comes first.
+            Request::OpenHere { pane: local, file } => (self.pane_elsewhere_for(token, *local))
                 .map(|found| {
-                    let (at, pane) = found?;
-                    let open = Request::OpenHere {
-                        pane,
-                        file: file.clone(),
-                    };
-                    Ok((at, self.if_relays(at, "an editor", (open, Then::Pass))?))
+                    flip(found.map(|(at, pane)| {
+                        let open = Request::OpenHere {
+                            pane,
+                            file: file.clone(),
+                        };
+                        (at, (open, Then::Pass))
+                    }))
                 })
-                .map(flip),
-            Request::BlankHere { pane: local, blank } => self
-                .pane_elsewhere(*local)
-                .map(|found| {
-                    let (at, pane) = found?;
-                    let blank = Request::BlankHere {
-                        pane,
-                        blank: blank.clone(),
-                    };
-                    Ok((at, self.if_relays(at, "an editor", (blank, Then::Pass))?))
-                })
-                .map(flip),
-            &Request::Recover { pane: local, drop } => self
-                .pane_elsewhere(local)
-                .map(|found| {
-                    let (at, pane) = found?;
-                    let recover = Request::Recover { pane, drop };
-                    Ok((
+                .map(|(at, asked)| {
+                    (
                         at,
-                        self.if_relays(at, "an editor", (recover, Then::Recovered))?,
-                    ))
+                        asked.and_then(|asked| self.if_relays(at, "an editor", asked)),
+                    )
+                }),
+            Request::BlankHere { pane: local, blank } => (self.pane_elsewhere_for(token, *local))
+                .map(|found| {
+                    flip(found.map(|(at, pane)| {
+                        let blank = Request::BlankHere {
+                            pane,
+                            blank: blank.clone(),
+                        };
+                        (at, (blank, Then::Pass))
+                    }))
                 })
-                .map(flip),
+                .map(|(at, asked)| {
+                    (
+                        at,
+                        asked.and_then(|asked| self.if_relays(at, "an editor", asked)),
+                    )
+                }),
+            &Request::Recover { pane: local, drop } => (self.pane_elsewhere_for(token, local))
+                .map(|found| {
+                    let recover = |pane| (Request::Recover { pane, drop }, Then::Recovered);
+                    flip(found.map(|(at, pane)| (at, recover(pane))))
+                })
+                .map(|(at, asked)| {
+                    (
+                        at,
+                        asked.and_then(|asked| self.if_relays(at, "an editor", asked)),
+                    )
+                }),
             &(Request::Save { buffer, .. }
             | Request::Discard { buffer }
             | Request::Reload { buffer }
@@ -1545,10 +1681,10 @@ impl Daemon {
                 server,
                 buffer: Some(local),
             } => self.relayed_buffer(*local).map(|(at, remote)| {
-                self.links.list[at]
-                    .relayed
-                    .installing
-                    .push((token, language.clone()));
+                // Told how it went only if it's asked there at all.
+                if self.refuse_unshared(token, at).is_ok() {
+                    (self.links.list[at].relayed.installing).push((token, language.clone()));
+                }
                 let install = Request::Install {
                     language: language.clone(),
                     grammar: *grammar,
@@ -1608,7 +1744,12 @@ impl Daemon {
         };
         match renumbered {
             None => Routed::Here(request),
-            Some((_, Err(err))) => Routed::Answered(Response::Error(err)),
+            // Refused a machine kept from it, a daemon relaying is told so
+            // before anything else that would say what's there.
+            Some((at, Err(err))) => {
+                let err = self.refuse_unshared(token, at).err().unwrap_or(err);
+                Routed::Answered(Response::Error(err))
+            }
             // What acts on a buffer's text, or closes what shows it, waits
             // for the client's changes to it.
             Some((at, Ok((request, then)))) if acts_on_text(&request) => {
@@ -1622,7 +1763,7 @@ impl Daemon {
     /// `at`, for the client at `token` to be answered as it answers, as
     /// `then` says.
     fn wait_for(&mut self, token: Token, at: usize, request: Request, then: Then) -> Routed {
-        if let Err(err) = self.can_ask(at) {
+        if let Err(err) = self.can_ask(token, at) {
             return Routed::Answered(Response::Error(err));
         }
         let Some(ticket) = self.take_place(token) else {
@@ -1648,7 +1789,7 @@ impl Daemon {
         if !held_already && !self.client_busy(at, token) {
             return self.wait_for(token, at, request, then);
         }
-        if let Err(err) = self.can_ask(at) {
+        if let Err(err) = self.can_ask(token, at) {
             return Routed::Answered(Response::Error(err));
         }
         let Some(ticket) = self.take_place(token) else {
@@ -1690,9 +1831,18 @@ impl Daemon {
         }
     }
 
+    /// Whether the client at `token` may have the daemon of the connection
+    /// at `at` asked anything now, or why not: not of a connection kept
+    /// from it (see [`refuse_unshared`](Self::refuse_unshared)), nor one
+    /// that can't be asked.
+    fn can_ask(&self, token: Token, at: usize) -> Result<(), Error> {
+        self.refuse_unshared(token, at)?;
+        self.answers(at)
+    }
+
     /// Whether the daemon of the connection at `at` can be asked anything
     /// now, or why not.
-    fn can_ask(&self, at: usize) -> Result<(), Error> {
+    fn answers(&self, at: usize) -> Result<(), Error> {
         let host = &self.links.list[at].remote.host;
         if !self.is_linked(at) {
             return Err(Error::Other(format!("{host} isn't connected just now")));
@@ -1722,7 +1872,7 @@ impl Daemon {
     /// the place numbered `ticket` among its answers: an error there at
     /// once, if it can't be asked.
     fn ask_in_place(&mut self, token: Token, ticket: u64, at: usize, request: Request, then: Then) {
-        if let Err(err) = self.can_ask(at) {
+        if let Err(err) = self.can_ask(token, at) {
             self.hand_answer_with(token, ticket, Response::Error(err));
             return;
         }
@@ -1743,18 +1893,24 @@ impl Daemon {
         match self.sources.get_mut(token.0) {
             Some(Source::Client(client)) if !matches!(client.link, Link::Web(_)) => {
                 client.relays = true;
+                // What only this machine's own windows may have: the
+                // connections, and ssh's questions (CLACKA-118).
+                client.watching_connections = false;
                 // Told the workspaces before, it's told them again without
-                // what's parked here.
-                let watching = client.watching_workspaces;
+                // what's parked here, or what it may not be told of a
+                // connection asked not to be passed on; and the chats.
+                let (watching, chats) = (client.watching_workspaces, client.watching_chats);
+                self.forget_link_client(token);
                 if watching {
                     let shown = self.shown_workspaces();
-                    let homes = self.shared_homes();
-                    let parked = self.without_parked(&shown);
-                    if parked.is_some() || homes != shown.homes {
-                        let mut without = parked.unwrap_or(shown);
-                        without.homes = homes;
+                    let without = self.relaying_shown(token, &shown);
+                    if without != shown {
                         self.send_event(token, Event::Workspaces(without));
                     }
+                }
+                if chats && self.kept().any() {
+                    let told = self.chats_told(token);
+                    self.send_event(token, Event::Chats(told));
                 }
                 Ok(Response::Done)
             }
@@ -1781,6 +1937,9 @@ impl Daemon {
         remote: TerminalId,
         bytes: Vec<u8>,
     ) -> Response {
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return Response::Error(err);
+        }
         if !self.answering(at) {
             let host = &self.links.list[at].remote.host;
             return Response::Error(Error::Other(format!(
@@ -1861,7 +2020,8 @@ impl Daemon {
     /// over the connection at `at` but for its leading numbers, which
     /// `changes` renumbers (see [`frame::renumber_leading`]): encoded for
     /// the client's version, from the connection's if it couldn't be
-    /// unpacked for it.
+    /// unpacked for it. None for a daemon relaying, of a connection kept
+    /// from it (CLACKA-118).
     pub(super) fn frame_for(
         &self,
         at: usize,
@@ -1869,6 +2029,9 @@ impl Daemon {
         unpacked: &Unpacked,
         changes: &[(usize, u64)],
     ) -> Option<Vec<u8>> {
+        if self.relays(token) && self.kept_for(token).link(at) {
+            return None;
+        }
         let link = self.link_wire(at);
         let wire = self.client_wire(token)?;
         if let Some(frame) = unpacked.for_wire(wire) {
@@ -2282,20 +2445,28 @@ impl Daemon {
     /// Forgets the client at `token`, gone: it follows none of other
     /// daemons' terminals, buffers or anything else any more.
     pub(super) fn forget_relay_client(&mut self, token: Token) {
-        self.forget_buffer_client(token);
-        self.forget_files_client(token);
-        self.forget_finds_client(token);
-        self.forget_sessions_client(token);
-        self.forget_ports_client(token);
-        self.forget_shown_client(token);
-        self.forget_forwards_client(token);
-        for linked in &mut self.links.list {
-            linked
-                .relayed
-                .installing
-                .retain(|(asker, _)| *asker != token);
+        self.forget_relay_client_on(token, 0..self.links.list.len());
+    }
+
+    /// As [`forget_relay_client`](Self::forget_relay_client), on the
+    /// connections `links` alone.
+    fn forget_relay_client_on(&mut self, token: Token, links: Range<usize>) {
+        self.forget_buffer_client(token, links.clone());
+        self.forget_files_client(token, links.clone());
+        self.forget_finds_client(token, links.clone());
+        self.forget_sessions_client(token, links.clone());
+        self.forget_ports_client(token, links.clone());
+        self.forget_shown_client(token, links.clone());
+        self.forget_forwards_client(token, links.clone());
+        for linked in &mut self.links.list[links.clone()] {
+            let relayed = &mut linked.relayed;
+            relayed.installing.retain(|(asker, _)| *asker != token);
+            // The size of a page no one here watches any more goes with it.
+            let browsers = &relayed.browsers;
+            (relayed.browser_sizes).retain(|chat, _| browsers.contains_key(chat));
         }
         let followed: Vec<(usize, TerminalId)> = (self.links.list.iter().enumerate())
+            .filter(|(at, _)| links.contains(at))
             .flat_map(|(at, linked)| {
                 (linked.relayed.followed.iter())
                     .filter(|(_, followed)| {
@@ -2312,8 +2483,14 @@ impl Daemon {
     }
 
     /// Hands the client at `token` its answer numbered `ticket`, `frame`,
-    /// in its turn: once every answer before it has been.
+    /// in its turn: once every answer before it has been. Every answer
+    /// handed so comes here.
     fn hand_answer(&mut self, token: Token, ticket: u64, frame: Vec<u8>) {
+        // A daemon relaying is told only what it may be (CLACKA-118).
+        let frame = match self.client_wire(token) {
+            Some(wire) if self.relays(token) => self.answer_frame_for_relay(token, wire, frame),
+            _ => frame,
+        };
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
@@ -2332,7 +2509,8 @@ impl Daemon {
     }
 
     /// Hands the client at `token` its answer numbered `ticket`,
-    /// `response`, encoded as it speaks.
+    /// `response`, encoded as it speaks: told a daemon relaying as
+    /// [`hand_answer`](Self::hand_answer) tells it.
     pub(super) fn hand_answer_with(&mut self, token: Token, ticket: u64, response: Response) {
         let Some(Source::Client(client)) = self.sources.get(token.0) else {
             return;
@@ -2860,6 +3038,9 @@ impl Daemon {
     /// following it that's to have it, as `unpacked` holds it for each
     /// version they speak.
     fn pass_on_view(&mut self, at: usize, local: TerminalId, snapshot: bool, unpacked: &Unpacked) {
+        // No daemon relaying follows what's kept from it past it being so
+        // (CLACKA-118).
+        self.let_go_kept_follows(at, local);
         let mapped;
         let unpacked =
             if let Unpacked::Decoded(Ok(ServerMessage::Event(Event::View { terminal, update }))) =
@@ -3192,7 +3373,8 @@ impl Daemon {
                 // A place in a file is the file's on that machine, which
                 // the pane shows.
                 let place = place.filter(|_| self.links.list[at].relayed.relays);
-                // A client from before federation isn't shown the pane.
+                // A client from before federation isn't shown the pane; a
+                // daemon relaying, as `send_event` says (CLACKA-118).
                 let watchers: Vec<Token> = (self.sources.iter())
                     .filter_map(|(key, source)| match source {
                         Source::Client(client)
@@ -3358,79 +3540,93 @@ impl Daemon {
             for local in owed {
                 self.ack_if_drawn(at, local);
             }
+            if self.links.list[at].connected.is_none() {
+                continue;
+            }
             let answering = self.answering(at);
-            let host = self.links.list[at].remote.host.clone();
-            let Some((token, _)) = self.links.list[at].connected else {
-                continue;
-            };
-            let Some(Source::Reached(reached)) = self.sources.get_mut(token.0) else {
-                continue;
-            };
-            let mut given_up = Vec::new();
-            let mut lent_late = Vec::new();
-            let mut placed_late = Vec::new();
-            for expect in &mut reached.upstream.expecting {
-                if let Expect::Client {
-                    token,
-                    ticket,
-                    asked,
-                    then,
-                } = *expect
-                    && ((!answering && now >= asked + KEYS_UNANSWERED)
-                        || now >= asked + LONGEST_ANSWER)
-                {
-                    // An attach's answer, late, still ends what it brought
-                    // going to the client that asked alone.
-                    *expect = match then {
-                        Then::Attached(local) => Expect::Attached(local),
-                        _ => Expect::Nothing,
-                    };
-                    given_up.push((token, ticket));
-                    // A pane lent late is one no pane here shows, which
-                    // the daemon there is asked to close.
-                    match then {
-                        Then::Lent(key) => lent_late.push(key),
-                        // One to show a pane of this machine's goes as
-                        // any such its layout doesn't name.
-                        Then::Placed(key) => placed_late.push(key),
-                        _ => {}
-                    }
-                }
-            }
-            if !given_up.is_empty() {
-                log::info!(
-                    "{host} hasn't answered {} requests: given up on",
-                    given_up.len()
-                );
-            }
-            for (token, ticket) in given_up {
-                let silent = Error::Other(format!("{host} isn't answering"));
-                self.hand_answer_with(token, ticket, Response::Error(silent));
-            }
-            for key in lent_late {
-                self.lending_given_up(at, key);
-            }
-            for key in placed_late {
-                self.placing_given_up(at, key);
-            }
-            // Requests held for clients' changes, and attaches waiting
-            // behind a change, are given up on by the same rule: answered
-            // with an error, the attach still made in its turn.
-            let late = |asked: Instant| {
+            let late = |_: Token, asked: Instant| {
                 (!answering && now >= asked + KEYS_UNANSWERED) || now >= asked + LONGEST_ANSWER
             };
-            let why = format!("{host} isn't answering");
-            let (late_held, kept): (VecDeque<HeldAsk>, VecDeque<HeldAsk>) =
-                std::mem::take(&mut self.links.list[at].relayed.held)
-                    .into_iter()
-                    .partition(|held| late(held.asked));
-            self.links.list[at].relayed.held = kept;
-            for held in late_held {
-                let silent = Error::Other(why.clone());
-                self.hand_answer_with(held.token, held.ticket, Response::Error(silent));
+            let host = self.links.list[at].remote.host.clone();
+            let given_up = self.give_up_answers(at, late, &format!("{host} isn't answering"));
+            if given_up > 0 {
+                log::info!("{host} hasn't answered {given_up} requests: given up on");
             }
-            self.give_up_on_attaches(at, late, &why);
         }
+    }
+
+    /// Gives up on what the clients `pick` picks, by when each asked, wait
+    /// for from the daemon of the connection at `at`, while it's made: each
+    /// is answered with an error saying `why`, and the answer, should it
+    /// come after all, is dropped in its place. Returns how many requests
+    /// sent there were.
+    pub(super) fn give_up_answers(
+        &mut self,
+        at: usize,
+        pick: impl Fn(Token, Instant) -> bool,
+        why: &str,
+    ) -> usize {
+        let Some((token, _)) = self.links.list[at].connected else {
+            return 0;
+        };
+        let Some(Source::Reached(reached)) = self.sources.get_mut(token.0) else {
+            return 0;
+        };
+        let mut given_up = Vec::new();
+        let mut lent_late = Vec::new();
+        let mut placed_late = Vec::new();
+        for expect in &mut reached.upstream.expecting {
+            if let Expect::Client {
+                token,
+                ticket,
+                asked,
+                then,
+            } = *expect
+                && pick(token, asked)
+            {
+                // An attach's answer, late, still ends what it brought
+                // going to the client that asked alone.
+                *expect = match then {
+                    Then::Attached(local) => Expect::Attached(local),
+                    _ => Expect::Nothing,
+                };
+                given_up.push((token, ticket));
+                // A pane lent late is one no pane here shows, which the
+                // daemon there is asked to close.
+                match then {
+                    Then::Lent(key) => lent_late.push(key),
+                    // One to show a pane of this machine's goes as any such
+                    // its layout doesn't name.
+                    Then::Placed(key) => placed_late.push(key),
+                    _ => {}
+                }
+            }
+        }
+        let count = given_up.len();
+        for (token, ticket) in given_up {
+            let error = Error::Other(why.to_owned());
+            self.hand_answer_with(token, ticket, Response::Error(error));
+        }
+        for key in lent_late {
+            self.lending_given_up(at, key);
+        }
+        for key in placed_late {
+            self.placing_given_up(at, key);
+        }
+        // Requests held for clients' changes, and attaches waiting behind
+        // a change, are given up on by the same rule: answered with an
+        // error, the attach still made in its turn.
+        let (late_held, kept): (VecDeque<HeldAsk>, VecDeque<HeldAsk>) =
+            std::mem::take(&mut self.links.list[at].relayed.held)
+                .into_iter()
+                .partition(|held| pick(held.token, held.asked));
+        self.links.list[at].relayed.held = kept;
+        for held in late_held {
+            let error = Error::Other(why.to_owned());
+            self.hand_answer_with(held.token, held.ticket, Response::Error(error));
+        }
+        self.give_up_on_attaches(at, &pick, why);
+        count
     }
 
     /// Takes in `chats`, from the daemon of the connection at `at`.

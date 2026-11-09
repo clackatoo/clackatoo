@@ -117,10 +117,16 @@ impl Daemon {
             }
             stale.push(Token(key));
         }
+        let lost_claims = !stale.is_empty();
         for token in stale {
             if let Some(Source::Client(other)) = self.sources.get_mut(token.0) {
                 other.machine = None;
             }
+        }
+        // What was its own as that machine, kept from the rest, it may no
+        // longer have (CLACKA-118).
+        if lost_claims {
+            self.shared_anew();
         }
         let done = self.relaying(token)?;
         self.workspaces
@@ -141,7 +147,7 @@ impl Daemon {
         // With what this daemon passes on, which only a daemon saying which
         // machine it is is told.
         if watching {
-            let shown = self.relays_shown(&self.shown_workspaces());
+            let shown = self.relays_shown(token, &self.shown_workspaces());
             let with = self.with_lent(token, &shown).unwrap_or(shown);
             self.send_event(token, Event::Workspaces(with));
         }
@@ -236,10 +242,13 @@ impl Daemon {
         };
         let machine = (client.machine.as_ref()).filter(|_| client.wire >= wire::LEND)?;
         let others = client.wire >= wire::MIXED;
+        // Never those lent to a machine kept from it (CLACKA-118).
+        let kept = self.kept_for(token);
         let mut lent = (self.workspaces.get().list.iter())
             .filter(|workspace| {
                 workspace.lent.is_some_and(|lent| {
-                    lent.to == machine.id || (others && self.lent_named_live(lent))
+                    lent.to == machine.id
+                        || (others && self.lent_named_live(lent) && !kept.machine(lent.to))
                 })
             })
             .peekable();

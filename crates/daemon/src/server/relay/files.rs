@@ -25,6 +25,7 @@
 //! comes back to the client under its own number.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::path::Path;
 
 use clackatoo_protocol::frame::{self, Head};
@@ -111,6 +112,9 @@ impl Daemon {
         git_changes: bool,
     ) -> Option<Routed> {
         let (at, remote) = self.relayed_files(local)?;
+        if let Err(err) = self.refuse_unshared(token, at) {
+            return Some(Routed::Answered(Response::Error(err)));
+        }
         let followed = self.links.list[at].relayed.files.entry(local).or_default();
         followed.viewers.entry(token).or_default();
         if changes {
@@ -149,7 +153,7 @@ impl Daemon {
     /// `local`, of the connection at `at`: the folders only it had open
     /// are closed there, and the explorer is let go of there once no
     /// client follows it.
-    fn unfollow_files(&mut self, token: Token, at: usize, local: FilesId) {
+    pub(super) fn unfollow_files(&mut self, token: Token, at: usize, local: FilesId) {
         let relayed = &mut self.links.list[at].relayed;
         let Some(followed) = relayed.files.get_mut(&local) else {
             return;
@@ -317,7 +321,7 @@ impl Daemon {
         op: &FileOp,
         pane: Option<PaneId>,
     ) -> bool {
-        let Some(found) = pane.and_then(|pane| self.pane_elsewhere(pane)) else {
+        let Some(found) = pane.and_then(|pane| self.pane_elsewhere_for(token, pane)) else {
             return false;
         };
         let refused = match found {
@@ -396,10 +400,11 @@ impl Daemon {
         }
     }
 
-    /// Forgets the client at `token`, gone: it follows none of other
-    /// daemons' explorers any more, nor waits to hear of file operations.
-    pub(super) fn forget_files_client(&mut self, token: Token) {
-        for at in 0..self.links.list.len() {
+    /// Forgets the client at `token` on the connections `links`, as it has
+    /// gone: it follows none of other daemons' explorers any more, nor waits
+    /// to hear of file operations.
+    pub(super) fn forget_files_client(&mut self, token: Token, links: Range<usize>) {
+        for at in links {
             let followed: Vec<FilesId> = (self.links.list[at].relayed.files.iter())
                 .filter(|(_, followed)| followed.viewers.contains_key(&token))
                 .map(|(&local, _)| local)

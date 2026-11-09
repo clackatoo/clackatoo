@@ -231,6 +231,8 @@ impl Daemon {
         let phone_title = (phone && program)
             .then(|| shown.map(|notification| self.titled(id, &notification.title)))
             .flatten();
+        // A machine kept from a daemon relaying says nothing to it, as
+        // `send_event` sees to (CLACKA-118).
         let told: Vec<Token> = (self.sources.iter())
             .filter_map(|(key, source)| match source {
                 Source::Client(client)
