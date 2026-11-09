@@ -198,6 +198,10 @@ pub(super) struct Explorers {
     watches: HashMap<i32, Watched>,
     /// Watches weren't made for lack of room, which is said once.
     full: bool,
+    /// The watches made for signs or the display, which aren't counted
+    /// against [`MAX_WATCHES`] unless something capped is on them too: a
+    /// few, one for each repository buffers are in, and the display's two.
+    others: Vec<i32>,
     /// How many of the watches are for language servers, among other
     /// things or alone.
     server_watches: usize,
@@ -265,6 +269,7 @@ impl Default for Explorers {
             instance_tries: 0,
             watches: HashMap::new(),
             full: false,
+            others: Vec::new(),
             server_watches: 0,
             ops: HashMap::new(),
             next_ticket: 0,
@@ -373,12 +378,16 @@ pub(super) struct Watched {
 impl Watched {
     /// Whether it's on nothing any more, so the watch can go.
     fn unused(&self) -> bool {
+        self.uncapped() && self.index.is_empty() && self.display.is_none()
+    }
+
+    /// Whether it's on nothing counted against [`MAX_WATCHES`]: only for
+    /// signs or the display, if anything.
+    fn uncapped(&self) -> bool {
         self.dirs.is_empty()
             && self.repo.is_none()
             && self.buffers.is_empty()
             && self.servers.is_empty()
-            && self.index.is_empty()
-            && self.display.is_none()
     }
 }
 
@@ -896,9 +905,22 @@ impl Daemon {
         true
     }
 
-    /// How many directories are watched, for anything.
+    /// How many directories are watched for what's counted against
+    /// [`MAX_WATCHES`]: all but those only for signs or the display.
     pub(super) fn watch_count(&self) -> usize {
-        self.explorers.watches.len()
+        let explorers = &self.explorers;
+        let uncapped = (explorers.others.iter())
+            .filter(|watch| (explorers.watches.get(watch)).is_some_and(Watched::uncapped))
+            .count();
+        explorers.watches.len() - uncapped
+    }
+
+    /// Notes that `watch` is for signs or the display, so it isn't counted
+    /// against [`MAX_WATCHES`] alone.
+    fn other_watch(&mut self, watch: i32) {
+        if !self.explorers.others.contains(&watch) {
+            self.explorers.others.push(watch);
+        }
     }
 
     /// How many directories are watched for language servers.
@@ -955,6 +977,7 @@ impl Daemon {
             Ok(watch) => {
                 let watched = self.explorers.watches.entry(watch).or_default();
                 watched.index.push(git_dir.to_owned());
+                self.other_watch(watch);
                 true
             }
             // Said once already, as inotify ran out.
@@ -993,6 +1016,7 @@ impl Daemon {
                 Ok(watch) => {
                     let watched = self.explorers.watches.entry(watch).or_default();
                     watched.display = Some(kind);
+                    self.other_watch(watch);
                     made = true;
                 }
                 Err(Unwatched::Failed(Errno::NOENT)) if kind == display::Watched::X => {
@@ -1185,7 +1209,7 @@ impl Daemon {
         // Added to what's watched already, as a directory reached by
         // another path, or watched for something else, is one watch.
         let flags = hear | WatchFlags::ONLYDIR | WatchFlags::MASK_ADD;
-        let full = self.explorers.watches.len() >= most;
+        let full = most != usize::MAX && self.watch_count() >= most;
         match inotify::add_watch(inotify, dir, flags) {
             // The directory's watch already, which costs nothing more, or a
             // new one with room for it.
@@ -1237,7 +1261,10 @@ impl Daemon {
     /// gone: if there was none, buffers whose directories weren't watched
     /// for lack of it are tried again.
     fn watches_gone(&mut self) {
-        if self.explorers.full && self.explorers.watches.len() < MAX_WATCHES {
+        let explorers = &mut self.explorers;
+        let watches = &explorers.watches;
+        explorers.others.retain(|watch| watches.contains_key(watch));
+        if self.explorers.full && self.watch_count() < MAX_WATCHES {
             self.explorers.full = false;
             self.rewatch_now();
         }
@@ -2292,6 +2319,22 @@ mod tests {
             assert!(turns < 100, "never read to the end");
         }
         assert!(turns > 2, "{turns}");
+    }
+
+    /// Watches for signs and the display aren't counted against what
+    /// explorers, buffers and language servers may have.
+    #[test]
+    fn index_watches_take_no_room_from_explorers() {
+        needs_inotify();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(&root);
+        let before = daemon.watch_count();
+        assert!(daemon.add_index_watch(&root));
+        assert_eq!(daemon.watch_count(), before);
+        // Something capped on the same watch counts it again.
+        assert!(daemon.watch_buffer_file(BufferId(1), &root.join("a.txt")));
+        assert_eq!(daemon.watch_count(), before + 1);
     }
 
     #[test]
