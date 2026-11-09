@@ -289,13 +289,14 @@ impl Blocks {
     }
 
     /// The running command has finished, with `exit` if the shell said.
-    pub(crate) fn finished(&mut self, exit: Option<i32>) {
-        if let Some(last) = self.entries.back_mut()
-            && last.phase == Phase::Running
-        {
-            last.phase = Phase::Finished;
-            last.exit = exit;
+    pub(crate) fn finished(&mut self, exit: Option<i32>) -> Option<u32> {
+        let last = self.entries.back_mut()?;
+        if last.phase != Phase::Running {
+            return None;
         }
+        last.phase = Phase::Finished;
+        last.exit = exit;
+        Some(self.last())
     }
 
     /// Forgets the blocks numbered below `block`, which no row is marked

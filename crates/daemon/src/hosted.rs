@@ -90,7 +90,20 @@ pub(crate) struct HostedTerminal {
     /// The block whose command its shell said is running, when that was
     /// first seen, and the command, if the shell's integration said it,
     /// signed: for how long it ran, as it ends.
-    running: Option<(u32, Instant, Option<String>)>,
+    running: Option<Running>,
+}
+
+/// A command a terminal's shell said started, as
+/// [`HostedTerminal::command_ended`] follows it.
+#[derive(Debug)]
+struct Running {
+    /// Its block's number, of the numbering `renumbered` counts.
+    block: u32,
+    renumbered: u64,
+    /// When its start was first seen.
+    since: Instant,
+    /// The command, if the shell's integration said it, signed.
+    command: Option<String>,
 }
 
 /// A command a terminal's shell said ended: see
@@ -385,6 +398,7 @@ impl HostedTerminal {
         let _ = self.emulator.take_replies();
         let _ = self.emulator.take_clipboard();
         let _ = self.emulator.take_notice();
+        let _ = self.emulator.take_ended();
     }
 
     /// Says on a line of its own that the command ended, with its exit
@@ -608,33 +622,38 @@ impl HostedTerminal {
     /// The command its shell said ended since this was last asked, at
     /// `now`, if one did that was seen to start: by the marks alone, which
     /// any program can print. Cheap: asked as output is read.
+    ///
+    /// The end is the one the emulator kept as the marks said it (see
+    /// [`Terminal::take_ended`]), not the latest block, so an end and the
+    /// shell's next prompt in one read, as every shell prints them, is
+    /// still an end, even when the prompt is on the row the command's
+    /// start was marked on, as after a command that printed nothing.
     pub(crate) fn command_ended(&mut self, now: Instant) -> Option<Ended> {
-        let (block, progress) = self.emulator.latest_block()?;
-        match progress {
-            Progress::Running => {
-                if self
-                    .running
-                    .as_ref()
-                    .is_none_or(|(known, ..)| *known != block)
-                {
-                    let command = (self.emulator.trusted_running_command()).map(str::to_owned);
-                    self.running = Some((block, now, command));
-                }
-                None
-            }
-            Progress::Finished(exit) => {
-                let (known, since, command) = self.running.take()?;
-                (known == block).then(|| Ended {
-                    command,
-                    exit,
-                    took: now.saturating_duration_since(since),
-                })
-            }
-            Progress::Prompt => {
-                self.running = None;
-                None
-            }
+        let renumbered = self.emulator.block_renumberings();
+        let ended = self.emulator.take_ended().and_then(|(block, exit)| {
+            let running = (self.running.take())
+                .filter(|running| running.block == block && running.renumbered == renumbered)?;
+            Some(Ended {
+                command: running.command,
+                exit,
+                took: now.saturating_duration_since(running.since),
+            })
+        });
+        // A command started since, perhaps in the same read.
+        if let Some((block, Progress::Running)) = self.emulator.latest_block()
+            && self
+                .running
+                .as_ref()
+                .is_none_or(|running| running.block != block || running.renumbered != renumbered)
+        {
+            self.running = Some(Running {
+                block,
+                renumbered,
+                since: now,
+                command: (self.emulator.trusted_running_command()).map(str::to_owned),
+            });
         }
+        ended
     }
 
     /// Puts back the left and right margins its program set, as the

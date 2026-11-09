@@ -842,6 +842,22 @@ mod queries {
     }
 
     #[test]
+    fn an_end_is_kept_for_its_taker_though_the_next_prompt_follows_it() {
+        // A command that printed nothing, its end and the next prompt in
+        // one read: the latest block is the prompt's, but the end is kept.
+        let mut t = terminal(20, 3);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07sleep\r\n\x1b]133;C\x07");
+        let (block, _) = t.latest_block().unwrap();
+        t.advance(b"\x1b]133;D;3\x07\x1b]133;A\x07$ ");
+        assert_ne!(t.latest_block().map(|(latest, _)| latest), Some(block));
+        assert_eq!(t.take_ended(), Some((block, Some(3))));
+        assert_eq!(t.take_ended(), None, "taken once");
+        // An end with nothing running is none.
+        t.advance(b"\x1b]133;D;0\x07");
+        assert_eq!(t.take_ended(), None);
+    }
+
+    #[test]
     fn an_overline_is_set_reset_and_said() {
         let t = after(4, 1, "a\x1b[53mb\x1b[55mc");
         let overline = |col| {

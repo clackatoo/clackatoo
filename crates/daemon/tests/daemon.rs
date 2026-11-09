@@ -1729,6 +1729,31 @@ fn a_program_asking_is_told_of_resizes_with_the_window_s_pixels() {
 }
 
 #[test]
+fn a_long_command_is_told_though_the_next_prompt_comes_in_the_same_read() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.long_commands = Some(Duration::from_millis(300));
+    });
+    let mut window = daemon.client();
+    a_window(&mut window);
+    // The end and the next prompt in one write, as bash, zsh and fish's
+    // integrations print them.
+    for end in [
+        r"\033]133;D;101\007\033]133;A\007",
+        r"\033]133;D;101\033\\\033]133;A;cl=m;aid=7\033\\",
+        r"\033]133;D;101\007\033]133;A;click_events=1\007",
+    ] {
+        let script = format!(r"printf '\033]133;C\007'; sleep 0.5; printf '{end}'; read x");
+        let (terminal, _clients) = followed(&daemon, &script, 1, 0);
+        let (from, notice) = next_program_notice(&mut window);
+        assert_eq!(from, terminal, "{end}");
+        let clackatoo_protocol::Notice::Show(said) = notice else {
+            panic!("shown: {notice:?}");
+        };
+        assert!(said.body.contains("failed (exit 101)"), "{end}: {said:?}");
+    }
+}
+
+#[test]
 fn a_terminal_is_marked_for_the_phone_and_its_view_says_so() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

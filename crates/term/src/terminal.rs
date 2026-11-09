@@ -152,6 +152,15 @@ impl Terminal {
         std::mem::take(&mut self.emulator.history_cleared)
     }
 
+    /// Takes the block whose command the shell last said ended (OSC 133
+    /// `D`) since the last call, and its exit status if the shell said:
+    /// by the marks alone, which any program can print. Kept for its
+    /// taker even when the shell's next prompt, in the same read, leaves
+    /// no row marked with the block.
+    pub fn take_ended(&mut self) -> Option<(u32, Option<i32>)> {
+        self.emulator.ended.take()
+    }
+
     /// Takes the replies to queries seen so far. These must be written back to
     /// the program, which may be waiting for them.
     pub fn take_replies(&mut self) -> Vec<u8> {
@@ -1024,6 +1033,9 @@ pub(crate) struct Emulator {
     /// History was cleared since [`Terminal::take_history_cleared`] last
     /// asked, freeing the memory it held.
     history_cleared: bool,
+    /// The block whose command the shell last said ended, and how, until
+    /// [`Terminal::take_ended`] takes it.
+    ended: Option<(u32, Option<i32>)>,
     /// The title and working directory are the owner's, which what the
     /// program prints can't change (see [`Terminal::keep_names`]).
     pub(crate) names_kept: bool,
@@ -1078,6 +1090,7 @@ impl Emulator {
             notifications: Notifications::default(),
             last_printed: None,
             history_cleared: false,
+            ended: None,
             names_kept: false,
             #[cfg(test)]
             simple_print: false,
@@ -2300,6 +2313,7 @@ impl Emulator {
         // What the program asked before the reset is still to be done.
         let replies = std::mem::take(&mut self.replies);
         let clipboard = std::mem::take(&mut self.clipboard);
+        let ended = self.ended.take();
         let mut notifications = std::mem::take(&mut self.notifications);
         notifications.reset();
         let generation = self.primary.history_generation();
@@ -2327,6 +2341,7 @@ impl Emulator {
         self.replies = replies;
         self.clipboard = clipboard;
         self.notifications = notifications;
+        self.ended = ended;
         // Link IDs are never reused (see crate::links), nor are block
         // numbers, which windows know how blocks ended by.
         self.links = Links::from_parts([], next_link);
@@ -2426,7 +2441,9 @@ impl Emulator {
                 let exit = options
                     .first()
                     .and_then(|status| std::str::from_utf8(status).ok()?.parse().ok());
-                self.blocks.finished(exit);
+                if let Some(block) = self.blocks.finished(exit) {
+                    self.ended = Some((block, exit));
+                }
             }
             _ => {}
         }
