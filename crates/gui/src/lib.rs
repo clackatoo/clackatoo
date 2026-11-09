@@ -272,6 +272,43 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     open_here(options, spec, launch, started, true)
 }
 
+/// Hands the window `options` describe, with the desktop's `launch`
+/// tokens, to a process of windows already running, as [`run`] would,
+/// and returns once it's open; or if none takes it, the tokens back, for
+/// the window to open some other way. Never forks one, nor opens the
+/// window in this process: for a command that has started threads by now,
+/// as `clackatoo open` has, connecting to the daemon.
+///
+/// # Errors
+///
+/// The tokens, if no process of windows took the window.
+pub fn hand_window(options: &Options, launch: LaunchToken) -> Result<(), LaunchToken> {
+    let spec = app::host::Spec {
+        remote: options.remote.clone(),
+        pick_remote: options.pick_remote,
+        remote_command: options.remote_command.clone(),
+        font: options.font.clone(),
+        font_fixed: options.font_fixed,
+        origin: handoff::here(),
+    };
+    let request = handoff::Request {
+        spec: &spec,
+        graphics_api: options.graphics_api,
+        runtime: &options.runtime,
+        waits: handoff::Waits::default(),
+    };
+    let shared = handoff::shared_socket(&options.runtime);
+    let not = match handoff::ask(&request, launch, handoff::To::Socket(shared)) {
+        Ok(()) => return Ok(()),
+        Err(not) => not,
+    };
+    if not.then != handoff::Then::Group {
+        return Err(not.launch);
+    }
+    let group = handoff::group_socket(&options.runtime, options.graphics_api);
+    handoff::ask(&request, not.launch, handoff::To::Socket(group)).map_err(|not| not.launch)
+}
+
 /// Opens the window for `spec` in this process, which runs until it's
 /// closed; windows it opens itself, with `share`, open here too.
 fn open_here(

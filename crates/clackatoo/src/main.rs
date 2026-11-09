@@ -691,9 +691,15 @@ fn window_font(
 
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
     logs::window();
+    clackatoo_gui::run(window_options(args))
+}
+
+/// What a window opens with, as `args`, the environment and
+/// `client/startup.toml` say.
+fn window_options(args: &WindowArgs) -> clackatoo_gui::Options {
     let config = config::load();
     let (font, font_fixed) = window_font(args, &config);
-    clackatoo_gui::run(clackatoo_gui::Options {
+    clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
         remote: args.remote.remote(),
         pick_remote: args.connect_picker,
@@ -706,7 +712,7 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
             .or(config.renderer)
             .unwrap_or_default(),
         config: config::dir(),
-    })
+    }
 }
 
 fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
@@ -1023,7 +1029,14 @@ fn open_paths(open: &Open) -> anyhow::Result<()> {
         // Where a window opening now starts.
         client.focus(pane)?;
         if !revealed(&mut client, pane, launched.token()) {
-            start_window(&launched)?;
+            // The process of windows opens one at once, if it's running;
+            // else a window starts as `clackatoo` alone does, forking one.
+            let cli = Cli::parse_from(["clackatoo"]);
+            if let Err(launched) =
+                clackatoo_gui::hand_window(&window_options(&cli.window), launched)
+            {
+                start_window(&launched)?;
+            }
         }
     }
     if failed > 0 {

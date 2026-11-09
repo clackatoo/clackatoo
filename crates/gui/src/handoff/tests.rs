@@ -452,3 +452,29 @@ fn only_the_locale_variables_that_change_a_window_are_matched() {
     }
     assert!(MATCH_ENV.contains(&"LC_CTYPE") && !MATCH_ENV.contains(&"LC_TERMINAL"));
 }
+
+/// `clackatoo open` hands its window to a process of windows running, and
+/// gets the tokens back, to start a window some other way, when none is:
+/// never forking one, nor opening the window itself.
+#[test]
+fn a_window_handed_over_goes_to_the_process_running_or_comes_back() {
+    let (_dir, runtime) = runtime();
+    let options = crate::Options {
+        runtime: runtime.clone(),
+        remote: None,
+        pick_remote: false,
+        remote_command: "clackatoo".into(),
+        font: FontOptions::default(),
+        font_fixed: FontFixed::default(),
+        graphics_api: GraphicsApi::Vulkan,
+        config: None,
+    };
+    assert_eq!(crate::hand_window(&options, launched()), Err(launched()));
+    let (_listening, delivered) = listening(&runtime);
+    let handing = std::thread::spawn(move || crate::hand_window(&options, launched()));
+    let mut asked = delivered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(asked.launch, launched());
+    assert!(asked.take());
+    asked.opened(Ok(()));
+    assert_eq!(handing.join().unwrap(), Ok(()));
+}
