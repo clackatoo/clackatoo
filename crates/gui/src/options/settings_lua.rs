@@ -252,44 +252,70 @@ impl Model {
         Ok(())
     }
 
-    /// Saves `mapping`, replacing what bound the same keys in the same
-    /// modes; or with no keys to type in `to`, saves the keys bound in
-    /// `modes` no more. Only those keys' lines change, and a binding not
-    /// saved before goes at the end.
-    pub(crate) fn bind(&mut self, mapping: Mapping, to: bool) {
-        let its = |line: &Line| matches!(line, Line::Maps { mapping: Some(saved), .. } if saved.same_keys(&mapping));
-        let mut found: Vec<usize> = (self.lines.iter().enumerate())
-            .filter(|(_, line)| its(line))
-            .map(|(index, _)| index)
-            .collect();
-        if !to {
-            for index in found.into_iter().rev() {
-                self.lines.remove(index);
-            }
-            return;
-        }
-        // Lua binds them in turn, so the last is what counts.
-        if let Some(last) = found.pop() {
-            for &index in found.iter().rev() {
-                self.lines.remove(index);
-            }
-            if let Some(Line::Maps {
-                mapping: saved,
+    /// Saves `mapping`, or if not `bound`, saves its keys in its modes no
+    /// more: only lines binding those keys change, and each only in those
+    /// modes, so a line binding them in other modes too keeps those
+    /// (`"niv"` taken out in `iv` is left `"n"`). Once saved, no other
+    /// line binds the keys in its modes, so it's what Lua binds last in
+    /// each. A line in exactly its modes is changed where it is, keeping
+    /// its comment; otherwise it goes where the last line binding the keys
+    /// in any of its modes was, or at the end. Returns whether any line
+    /// changed.
+    pub(crate) fn bind(&mut self, mapping: Mapping, bound: bool) -> bool {
+        let before = self.lines.clone();
+        // The last line in exactly these modes, to change in place.
+        let exact = (self.lines.iter()).rposition(|line| {
+            matches!(line, Line::Maps { mapping: Some(saved), .. } if saved.same_keys(&mapping))
+        });
+        let (mut index, mut removed) = (0, 0);
+        let mut after = None;
+        while index < self.lines.len() {
+            let Line::Maps {
+                mapping: Some(saved),
                 read,
                 ..
-            }) = self.lines.get_mut(last - found.len())
-                && saved.as_ref() != Some(&mapping)
-            {
-                *saved = Some(mapping);
-                *read = None;
+            } = &mut self.lines[index]
+            else {
+                index += 1;
+                continue;
+            };
+            let overlaps = saved.modes.iter().any(|mode| mapping.modes.contains(mode));
+            if saved.keys != mapping.keys || !overlaps {
+                index += 1;
+                continue;
             }
-            return;
+            if bound && Some(index + removed) == exact {
+                if *saved != mapping {
+                    *saved = mapping.clone();
+                    *read = None;
+                }
+                index += 1;
+                continue;
+            }
+            saved.modes.retain(|mode| !mapping.modes.contains(mode));
+            if saved.modes.is_empty() {
+                self.lines.remove(index);
+                removed += 1;
+                after = Some(index);
+            } else {
+                *read = None;
+                index += 1;
+                after = Some(index);
+            }
         }
-        self.lines.push(Line::Maps {
-            mapping: Some(mapping),
-            comment: String::new(),
-            read: None,
-        });
+        let placed = bound && exact.is_some();
+        if bound && !placed {
+            let at = after.unwrap_or(self.lines.len()).min(self.lines.len());
+            self.lines.insert(
+                at,
+                Line::Maps {
+                    mapping: Some(mapping),
+                    comment: String::new(),
+                    read: None,
+                },
+            );
+        }
+        self.lines != before
     }
 
     /// The bindings it saves, in the order it binds them.
@@ -962,5 +988,50 @@ mod tests {
              client.opt.number = false\n\
              client.keys.map(\"n\", \"<A-x>\", \"x\")\n"
         );
+    }
+
+    #[test]
+    fn keys_are_saved_and_taken_out_mode_by_mode_the_last_line_counting() {
+        let text = "client.keys.map(\"niv\", \"<A-t>\", \"<C-b>c\") -- tabs\n\
+                    client.keys.map(\"n\", \"<A-u>\", \"u\")\n";
+        let mut model = Model::parse(text).unwrap();
+        // Bound again in one of its modes, the line keeps the others, and
+        // the new one comes after it.
+        assert!(model.bind(mapping("i", "<A-t>", "<C-b>]", None), true));
+        assert_eq!(
+            model.render(),
+            "client.keys.map(\"nv\", \"<A-t>\", \"<C-b>c\") -- tabs\n\
+             client.keys.map(\"i\", \"<A-t>\", \"<C-b>]\")\n\
+             client.keys.map(\"n\", \"<A-u>\", \"u\")\n"
+        );
+        // Bound in modes two lines share, the last line binds each.
+        assert!(model.bind(mapping("vi", "<A-t>", "x", None), true));
+        assert_eq!(
+            model.render(),
+            "client.keys.map(\"n\", \"<A-t>\", \"<C-b>c\") -- tabs\n\
+             client.keys.map(\"iv\", \"<A-t>\", \"x\")\n\
+             client.keys.map(\"n\", \"<A-u>\", \"u\")\n"
+        );
+        let last_in = |model: &Model, mode| {
+            (model.mappings())
+                .filter(|saved| {
+                    saved.keys == parse_keys("<A-t>").unwrap() && saved.modes.contains(&mode)
+                })
+                .last()
+                .map(|saved| display(&saved.to))
+        };
+        assert_eq!(last_in(&model, KeyMode::Normal).as_deref(), Some("<C-b>c"));
+        assert_eq!(last_in(&model, KeyMode::Visual).as_deref(), Some("x"));
+        // Taken out in some modes, the rest stay; taking out what isn't
+        // there changes nothing.
+        assert!(model.bind(mapping("ni", "<A-t>", "x", None), false));
+        assert_eq!(
+            model.render(),
+            "client.keys.map(\"v\", \"<A-t>\", \"x\")\n\
+             client.keys.map(\"n\", \"<A-u>\", \"u\")\n"
+        );
+        assert!(!model.bind(mapping("n", "<A-t>", "x", None), false));
+        // The same binding saved again changes nothing either.
+        assert!(!model.bind(mapping("n", "<A-u>", "u", None), true));
     }
 }

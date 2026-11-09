@@ -276,3 +276,56 @@ fn mappersist_saves_keys_unless_init_lua_binds_them() {
     let keys = parse_keys("<A-u>").unwrap();
     assert!(desk.client().0.keys().get(KeyMode::Visual, &keys).is_some());
 }
+
+#[test]
+fn keys_saved_in_some_modes_change_only_those_and_taking_out_nothing_says_so() {
+    let (mut desk, dir) = configured("");
+    command(&mut desk, "mapp niv <A-t> <C-b>c");
+    saved(&mut desk, 1);
+    command(&mut desk, "mapp i <A-t> <C-b>]");
+    saved(&mut desk, 1);
+    assert_eq!(
+        read(&dir, "client/settings.lua"),
+        format!(
+            "{HEADER}\nclient.keys.map(\"nv\", \"<A-t>\", \"<C-b>c\")\n\
+             client.keys.map(\"i\", \"<A-t>\", \"<C-b>]\")\n"
+        )
+    );
+    // Two rows, each its own: taking out one leaves the other.
+    command(&mut desk, "Settings <A-t>");
+    let (picked, _, preview) = menu(&mut desk);
+    assert!(
+        picked.starts_with("<A-t>") && picked.contains("types <C-b>c"),
+        "{picked}"
+    );
+    assert!(
+        preview.contains(&"Modes     normal, visual".to_owned()),
+        "{preview:#?}"
+    );
+    type_keys(&mut desk, "d");
+    saved(&mut desk, 1);
+    assert_eq!(
+        read(&dir, "client/settings.lua"),
+        format!("{HEADER}\nclient.keys.map(\"i\", \"<A-t>\", \"<C-b>]\")\n")
+    );
+    let keys = parse_keys("<A-t>").unwrap();
+    assert!(desk.client().0.keys().get(KeyMode::Normal, &keys).is_none());
+    assert!(desk.client().0.keys().get(KeyMode::Insert, &keys).is_some());
+    // What isn't in the file any more isn't said to be taken out.
+    std::fs::write(
+        dir.path().join("client/settings.lua"),
+        format!("{HEADER}\n"),
+    )
+    .unwrap();
+    let (picked, _, _) = menu(&mut desk);
+    assert!(
+        picked.starts_with("<A-t>") && picked.contains("types <C-b>]"),
+        "{picked}"
+    );
+    type_keys(&mut desk, "d");
+    saved(&mut desk, 1);
+    assert_eq!(
+        desk.message.as_deref(),
+        Some("<A-t> wasn't taken out: client/settings.lua doesn't bind <A-t> in those modes")
+    );
+}

@@ -184,6 +184,8 @@ struct Bound {
     keys: Vec<Chord>,
     binding: Binding,
     label: Option<String>,
+    /// What bound them, the same in every one of its modes.
+    by: SetBy,
 }
 
 impl Bound {
@@ -1508,8 +1510,8 @@ fn keys_detail(bound: &Bound, facts: &Facts) -> Vec<Said> {
     }
     said
 }
-/// The bindings in `keys`, those bound alike in several modes as one, in
-/// the order of their keys.
+/// The bindings in `keys`, those bound alike in several modes, by the
+/// same, as one, in the order of their keys.
 fn bindings(keys: &Keys) -> Vec<Bound> {
     let mut found: Vec<Bound> = Vec::new();
     for mode in [
@@ -1520,8 +1522,12 @@ fn bindings(keys: &Keys) -> Vec<Bound> {
     ] {
         for (bound_keys, binding, label) in keys.bound(mode) {
             let label = label.map(str::to_owned);
+            let by = keys.bound_by(mode, bound_keys);
             let alike = found.iter_mut().find(|bound| {
-                bound.keys == bound_keys && bound.binding == *binding && bound.label == label
+                bound.keys == bound_keys
+                    && bound.binding == *binding
+                    && bound.label == label
+                    && bound.by == by
             });
             match alike {
                 Some(bound) => bound.modes.push(mode),
@@ -1530,6 +1536,7 @@ fn bindings(keys: &Keys) -> Vec<Bound> {
                     keys: bound_keys.to_vec(),
                     binding: binding.clone(),
                     label,
+                    by,
                 }),
             }
         }
@@ -1675,4 +1682,30 @@ fn lines(said: &[Vec<(&str, Ink)>], (rows, cols): (usize, usize)) -> PreviewView
     }
     lines.truncate(rows);
     PreviewView { lines, at: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::{parse_keys, parse_modes};
+
+    #[test]
+    fn keys_alike_in_several_modes_are_one_row_only_if_one_thing_bound_them_all() {
+        let mut keys = Keys::default();
+        let alt_t = parse_keys("<A-t>").unwrap();
+        let to = Binding::Keys(parse_keys("<C-b>c").unwrap());
+        keys.bind(&parse_modes("niv").unwrap(), &alt_t, to, Some("new tab"));
+        keys.set_by(&parse_modes("nv").unwrap(), &alt_t, &SetBy::SAVED);
+        let rows: Vec<(String, Source)> = (bindings(&keys).into_iter())
+            .filter(|bound| bound.keys == alt_t)
+            .map(|bound| (KeyMode::letters(&bound.modes), bound.by.source))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("nv".to_owned(), Source::Settings),
+                ("i".to_owned(), Source::Default)
+            ]
+        );
+    }
 }

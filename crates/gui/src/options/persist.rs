@@ -126,12 +126,22 @@ fn write(dir: &Path, change: &Change) -> anyhow::Result<()> {
     let (info, value) = match change {
         Change::Option { info, value } => (*info, value.clone()),
         Change::Keys { mapping, bound } => {
-            return locked(&client, || {
+            let changed = locked(&client, || {
+                let mut changed = false;
                 settings_lua(&settings, *bound, |model| {
-                    model.bind(mapping.clone(), *bound);
+                    changed = model.bind(mapping.clone(), *bound);
                     Ok(())
-                })
-            });
+                })?;
+                Ok(changed)
+            })?;
+            // Taking out what isn't there takes nothing out.
+            if !*bound && !changed {
+                anyhow::bail!(
+                    "client/settings.lua doesn't bind {} in those modes",
+                    crate::keymap::display(&mapping.keys)
+                );
+            }
+            return Ok(());
         }
     };
     // Whoever asked, nothing an option can't hold is written.

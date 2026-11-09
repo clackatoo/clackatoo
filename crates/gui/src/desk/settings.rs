@@ -395,6 +395,7 @@ impl Desk {
             Change::Keys { mapping, bound } => {
                 let keys = crate::keymap::display(&mapping.keys);
                 return match result {
+                    Err(why) if !bound => self.warn(format!("{keys} wasn't taken out: {why}")),
                     Err(why) => self.warn(format!("{keys} wasn't saved: {why}")),
                     Ok(()) if bound => self.say(format!("saved {keys} in {file}")),
                     Ok(()) => self.say(format!("{keys} is saved in {file} no more")),
