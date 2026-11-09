@@ -141,19 +141,7 @@ pub(super) fn run(
             return;
         }
     };
-    // A mistake in one stops only that one: what clackatoo saved doesn't
-    // keep the user's own config from running, nor the other way round.
-    for chunk in chunks {
-        state.loading.set(Some(chunk.from));
-        match (runtime.lua.load(&chunk.text))
-            .set_name(format!("@{}", chunk.path))
-            .into_function()
-        {
-            Ok(function) => runtime.start(&function, (), INIT_TIME),
-            Err(err) => runtime.report(&err),
-        }
-        state.loading.set(None);
-    }
+    runtime.load(chunks);
     state.tell(FromLua::Ready);
     while let Ok(message) = from_window.recv() {
         runtime.handle(message);
@@ -168,6 +156,9 @@ struct Runtime {
     prelude: Table,
     /// Coroutines waiting on requests, by request.
     waiting: HashMap<u64, Thread>,
+    /// The config's files that are waiting on requests as they load, and
+    /// which each is: what they set when they go on is set as they load.
+    loading: Vec<(Thread, SetFrom)>,
     watchdog: Arc<Watchdog>,
 }
 
@@ -217,8 +208,36 @@ impl Runtime {
             state: state.clone(),
             prelude,
             waiting: HashMap::new(),
+            loading: Vec::new(),
             watchdog,
         })
+    }
+
+    /// Runs the config's `chunks` in turn, each in a coroutine of its own.
+    /// One that waits, as `pane:split` does, loads on when its answer comes.
+    /// A mistake in one stops only that one: what clackatoo saved doesn't
+    /// keep the user's own config from running, nor the other way round.
+    fn load(&mut self, chunks: &[Chunk]) {
+        for chunk in chunks {
+            let thread = (self.lua.load(&chunk.text))
+                .set_name(format!("@{}", chunk.path))
+                .into_function()
+                .and_then(|function| self.lua.create_thread(function));
+            let thread = match thread {
+                Ok(thread) => thread,
+                Err(err) => {
+                    self.report(&err);
+                    continue;
+                }
+            };
+            self.state.loading.set(Some(chunk.from));
+            let resumed = self.watched(INIT_TIME, || thread.resume(()));
+            self.state.loading.set(None);
+            self.settle(&thread, resumed);
+            if thread.status() == ThreadStatus::Resumable {
+                self.loading.push((thread, chunk.from));
+            }
+        }
     }
 
     fn handle(&mut self, message: ToLua) {
@@ -254,11 +273,19 @@ impl Runtime {
                 let Some(thread) = self.waiting.remove(&request) else {
                     return;
                 };
+                // A file of the config goes on loading.
+                let loading = (self.loading.iter())
+                    .find(|(loading, _)| *loading == thread)
+                    .map(|&(_, from)| from);
+                self.state.loading.set(loading);
                 let resumed = match result {
                     Ok(pane) => self.watched(HANDLER_TIME, || thread.resume(pane.0)),
                     Err(err) => self.watched(HANDLER_TIME, || thread.resume((Value::Nil, err))),
                 };
+                self.state.loading.set(None);
                 self.settle(&thread, resumed);
+                self.loading
+                    .retain(|(loading, _)| loading.status() == ThreadStatus::Resumable);
             }
             ToLua::Option { option, value } => {
                 // The window's own value, so it suits the option.
@@ -947,5 +974,77 @@ struct Watch {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.watchdog.set(|watch| watch.closed = true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `init.lua` that waits on a request as it loads, as `pane:split`
+    /// would, sets what it sets after as it loads, not later.
+    #[test]
+    fn a_config_that_waits_as_it_loads_is_loading_until_it_ends() {
+        let (to_window, said) = std::sync::mpsc::channel();
+        let state = Rc::new(State {
+            world: RefCell::default(),
+            options: RefCell::new(Options::default()),
+            to_window,
+            wake: Box::new(|| {}),
+            bindings: RefCell::default(),
+            handlers: RefCell::default(),
+            next: Cell::new(0),
+            loading: Cell::new(None),
+            files: RefCell::default(),
+        });
+        let mut runtime = Runtime::new(&Source::Text(String::new()), &state).unwrap();
+        // What `pane:split` yields, to wait on its answer.
+        let request: Table = runtime.prelude.get("request").unwrap();
+        runtime.lua.globals().set("REQUEST", request).unwrap();
+        runtime.load(&[Chunk {
+            path: "init.lua".into(),
+            text: "client.opt.nu = false\n\
+                   coroutine.yield(REQUEST, 7)\n\
+                   client.opt.wrap = false\n\
+                   client.keys.map('n', 'k', function() client.opt.ts = 8 end)\n"
+                .into(),
+            from: SetFrom::Config,
+        }]);
+        let loading = |said: &FromLua| match said {
+            FromLua::Set { by, .. } | FromLua::Map { by, .. } => {
+                Some((by.loading, by.at.as_ref().map(|at| at.line)))
+            }
+            _ => None,
+        };
+        let first: Vec<_> = said.try_iter().collect();
+        assert_eq!(
+            first.iter().map(loading).collect::<Vec<_>>(),
+            [Some((true, Some(1)))]
+        );
+        // Meanwhile, a key's handler isn't the config loading.
+        runtime.handle(ToLua::Answer {
+            request: 7,
+            result: Ok(PaneId(2)),
+        });
+        let after: Vec<_> = said.try_iter().collect();
+        assert_eq!(
+            after.iter().map(loading).collect::<Vec<_>>(),
+            [Some((true, Some(3))), Some((true, Some(4)))]
+        );
+        assert!(runtime.loading.is_empty(), "it's loaded");
+        runtime.handle(ToLua::Bound {
+            seq: 1,
+            key: crate::lua::KeyInfo {
+                key: "k".into(),
+                keys: Some("k".into()),
+                text: None,
+                mode: KeyMode::Normal,
+                pane: None,
+                count: None,
+            },
+            binding: 1,
+        });
+        let later: Vec<_> = said.try_iter().filter_map(|said| loading(&said)).collect();
+        assert_eq!(later, [(false, Some(4))]);
     }
 }

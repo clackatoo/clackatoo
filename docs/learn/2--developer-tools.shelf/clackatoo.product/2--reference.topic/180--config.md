@@ -406,7 +406,11 @@ the command line; saved in `settings.lua`; set in your config as it loaded,
 with the line, and the line of a module's helper that really set it if that's
 elsewhere, as `client/init.lua:3 (in lua/opts.lua:8)`; set by your config after
 it loaded, by a handler or a binding; or set with `:set` or a key. A `:set`
-your config runs, with `client.cmd`, is your config's, at its line.
+your config runs, with `client.cmd`, is your config's, at its line. Your config
+is loading until each file has run to its end, even one that waits partway, as
+`pane:split` waits. An option set in a coroutine of your own, one made with
+`coroutine.create` or `coroutine.wrap`, is said to be set at a line of that
+coroutine's, as only its lines can be seen from there.
 
 ## Events and handles
 
