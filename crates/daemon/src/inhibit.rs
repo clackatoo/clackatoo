@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
-use crate::dbus::{Body, Bus, Call, Kind, Message};
+use crate::dbus::{BUS, Body, Bus, Call, Kind, Message};
 
 /// logind's name on the system bus, its object, and its interface.
 const LOGIN: &str = "org.freedesktop.login1";
@@ -135,7 +135,7 @@ fn listen(address: &str, shared: &Shared, tell: impl Fn(News)) -> io::Result<()>
     // Only logind's own signals count: anyone could send one to the
     // daemon's connection.
     let asked = bus.get_name_owner(LOGIN)?;
-    let owner = (bus.answer(asked, WAIT)?.args("s"))
+    let mut owner = (bus.answer(asked, WAIT)?.args("s"))
         .and_then(|mut args| args.string().map(str::to_owned))
         .ok_or_else(|| unexpected("logind's name"))?;
     for member in ["PrepareForShutdown", "PrepareForSleep"] {
@@ -144,6 +144,11 @@ fn listen(address: &str, shared: &Shared, tell: impl Fn(News)) -> io::Result<()>
              member='{member}'"
         ))?;
     }
+    // logind gets a new name each time it starts again, as an upgrade of
+    // systemd restarts it.
+    bus.add_match(&format!(
+        "type='signal',sender='{BUS}',interface='{BUS}',member='NameOwnerChanged',arg0='{LOGIN}'"
+    ))?;
     let mut asking = Some(inhibit(&mut bus)?);
     let mut lock: Option<OwnedFd> = None;
     loop {
@@ -154,6 +159,15 @@ fn listen(address: &str, shared: &Shared, tell: impl Fn(News)) -> io::Result<()>
         if asking.is_some() && message.reply_serial == asking {
             asking = None;
             lock = Some(locked(&message, &mut fds)?);
+            continue;
+        }
+        if let Some(new) = new_owner(&message) {
+            // Its locks are its to keep, or not: asked for again if this
+            // one has none.
+            owner = new;
+            if !owner.is_empty() && lock.is_none() && asking.is_none() {
+                asking = Some(inhibit(&mut bus)?);
+            }
             continue;
         }
         if message.sender.as_deref() != Some(owner.as_str()) {
@@ -195,6 +209,17 @@ fn coming(message: &Message) -> Option<Coming> {
     } else {
         None
     }
+}
+
+/// logind's new name on the bus, empty if it has gone, if `message` is
+/// the bus saying so.
+fn new_owner(message: &Message) -> Option<String> {
+    if !message.is_signal(BUS, "NameOwnerChanged") || message.sender.as_deref() != Some(BUS) {
+        return None;
+    }
+    let mut args = message.args("sss")?;
+    let (name, _old, new) = (args.string()?, args.string()?, args.string()?);
+    (name == LOGIN).then(|| new.to_owned())
 }
 
 /// Asks logind for its lock: its answer, which comes later, is the

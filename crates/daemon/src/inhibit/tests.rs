@@ -97,6 +97,12 @@ impl FakeBus {
                 field(&mut fields, 3, b's', &string(member));
                 Kind::Signal as u8
             }
+            Sent::Bus(member) => {
+                field(&mut fields, 1, b'o', &string("/org/freedesktop/DBus"));
+                field(&mut fields, 2, b's', &string(BUS));
+                field(&mut fields, 3, b's', &string(member));
+                Kind::Signal as u8
+            }
         };
         field(&mut fields, 7, b's', &string(sender));
         let mut value = vec![u8::try_from(signature.len()).unwrap()];
@@ -145,7 +151,7 @@ impl FakeBus {
         let owner = self.call();
         assert_eq!(owner.member.as_deref(), Some("GetNameOwner"));
         self.answer(&owner, LOGIND);
-        for _ in 0..2 {
+        for _ in 0..3 {
             assert_eq!(self.call().member.as_deref(), Some("AddMatch"));
         }
         let inhibit = self.call();
@@ -180,6 +186,8 @@ enum Sent<'a> {
     Error(u32, &'a str),
     /// A signal of logind's.
     Signal(&'a str),
+    /// A signal of the bus's own.
+    Bus(&'a str),
 }
 
 /// Whether the pipe whose read end is `read` has ended: every copy of
@@ -281,4 +289,54 @@ fn logind_refusing_the_lock_ends_the_thread_with_nothing_said_to_the_loop() {
     let mut byte = [0];
     assert_eq!(bus.stream.read(&mut byte).unwrap(), 0);
     assert!(inhibitor.news().is_empty());
+}
+
+/// logind started again has a new name on the bus: its signals count from
+/// then on, and the old name's don't; and with no lock held, it's asked
+/// for one.
+#[test]
+fn logind_starting_again_is_heard_under_its_new_name() {
+    let (_dir, mut bus, inhibitor) = connected();
+    let inhibit = bus.up_to_the_lock();
+    let held = bus.lock(&inhibit);
+    let changed = |name: &str, old: &str, new: &str| {
+        let mut body = Vec::new();
+        for text in [name, old, new] {
+            while !body.len().is_multiple_of(4) {
+                body.push(0);
+            }
+            body.extend_from_slice(&string(text));
+        }
+        body
+    };
+    let restarted = ":1.7";
+    // Only the bus says who has a name.
+    let forged = changed(LOGIN, LOGIND, OTHER);
+    bus.send(OTHER, Sent::Bus("NameOwnerChanged"), ("sss", &forged), None);
+    let body = changed(LOGIN, LOGIND, restarted);
+    bus.send(BUS, Sent::Bus("NameOwnerChanged"), ("sss", &body), None);
+    bus.signal(LOGIND, "PrepareForShutdown", true);
+    bus.signal(OTHER, "PrepareForShutdown", true);
+    bus.signal(restarted, "PrepareForShutdown", true);
+    let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
+        panic!("not the shutdown, with the lock");
+    };
+    drop(lock);
+    assert!(ended(&held));
+    assert!(inhibitor.news().is_empty());
+
+    // Gone, then back with no lock held: asked for one.
+    bus.send(
+        BUS,
+        Sent::Bus("NameOwnerChanged"),
+        ("sss", &changed(LOGIN, restarted, "")),
+        None,
+    );
+    bus.send(
+        BUS,
+        Sent::Bus("NameOwnerChanged"),
+        ("sss", &changed(LOGIN, "", LOGIND)),
+        None,
+    );
+    assert_eq!(bus.call().member.as_deref(), Some("Inhibit"));
 }

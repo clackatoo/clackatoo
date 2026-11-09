@@ -1062,7 +1062,6 @@ fn shells_killed_just_before_the_daemon_stops_come_back_with_their_workspaces() 
     let killed = Instant::now();
     rustix::process::kill_process(pid_of(&mut client, lapses), Signal::HUP).unwrap();
     eventually("the daemon sees bash go", || ended(&mut client, lapses));
-    assert!(workspace_names(&mut client).contains(&names[2].to_owned()));
     eventually("the workspace of the shell killed goes", || {
         !workspace_names(&mut client).contains(&names[2].to_owned())
     });

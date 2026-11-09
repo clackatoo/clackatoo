@@ -61,13 +61,16 @@ impl Daemon {
             Some(Hosted::Pty(terminal)) => terminal.status(),
             _ => return false,
         };
-        if !self.stopping_soon() && !ended_with_everything(status) {
+        if self.stopping_soon() {
+            log::info!("terminal {id}: its pane is kept, as the daemon is stopping");
+        } else if ended_with_everything(status) {
+            log::info!(
+                "terminal {id}: its pane closes in {} s, unless the daemon stops first",
+                GRACE.as_secs()
+            );
+        } else {
             return false;
         }
-        log::info!(
-            "terminal {id}: its pane closes in {} s, unless the daemon stops first",
-            GRACE.as_secs()
-        );
         self.graced.insert(id, Instant::now() + GRACE);
         true
     }
