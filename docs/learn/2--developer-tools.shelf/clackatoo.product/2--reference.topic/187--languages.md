@@ -150,7 +150,7 @@ changes the server makes while it runs are made the same way; changes a server
 makes unasked are refused. The bar says how it went.
 
 `<Space>bs` lists the file's symbols in
-[the finder](~clackatoo/reference/window#the-finder), as the server knows
+[the finder](~clackatoo/reference/workspaces#the-finder), as the server knows
 them, in the order of the file's outline. `<Space>ps` finds symbols in the
 whole project. <kbd>Enter</kbd> goes to the one picked.
 

@@ -11,12 +11,12 @@ The editor's keys are Vim's.
 ## Keys
 
 An editor in a window of its own starts in normal mode, as in Vim. One you go
-to takes [the window's mode](~clackatoo/reference/window#modes): in insert
-mode it types at its cursor once its text has come, holding what you type
-until then. A file opened from the explorer or a review opens in normal mode.
-The bottom bar shows the mode, the file's name, and the cursor's line and
-column, and before them a command half typed, as `2d` or `"a`, as Vim's
-`showcmd` shows it.
+to takes [the window's mode](~clackatoo/reference/frame#modes): in insert mode
+it types at its cursor once its text has come, holding what you type until
+then. A file opened from the explorer or a review opens in normal mode. The
+bottom bar shows the mode, the file's name, and the cursor's line and column,
+and before them a command half typed, as `2d` or `"a`, as Vim's `showcmd`
+shows it.
 
 ### Moving
 
@@ -49,8 +49,8 @@ column, and before them a command half typed, as `2d` or `"a`, as Vim's
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd> | The view a screen row down or up, or as many as a count says, keeping the cursor in view, `scrolloff` rows in, as the wheel does. While a panel by the cursor is shown, they scroll it instead. |
 | `zt` `zz` `zb` | Scrolls the cursor's line to the top, middle or bottom, `zt` and `zb` keeping `scrolloff` lines above or below it, with the view starting at a line's start, as Vim's does: where lines wrap, one that doesn't fit is left out. With a count, that line, the cursor going to it in the column it's in, as a jump, as Vim's does: `5zt`. |
 | `]d` `[d` | The next mistake a [language server](~clackatoo/reference/languages#language-servers) found, or the one before, going round the file's ends. A count goes that many. |
-| `gd` `gD` `gy` `gri` | Where what's under the cursor is defined, declared, where its type is defined, or what implements it, as the [language server](~clackatoo/reference/languages#language-servers) says, as Neovim's keys go. A place in another file opens there in place of this one, as `:e` does. Several places open [the finder](~clackatoo/reference/window#the-finder) on them, each with its line. |
-| `grr` | Everywhere what's under the cursor is used, its declaration included, as the language server says, in [the finder](~clackatoo/reference/window#the-finder), each with its line. |
+| `gd` `gD` `gy` `gri` | Where what's under the cursor is defined, declared, where its type is defined, or what implements it, as the [language server](~clackatoo/reference/languages#language-servers) says, as Neovim's keys go. A place in another file opens there in place of this one, as `:e` does. Several places open [the finder](~clackatoo/reference/workspaces#the-finder) on them, each with its line. |
+| `grr` | Everywhere what's under the cursor is used, its declaration included, as the language server says, in [the finder](~clackatoo/reference/workspaces#the-finder), each with its line. |
 | `K` | What's under the cursor, as the [language server](~clackatoo/reference/languages#language-servers) says, in a panel by the cursor, with what's wrong there in full above it, its code colored and the name it's about underlined. `K` again pages through a long one, <kbd>Ctrl</kbd>+<kbd>E</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd> scroll it, and <kbd>Esc</kbd>, moving the cursor or an edit closes it. |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> `d`, <kbd>Ctrl</kbd>+<kbd>W</kbd> <kbd>Ctrl</kbd>+<kbd>D</kbd> | What's wrong under the cursor, or else on its line, in full, in the same panel. |
 
@@ -132,7 +132,7 @@ cursor was, and Ctrl+O goes back there, opening the file again in place of the
 one shown if it has to, as `:e` does. Ctrl+I goes forward again. A count goes
 that many places, as `3` Ctrl+O, or nowhere if there aren't that many. Moving
 to another pane is a jump too (see
-[the window](~clackatoo/reference/window#moving-around)).
+[the window](~clackatoo/reference/workspaces#moving-around)).
 
 A jump from the line the last one left replaces it, so going back never stops
 twice on one line. A place moves with the text while a pane of the window
@@ -151,7 +151,7 @@ back. `m'` makes where the cursor is a place to come back to.
 | `i` `a` `I` `A` | Insert mode before or after the cursor, at the line's first character that isn't blank (after a line of blanks), at its end. `I` in a selection by characters or lines types at the start of the line its other end is on, or at the cursor if it's on a line before, as Vim's. |
 | `o` `O` | Insert mode on a new line below or above, indented as the language says, or as the cursor's line is where it has no rules. |
 | `d`, `c`, `y` and a motion | Deletes, changes, or copies what the motion moves over: `dw`, `c$`, `y2j`. |
-| `d`, `c`, `y` and an object | The same, for a [text object](~clackatoo/reference/window#text-objects): `diw`, `ci"`, `ya(`. |
+| `d`, `c`, `y` and an object | The same, for a [text object](~clackatoo/reference/normal-mode#text-objects): `diw`, `ci"`, `ya(`. |
 | `dd` `cc` `yy` | Whole lines: the cursor's, and with a count, those after it. |
 | `>>` `<<` | Indents the cursor's line by `shiftwidth`, or takes as much off its indent. A count does that many lines. |
 | `~` | Turns over the case of the character under the cursor, and as many after it as the count, moving on past them. With `tildeop`, `~` takes a motion as `g~` does. |

@@ -62,7 +62,7 @@ sent none of these.
 | <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Tab</kbd> | The new chat's next or previous picker: agent, model, folder. |
 | `l`, `h`, <kbd>Right</kbd>, <kbd>Left</kbd> | The picker's next or previous choice. |
 | `b` | Lists the branches of chats that have gone too, or leaves them out again. |
-| `/`, then typing | Filters the chats and sessions, as the finder does: <kbd>Backspace</kbd>, <kbd>Ctrl</kbd>+<kbd>U</kbd>, and <kbd>Ctrl</kbd>+<kbd>W</kbd> delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
+| `/`, then typing | Filters the chats and sessions, as the finder does: <kbd>Backspace</kbd>, <kbd>Ctrl</kbd>+<kbd>U</kbd>, and <kbd>Ctrl</kbd>+<kbd>W</kbd> delete as [the finder's](~clackatoo/reference/workspaces#the-finder) do. |
 | <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd> | Clears what's typed, or closes the page. |
 
 `j`, `k`, `n`, `h`, `l`, and `b` are keys only while nothing's typed: any

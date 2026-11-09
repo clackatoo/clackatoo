@@ -83,14 +83,14 @@ left it.
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd> <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, `zt` `zz` `zb` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
+| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd> <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, `zt` `zz` `zb` | Moves, with a count, as every [list](~clackatoo/reference/normal-mode#lists) does |
 | `l`, <kbd>Enter</kbd> | Opens a file; opens a folder (<kbd>Enter</kbd> closes an open one); on `..`, goes up |
 | `h` | Closes a folder, or goes to the one it's in |
 | `-` | Goes up: the folder above the root becomes the root, as <kbd>Enter</kbd> on `..` does |
 | `g?` | Lists these keys at the explorer's foot, or hides them; the bar says `g? keys` until then |
 | `zo` `zc` `za` | Opens, closes, or toggles the folder at the cursor |
 | `zR` `zM` | Opens every folder shown, one level a press; closes them all |
-| `/` `?` `n` `N` | Searches the names shown, with the editor's patterns, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
+| `/` `?` `n` `N` | Searches the names shown, with the editor's patterns, shown as you type and lit as every [list](~clackatoo/reference/normal-mode#lists)'s search is |
 | `.`, `g.` | Shows hidden files, or hides them |
 | `R` | Lists everything shown again |
 | `Q` | Closes the explorer |

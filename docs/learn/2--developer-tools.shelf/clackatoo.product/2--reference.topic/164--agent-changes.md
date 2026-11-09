@@ -148,9 +148,9 @@ and `:Review base` everything changed since the branch left `main` (or
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd>, `zt` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
+| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd>, `zt` | Moves, with a count, as every [list](~clackatoo/reference/normal-mode#lists) does |
 | `]h` `[h`, `]f` `[f` | The next change or the one before, the next file or the one before; a count goes that many |
-| `/` `?` `n` `N` | Searches the lines, the files' names and the comments, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
+| `/` `?` `n` `N` | Searches the lines, the files' names and the comments, shown as you type and lit as every [list](~clackatoo/reference/normal-mode#lists)'s search is |
 | <kbd>Enter</kbd> | Goes to the line in the editor |
 | `a`, `A` | Keeps the change, or every change in its file: its color goes |
 | `x`, `X` | Rejects the change, or every change in its file; `x` on a comment takes it back |

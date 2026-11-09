@@ -60,7 +60,7 @@ the start of the bar, and <kbd>Ctrl</kbd>+<kbd>?</kbd> lists them:
 | `R` | Sends the last message again, if its turn failed (see [When a turn fails](#when-a-turn-fails)). |
 | `gl` | Signs in to the agent again in a new tab, if the last turn failed for want of it (see [When a turn fails](#when-a-turn-fails)). |
 | `gC` | Starts a new chat with the same agent in the same folder, in a new tab, if the last turn hit the model's limit. |
-| `q` `@`, `m` `'` and `` ` ``, Ctrl+O Ctrl+I | Macros, marks and jumps, as in every pane (see [Macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes)). |
+| `q` `@`, `m` `'` and `` ` ``, Ctrl+O Ctrl+I | Macros, marks and jumps, as in every pane (see [Macros and marks across panes](~clackatoo/reference/workspaces#macros-and-marks-across-panes)). |
 | `i`, `a`, `I`, `A`, `o`, <kbd>Enter</kbd> | Back to insert mode. |
 
 The mouse wheel scrolls in either mode. While you're at the end, the view
@@ -229,7 +229,7 @@ only while the chat has the keyboard in a focused window and the agent has
 been heard from in the last few minutes; otherwise they step once a second.
 Nothing moves once the agent stops, while it asks you something, or while the
 daemon is out of reach. Its tab, and its workspace in the top bar, show `⋯`
-(see [the window](~clackatoo/reference/window#workspaces-tabs-and-panes)).
+(see [the window](~clackatoo/reference/workspaces#workspaces-tabs-and-panes)).
 
 When you send a message more than half an hour after the turn before it ended,
 a line across the chat says when: `14:32` today, `Yesterday 09:10`, the day of
@@ -743,7 +743,7 @@ turn, fails (its turn went wrong, or its agent couldn't start) or asks you
 something: a permission, or a form. A chat you can't see is one that isn't in
 the tab shown, or any chat while the window doesn't have the focus. These are
 the chats the tabs mark `•` and `?` (see
-[Workspaces, tabs, and panes](~clackatoo/reference/window#workspaces-tabs-and-panes)):
+[Workspaces, tabs, and panes](~clackatoo/reference/workspaces#workspaces-tabs-and-panes)):
 the notification and the mark go by the same rules.
 
 - **One a chat.** Each chat has one notification at most, replaced as it

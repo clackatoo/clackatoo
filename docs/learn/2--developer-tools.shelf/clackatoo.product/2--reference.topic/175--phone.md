@@ -282,20 +282,21 @@ The **Terminals** filter lists each workspace's terminals, with what each is
 running, where, and its size; terminals in no workspace are under Elsewhere.
 Select one to follow it.
 
-A workspace's [background tabs](~clackatoo/reference/window#background-tabs)
-are listed after its terminals, those of another machine's workspaces your
-daemon shows too: each with how it's getting on (Running, Idle, Ended, or
-Failed with its exit status), the ports its programs listen on, and ` ↻` if
-it's kept running. Select one to follow its terminal; **Bring back** puts it
-back in its workspace's tab bar and shows it; **✕** dismisses it, closing its
-terminals, and one still running asks you to select it again, **Stop?**,
-within three seconds. A workspace's heading says how many of its background
-tabs are running, `⚙ 2`, red with the exit status of one that failed,
-`⚙ 1 ✗ 2`, as a window's icon after the tabs does; select it to list them.
-Listing them counts as having seen a failure, as a window's list does, but the
-list goes on saying it while it's shown. The app doesn't mark a terminal to
-keep running (the daemon refuses that from a phone: it's for you at a window),
-nor offer starting a background tab.
+A workspace's
+[background tabs](~clackatoo/reference/workspaces#background-tabs) are listed
+after its terminals, those of another machine's workspaces your daemon shows
+too: each with how it's getting on (Running, Idle, Ended, or Failed with its
+exit status), the ports its programs listen on, and ` ↻` if it's kept running.
+Select one to follow its terminal; **Bring back** puts it back in its
+workspace's tab bar and shows it; **✕** dismisses it, closing its terminals,
+and one still running asks you to select it again, **Stop?**, within three
+seconds. A workspace's heading says how many of its background tabs are
+running, `⚙ 2`, red with the exit status of one that failed, `⚙ 1 ✗ 2`, as a
+window's icon after the tabs does; select it to list them. Listing them counts
+as having seen a failure, as a window's list does, but the list goes on saying
+it while it's shown. The app doesn't mark a terminal to keep running (the
+daemon refuses that from a phone: it's for you at a window), nor offer
+starting a background tab.
 
 A terminal is shown at its own size, the one your windows gave it: with
 readable 14–16 pixel text by default, so a wider one pans sideways under your

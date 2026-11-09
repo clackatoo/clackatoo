@@ -11,7 +11,7 @@ The window's behavior is configured in code: an `init.lua`, as Neovim's is,
 written in [Luau](https://luau.org), a fast dialect of Lua with optional types
 and a sandbox. Without one, the window works as it always does. Settings
 needed before the window starts, such as the graphics API, stay in
-[`startup.toml`](~clackatoo/reference/window#settings), beside it. The font is
+[`startup.toml`](~clackatoo/reference/frame#settings), beside it. The font is
 both: startup.toml's is what the window starts in, and `init.lua`'s outdoes
 it.
 
@@ -249,7 +249,7 @@ short name, as in Vim, which works everywhere the long one does.
 | `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until <kbd>Esc</kbd> or `:nohlsearch`. Off, only the match the search went to is lit. | on |
 | `clipboard` | `cb` | Which of the desktop's the unnamed register goes along with, for what's yanked or deleted in an editor and yanked in a terminal or a chat: the clipboard (`unnamedplus`), the primary selection (`unnamed`), or neither (`none`), keeping it the window's own but for `"+` and `"*`. | `unnamedplus` |
 | `osc52` | `osc52` | What programs in a terminal can do with the clipboard through OSC 52: `copy`, `paste`, `copy-paste`, or `off`. What they copy goes to `"+` and `"*` too. Reading is off unless allowed, since whatever runs in the terminal would get the clipboard. Only the window that last typed into the terminal acts, and text is capped at 1 MiB. | `copy` |
-| `pasteimage` | `pi` | How <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> [pastes an image](~clackatoo/reference/window#pasting-an-image) into a terminal: `path`, kept in a file on the terminal's machine whose path is pasted, or `clipboard`, put on that machine's clipboard and <kbd>Ctrl</kbd>+<kbd>V</kbd> typed, which needs a desktop session there. A chat attaches the image either way. | `path` |
+| `pasteimage` | `pi` | How <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> [pastes an image](~clackatoo/reference/typing#pasting-an-image) into a terminal: `path`, kept in a file on the terminal's machine whose path is pasted, or `clipboard`, put on that machine's clipboard and <kbd>Ctrl</kbd>+<kbd>V</kbd> typed, which needs a desktop session there. A chat attaches the image either way. | `path` |
 | `agent` | `ag` | The agent `:Agent` and <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` open a chat with: `claude`, `codex`, `gemini`, or one in the daemon's [`agents.toml`](~clackatoo/reference/agent-settings#which-agent). Empty leaves it to the daemon. | `claude` |
 | `agenttools` | `agt` | What a new chat's agent can do with [clackatoo's tools](~clackatoo/reference/agent-tools#what-the-agent-can-show-you): `ask` before running commands or typing, `allow` commands in its own terminals, or `off`. | `ask` |
 | `claudetask` | `ct` | A new Claude Code chat keeps Claude Code's own Task tool, which runs helpers inside one turn, folded under the Task's [card](~clackatoo/reference/chat-view#claude-code-s-own-subagents). Off, Claude hands work on only as [subagents](~clackatoo/reference/chats-together#subagents), which you can watch. Other agents have no such tool. | off |
@@ -276,7 +276,7 @@ short name, as in Vim, which works everywhere the long one does.
 | `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/languages#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
 | `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor-view#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
 | `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor-view#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
-| `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/window#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
+| `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/typing#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/languages#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 

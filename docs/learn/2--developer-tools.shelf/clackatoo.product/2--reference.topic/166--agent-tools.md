@@ -20,7 +20,7 @@ say, can run them where you watch.
 |---|---|
 | `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. In a folder you haven't [trusted](~clackatoo/reference/languages#trusted-folders), the file has no language server, and the agent is told so; only you can trust the folder. |
 | `run_in_terminal` | Opens a terminal beside the chat, running your own shell, and types a command at its first prompt. You can watch it, and type into it yourself. |
-| `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/window#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
+| `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/workspaces#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
 | `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output: the last 50 lines, unless it asks for up to 500. |
 | `wait_for_terminal` | Waits until the command in a terminal finishes, for a minute unless it asks for longer, up to ten. |
 | `send_to_terminal` | Types into a terminal, as you would: an answer to a prompt, or another command. |
@@ -50,7 +50,7 @@ The marks that say a command finished aren't signed, so a program can print
 them in what it outputs, as a log line or a page it fetched could. A finish is
 taken, for `wait_for_terminal`, an activity's result and the closing timer
 alike, only once the shell has the terminal to itself again, as when
-[keeping a terminal running](~clackatoo/reference/window#keeping-a-terminal-running):
+[keeping a terminal running](~clackatoo/reference/workspaces#keeping-a-terminal-running):
 its process group in front, and nothing running in it. So a command still
 running is never closed under it, nor waited for as done, and `read_terminal`
 says it's still running, not how the marks say it exited. A command that
@@ -68,8 +68,8 @@ shell ends when its time is up, not when the command does; `read_terminal`
 shows how it's getting on meanwhile.
 
 No tool marks a terminal to
-[keep running](~clackatoo/reference/window#keeping-a-terminal-running), and
-`run_in_terminal` and `run_in_background` refuse a command line that runs
+[keep running](~clackatoo/reference/workspaces#keeping-a-terminal-running),
+and `run_in_terminal` and `run_in_background` refuse a command line that runs
 `clackatoo keep` or `clackatoo bg`. That's a guard against mistakes, not a
 boundary: whatever an agent types into a terminal, or a script it runs there,
 follows the rules below, and could do what you could at that shell.
@@ -109,7 +109,7 @@ finishes.
 
 A command is typed only while the shell has the terminal to itself, as for a
 terminal
-[kept running](~clackatoo/reference/window#keeping-a-terminal-running): a
+[kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running): a
 `$SHELL` that starts another shell rather than becoming it, as `sh -c fish`
 does, never has, so the agent is told its command wasn't typed, and why; set
 the daemon's `$SHELL` to the real shell.
@@ -269,7 +269,7 @@ alike, that stays: `Starting`, `Running`, `Stopping`, and then how it ended,
 as clackatoo saw it. Open the card for its command and the end of its output.
 Stop sends it <kbd>Ctrl</kbd>+<kbd>C</kbd>, and the card says it's ended only
 once the shell's integration says so. Its terminal is a
-[background tab](~clackatoo/reference/window#background-tabs), so
+[background tab](~clackatoo/reference/workspaces#background-tabs), so
 `:Background` lists it too.
 
 clackatoo tells agents when to use its tools `start_activity`,

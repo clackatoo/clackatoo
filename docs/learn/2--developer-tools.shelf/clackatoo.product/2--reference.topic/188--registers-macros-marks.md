@@ -69,7 +69,7 @@ next key, and keys you press meanwhile wait behind it. After 5 seconds it
 gives up and says what it waited for; <kbd>Esc</kbd> stops it at once, and so
 does moving to another pane yourself while it waits. Recording and replay work
 in every text and list pane in normal mode; see
-[macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes).
+[macros and marks across panes](~clackatoo/reference/workspaces#macros-and-marks-across-panes).
 A macro typing through a terminal's normal mode or a chat stops there the same
 way, at a motion that goes nowhere, a search that finds nothing or a command
 they refuse; keys after a terminal's search or `[[` wait for the daemon's

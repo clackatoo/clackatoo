@@ -37,8 +37,8 @@ Type a few letters to narrow them, or a machine that isn't listed, such as
 `jack@server:2222`, and <kbd>Enter</kbd> connects, as `--remote` would. If it
 can't, the picker opens again saying why, so you can pick another. What's
 typed is edited, and the machines moved through, with
-[the finder's keys](~clackatoo/reference/window#the-finder). <kbd>Esc</kbd>,
-<kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>;</kbd>,
+[the finder's keys](~clackatoo/reference/workspaces#the-finder).
+<kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>;</kbd>,
 <kbd>Shift</kbd>+<kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>&#92;</kbd> closes the
 window.
 
@@ -78,15 +78,15 @@ work.
 
 After HOST restarts, as after a power cut, its terminals offer `R` to put what
 they were running at the new shell's prompt, as they do on HOST (see
-[after a restart](~clackatoo/reference/window#after-a-restart)), and its
+[after a restart](~clackatoo/reference/workspaces#after-a-restart)), and its
 editors come back where they were. <kbd>Esc</kbd> dismisses an offer on HOST
 and in every window, as typing into the terminal does. One dismissed while
 HOST isn't connected never reaches HOST, so it comes back. A terminal HOST
 keeps running says ` ↻` after its tab's name, and `:keep` marks one of HOST's
 from here, on HOST, as it would there; a device on the web app can't, as it
 can't mark your daemon's own. HOST's
-[background tabs](~clackatoo/reference/window#background-tabs) are shown in
-its workspaces, in the icon and the list, and sending a tab there, bringing
+[background tabs](~clackatoo/reference/workspaces#background-tabs) are shown
+in its workspaces, in the icon and the list, and sending a tab there, bringing
 one back, dismissing one and `:bg CMD` all happen on HOST. Not shown here: the
 offer of a pane HOST lends one of your own workspaces. Chats in HOST's
 workspaces come back after HOST restarts, and go on with an interrupted turn
@@ -182,7 +182,7 @@ at once or once desk is back; its program exiting on desk closes it here. Desk
 needs this release of clackatoo or later; an older one says it's too old to
 lend panes. `:bg CMD` beside such a pane starts the command on desk, in a
 shell desk lends you as a background tab of your workspace (see
-[background tabs](~clackatoo/reference/window#background-tabs)).
+[background tabs](~clackatoo/reference/workspaces#background-tabs)).
 
 Desk never throws away what it lent on so little: a pane your daemon has
 stopped showing, or a `[No Name]` with changes you closed, comes back as one
@@ -393,7 +393,7 @@ desktop's own clipboard instead, which needs you signed in there (see
 [the other machine's desktop](#the-other-machine-s-desktop)). Each machine on
 the way needs a clackatoo that knows how; the bottom bar says which to update
 if one doesn't. See
-[pasting an image](~clackatoo/reference/window#pasting-an-image).
+[pasting an image](~clackatoo/reference/typing#pasting-an-image).
 
 ## Options
 
@@ -517,7 +517,7 @@ treats it as from another build.
 
 If the daemon on the other machine speaks another version of the protocol, the
 window says so, as it does
-[on this machine](~clackatoo/reference/window#a-daemon-from-another-build).
+[on this machine](~clackatoo/reference/frame#a-daemon-from-another-build).
 
 - **An older daemon there:** <kbd>Enter</kbd> replaces it using the clackatoo
   installed there: it upgrades it if it can, keeping its terminals, or else
@@ -624,9 +624,9 @@ rides out network changes as the window does.
   forwards a port each time a window opens on another machine; a window on
   this machine passes it over without a word.
 - **A background tab's ports** show in the
-  [list of background tabs](~clackatoo/reference/window#background-tabs), and
-  <kbd>Ctrl</kbd>+<kbd>F</kbd> there forwards them all, each to the same port
-  here.
+  [list of background tabs](~clackatoo/reference/workspaces#background-tabs),
+  and <kbd>Ctrl</kbd>+<kbd>F</kbd> there forwards them all, each to the same
+  port here.
 - A daemon older than protocol 82 doesn't forward ports, and the bar says how
   to update it. A window on this machine has nothing to forward.
 

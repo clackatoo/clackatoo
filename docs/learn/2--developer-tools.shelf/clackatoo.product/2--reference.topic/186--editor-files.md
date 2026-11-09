@@ -16,7 +16,7 @@ every window showing the file edits together.
 | `:e PATH`, `:edit PATH` | Opens the file, or the folder's listing, in place of what the pane shows, as Vim's do; from a terminal, in a new tab. `:e .` shows the folder of the file shown. |
 | `:e`, `:edit` alone | Opens [the explorer](~clackatoo/reference/explorer) at the folder you're in, the folder of an editor's file or a terminal's, beside an empty file with no name yet, where `:e PATH` would put a file: in place of an editor's file, or in a new tab. The explorer has the focus. |
 | `:Editor PATH` | Opens the file, or the folder, in a new tab; with no path, the focused pane's folder. |
-| `:\|Editor PATH`, `:\|<Editor PATH`, `:-Editor PATH`, `:-^Editor PATH` | Opens it beside the focused pane: right, left, below or above, as the [split marks](~clackatoo/reference/window#the-command-line) do for terminals. |
+| `:\|Editor PATH`, `:\|<Editor PATH`, `:-Editor PATH`, `:-^Editor PATH` | Opens it beside the focused pane: right, left, below or above, as the [split marks](~clackatoo/reference/workspaces#the-command-line) do for terminals. |
 | `clackatoo edit [PATH]` | From a shell: opens it, a folder too, in a new tab of the workspace last used; with no path, the current directory. See [the CLI](~clackatoo/reference/cli#edit). |
 
 A relative path is from the focused pane's directory: for a terminal, the
