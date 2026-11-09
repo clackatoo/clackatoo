@@ -1067,7 +1067,7 @@ impl Daemon {
                     files,
                     marks,
                     changes,
-                } => self.marks_merged(files, marks, changes),
+                } => self.marks_merged(files, &marks, changes),
                 Done::Op {
                     ticket,
                     changed,
@@ -1367,7 +1367,7 @@ impl Daemon {
     /// every client following it that hasn't had it: to one that was sent
     /// the merge before and asked for changes, as what `changes` says
     /// changed since, if it says.
-    fn marks_merged(&mut self, files: FilesId, marks: Arc<Marks>, changes: Option<MarksChanges>) {
+    fn marks_merged(&mut self, files: FilesId, marks: &Arc<Marks>, changes: Option<MarksChanges>) {
         let Some(explorer) = self.explorers.list.get_mut(&files) else {
             return;
         };
@@ -1378,11 +1378,11 @@ impl Daemon {
         let mut viewers = explorer.viewers.clone();
         let mut as_changes = None;
         // The thread hands back the merge it was against if it's the same.
-        let same = (explorer.marks.as_ref()).is_some_and(|before| Arc::ptr_eq(before, &marks));
+        let same = (explorer.marks.as_ref()).is_some_and(|before| Arc::ptr_eq(before, marks));
         if same {
             // Only those who haven't had it.
             viewers.retain(|viewer| !had.contains(viewer));
-        } else if let Some(before) = explorer.marks.replace(Arc::clone(&marks)) {
+        } else if let Some(before) = explorer.marks.replace(Arc::clone(marks)) {
             as_changes = (u32::try_from(before.len()).ok())
                 .zip(changes)
                 .map(|(was, changes)| FilesUpdate::GitChanged { was, changes });
@@ -1390,12 +1390,12 @@ impl Daemon {
         // Those who have what it changes, and asked for changes, are sent
         // them.
         let takes = |viewer: &Token| had.contains(viewer) && explorer.git_changes.contains(viewer);
-        let (changed, whole): (Vec<Token>, Vec<Token>) = match &as_changes {
+        let (told, whole): (Vec<Token>, Vec<Token>) = match &as_changes {
             Some(_) => viewers.into_iter().partition(takes),
             None => (Vec::new(), viewers),
         };
         if let Some(as_changes) = as_changes {
-            for viewer in changed {
+            for viewer in told {
                 self.tell_files(viewer, files, as_changes.clone());
             }
         }
