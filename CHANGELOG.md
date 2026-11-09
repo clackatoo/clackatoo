@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026.11.28 (2026-11-09)
+
+### Features
+
+- **term:** show the notifications programs ask for, and mark a pane's for the phone (CLACKA-238) (fb9e481a)
+- **daemon:** a long command ending is told in a notification when no one looks (CLACKA-238) (97efa151)
+- **term:** variation selector 16 widens an emoji to two columns, by default (CLACKA-238) (5a542aa9)
+- **term:** mode 2027 prints a grapheme cluster to a cell (CLACKA-238) (bc59b2e5)
+- **term:** tell programs that ask of each resize in-band, with pixels (mode 2048) (CLACKA-238) (32e0511c)
+- **term:** mouse reports in pixels for programs that ask (mode 1016) (CLACKA-238) (315b4c8e)
+- **gui:** key repeats and releases for programs that ask, and Super as a modifier (CLACKA-238) (6aab7b52)
+- **term:** left and right margins (DECLRMM, DECSLRM) (CLACKA-238) (c55f032c)
+- **term:** overlines (SGR 53 and 55), drawn by the window and the phone (CLACKA-238) (6859ffdc)
+- **term:** mouse pointer shapes programs ask for (kitty's OSC 22) (CLACKA-238) (d4cf872d)
+
+### Fixes
+
+- **daemon:** a long command's end is told though the next prompt comes in the same read (CLACKA-238) (858f1749)
+- **daemon:** relayed notifications are bounded too, and ten a minute in all (CLACKA-238) (3a73412f)
+- **daemon:** a newer daemon's lines are laid out again for a window from before the width rules (CLACKA-238) (6ff1bb0a)
+- **term:** by clusters, a spacing mark or skin tone after ASCII joins it on the fast path too (CLACKA-238) (40f567b5)
+- **term:** margins are put back two columns apart, and a character wider than them is dropped (CLACKA-238) (9451c416)
+- **daemon:** notifications from another machine's terminals are taken in to pass on (CLACKA-238) (22678b87)
+- **daemon:** a lent terminal's notifications go only where it's borrowed (CLACKA-238) (3f10aa44)
+- **notices:** a program's notification is titled by what its terminal is called first (CLACKA-238) (967cb3e5)
+- **gui:** a macro's keys aren't held, and a key held repeats only where it went down (CLACKA-238) (7f6f394d)
+
 ## 2026.11.27 (2026-11-09)
 
 ### Features
