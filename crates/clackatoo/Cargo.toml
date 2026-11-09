@@ -41,5 +41,15 @@ tempfile.workspace = true
 name = "e2e"
 harness = false
 
+[features]
+## The daemon's life under a real systemd: stopped with its scope,
+## upgraded, killed and started again (tests/lifecycle.rs). Opt-in, as it
+## needs a systemd user manager.
+lifecycle = []
+
+[[test]]
+name = "lifecycle"
+required-features = ["lifecycle"]
+
 [lints]
 workspace = true
