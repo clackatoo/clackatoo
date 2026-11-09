@@ -1093,6 +1093,7 @@ impl App {
         true
     }
 
+    #[allow(clippy::too_many_lines, reason = "each part of the frame in turn")]
     fn clicked(&mut self, button: MouseButton) {
         if self.click_shortcut_help() {
             return;
