@@ -157,6 +157,7 @@ impl TestDaemon {
             languages: None,
             servers: None,
             declined: None,
+            trusted: clackatoo_daemon::Trusting::All,
             lsp_trace: None,
             server_idle: Duration::ZERO,
             rename_gate: None,

@@ -91,6 +91,7 @@ mod signs;
 mod stopping;
 mod symbols;
 mod tools;
+mod trust;
 mod turn_undo;
 mod watched;
 mod web;
@@ -932,6 +933,9 @@ pub struct Daemon {
     servers: Servers,
     /// Languages offered to clients to install, and being installed.
     installs: Installs,
+    /// The folders trusted to run their language servers, or not, and
+    /// which clients have been asked about which.
+    trust: trust::Asking,
     /// Renames whose files are being written.
     renames: rename::Renames,
     /// The finder's searches going on.
@@ -1080,6 +1084,7 @@ impl Daemon {
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
         let mut daemon = Self::listening(listener, config, None)?;
+        daemon.trust.folders.started();
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
         Ok(daemon)
@@ -1152,6 +1157,7 @@ impl Daemon {
             syntax: None,
             servers: Servers::default(),
             installs: Installs::new(config.declined.as_deref()),
+            trust: trust::Asking::new(&config.trusted),
             renames: rename::Renames::default(),
             finds,
             tools: Tools::with_limits(config.agents.subagent_limits()),
@@ -1422,6 +1428,9 @@ impl Daemon {
             daemon.disk_maybe_changed(id);
         }
         daemon.resume_files(state.next_files, explorers);
+        // With the files that were open, whose servers the build before
+        // may have run without asking.
+        daemon.trust_what_was_running();
         // Messages waiting in chats' inboxes go as their turns end.
         daemon.resume_talk(&state.undelivered, standing.as_ref());
         daemon.resume_activities(&state.activities);
@@ -1557,6 +1566,7 @@ impl Daemon {
         // goes over to it.
         self.keep_last();
         self.kept_last();
+        self.trust.folders.kept();
         let activities = self.hand_over_activities().map_err(io::Error::other)?;
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
@@ -1972,6 +1982,7 @@ impl Daemon {
         // As they are, before anything closes, written on the writer's
         // thread while the rest stops.
         self.keep_last();
+        self.trust.folders.kept();
         let servers_until = started + stopping::STOP_WAIT;
         let until = started + STOPPING_WAIT;
         // A client waiting for an upgrade hears why there won't be one.
@@ -3558,6 +3569,11 @@ impl Daemon {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
             }
+            Request::Trust {
+                action,
+                folder,
+                buffer,
+            } => self.serve_trust(token, action, folder.as_deref(), buffer),
             Request::Relay => self.relaying(token),
             Request::RelayAs { machine } => self.relaying_as(token, machine),
             Request::Unlend {
@@ -4100,6 +4116,7 @@ impl Daemon {
             }
             self.forget_queries(token, None);
             self.installs.forget(token);
+            self.trust.forget(token);
             self.forget_finds(token);
             self.forget_files_viewer(token);
             self.forget_board_viewer(token);

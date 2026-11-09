@@ -823,6 +823,7 @@ mod tests {
             languages: None,
             servers: None,
             declined: None,
+            trusted: clackatoo_daemon::Trusting::All,
             lsp_trace: None,
             boards: None,
             recovery: None,

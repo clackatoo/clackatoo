@@ -48,7 +48,7 @@ use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
     BackgroundAction, BoardId, BufferId, ChatSummary, ClientMessage, Error, Event, FilesId,
     PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId, ServerMessage, TabId,
-    TerminalId, WorkspaceId, Workspaces, wire,
+    TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -1328,6 +1328,31 @@ impl Daemon {
                     buffer: Some(remote),
                 };
                 (at, Ok((decline, Then::Pass)))
+            }),
+            Request::Trust {
+                action,
+                folder,
+                buffer: Some(local),
+            } => self.relayed_buffer(*local).map(|(at, remote)| {
+                // Checked here too, as the daemon there can't tell who
+                // asked through this one.
+                if *action == TrustAction::Trust && self.is_web_device(token) {
+                    return (
+                        at,
+                        Err(Error::Other(
+                            "a device on the web app can't trust a folder".into(),
+                        )),
+                    );
+                }
+                if self.link_wire(at) < wire::TRUST {
+                    return (at, Err(self.too_old(at, "trusting a folder")));
+                }
+                let trust = Request::Trust {
+                    action: *action,
+                    folder: folder.clone(),
+                    buffer: Some(remote),
+                };
+                (at, Ok((trust, Then::Pass)))
             }),
             &Request::AttachBrowser { chat, .. } => self
                 .relayed_terminal(chat)

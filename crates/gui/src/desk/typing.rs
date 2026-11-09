@@ -277,7 +277,12 @@ impl Desk {
             Purpose::Command => {
                 self.remember_typed(Kind::Command, &text);
                 match command::parse(&text) {
-                    Ok(command) => self.run(command),
+                    Ok(command) => {
+                        // Enter pressed now, not a macro's or a binding's.
+                        self.typed_now = !self.script.typing && self.key_pressed_now();
+                        self.run(command);
+                        self.typed_now = false;
+                    }
                     Err(message) => self.refuse(message),
                 }
             }

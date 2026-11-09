@@ -103,6 +103,7 @@ impl TestDaemon {
             languages: None,
             servers: None,
             declined: None,
+            trusted: clackatoo_daemon::Trusting::All,
             lsp_trace: None,
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
@@ -7577,6 +7578,167 @@ fn fake_project(daemon: &TestDaemon, files: &[(&str, &str)]) -> (Client, BufferI
     attach_buffer(&mut client, buffer);
     next_diagnostics(&mut client);
     (client, buffer)
+}
+
+/// A daemon with the fake language server, asking about every folder and
+/// keeping the answers in `trusted` in its directory.
+fn asking_fake_language_server() -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        config.languages = Some(fake_language_server_pack(dir, Vec::new()));
+        config.trusted = clackatoo_daemon::Trusting::File(dir.join("state/trusted"));
+    })
+}
+
+/// The next update about a buffer that isn't its highlights, what its
+/// server does, or its hunks, which come whenever they come.
+fn next_said(client: &mut Client) -> BufferUpdate {
+    loop {
+        match next_buffer_update(client) {
+            BufferUpdate::Highlights { .. }
+            | BufferUpdate::Features(_)
+            | BufferUpdate::Hunks { .. }
+            | BufferUpdate::Agents { .. }
+            | BufferUpdate::Language { .. } => {}
+            update => return update,
+        }
+    }
+}
+
+fn trust(client: &mut Client, action: clackatoo_protocol::TrustAction, buffer: BufferId) -> String {
+    let request = Request::Trust {
+        action,
+        folder: None,
+        buffer: Some(buffer),
+    };
+    match client.request(&request).unwrap() {
+        Response::Text(said) => said,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_folder_runs_its_language_server_only_once_trusted() {
+    use clackatoo_protocol::TrustAction;
+
+    let daemon = asking_fake_language_server();
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    let app = dir.join("app").canonicalize().unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    // Asked, and nothing said of the file: no server runs.
+    assert_eq!(
+        next_said(&mut client),
+        BufferUpdate::Trust {
+            root: app.display().to_string()
+        }
+    );
+    // Asked once: attached again, it isn't asked again.
+    let detach = Request::DetachBuffer { buffer };
+    assert_eq!(client.request(&detach).unwrap(), Response::Done);
+    attach_buffer(&mut client, buffer);
+    let said = trust(&mut client, TrustAction::List, buffer);
+    assert_eq!(said, "no folder is trusted yet");
+    let said = trust(&mut client, TrustAction::Trust, buffer);
+    assert!(said.starts_with("trusted ~/app"), "{said}");
+    let (_, places) = next_diagnostics(&mut client);
+    assert_eq!(places, [(0, 3)], "its server started");
+    // Kept, once its thread has written it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let kept = std::fs::read_to_string(dir.join("state/trusted")).unwrap_or_default();
+        if kept.contains(&app.display().to_string()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not kept: {kept}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Taken back, its server stops, and it isn't asked about again.
+    let said = trust(&mut client, TrustAction::Untrust, buffer);
+    assert!(said.contains("its language server stopped"), "{said}");
+    // What it said goes with it.
+    while !next_diagnostics(&mut client).1.is_empty() {}
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let said = trust(&mut other, TrustAction::List, buffer);
+    assert_eq!(said, "not trusted ~/app");
+    other
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    while let Ok(event) = other.next_event() {
+        assert!(
+            !matches!(
+                event,
+                Event::Buffer {
+                    update: BufferUpdate::Trust { .. } | BufferUpdate::Diagnostics { .. },
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+    }
+}
+
+#[test]
+fn a_folder_inside_one_trusted_is_trusted_but_for_one_marked_not() {
+    use clackatoo_protocol::TrustAction;
+
+    let daemon = asking_fake_language_server();
+    let dir = daemon.dir.path();
+    for project in ["src/good", "src/bad"] {
+        std::fs::create_dir_all(dir.join(project)).unwrap();
+        std::fs::write(dir.join(project).join("project"), "").unwrap();
+        std::fs::write(dir.join(project).join("a.fk"), "bad\n").unwrap();
+    }
+    let mut client = daemon.client();
+    let folder = |folder: &str, action| Request::Trust {
+        action,
+        folder: Some(folder.to_owned()),
+        buffer: None,
+    };
+    for (name, action) in [
+        ("~/src", TrustAction::Trust),
+        ("src/bad", TrustAction::Untrust),
+    ] {
+        let said = client.request(&folder(name, action)).unwrap();
+        assert!(matches!(said, Response::Text(_)), "{said:?}");
+    }
+    let said = client
+        .request(&folder("~/nowhere", TrustAction::Trust))
+        .unwrap();
+    assert!(
+        matches!(&said, Response::Error(Error::Other(why)) if why.contains("isn't a folder")),
+        "{said:?}"
+    );
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "src/good/a.fk"))).unwrap();
+    let good = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, good);
+    let (_, places) = next_diagnostics(&mut client);
+    assert_eq!(places, [(0, 3)], "trusted with the folder it's in");
+    let pane = (client.new_workspace(None, open_file(dir, "src/bad/a.fk"))).unwrap();
+    let bad = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, bad);
+    client
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    while let Ok(event) = client.next_event() {
+        if let Event::Buffer { buffer, update } = &event {
+            assert!(
+                *buffer != bad
+                    || !matches!(
+                        update,
+                        BufferUpdate::Trust { .. } | BufferUpdate::Diagnostics { .. }
+                    ),
+                "{event:?}"
+            );
+        }
+    }
 }
 
 /// The updates about a buffer up to the next answer, but diagnostics,

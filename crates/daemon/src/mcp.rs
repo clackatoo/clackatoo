@@ -44,9 +44,11 @@ pub(crate) const SERVER_NAME: &str = "clackatoo";
 /// gets the newest, and decides itself whether it can go on.
 const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Why a command running `clackatoo keep` or `clackatoo bg` isn't run.
-const KEPT_BY_THE_USER: &str = "only the user has clackatoo keep things running, or start them \
-    in the background, from their window or their own terminal: not this tool";
+/// Why a command running `clackatoo keep`, `clackatoo bg` or `clackatoo
+/// trust` isn't run.
+const KEPT_BY_THE_USER: &str = "only the user has clackatoo keep things running, start them \
+    in the background, or trust a folder's language servers, from their window or their own \
+    terminal: not this tool";
 
 /// The longest path a tool takes, in bytes: as long as Linux takes.
 const MOST_PATH: usize = 4096;

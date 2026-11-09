@@ -493,6 +493,17 @@ impl Daemon {
             let Some(root) = spec.root(&path, &self.config.home) else {
                 return;
             };
+            // It may run the project's code: not until the folder's
+            // trusted. Its windows are asked, if its server is there to
+            // be started at all.
+            if !self.trusts(&root) {
+                let program = spec.command.first().map_or("", String::as_str);
+                let untrusted = self.program_found(program).then_some(root);
+                if let Some(slot) = self.buffers.get_mut(&id) {
+                    slot.untrusted = untrusted;
+                }
+                return;
+            }
             let Some(server) = self.server_for(&spec.command, root) else {
                 return;
             };
@@ -501,6 +512,7 @@ impl Daemon {
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
+        slot.untrusted = None;
         let (text, version) = (slot.buffer.text().clone(), slot.buffer.version());
         if let Some(running) = self.servers.slots.get_mut(&server) {
             running.idle_since = None;
@@ -615,6 +627,52 @@ impl Daemon {
             },
         );
         Some(id)
+    }
+
+    /// Whether the language server program `name` is there to be started,
+    /// found as [`server_for`](Self::server_for) finds it.
+    pub(super) fn program_found(&self, name: &str) -> bool {
+        server_program(name, self.config.servers.as_deref()).is_some()
+    }
+
+    /// Stops the servers started for folders no longer trusted, as they
+    /// were stopped on purpose, and returns how many: their files lose
+    /// what they said, and get no server until their folder's trusted.
+    pub(super) fn stop_untrusted_servers(&mut self) -> usize {
+        let untrusted: Vec<(ServerId, PathBuf)> = (self.servers.slots.iter())
+            .filter(|(_, slot)| !self.trusts(&slot.root))
+            .map(|(&id, slot)| (id, slot.root.clone()))
+            .collect();
+        for (id, root) in &untrusted {
+            let cleared: Vec<BufferId> = (self.buffers.iter_mut())
+                .filter(|(_, slot)| {
+                    (slot.server.as_ref()).is_some_and(|opened| opened.server == *id)
+                })
+                .map(|(&buffer, slot)| {
+                    slot.server = None;
+                    slot.untrusted = Some(root.clone());
+                    buffer
+                })
+                .collect();
+            for buffer in cleared {
+                let version = self.buffers[&buffer].buffer.version();
+                let none = BufferUpdate::Diagnostics {
+                    version,
+                    diagnostics: Vec::new(),
+                };
+                self.tell_viewers(buffer, None, &none);
+                let none = BufferUpdate::Features(ServerFeatures::default());
+                self.tell_viewers(buffer, None, &none);
+            }
+            // Stopped on purpose, which doesn't count against starting it
+            // again, as stopping by itself does.
+            if let Some(slot) = self.servers.slots.get(id) {
+                let (command, root) = (&slot.command, &slot.root);
+                (self.servers.started).retain(|(started, at, _)| started != command || at != root);
+            }
+            self.stop_server(*id);
+        }
+        untrusted.len()
     }
 
     /// Tells buffer `id`'s server about `edit`, which made `version`, and

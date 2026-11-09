@@ -100,6 +100,10 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         | Request::Disconnect { .. }
         | Request::Forget { .. }
         | Request::Install { .. }
+        | Request::Trust {
+            action: clackatoo_protocol::TrustAction::Trust,
+            ..
+        }
         | Request::Forward(_) => true,
         _ => false,
     }
@@ -437,6 +441,20 @@ mod tests {
         assert!(changes(&chat(TerminalId(2), ChatAction::Stop)));
         let draft = ChatAction::Draft { text: "x".into() };
         assert!(changes(&chat(TerminalId(2), draft)));
+        // Nor trust a folder to run its code; taking trust away is fine.
+        let trust = |action| {
+            ClientMessage::Request(Request::Trust {
+                action,
+                folder: None,
+                buffer: None,
+            })
+        };
+        assert!(changes(&trust(
+            clackatoo_protocol::TrustAction::Trust
+        )));
+        assert!(!changes(&trust(
+            clackatoo_protocol::TrustAction::Untrust
+        )));
     }
 
     #[test]

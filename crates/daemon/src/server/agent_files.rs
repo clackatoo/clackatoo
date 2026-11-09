@@ -1657,6 +1657,7 @@ pub(super) mod tests {
             languages: None,
             servers: None,
             declined: None,
+            trusted: crate::Trusting::All,
             lsp_trace: None,
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,

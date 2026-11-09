@@ -294,6 +294,13 @@ pub(crate) enum Command {
     /// `:keep`, `:keep always`, `:keep off`: the focused terminal kept
     /// running so, or not.
     Keep(clackatoo_protocol::Keeping),
+    /// `:trust [DIR]`, `:untrust [DIR]`, `:trusted`: a folder trusted to
+    /// run its language servers, or not, or those marked listed.
+    Trust {
+        action: clackatoo_protocol::TrustAction,
+        /// The folder, or with none, the focused file's project.
+        folder: Option<String>,
+    },
 }
 
 /// What `:bg`, `:bgpane` and `:Background` do.
@@ -459,6 +466,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         "bg" | "bgpane" | "Background" => return background_command(word, argument),
         "keep" => return keep_command(argument),
+        "trust" | "untrust" | "trusted" => return trust_command(word, argument),
         _ => {}
     }
     let (place, rest) = place(word);
@@ -510,6 +518,26 @@ fn keep_command(argument: Option<&str>) -> Result<Command, String> {
         Some("off") => Keeping::Off,
         Some(other) => return Err(format!("keep takes always or off, not {other:?}")),
     }))
+}
+
+/// `:trust`, `:untrust` or `:trusted`, as `word` says, with `argument`,
+/// the folder, after it.
+fn trust_command(word: &str, argument: Option<&str>) -> Result<Command, String> {
+    use clackatoo_protocol::TrustAction;
+    let action = match word {
+        "trust" => TrustAction::Trust,
+        "untrust" => TrustAction::Untrust,
+        _ => {
+            if let Some(argument) = argument {
+                return Err(format!(
+                    "trusted takes nothing after it, but has {argument:?}"
+                ));
+            }
+            TrustAction::List
+        }
+    };
+    let folder = argument.map(str::to_owned);
+    Ok(Command::Trust { action, folder })
 }
 
 /// `:bg`, `:bgpane` or `:Background`, as `word` says, with `argument`
@@ -969,6 +997,9 @@ command_names! {
     "bgpane" => "Move the focused terminal to the background",
     "Background" => "Browse background tabs",
     "keep" => "Restart this terminal command when the daemon starts",
+    "trust" => "Let this folder's language servers run its code",
+    "untrust" => "Stop this folder's language servers running its code",
+    "trusted" => "List the folders trusted to run language servers",
     "reload" => "Reload your Lua configuration",
     "set" => "View or change settings",
     "Registers" => "Show the contents of registers",
@@ -1080,7 +1111,8 @@ pub(crate) fn takes(word: &str) -> Takes {
     let word = word.split_once('@').map_or(word, |(kind, _)| kind);
     let word = canonical(word.strip_suffix('!').unwrap_or(word));
     match word {
-        "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" => Takes::Path,
+        "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" | "trust"
+        | "untrust" => Takes::Path,
         "set" | "se" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
@@ -1193,6 +1225,9 @@ mod tests {
         ("bgpane", ""),
         ("Background", ""),
         ("keep", ""),
+        ("trust", ""),
+        ("untrust", ""),
+        ("trusted", ""),
         ("q", "quit"),
         ("quit", ""),
         ("w", "write"),

@@ -163,6 +163,14 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join("app/project"), "").unwrap();
         std::fs::write(root.join("app/a.fk"), "bad\n").unwrap();
+        // Trusted to run its server, as the user would have.
+        let app = root.join("app").canonicalize().unwrap();
+        let trusted = serde_json::json!({
+            "clackatoo_trusted": 1,
+            "folders": [{"folder": app, "trusted": true}],
+        });
+        std::fs::create_dir_all(root.join("state/clackatoo")).unwrap();
+        std::fs::write(root.join("state/clackatoo/trusted"), trusted.to_string()).unwrap();
     }
     let agent = (setup.agent.iter())
         .map(|args| {

@@ -147,7 +147,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 130;
+pub const PROTOCOL_VERSION: u32 = 131;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1542,6 +1542,39 @@ pub enum Request {
     /// [`Response::Done`]. Only to a daemon of protocol 130 or later
     /// ([`wire::REVEAL`]).
     Window,
+    /// Trusts a folder to run its language servers, which may run its
+    /// code, or takes that trust back, or lists the folders trusted and
+    /// not, as `action` says. The folder is `folder`, from the directory
+    /// `buffer`'s file was opened from (or else home), or with no
+    /// `folder`, the project `buffer`'s file is in, as its language server
+    /// would be started for: the folder a [`BufferUpdate::Trust`] asked
+    /// about. A folder is trusted with all inside it, but for any folder
+    /// inside it marked not trusted. Only a user trusts a folder, with a
+    /// key pressed in a window, or with the `clackatoo` command: never an
+    /// agent, or a device on the web app. Answered with
+    /// [`Response::Text`], saying what was done. New in protocol 131: a
+    /// client asks [`wire::daemon_has`] with [`wire::TRUST`] first.
+    Trust {
+        /// What's done.
+        action: TrustAction,
+        /// The folder, if not the project of `buffer`'s file.
+        folder: Option<String>,
+        /// The buffer whose project, or whose directory `folder` is from,
+        /// which says on which machine.
+        buffer: Option<BufferId>,
+    },
+}
+
+/// What [`Request::Trust`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrustAction {
+    /// The folder's language servers may run: those of its files open
+    /// start now.
+    Trust,
+    /// They may not: those running stop, and it isn't asked about again.
+    Untrust,
+    /// Lists the folders trusted, and those not, one a line.
+    List,
 }
 
 /// How to start a terminal.

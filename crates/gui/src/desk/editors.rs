@@ -720,6 +720,7 @@ impl Desk {
                 grammar,
                 server,
             } => self.offered(buffer, language, grammar, server),
+            BufferUpdate::Trust { root } => self.trust_asked(buffer, root),
             BufferUpdate::Notice(notice) => {
                 self.say(notice);
                 true

@@ -311,6 +311,8 @@ impl Daemon {
                 self.find_words(id);
             }
             self.open_in_server(id);
+            // A server just installed may be one for a folder not trusted.
+            self.ask_trust(id, None);
         }
     }
 }

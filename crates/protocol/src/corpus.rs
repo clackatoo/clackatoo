@@ -867,6 +867,33 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Client(ClientMessage::Request(Request::Window)),
         ),
     ]);
+    // A folder asked about, trusted, not, and listed (CLACKA-224).
+    samples.extend(
+        [
+            Server(ServerMessage::Event(Event::Buffer {
+                buffer: BufferId(2),
+                update: BufferUpdate::Trust {
+                    root: "/src/project".into(),
+                },
+            })),
+            Client(ClientMessage::Request(Request::Trust {
+                action: crate::TrustAction::Trust,
+                folder: None,
+                buffer: Some(BufferId(2)),
+            })),
+            Client(ClientMessage::Request(Request::Trust {
+                action: crate::TrustAction::Untrust,
+                folder: Some("../other".into()),
+                buffer: Some(BufferId(2)),
+            })),
+            Client(ClientMessage::Request(Request::Trust {
+                action: crate::TrustAction::List,
+                folder: None,
+                buffer: None,
+            })),
+        ]
+        .map(|sample| (crate::wire::TRUST, sample)),
+    );
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,

@@ -343,6 +343,10 @@ gates! {
     /// (CLACKA-223): `Request::Reveal`, `Request::Window` and
     /// `Event::Reveal`.
     REVEAL = 130,
+    /// Asking before a folder's language servers run its code
+    /// (CLACKA-224): `Request::Trust`, and `BufferUpdate::Trust`, which a
+    /// daemon sends only to a client of this protocol or later.
+    TRUST = 131,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -556,6 +560,7 @@ impl Since for BufferUpdate {
             Self::Language { .. } => WORDS,
             Self::Reattach => RELAY,
             Self::Reversed { .. } => UNDO_STATE,
+            Self::Trust { .. } => TRUST,
         }
     }
 }
@@ -1460,6 +1465,9 @@ impl Downgrade for ServerMessage {
     /// `FilesUpdate::Changed`, likewise, as a daemon passing another's
     /// explorer on asks for changes only while every client it passes
     /// them to reads them.
+    /// `BufferUpdate::Trust` is dropped too, as the daemon asks only a
+    /// client that can answer it: an older one's files go without their
+    /// folder's language servers, as an unanswered question leaves them.
     /// `BufferUpdate::Reversed` only answers a newer window's undo or redo,
     /// and becomes the `Edited` an older one's is answered with.
     /// A new answer, or a new kind of thing found, only ever answers what
@@ -1568,7 +1576,8 @@ impl Downgrade for ServerMessage {
                     update:
                         BufferUpdate::Coloured { .. }
                         | BufferUpdate::Language { .. }
-                        | BufferUpdate::Reattach,
+                        | BufferUpdate::Reattach
+                        | BufferUpdate::Trust { .. },
                     ..
                 },
             ) => Downgraded::Dropped,
@@ -2388,7 +2397,9 @@ mod tests {
         // background tabs listen on, which only a client that asked is
         // sent; and what changed in a folder, which only a client that
         // asked for changes is sent; and a pane to switch to, which only
-        // a window that reads it is sent.
+        // a window that reads it is sent;
+        // and the question whether to trust a
+        // folder, which only a client that can answer it is asked.
         matches!(
             message,
             ServerMessage::Event(
@@ -2409,7 +2420,8 @@ mod tests {
                     | Event::Buffer {
                         update: BufferUpdate::Coloured { .. }
                             | BufferUpdate::Language { .. }
-                            | BufferUpdate::Reattach,
+                            | BufferUpdate::Reattach
+                            | BufferUpdate::Trust { .. },
                         ..
                     }
             )

@@ -1416,7 +1416,22 @@ impl Daemon {
         let place = line
             .map(|line| format!(" at line {line}"))
             .unwrap_or_default();
-        Ok(format!("Showing {}{place} in pane {pane}.", path.display()))
+        // Not started for it: the user hasn't trusted its folder to run
+        // its code, and only the user can.
+        let untrusted = (self.untrusted_root(buffer))
+            .map(|root| {
+                format!(
+                    " Its folder, {}, isn't trusted to run its language server, so it has none: \
+                     no diagnostics, definitions or completion. Only the user can trust it, with \
+                     :trust in their window.",
+                    visible(&root.display().to_string())
+                )
+            })
+            .unwrap_or_default();
+        Ok(format!(
+            "Showing {}{place} in pane {pane}.{untrusted}",
+            path.display()
+        ))
     }
 
     /// `explore`: opens a file explorer beside the chat, at the directory
@@ -2506,7 +2521,8 @@ impl Daemon {
             return match path {
                 Some(path) => format!(
                     "No language server says anything is wrong in {path}. If no editor has it open, \
-                     its server may not be running: open_file starts one."
+                     its server may not be running: open_file starts one, if the user has \
+                     trusted its folder."
                 ),
                 None => format!(
                     "No language server says anything is wrong in this chat's project, {}.",

@@ -10,6 +10,11 @@ impl Desk {
         if let Some(context) = self.link_shortcuts() {
             return context;
         }
+        if self.trust_asking() {
+            return crate::shortcuts::bindings::from_presses("Trust this folder", |press| {
+                self.describe_trust_key(press)
+            });
+        }
         if self.offer_asked() {
             return crate::shortcuts::bindings::from_presses(
                 "Install language features",

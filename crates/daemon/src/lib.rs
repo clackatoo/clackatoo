@@ -57,6 +57,7 @@ mod server;
 mod shell;
 mod signals;
 mod tool_images;
+mod trust;
 pub mod upgrade;
 pub mod web;
 mod workspaces;
@@ -72,6 +73,7 @@ pub use display::DisplayConfig;
 pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
+pub use trust::Trusting;
 
 /// Numbers every chat's turns from `from` from now on, not 0, so a turn's
 /// uid, which what's kept of it is keyed by, is never its index: for
@@ -118,6 +120,10 @@ pub struct DaemonConfig {
     /// The file the languages are listed in that the answer to an offer
     /// to install them was no, so they aren't offered again.
     pub declined: Option<PathBuf>,
+    /// Where the folders trusted to run their language servers are kept
+    /// (see [`Trusting`]): a server, which may run its project's code, is
+    /// started only for a folder the user has trusted.
+    pub trusted: Trusting,
     /// A file every message to and from language servers is written to,
     /// a line each, stamped with the time and the server, to see what was
     /// said. `None` writes none.
@@ -400,6 +406,8 @@ impl DaemonConfig {
     /// `clackatoo/browser` in the data directory, or for a snap, in its
     /// own folder), the web app as `daemon/web.toml` in [`config_dir`]
     /// says, keeping its devices in `clackatoo/web` in the data directory,
+    /// the folders trusted to run their language servers in `trusted` in
+    /// [`state_dir`] (or for this run only, with none),
     /// `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
     /// messages to (or else none), `$CLACKATOO_ACP_TRACE`: a directory to
     /// trace agents' messages to, a file each (or else none), and `$CLACKATOO_DISPLAY`: `off` to
@@ -462,6 +470,8 @@ impl DaemonConfig {
             languages: languages_dir(),
             servers: languages_dir().map(|dir| dir.with_file_name("servers")),
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
+            trusted: state_dir()
+                .map_or(Trusting::ThisRun, |dir| Trusting::File(dir.join("trusted"))),
             lsp_trace: non_empty("CLACKATOO_LSP_TRACE").map(PathBuf::from),
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,

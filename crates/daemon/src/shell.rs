@@ -277,9 +277,10 @@ pub(crate) fn marks(shell: &OsStr, dir: Option<&Path>) -> bool {
 }
 
 /// Whether `command` would have clackatoo arrange for something to run by
-/// itself, by running `clackatoo keep` or `clackatoo bg` anywhere in it:
-/// never kept running, nor run by an agent's tools. A guard against
-/// mistakes, not a boundary: a script can run them.
+/// itself, by running `clackatoo keep`, `clackatoo bg` or `clackatoo
+/// trust` anywhere in it: never kept running, nor run by an agent's
+/// tools. A guard against mistakes, not a boundary: a script can run
+/// them.
 pub(crate) fn arranges_running(command: &str) -> bool {
     let words: Vec<&str> = (command
         .split(|ch: char| ch.is_whitespace() || ";|&()`$\"'".contains(ch)))
@@ -287,7 +288,7 @@ pub(crate) fn arranges_running(command: &str) -> bool {
     .collect();
     (words.iter().enumerate()).any(|(at, word)| {
         word.rsplit('/').next() == Some("clackatoo")
-            && (words[at + 1..].iter()).any(|later| matches!(*later, "keep" | "bg"))
+            && (words[at + 1..].iter()).any(|later| matches!(*later, "keep" | "bg" | "trust"))
     })
 }
 
@@ -301,6 +302,8 @@ mod tests {
             "sleep 1; /usr/bin/clackatoo --remote x bg -- make"
         ));
         assert!(arranges_running("echo $(clackatoo keep 1)"));
+        assert!(arranges_running("clackatoo trust ."));
+        assert!(!arranges_running("clackatoo untrust ."));
         assert!(!arranges_running("clackatoo list"));
         assert!(!arranges_running("trail serve --keep"));
     }

@@ -1217,6 +1217,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Open in clackatoo from a file manager: folders as terminals, files in editors, in the window used last",
     },
+    News {
+        id: "trust-folders",
+        date: "2026-11-08",
+        lesson: "snippets",
+        what: "Language servers start only in folders you trust: the bar asks once per folder; :trust and :untrust change it",
+    },
 ];
 
 impl News {

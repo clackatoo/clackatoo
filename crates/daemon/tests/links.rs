@@ -112,6 +112,24 @@ impl World {
     /// language whose server is the fake language server, in a project
     /// whose root holds a file `project`.
     fn start_speaking(&self, host: &str) -> TestDaemon {
+        self.start_speaking_with(host, |_| {})
+    }
+
+    /// As [`start_speaking`](Self::start_speaking), but asking before a
+    /// folder's language server runs, as a daemon does in use.
+    fn start_asking(&self, host: &str) -> TestDaemon {
+        self.start_speaking_with(host, |config| {
+            config.trusted = clackatoo_daemon::Trusting::ThisRun;
+        })
+    }
+
+    /// As [`start_speaking`](Self::start_speaking), with the config
+    /// changed by `change` too.
+    fn start_speaking_with(
+        &self,
+        host: &str,
+        change: impl FnOnce(&mut DaemonConfig),
+    ) -> TestDaemon {
         let pack = self.host(host).join("languages/fake");
         std::fs::create_dir_all(&pack).unwrap();
         let server = format!(
@@ -127,7 +145,10 @@ impl World {
         )
         .unwrap();
         let languages = self.host(host).join("languages");
-        self.start_configured(host, false, |config| config.languages = Some(languages))
+        self.start_configured(host, false, |config| {
+            config.languages = Some(languages);
+            change(config);
+        })
     }
 
     /// As [`start_with`](Self::start_with), with `configure` changing the
@@ -161,6 +182,7 @@ impl World {
             languages: None,
             servers: None,
             declined: None,
+            trusted: clackatoo_daemon::Trusting::All,
             lsp_trace: None,
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
@@ -2153,6 +2175,54 @@ fn a_language_server_there_answers_each_window_here_under_its_own_number() {
     assert!(text.starts_with("# bad"), "{text}");
     assert_eq!(range, Some(("é ".len(), "é bad".len())), "in bytes");
     assert_eq!(answer(&mut other), (1, Answer::Nothing));
+}
+
+#[test]
+fn a_folder_there_is_asked_about_here_and_trusted_through_the_daemon_between() {
+    let mut pair = Pair::with(World::start_asking);
+    let app = pair.world.host("laptop").join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(app.join("project"), "").unwrap();
+    std::fs::write(app.join("a.fk"), "bad\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &app.join("a.fk"));
+    attach_to_buffer(&mut pair.window, buffer, 1);
+    // Asked here, about the folder there, before any server runs.
+    let root = app.canonicalize().unwrap().display().to_string();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "not asked");
+        match buffer_update(&mut pair.window, buffer) {
+            BufferUpdate::Trust { root: asked } => {
+                assert_eq!(asked, root);
+                break;
+            }
+            BufferUpdate::Diagnostics { diagnostics, .. } => {
+                assert!(diagnostics.is_empty(), "a server ran: {diagnostics:?}");
+            }
+            _ => {}
+        }
+    }
+    // Answered here, it's trusted there, by the buffer's number here.
+    let trust = Request::Trust {
+        action: clackatoo_protocol::TrustAction::Trust,
+        folder: None,
+        buffer: Some(buffer),
+    };
+    let said = pair.window.request(&trust).unwrap();
+    assert!(
+        matches!(&said, Response::Text(said) if said.starts_with("trusted ~/app")),
+        "{said:?}"
+    );
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no diagnostics came");
+        if let BufferUpdate::Diagnostics { diagnostics, .. } =
+            buffer_update(&mut pair.window, buffer)
+            && !diagnostics.is_empty()
+        {
+            break;
+        }
+    }
 }
 
 // --- Another machine's explorers, file operations and finder -----------

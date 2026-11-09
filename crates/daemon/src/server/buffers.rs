@@ -35,6 +35,9 @@ pub(super) struct BufferSlot {
     word: String,
     /// How its language server knows it, while it's open in one.
     pub(super) server: Option<Opened>,
+    /// The folder its language server would be started for, not trusted
+    /// to run it, as of the last look (see [`super::trust`]).
+    pub(super) untrusted: Option<PathBuf>,
     /// Whether it's being compared with its file's text in the index.
     pub(super) compared: bool,
     /// The git directory of the repository its file is in, once the
@@ -151,6 +154,7 @@ impl BufferSlot {
             parsed: false,
             word: String::new(),
             server: None,
+            untrusted: None,
             compared: false,
             git_dir: None,
             hunks: Hunks::new(),
@@ -391,6 +395,7 @@ impl Daemon {
         self.compare_buffer(id);
         self.watch_buffer(id);
         self.offer_install(token, id);
+        self.ask_trust(id, Some(token));
         Ok(Response::Done)
     }
 
@@ -423,6 +428,7 @@ impl Daemon {
         self.compare_buffer(id);
         self.send_snapshot(token, id, resume);
         self.offer_install(token, id);
+        self.ask_trust(id, Some(token));
         self.tell_if_changed_on_disk(token, id);
         self.tell_recovered(token, id);
         Ok(())

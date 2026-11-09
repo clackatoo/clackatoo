@@ -566,7 +566,7 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 
 | Tool | Does |
 |---|---|
-| `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. |
+| `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. In a folder you haven't [trusted](~clackatoo/reference/editor#trusted-folders), the file has no language server, and the agent is told so; only you can trust the folder. |
 | `run_in_terminal` | Opens a terminal beside the chat, running your own shell, and types a command at its first prompt. You can watch it, and type into it yourself. |
 | `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/window#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
 | `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output: the last 50 lines, unless it asks for up to 500. |
@@ -859,7 +859,7 @@ background command or a chat; sending, drafting, stopping, undoing or rewinding
 in another chat; keeping, rejecting or commenting on agents' changes in a
 review, or sending its comments; posting on a board; closing panes, tabs,
 workspaces, terminals or background tabs; pairing or revoking devices,
-unlocking pairing, `:keep`, connecting to or forgetting other machines,
+unlocking pairing, `:keep`, [trusting a folder](~clackatoo/reference/editor#trusted-folders), connecting to or forgetting other machines,
 forwarding ports, installing, upgrading, `:update` and `:reload`. While a chat
 has Control, what the config's Lua does runs no commands, makes or closes no
 panes and connects to nothing: what it does by itself, and for your keys too.

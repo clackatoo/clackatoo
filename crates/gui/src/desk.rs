@@ -139,6 +139,9 @@ enum Asked {
     BackgroundPreview(TabId),
     /// `:keep`, whose answer is said in the bar.
     Kept,
+    /// `:trust`, `:untrust`, `:trusted` or an answer to whether to trust
+    /// a folder, whose answer is said in the bar.
+    Trusted,
 }
 
 /// What the window attaches to again, or asks for again, when a newer
@@ -197,6 +200,7 @@ mod settings;
 mod shortcuts;
 mod starting;
 mod subagents;
+mod trust;
 mod typing;
 mod updating;
 
@@ -370,6 +374,12 @@ pub(crate) struct Desk {
     /// The daemon's offer to install a language, asked in the bar until
     /// the next key.
     offer: Option<offers::Offer>,
+    /// The daemon's questions whether to trust folders to run their
+    /// language servers, asked in the bar.
+    trust: trust::Questions,
+    /// Whether the command being run was typed with keys pressed now, not
+    /// a macro's, a binding's or the config's.
+    typed_now: bool,
     /// The devices asking to pair with the daemon's web app, asked about
     /// in the bar until a window answers.
     pairing: clackatoo_protocol::PairingState,
@@ -854,6 +864,9 @@ impl Desk {
         }
         if let Some(input) = &self.input {
             return self.typing_status(input);
+        }
+        if let Some(status) = self.trust_status() {
+            return status;
         }
         if let Some(status) = self.offer_status() {
             return status;
@@ -1732,9 +1745,10 @@ impl Desk {
                 }
                 true
             }
-            Some(Asker::Window(Asked::Forwarded | Asked::Kept)) => {
+            Some(Asker::Window(Asked::Forwarded | Asked::Kept | Asked::Trusted)) => {
                 match response {
-                    Response::Text(said) => self.say(said),
+                    // `:trusted` lists a folder a line.
+                    Response::Text(said) => self.say(said.replace('\n', "; ")),
                     Response::Error(err) => self.warn(err.to_string()),
                     _ => {}
                 }
@@ -1997,6 +2011,9 @@ impl Desk {
         let cancel = escape && !typing && !self.key_from_frame();
         if let Some(redraw) = self.hold_while_waiting(cancel, held) {
             return redraw;
+        }
+        if self.trust_key(press) {
+            return true;
         }
         let asked = self.offer_asked();
         if asked && self.offer_key(press) {
@@ -2842,6 +2859,7 @@ impl Desk {
             Command::Background(command) => self.background_command(command),
             Command::BackgroundStart(command) => self.start_in_background(command),
             Command::Keep(how) => self.keep_running(how),
+            Command::Trust { action, folder } => self.trust_command(action, folder),
             Command::Reload
             | Command::Set(_)
             | Command::Update(_)
@@ -2975,6 +2993,7 @@ mod tests {
     mod shortcuts;
     mod subagents;
     mod tasks;
+    mod trust;
     mod typing;
     mod view;
 

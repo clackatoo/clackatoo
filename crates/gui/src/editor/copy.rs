@@ -1146,6 +1146,7 @@ impl BufferCopy {
             // The window asks and says these, not the editor; and
             // `update` has taken what words are made of.
             BufferUpdate::Offer { .. }
+            | BufferUpdate::Trust { .. }
             | BufferUpdate::Notice(_)
             | BufferUpdate::ChangedOnDisk
             | BufferUpdate::Language { .. }

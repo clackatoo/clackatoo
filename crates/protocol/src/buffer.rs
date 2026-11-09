@@ -397,6 +397,17 @@ pub enum BufferUpdate {
         /// What the step kept, if it kept anything.
         state: Option<StepState>,
     },
+    /// The buffer's language has a language server, which may run the
+    /// code of the project it's started for, `root`, a folder not yet
+    /// trusted: the user is asked whether to trust it, and answers with
+    /// [`Request::Trust`](crate::Request::Trust). Until then its files get
+    /// no language server. Asked of each window once for each folder, and
+    /// only of a client of protocol 131 or later that isn't a device on
+    /// the web app.
+    Trust {
+        /// The folder, as the daemon's machine names it.
+        root: String,
+    },
 }
 
 /// What a buffer's language server does as you type, as it said when it

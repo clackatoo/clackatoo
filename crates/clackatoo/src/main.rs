@@ -163,6 +163,13 @@ enum Command {
     /// last: run again by itself as the daemon starts afresh, and with
     /// `always`, as it ends too; or with `off`, take the mark away.
     Keep(Keep),
+    /// Trust a folder to run its language servers, which may run its code,
+    /// as `:trust` does: those of its files open start now, and its files
+    /// are no longer asked about. A folder is trusted with all inside it.
+    Trust(Trust),
+    /// Take a folder's trust away: its language servers stop, and its
+    /// files get none, nor are asked about.
+    Untrust(Untrust),
     /// Send text to a terminal exactly as given, without pressing Enter.
     Send(Send),
     /// Print what a terminal is showing.
@@ -384,6 +391,27 @@ struct Keep {
     how: KeepHow,
 }
 
+#[derive(Debug, Args)]
+struct Trust {
+    /// The folder. A relative one is from the current directory.
+    #[arg(default_value = ".", conflicts_with = "list")]
+    folder: PathBuf,
+    /// List the folders trusted, and those not, instead.
+    #[arg(long)]
+    list: bool,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+#[derive(Debug, Args)]
+struct Untrust {
+    /// The folder. A relative one is from the current directory.
+    #[arg(default_value = ".")]
+    folder: PathBuf,
+    #[command(flatten)]
+    connection: Connection,
+}
+
 /// How `clackatoo keep` keeps a terminal running.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum KeepHow {
@@ -507,6 +535,19 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::New(new) => new_terminal(new),
         Command::Bg(bg) => start_in_background(bg),
         Command::Keep(keep) => keep_running(&keep),
+        Command::Trust(trust) => {
+            let action = if trust.list {
+                clackatoo_protocol::TrustAction::List
+            } else {
+                clackatoo_protocol::TrustAction::Trust
+            };
+            trust_folder(action, &trust.folder, &trust.connection)
+        }
+        Command::Untrust(untrust) => trust_folder(
+            clackatoo_protocol::TrustAction::Untrust,
+            &untrust.folder,
+            &untrust.connection,
+        ),
         Command::Edit(edit) => edit_file(edit),
         Command::Open(open) => open_paths(&open),
         Command::Language(command) => language::run(command),
@@ -858,6 +899,33 @@ fn keep_running(keep: &Keep) -> anyhow::Result<()> {
         KeepHow::Off => clackatoo_protocol::Keeping::Off,
     };
     match client.request(&Request::Keep { pane: pane.id, how })? {
+        Response::Text(said) => println!("{said}"),
+        Response::Error(err) => anyhow::bail!("{err}"),
+        other => anyhow::bail!("the daemon answered {other:?}"),
+    }
+    Ok(())
+}
+
+/// Trusts `folder` to run its language servers, takes that away, or lists
+/// the folders marked, as `action` says.
+fn trust_folder(
+    action: clackatoo_protocol::TrustAction,
+    folder: &Path,
+    connection: &Connection,
+) -> anyhow::Result<()> {
+    let folder = std::path::absolute(folder).context("could not read the current directory")?;
+    let mut client = connect(connection)?;
+    if !client.daemon_has(clackatoo_protocol::wire::TRUST) {
+        anyhow::bail!(
+            "the daemon is too old to ask before language servers run: update it, and run `clackatoo upgrade`"
+        );
+    }
+    let trust = Request::Trust {
+        action,
+        folder: Some(path_string(folder, "the folder")?),
+        buffer: None,
+    };
+    match client.request(&trust)? {
         Response::Text(said) => println!("{said}"),
         Response::Error(err) => anyhow::bail!("{err}"),
         other => anyhow::bail!("the daemon answered {other:?}"),
