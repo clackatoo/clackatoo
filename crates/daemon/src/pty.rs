@@ -142,9 +142,9 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
     rustix::termios::tcsetwinsize(&master, winsize(size))?;
 
     let mut command = Command::new(program.path);
-    // Never at the daemon's priority, and in its leaf: before the hook
-    // below, so it runs first.
-    let readied = crate::priority::ready_first(&mut command, program.leaf);
+    // Never at the daemon's priority: before the hook below, so it runs
+    // first.
+    crate::priority::ready_first(&mut command);
     command
         .args(program.args)
         .current_dir(program.cwd)
@@ -178,7 +178,8 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
         });
     }
     let child = command.spawn()?;
-    crate::priority::spawned(&child, program.leaf, readied);
+    // Into its leaf, off the daemon's loop, with what it starts by then.
+    crate::priority::started(child.id(), program.leaf);
     // The slave fds go with `command`. Close them now, because the master only
     // reports EOF once every copy of the slave is closed, and ours would keep
     // it open forever.

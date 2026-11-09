@@ -26225,7 +26225,13 @@ fn standing(pid: u32) -> (i32, u32, String) {
 /// This process's child whose command line has `word` in an argument,
 /// once it has started that program.
 fn child_running(word: &str) -> u32 {
-    let ours = std::process::id().to_string();
+    running_under(std::process::id(), word)
+}
+
+/// The child of process `parent` whose command line has `word` in an
+/// argument, once it has started that program.
+fn running_under(parent: u32, word: &str) -> u32 {
+    let ours = parent.to_string();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -26290,14 +26296,35 @@ fn the_daemons_children_start_at_the_usual_priority_in_leaves_of_their_own() {
         own_nice.max(0)
     };
 
+    // Moved off the daemon's loop, a moment after it starts.
+    let moved_to = |pid: u32, leaf: &str| {
+        let leaf = format!("/{scope}/{leaf}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let standing = standing(pid);
+            if standing.2.ends_with(&leaf) {
+                return standing;
+            }
+            assert!(Instant::now() < deadline, "pid {pid} is in {}", standing.2);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
     let terminal = spawn(&mut client, &["sleep", "4231.5"]);
-    let (nice, policy, cgroup) = standing(child_running("4231.5"));
+    let (nice, policy, _) = moved_to(child_running("4231.5"), "terminals");
     assert_eq!((nice, policy), (expected, 0), "terminal {terminal}");
-    assert!(cgroup.ends_with(&format!("/{scope}/terminals")), "{cgroup}");
+
+    // What a shell's rc file starts at once goes with it.
+    spawn(
+        &mut client,
+        &["sh", "-c", "sleep 4232.5 & exec sleep 4233.5"],
+    );
+    let shell = child_running("4233.5");
+    let started = running_under(shell, "4232.5");
+    moved_to(shell, "terminals");
+    moved_to(started, "terminals");
 
     start_chat(&mut client);
     let log = daemon.dir.path().join("agent.log");
-    let (nice, policy, cgroup) = standing(child_running(&log.to_string_lossy()));
+    let (nice, policy, _) = moved_to(child_running(&log.to_string_lossy()), "agents");
     assert_eq!((nice, policy), (expected, 0), "the agent");
-    assert!(cgroup.ends_with(&format!("/{scope}/agents")), "{cgroup}");
 }

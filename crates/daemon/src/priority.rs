@@ -41,15 +41,15 @@
 //! `SCHED_RESET_ON_FORK`, which starts every process and thread it starts
 //! at the usual scheduling and nice 0; and every program the daemon
 //! starts, from any thread, goes into its leaf: moved by the daemon as
-//! soon as it has started, or, for those with a hook of their own between
-//! fork and exec anyway (a terminal's, the browser's), moving itself
-//! there, and putting a raised nice back, before that hook (see `spawn`
-//! and `ready_first`). Those started before the daemon has leaves are
+//! soon as it has started (see `spawn` and `started`), with whatever it
+//! has started itself by then, as a shell's rc file starts programs at
+//! once (see `descendants`); what it starts after that starts in its leaf.
+//! Those with a hook of their own between fork and exec anyway (a
+//! terminal's, the browser's) also put a raised nice back themselves
+//! (see `ready_first`). Those started before the daemon has leaves are
 //! noted, and moved once it has. The daemon's moves are made off its
 //! loop, by a thread of their own, as one can take milliseconds (see
-//! `start_mover`). Anything a program starts before it's moved stays in
-//! the daemon's leaf, and only that: in practice nothing, as the move
-//! follows its start within milliseconds, before it's done starting up.
+//! `start_mover`).
 //!
 //! The scope ends with the user manager, which stops when the user's last
 //! login does, unless they linger (`loginctl enable-linger`). A daemon
@@ -74,7 +74,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{OwnedFd, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -629,9 +629,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // fork and exec makes std fork instead, which copies the daemon's page
 // tables, about 2 ms at 50 MiB resident and 20 ms at 300 MiB, against a
 // tenth of a millisecond. Their nice is put back by the kernel, as the
-// raised thread has `SCHED_RESET_ON_FORK`. Only programs that fork anyway,
-// for a hook of their own (a terminal's, the browser's), move themselves,
-// before that hook runs.
+// raised thread has `SCHED_RESET_ON_FORK`. Programs that fork anyway, for
+// a hook of their own (a terminal's, the browser's), also put it back
+// themselves (see `ready_first`), and are moved as the rest are: moving
+// themselves between fork and exec would hold up the thread starting
+// them for the move, as std waits for the exec.
 
 /// Starts `command` as a child of the daemon's, the quick way, and puts
 /// it in `leaf`: at once, or once the daemon has leaves.
@@ -646,33 +648,13 @@ pub(crate) fn spawn(command: &mut Command, leaf: Leaf) -> io::Result<Child> {
 }
 
 /// Readies `command`, which has a hook of its own between fork and exec,
-/// to start in `leaf`, and never at the raised priority of the thread
-/// starting it: called before its own hook is added, so this one runs
-/// first, before that hook moves any fds about. Returns what [`spawned`]
-/// is to be told once it has.
-pub(crate) fn ready_first(command: &mut Command, leaf: Leaf) -> Readied {
-    let procs = match &*lock(&PLACE) {
-        Place::Leaves(leaves) => Some(leaves.procs(leaf).as_raw_fd()),
-        Place::Pending(_) => None,
-        Place::Nowhere if RAISED.load(Ordering::SeqCst) => None,
-        Place::Nowhere => return Readied(false),
-    };
-    ready(command, procs);
-    Readied(procs.is_some())
-}
-
-/// Whether a program readied by [`ready_first`] moves itself into its
-/// leaf as it starts.
-#[derive(Clone, Copy, Debug)]
-#[must_use]
-pub(crate) struct Readied(bool);
-
-/// Says that `child`, readied by [`ready_first`] as `readied`, has
-/// started in `leaf`: one that didn't move itself is moved once there
-/// are leaves.
-pub(crate) fn spawned(child: &Child, leaf: Leaf, readied: Readied) {
-    if !readied.0 {
-        started(child.id(), leaf);
+/// so std forks for it anyway, never to start at the raised priority of
+/// the thread starting it, as the kernel sees to already: called before
+/// its own hook is added, so this one runs first. Once it has started,
+/// [`started`] puts it in its leaf.
+pub(crate) fn ready_first(command: &mut Command) {
+    if RAISED.load(Ordering::SeqCst) {
+        ready(command);
     }
 }
 
@@ -723,17 +705,77 @@ impl Movers {
     }
 
     /// Moves `early` into its leaf, if it's still the program that
-    /// started then.
+    /// started then, with what it has started by now, as a shell's rc
+    /// file starts programs before its shell is moved (see
+    /// [`descendants`]). What it starts from now on starts there.
     fn move_in(&self, early: &Early) -> io::Result<()> {
-        if early.since.is_none() || start_time(early.pid) != early.since {
+        let Some(since) = early.since else {
+            return Ok(());
+        };
+        if start_time(early.pid) != Some(since) {
             return Ok(());
         }
         let procs = match early.leaf {
             Leaf::Terminals => &self.terminals,
             Leaf::Agents => &self.agents,
         };
-        write_pid(procs, early.pid)
+        write_pid(procs, early.pid)?;
+        for descendant in descendants(Path::new("/proc"), early.pid, since) {
+            if let Err(err) = write_pid(procs, descendant) {
+                log::debug!("pid {descendant} couldn't follow pid {}: {err}", early.pid);
+            }
+        }
+        Ok(())
     }
+}
+
+/// The most of a program's descendants moved with it, and how far down.
+const MOST_DESCENDANTS: usize = 256;
+const DEEPEST: usize = 8;
+
+/// The descendants of `pid`, which started at `since`, as `proc` (a
+/// `/proc`) has them now: its children, from each of its threads'
+/// `children`, theirs, and so on, [`DEEPEST`] down, [`MOST_DESCENDANTS`]
+/// at most. Each started no sooner than its parent, so a pid since taken
+/// by another program is passed over, with what's below it.
+fn descendants(proc: &Path, pid: Pid, since: u64) -> Vec<Pid> {
+    let mut found = Vec::new();
+    let mut level = vec![(pid, since)];
+    for _ in 0..DEEPEST {
+        let mut next = Vec::new();
+        for (parent, parent_since) in level {
+            let Ok(tasks) = fs::read_dir(proc.join(parent.to_string()).join("task")) else {
+                continue;
+            };
+            for task in tasks.flatten() {
+                let Ok(children) = fs::read_to_string(task.path().join("children")) else {
+                    continue;
+                };
+                for child in children.split_whitespace() {
+                    let Some(child) = child.parse().ok().and_then(Pid::from_raw) else {
+                        continue;
+                    };
+                    let stat = fs::read_to_string(proc.join(child.to_string()).join("stat"));
+                    let Some(child_since) = stat.ok().as_deref().and_then(start_time_in) else {
+                        continue;
+                    };
+                    if child_since < parent_since || found.contains(&child) {
+                        continue;
+                    }
+                    if found.len() == MOST_DESCENDANTS {
+                        return found;
+                    }
+                    found.push(child);
+                    next.push((child, child_since));
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    found
 }
 
 /// Where the moves the daemon hands its mover go: see [`start_mover`].
@@ -791,27 +833,17 @@ fn move_later(early: Early) {
     }
 }
 
-/// Has `command`, as it starts, put its nice back to 0 if it was raised,
-/// and write `0` to `procs`, a leaf's `cgroup.procs`, if given, which
-/// moves it there.
-fn ready(command: &mut Command, procs: Option<RawFd>) {
+/// Has `command`, as it starts, put its nice back to 0 if it was raised.
+fn ready(command: &mut Command) {
     // SAFETY: the closure runs in the child between fork and exec, where
-    // only async-signal-safe operations are allowed. It makes at most
-    // three raw system calls through rustix, getpriority, setpriority and
-    // write, with no allocation, locking or shared state. The fd it
-    // writes to is never closed: `PLACE` keeps it, once set, for the life
-    // of the process, at 64 or above, out of the way of the fds hooks
-    // after it put in place.
+    // only async-signal-safe operations are allowed. It makes at most two
+    // raw system calls through rustix, getpriority and setpriority, with
+    // no allocation, locking or shared state.
     unsafe {
-        command.pre_exec(move || {
+        command.pre_exec(|| {
             // A nice of 0 or more is the user's choice, kept.
             if rustix::process::getpriority_process(None).is_ok_and(|nice| nice < 0) {
                 let _ = rustix::process::setpriority_process(None, 0);
-            }
-            if let Some(procs) = procs {
-                // Failing leaves it with the daemon, rather than not
-                // starting it at all.
-                let _ = rustix::io::write(BorrowedFd::borrow_raw(procs), b"0");
             }
             Ok(())
         });
@@ -1355,8 +1387,7 @@ fn unexpected(what: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
 
     #[test]
     fn the_cgroup_is_the_unified_trees() {
@@ -1473,9 +1504,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_added_to_a_program_while_the_daemon_is_as_it_always_was() {
+    fn nothing_is_noted_while_the_daemon_is_as_it_always_was() {
         // Tests never begin: their daemons are as they always were.
-        assert!(!ready_first(&mut Command::new("true"), Leaf::Terminals).0);
+        started(std::process::id(), Leaf::Terminals);
+        assert!(matches!(*lock(&PLACE), Place::Nowhere));
     }
 
     /// The leaves are kept out of the way of the fds a child's own hook
@@ -1530,29 +1562,16 @@ mod tests {
         );
     }
 
-    /// The hook a child runs between fork and exec, with a plain file in
-    /// place of a leaf's `cgroup.procs`: it writes `0` to it, and starts
-    /// at the usual scheduling, at no higher a priority than its parent.
+    /// The hook a terminal's or the browser's program runs between fork
+    /// and exec: it starts at the usual scheduling, at no higher a
+    /// priority than its parent.
     #[test]
-    fn a_child_moves_itself_into_its_leaf_and_never_starts_raised() {
-        let dir = tempfile::tempdir().unwrap();
-        let procs = dir.path().join("cgroup.procs");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&procs)
-            .unwrap();
+    fn a_child_never_starts_raised() {
         let mut command = Command::new("cat");
         command.arg("/proc/self/stat");
-        ready(&mut command, Some(file.as_raw_fd()));
+        ready(&mut command);
         let output = command.output().unwrap();
         assert!(output.status.success());
-        let mut written = String::new();
-        File::open(&procs)
-            .unwrap()
-            .read_to_string(&mut written)
-            .unwrap();
-        assert_eq!(written, "0");
         let stat = String::from_utf8(output.stdout).unwrap();
         let fields: Vec<&str> = stat
             .rsplit_once(')')
@@ -1565,5 +1584,45 @@ mod tests {
         let ours = rustix::process::getpriority_process(None).unwrap();
         assert_eq!(nice, ours.max(0));
         assert_eq!(policy, 0, "SCHED_OTHER");
+    }
+
+    /// A process in a fake `/proc`, started at `since`, whose thread
+    /// `task` has `children`.
+    fn fake(proc: &Path, pid: i32, since: u64, tasks: &[(i32, &str)]) {
+        let dir = proc.join(pid.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        let fields = "S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0";
+        fs::write(
+            dir.join("stat"),
+            format!("{pid} (sh) {fields} {since} 1000 10"),
+        )
+        .unwrap();
+        for (task, children) in tasks {
+            let task = dir.join("task").join(task.to_string());
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("children"), children).unwrap();
+        }
+    }
+
+    /// What a shell's rc file starts before the shell is moved goes with
+    /// it, from every one of its threads, as far down as it goes, but
+    /// never a pid since taken by a program older than its parent.
+    #[test]
+    fn a_programs_descendants_follow_it_but_not_a_reused_pid() {
+        let proc = tempfile::tempdir().unwrap();
+        let proc = proc.path();
+        let pid = |raw: i32| Pid::from_raw(raw).unwrap();
+        fake(proc, 100, 50, &[(100, "101 102 "), (105, "104")]);
+        fake(proc, 101, 60, &[(101, "103")]);
+        // Older than the shell: its pid was reused.
+        fake(proc, 102, 10, &[(102, "106")]);
+        fake(proc, 103, 70, &[]);
+        fake(proc, 104, 55, &[]);
+        fake(proc, 106, 80, &[]);
+        let mut found = descendants(proc, pid(100), 50);
+        found.sort_by_key(|pid| pid.as_raw_pid());
+        assert_eq!(found, vec![pid(101), pid(103), pid(104)]);
+        // Gone: nothing.
+        assert!(descendants(proc, pid(999), 50).is_empty());
     }
 }
