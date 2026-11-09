@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026.11.25 (2026-11-09)
+
+### Features
+
+- **images:** one image layer for every pane (CLACKA-239 part 1) (c5c39f03)
+
+### Fixes
+
+- **images:** a copy that can't be made or kept is made once, never in a loop (f246a0f4)
+- **images:** pin a picture only while it's shown, and keep the limits hard (530279ef)
+- **images:** a file that hangs holds nothing up (2d887a92)
+- **images:** Markdown's images are read only within its project, never through a link (e0f4c616)
+- **images:** Markdown asks for at most 64 images, near the view, each once (c18d0414)
+- **images:** a daemon passing a chat on gets its thumbnails' pixels (f3bb1af5)
+- **images:** what's lent to another machine's daemon is its alone, images too (ab20dadd)
+- **images:** a client's thumbnail is its pixels, never which image it is (266ade47)
+- **images:** a daemon starting afresh takes away images a handover left (20a9f00e)
+- **images:** a chat's original is written in base64 on the images' thread (952bc0df)
+- **images:** a JPEG too big to decode within the limit isn't decoded (e2ecab8a)
+- **images:** an image whose decoding panics fails, and nothing waits on it (8f2c9492)
+- **images:** a window's images are its daemon's, and checked against their IDs (4dc77699)
+- **images:** only so many chats' originals are written in base64 at once (bdf32a61)
+
 ## 2026.11.24 (2026-11-09)
 
 ### Features
