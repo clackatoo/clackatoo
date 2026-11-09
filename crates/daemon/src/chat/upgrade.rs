@@ -177,8 +177,8 @@ impl HostedChat {
     /// on: the background tasks `stopped`, and the turn it had taken by
     /// itself, if the upgrade cut one off. One notice, once: it starts no
     /// new chain of messages, but its turn counts as one a notice started
-    /// (see `Daemon::pass_upgrade_notice`). Nothing is told a chat whose
-    /// user had asked it to stop. The daemon may have restarted as the
+    /// (see `Daemon::pass_upgrade_notice`). A chat whose user had stopped
+    /// it holds it until they write there. The daemon may have restarted as the
     /// same build, if the next one failed to start, so it says restarted.
     /// Returns whether there was anything to tell.
     pub(crate) fn tell_upgrade(&mut self, stopped: &[String]) -> bool {

@@ -1437,15 +1437,15 @@ impl Daemon {
                     log::info!("chat {id}: its turn the upgrade cut off can't go on");
                 }
             }
-            // A turn the user had asked to stop isn't told of, nor what it
-            // ran: the tasks show lost all the same.
+            // One the user had stopped stays held for them: what the
+            // upgrade stopped is told it all the same, but waits, as other
+            // agents' messages do, until they write there.
             let asked_to_stop =
                 (standing.as_ref()).is_some_and(|standing| standing.stopped.contains(&id.0));
-            // And it stays held for the user, as they stopped it.
             if asked_to_stop {
                 chat.hold_as_stopped();
             }
-            if !told && !asked_to_stop && chat.tell_upgrade(&stopped) {
+            if !told && chat.tell_upgrade(&stopped) {
                 log::info!(
                     "chat {id}: told what the upgrade stopped ({} background tasks)",
                     stopped.len()

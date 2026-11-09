@@ -3920,9 +3920,11 @@ mod tests {
     }
 
     /// A turn the user had asked to stop as the upgrade came isn't told
-    /// of after, nor what it ran: its tasks show lost all the same.
+    /// of at once: its tasks show lost, and the notice of what the upgrade
+    /// stopped waits for the user, then goes after their message, so the
+    /// agent learns its processes were ended (CLACKA-220).
     #[test]
-    fn a_turn_the_user_asked_to_stop_isnt_told_of_after_an_upgrade() {
+    fn a_turn_the_user_asked_to_stop_is_told_of_after_an_upgrade_once_they_write() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = building(&mut daemon, 2, a);
@@ -3941,6 +3943,18 @@ mod tests {
         assert_eq!(
             kid.node().tasks[0].state,
             clackatoo_protocol::AgentTaskState::Lost
+        );
+        assert!(kid.relations().inbox[0].is_upgrade_notice(), "held");
+        let chat = resumed.chat(b).unwrap();
+        chat.act(clackatoo_protocol::ChatAction::Send("go on".to_owned()));
+        answers(&mut resumed, b, "going on");
+        relay(&mut resumed);
+        let turns = &resumed.chat_ref(b).unwrap().node().turns;
+        assert_eq!(turns.len(), 3, "{turns:#?}");
+        assert!(
+            turns[2].prompt.contains("npm run dev"),
+            "{:?}",
+            turns[2].prompt
         );
     }
 
