@@ -83,11 +83,12 @@ pub(super) fn encode(press: &KeyPress<'_>, flags: u8, out: &mut Vec<u8>) {
         Code::Functional(number, trailer) => {
             if !all && value == 1 {
                 // Kept as they were, as the module's documentation says.
-                let kept: &[u8] = match number {
+                // By its number and `u`: F3 is 13 too, as `CSI 13 ~`.
+                let kept: &[u8] = match (number, trailer) {
                     // Enter, on the keypad too.
-                    13 | 57414 => b"\r",
-                    9 => b"\t",
-                    127 => b"\x7f",
+                    (13 | 57414, 'u') => b"\r",
+                    (9, 'u') => b"\t",
+                    (127, 'u') => b"\x7f",
                     _ => &[],
                 };
                 if !kept.is_empty() {
