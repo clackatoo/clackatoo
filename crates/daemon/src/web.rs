@@ -47,7 +47,7 @@ pub use auth::hash_password;
 pub use config::{WebConfig, WebMode};
 
 pub(crate) use auth::Refused;
-pub(crate) use conn::{Filled, HttpConn, Peer, Read, State, WebLink, Who};
+pub(crate) use conn::{Filled, HttpConn, Peer, Read, Standing, State, WebLink, Who};
 pub(crate) use http::{Method, Request, Response};
 pub(crate) use push::payload as push_payload;
 pub(crate) use socket::{Stream, Transport};
@@ -545,10 +545,12 @@ impl Web {
         } else {
             None
         };
-        conn.authenticated = self.verified(request, login.as_deref());
-        if conn.authenticated {
-            conn.favoured = true;
+        if self.verified(request, login.as_deref()) {
+            conn.standing = Standing::Authenticated;
             self.authenticated(conn.who.clone(), now);
+        } else if conn.standing == Standing::Authenticated {
+            // Whom it's from authenticated just now.
+            conn.standing = Standing::Favoured;
         }
         if !auth::host_allowed(
             self.config.origin.as_deref(),

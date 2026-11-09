@@ -15,7 +15,7 @@ use clackatoo_protocol::{frame, wire};
 use mio::{Interest, Token};
 
 use super::{Broadcast, Client, Daemon, Link, Source, WEB};
-use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web, Who};
+use crate::web::{self, Filled, Handled, HttpConn, Read, Standing, State, Web, Who};
 
 /// The most HTTP connections open at once, WebSocket connections apart:
 /// past it, one is closed for a new one, from whoever has the most open
@@ -204,7 +204,9 @@ impl Daemon {
             let now = Instant::now();
             // Reached over HTTPS either way: TLS of its own, or Tailscale's.
             let mut conn = HttpConn::new(transport, peer, now, web.config.head_wait, true);
-            conn.favoured = favoured;
+            if favoured {
+                conn.standing = Standing::Favoured;
+            }
             let entry = self.sources.vacant_entry();
             let token = Token(entry.key());
             if let Err(err) =
@@ -288,8 +290,8 @@ impl Daemon {
                 unknown += 1;
                 older(&mut oldest[3]);
             }
-            if !conn.authenticated {
-                if conn.favoured {
+            if conn.standing != Standing::Authenticated {
+                if conn.standing == Standing::Favoured {
                     older(&mut oldest[2]);
                 } else {
                     strangers += 1;
@@ -430,7 +432,11 @@ impl Daemon {
                 let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
                     return;
                 };
-                conn.favoured = favoured;
+                conn.standing = if favoured {
+                    Standing::Favoured
+                } else {
+                    Standing::Stranger
+                };
                 if crowded {
                     let refused = web::Response::error(429, "too many connections are open");
                     conn.respond_and_close(&refused, now);

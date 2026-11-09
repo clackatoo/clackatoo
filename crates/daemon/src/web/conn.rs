@@ -107,6 +107,18 @@ pub(crate) enum Who {
     Unknown,
 }
 
+/// Whether a connection is a device's, as room is made for others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// Nothing says it's a device's.
+    Stranger,
+    /// Whom it's from had a request carry a device's token lately: it may
+    /// take a slot kept for devices.
+    Favoured,
+    /// Its last request carried the token of a device let in.
+    Authenticated,
+}
+
 /// Where a connection comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Peer {
@@ -160,11 +172,8 @@ pub(crate) struct HttpConn {
     pub(crate) peer: Peer,
     /// Whom it's counted as from.
     pub(crate) who: Who,
-    /// Its last request carried the token of a device let in.
-    pub(crate) authenticated: bool,
-    /// Whom it's from had a request authenticated lately: it may take a
-    /// slot kept for such.
-    pub(crate) favoured: bool,
+    /// Whether it's a device's, or may be, as room is made for others.
+    pub(crate) standing: Standing,
     /// Since when answers have waited to be written, and how much of them
     /// has been since.
     waiting: Option<(Instant, u64)>,
@@ -223,8 +232,7 @@ impl HttpConn {
             transport,
             peer,
             who: peer.group().map_or(Who::Unknown, Who::Address),
-            authenticated: false,
-            favoured: false,
+            standing: Standing::Stranger,
             waiting: None,
             input: Vec::new(),
             output: Vec::new(),
