@@ -2080,6 +2080,7 @@ pub(super) mod tests {
             logind: None,
             history: None,
             notes: Vec::new(),
+            own_config: None,
             keep_wait: crate::DEFAULT_KEEP_WAIT,
             images: crate::ImageLimits::default(),
             hints: crate::HintRules::default(),

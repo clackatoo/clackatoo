@@ -1,16 +1,18 @@
 //! The daemon's options, declared once: what each holds, its default, and
 //! where it's listed. Config sets them as `daemon.GROUP.NAME`, as
-//! `daemon.web.mode = "tailscale"`, each read as the daemon starts or
-//! upgrades.
+//! `daemon.web.mode = "tailscale"`. Those marked `live` change as the
+//! daemon runs, as its config is run again, for what it starts from then
+//! on; the rest are read as the daemon starts or upgrades.
 
 use crate::schema::{Category, Info, Kind, Scope, Value};
 
 /// Declares the daemon's options: [`ALL`], and [`default_of`]. Each is
-/// written as `"group.name" ("description") in Category: Kind = default`.
+/// written as `"group.name" ("description") in Category: Kind = default`,
+/// with `live` after the category for one that changes as the daemon runs.
 macro_rules! options {
     ($(
         $(#[doc = $doc:literal])+
-        $name:literal ($description:literal) in $category:ident: $kind:expr => $default:expr;
+        $name:literal ($description:literal) in $category:ident $($live:ident)?: $kind:expr => $default:expr;
     )+) => {
         /// Every option the daemon has, in the order they're listed.
         pub const ALL: &[Info] = &[$(
@@ -21,8 +23,7 @@ macro_rules! options {
                 description: $description,
                 category: Category::$category,
                 scope: Scope::Daemon,
-                // Read as the daemon starts or upgrades.
-                restart: true,
+                restart: options!(@restart $($live)?),
                 local: false,
             },
         )+];
@@ -36,6 +37,9 @@ macro_rules! options {
             }
         }
     };
+    // Read only as the daemon starts or upgrades, unless it's `live`.
+    (@restart) => { true };
+    (@restart live) => { false };
 }
 
 /// A whole number from `min` to `max`.
@@ -66,24 +70,24 @@ options! {
     /// (see [`crate::priority`]).
     "machine.priority" ("Run the daemon ahead of other programs") in Machine: Kind::Bool => Value::Bool(true);
     /// Whether agents go on through an upgrade, with all they run.
-    "upgrade.keep_agents" ("Keep agents running through upgrades") in Agents: Kind::Bool => Value::Bool(true);
+    "upgrade.keep_agents" ("Keep agents running through upgrades") in Agents live:Kind::Bool => Value::Bool(true);
     /// The most chats agents started that may work at once, in all.
-    "subagents.working" ("Chats agents started working at once, in all") in Subagents: number(1, 64) => Value::Number(16);
+    "subagents.working" ("Chats agents started working at once, in all") in Subagents live:number(1, 64) => Value::Number(16);
     /// The Subagents setting a chat of the user's starts with: at most
     /// `subagents.working`.
-    "subagents.default" ("A new chat's Subagents setting") in Subagents: number(0, 64) => Value::Number(6);
+    "subagents.default" ("A new chat's Subagents setting") in Subagents live:number(0, 64) => Value::Number(6);
     /// The most chats agents started open under one of the user's.
-    "subagents.open" ("Chats agents started open under one chat") in Subagents: number(1, 256) => Value::Number(32);
+    "subagents.open" ("Chats agents started open under one chat") in Subagents live:number(1, 256) => Value::Number(32);
     /// The most chats agents start under one of the user's between two of
     /// the user's messages there.
-    "subagents.started" ("Chats agents start under one, between your messages") in Subagents: number(1, 10_000) => Value::Number(128);
+    "subagents.started" ("Chats agents start under one, between your messages") in Subagents live:number(1, 10_000) => Value::Number(128);
     /// How deep chats agents start go.
-    "subagents.depth" ("How deep chats agents start go") in Subagents: number(1, crate::agents::DEEPEST_SUBAGENTS as u32) => Value::Number(3);
+    "subagents.depth" ("How deep chats agents start go") in Subagents live:number(1, crate::agents::DEEPEST_SUBAGENTS as u32) => Value::Number(3);
     /// The longest chain of messages between agents.
-    "subagents.hops" ("The longest chain of messages between agents") in Subagents: number(1, 64) => Value::Number(6);
+    "subagents.hops" ("The longest chain of messages between agents") in Subagents live:number(1, 64) => Value::Number(6);
     /// The most turns notices of chats finishing start under one of the
     /// user's, between two of the user's messages there.
-    "subagents.notice_turns" ("Turns notices start, between your messages") in Subagents: number(1, 10_000) => Value::Number(100);
+    "subagents.notice_turns" ("Turns notices start, between your messages") in Subagents live:number(1, 10_000) => Value::Number(100);
     /// How phones and browsers reach the web app, if they do.
     "web.mode" ("How phones and browsers reach the web app") in Web: Kind::Choice(WEB_MODES) => Value::Choice("off");
     /// With tailscale: the unix socket `tailscale serve` connects to.
@@ -113,10 +117,10 @@ options! {
     /// Whether terminals' history is kept across restarts.
     "history.keep" ("Keep terminals' history across restarts") in Kept: Kind::Bool => Value::Bool(true);
     /// The most lines kept of each terminal.
-    "history.lines" ("Lines kept of each terminal") in Kept: number(1, 1_000_000) => Value::Number(10_000);
+    "history.lines" ("Lines kept of each terminal") in Kept live:number(1, 1_000_000) => Value::Number(10_000);
     /// How often, in seconds, the history of terminals that changed is
     /// written.
-    "history.every" ("Seconds between writes of terminals' history") in Kept: number(1, 86_400) => Value::Number(30);
+    "history.every" ("Seconds between writes of terminals' history") in Kept live:number(1, 86_400) => Value::Number(30);
     /// How many MiB of images each terminal, chat, picture pane or buffer
     /// may hold.
     "images.terminal_mb" ("MiB of images each terminal or chat may hold") in Kept: number(1, 1 << 20) => Value::Number(64);
@@ -124,10 +128,10 @@ options! {
     "images.total_mb" ("MiB of images all of them may hold") in Kept: number(1, 1 << 20) => Value::Number(256);
     /// How many seconds a command must have run for its end to be told
     /// in a notification while no one is looking; 0 tells none.
-    "terminals.notify_after" ("Seconds a command runs before its end is told") in DaemonTerminals: Kind::Number { min: 1, max: 86_400, or_zero: true } => Value::Number(10);
+    "terminals.notify_after" ("Seconds a command runs before its end is told") in DaemonTerminals live:Kind::Number { min: 1, max: 86_400, or_zero: true } => Value::Number(10);
     /// Whether variation selector 16 widens an emoji to two columns, in
     /// terminals started from then on (see [`clackatoo_term::Widths`]).
-    "terminals.vs16" ("Variation selector 16 widens an emoji") in DaemonTerminals: Kind::Bool => Value::Bool(true);
+    "terminals.vs16" ("Variation selector 16 widens an emoji") in DaemonTerminals live:Kind::Bool => Value::Bool(true);
     /// Whether lines a program marks `hide` (OSC 3008) are masked until
     /// the user asks to see them, or shown.
     "hints.hide" ("Lines programs mark hidden: mask or show") in DaemonTerminals: Kind::Choice(HIDE_RULES) => Value::Choice("mask");

@@ -31,8 +31,12 @@
 use crate::options::Window as _;
 use std::fmt::Write as _;
 
-use super::{Info, Kind, Value, lookup};
+use super::{Info, Value, lookup};
 use crate::keymap::{Chord, KeyMode, display, parse_keys, parse_modes};
+use clackatoo_daemon::settings::literal::{
+    RESERVED as KEPT_WORDS, Read as Literal, bare as is_name, end as literal_end, long_bracket,
+    of_value as literal, quoted, unquoted,
+};
 
 /// What a new file starts with.
 pub(crate) const HEADER: &str = "\
@@ -473,200 +477,9 @@ fn maps(trimmed: &str) -> Option<Line> {
     })
 }
 
-/// Where the value at the start of `text` ends: after a string's closing
-/// quote, a table's `}`, or a word.
-fn literal_end(text: &str) -> Option<usize> {
-    if let Some(inside) = text.strip_prefix('"') {
-        let mut escaped = false;
-        for (at, ch) in inside.char_indices() {
-            match ch {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => return Some(at + 2),
-                _ => {}
-            }
-        }
-        return None;
-    }
-    if text.starts_with('{') {
-        return text.find('}').map(|at| at + 1);
-    }
-    Some(text.find(char::is_whitespace).unwrap_or(text.len()))
-}
-
-/// If `after`, what follows a comment's `--`, opens a block comment, as
-/// `[[` or `[==[` does: how long its opening is, and what ends it.
-fn long_bracket(after: &str) -> Option<(usize, String)> {
-    let rest = after.strip_prefix('[')?;
-    let level = rest.bytes().take_while(|&byte| byte == b'=').count();
-    rest[level..]
-        .starts_with('[')
-        .then(|| (level + 2, format!("]{}]", "=".repeat(level))))
-}
-
-/// The words Luau keeps for itself, which `client.opt.WORD` can't name:
-/// a line with one would stop the whole file from loading.
-const KEPT_WORDS: &[&str] = &[
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
-    "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
-];
-
-/// Whether `name` could be an option's: a Lua name, as Luau reads
-/// `client.opt.NAME`, and none of the words it keeps.
-fn is_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && !KEPT_WORDS.contains(&name)
-}
-
-/// `value` written as Lua, as the option reads it back.
-fn literal(value: &Value) -> String {
-    match value {
-        Value::Bool(on) => on.to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::Decimal(number) => number.to_string(),
-        Value::List(numbers) if numbers.is_empty() => "{}".into(),
-        Value::List(numbers) => {
-            let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
-            format!("{{ {} }}", numbers.join(", "))
-        }
-        Value::Choice(word) => quoted(word),
-        Value::Text(text) => quoted(text),
-    }
-}
-
-/// `text` as a Lua string: a backslash and a quote escaped, and any
-/// control character, which no option's text has, written as the `\ddd`
-/// of each of its bytes, so no text can end the line.
-fn quoted(text: &str) -> String {
-    let mut quoted = String::from('"');
-    for ch in text.chars() {
-        match ch {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            ch if ch.is_control() => {
-                for byte in ch.encode_utf8(&mut [0; 4]).bytes() {
-                    write!(quoted, "\\{byte:03}").expect("writing to a String");
-                }
-            }
-            ch => quoted.push(ch),
-        }
-    }
-    quoted.push('"');
-    quoted
-}
-
-/// A value, as the file writes it: what [`literal`] writes, and no more.
-#[derive(Debug, PartialEq)]
-enum Literal {
-    Bool(bool),
-    Whole(u32),
-    /// A number with a fraction, as its text.
-    Fraction(String),
-    Text(String),
-    Numbers(Vec<u32>),
-}
-
-impl Literal {
-    fn read(text: &str) -> Option<Self> {
-        match text {
-            "true" => return Some(Self::Bool(true)),
-            "false" => return Some(Self::Bool(false)),
-            _ => {}
-        }
-        if let Some(inside) = text
-            .strip_prefix('{')
-            .and_then(|text| text.strip_suffix('}'))
-        {
-            let inside = inside.trim();
-            if inside.is_empty() {
-                return Some(Self::Numbers(Vec::new()));
-            }
-            let inside = inside.strip_suffix(',').unwrap_or(inside);
-            return (inside.split(','))
-                .map(|number| whole(number.trim()))
-                .collect::<Option<_>>()
-                .map(Self::Numbers);
-        }
-        if let Some(inside) = text
-            .strip_prefix('"')
-            .and_then(|text| text.strip_suffix('"'))
-        {
-            return unquoted(inside).map(Self::Text);
-        }
-        if let Some(number) = whole(text) {
-            return Some(Self::Whole(number));
-        }
-        let (before, after) = text.split_once('.')?;
-        let digits =
-            |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-        (digits(before) && digits(after)).then(|| Self::Fraction(text.to_owned()))
-    }
-
-    /// The value it is for `info`, as `client.opt` takes it, if it's one
-    /// the option can hold.
-    fn value_for(&self, info: &Info) -> Option<Value> {
-        let value = match (self, info.kind) {
-            (Self::Bool(on), Kind::Bool) => Value::Bool(*on),
-            (Self::Whole(number), Kind::Number { .. }) => Value::Number(*number),
-            (Self::Whole(number), Kind::Decimal { .. }) => {
-                Value::Decimal(super::Decimal::whole(*number))
-            }
-            (Self::Fraction(text), Kind::Decimal { .. }) => {
-                return info.parse(text).ok();
-            }
-            (Self::Numbers(numbers), Kind::List { .. }) => Value::List(numbers.clone()),
-            (Self::Text(text), Kind::Choice(_) | Kind::Text) => return info.parse(text).ok(),
-            _ => return None,
-        };
-        info.check(&value).ok().map(|()| value)
-    }
-}
-
-/// A whole number, as Lua writes one, that an option could hold.
-fn whole(text: &str) -> Option<u32> {
-    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    digits.then(|| text.parse().ok()).flatten()
-}
-
-/// The text inside a Lua string's quotes, as [`quoted`] wrote it.
-fn unquoted(inside: &str) -> Option<String> {
-    let mut bytes = Vec::new();
-    let mut chars = inside.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => match chars.next()? {
-                escaped @ ('\\' | '"') => bytes.push(escaped as u8),
-                digit @ '0'..='9' => {
-                    // Up to three digits, as Lua reads them.
-                    let mut byte = u32::from(digit) - u32::from('0');
-                    for _ in 0..2 {
-                        match chars.peek() {
-                            Some(&next @ '0'..='9') => {
-                                byte = byte * 10 + (u32::from(next) - u32::from('0'));
-                                chars.next();
-                            }
-                            _ => break,
-                        }
-                    }
-                    bytes.push(u8::try_from(byte).ok()?);
-                }
-                _ => return None,
-            },
-            '"' => return None,
-            ch if ch.is_control() => return None,
-            ch => bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()),
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::{ALL, Decimal, find};
+    use super::super::{ALL, Decimal, Kind, find};
     use super::*;
 
     fn info(name: &str) -> &'static Info {

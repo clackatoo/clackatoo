@@ -66,6 +66,7 @@ mod chats;
 mod clipboard;
 mod closed;
 mod config_notes;
+mod configuring;
 mod disk;
 mod edit_log;
 mod explorers;
@@ -1145,6 +1146,8 @@ pub struct Daemon {
     keeping: restore::Keeping,
     /// Keeping terminals' history from one run of the daemon to the next.
     histories: history::Histories,
+    /// The daemon's own config, watched and run again as it changes.
+    configuring: configuring::Configuring,
     /// What's kept of the terminals in background tabs.
     background: background::Backgrounds,
     /// The terminals kept running always, and how running each again
@@ -1349,6 +1352,7 @@ impl Daemon {
             recovery: recovery::Recovery::default(),
             keeping,
             histories: history::Histories::default(),
+            configuring: configuring::Configuring::default(),
             machine,
             signer,
             mcp_run: tools::run_key(),
@@ -2115,6 +2119,8 @@ impl Daemon {
     pub fn run(&mut self) -> io::Result<Option<Upgrade>> {
         let mut events = Events::with_capacity(EVENTS);
         let mut waiting = Events::with_capacity(EVENTS);
+        // The daemon's own config, run again as its files change.
+        self.watch_config();
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some(upgrade) = self.upgrade_when_ready()? {
                 return Ok(Some(upgrade));
@@ -2180,6 +2186,7 @@ impl Daemon {
                     .chain(self.keeping.due())
                     .chain(self.history_due())
                     .chain(self.next_mask_due())
+                    .chain(self.next_config_due())
                     .chain(self.links.due())
                     .chain(self.relay_due())
                     .chain(self.next_lent_due())
@@ -2291,6 +2298,7 @@ impl Daemon {
             self.keep_if_due();
             self.keep_histories_if_due();
             self.mask_again_if_due();
+            self.run_config_if_due();
             self.send_view_updates();
             self.transmit_quic();
             // Floods last, once this turn's updates have gone out, and
@@ -2391,6 +2399,11 @@ impl Daemon {
                     self.refuse_upgrade(upgrading.token, reason);
                     return Ok(None);
                 }
+            }
+            // Asked again when it's done, or at the time.
+            if self.config_holds_upgrade(upgrading.until, Instant::now()) {
+                self.upgrade_to = Some(upgrading);
+                return Ok(None);
             }
             match self.file_ops_hold_upgrade(upgrading.until, Instant::now()) {
                 Ok(false) => {}
@@ -4064,6 +4077,10 @@ impl Daemon {
             Request::Tutor(files) => self.tutor_files(token, files),
             Request::KeepHistory { pane, how } => self.serve_keep_history(token, pane, how),
             Request::NotifyPhone { terminal, on } => self.notify_phone(terminal, on),
+            Request::DaemonSettings => self.serve_daemon_settings(token),
+            Request::SetDaemonOption { name, value } => {
+                self.serve_set_daemon_option(token, &name, value.as_deref())
+            }
             Request::Connect {
                 host,
                 command,

@@ -2103,6 +2103,94 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::SECRET_REGIONS, sample)),
     );
+    // The daemon's settings in a window's menu, asked for, changed, and
+    // said as its config runs again (CLACKA-237).
+    let settings = crate::DaemonSettings {
+        machine: "desk".into(),
+        dir: "/home/u/.config/clackatoo".into(),
+        options: vec![
+            crate::DaemonOption {
+                name: "history.lines".into(),
+                value: "20000".into(),
+                running: Some("10000".into()),
+                restart: true,
+                by: crate::OptionSetBy {
+                    source: crate::OptionSource::Settings,
+                    at: Some(crate::OptionPlace {
+                        file: "/home/u/.config/clackatoo/daemon/settings.lua".into(),
+                        line: 4,
+                    }),
+                    inner: None,
+                },
+            },
+            crate::DaemonOption {
+                name: "subagents.working".into(),
+                value: "8".into(),
+                running: None,
+                restart: false,
+                by: crate::OptionSetBy {
+                    source: crate::OptionSource::Config,
+                    at: Some(crate::OptionPlace {
+                        file: "/home/u/.config/clackatoo/daemon/init.lua".into(),
+                        line: 2,
+                    }),
+                    inner: Some(crate::OptionPlace {
+                        file: "/home/u/.config/clackatoo/lua/limits.lua".into(),
+                        line: 7,
+                    }),
+                },
+            },
+            crate::DaemonOption {
+                name: "terminals.vs16".into(),
+                value: "true".into(),
+                running: None,
+                restart: false,
+                by: crate::OptionSetBy {
+                    source: crate::OptionSource::Default,
+                    at: None,
+                    inner: None,
+                },
+            },
+        ],
+        failure: Some("daemon/init.lua:3: daemon.web.port is a whole number".into()),
+    };
+    samples.extend(
+        [
+            Sample::Client(ClientMessage::Request(Request::DaemonSettings)),
+            Sample::Server(ServerMessage::Response(Response::DaemonSettings(
+                settings.clone(),
+            ))),
+            Sample::Client(ClientMessage::Request(Request::SetDaemonOption {
+                name: "history.lines".into(),
+                value: Some("20000".into()),
+            })),
+            Sample::Client(ClientMessage::Request(Request::SetDaemonOption {
+                name: "history.lines".into(),
+                value: None,
+            })),
+            Sample::Server(ServerMessage::Event(Event::DaemonSettings {
+                settings: settings.clone(),
+                saved: Some(crate::OptionSaved {
+                    name: "history.lines".into(),
+                    value: Some("20000".into()),
+                    refused: None,
+                }),
+            })),
+            Sample::Server(ServerMessage::Event(Event::DaemonSettings {
+                settings: crate::DaemonSettings::default(),
+                saved: Some(crate::OptionSaved {
+                    name: "subagents.default".into(),
+                    value: None,
+                    refused: Some("it's at most daemon.subagents.working".into()),
+                }),
+            })),
+            Sample::Server(ServerMessage::Event(Event::DaemonSettings {
+                settings,
+                saved: None,
+            })),
+        ]
+        .map(|sample| (crate::wire::DAEMON_SETTINGS, sample)),
+    );
     samples
 }
 

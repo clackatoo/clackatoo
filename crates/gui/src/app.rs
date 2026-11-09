@@ -4430,6 +4430,14 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Notified { terminal, notice })) => {
                 self.desk.program_notice(terminal, notice);
             }
+            SessionEvent::Message(ServerMessage::Event(Event::DaemonSettings {
+                settings,
+                saved,
+            })) => {
+                if self.desk.daemon_settings_came(&settings, saved) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Paired { device, said })) => {
                 self.desk.device_paired(device, &said);
                 self.request_redraw();

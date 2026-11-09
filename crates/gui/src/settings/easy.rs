@@ -15,6 +15,7 @@
 //! value, and Enter or Space changes it. `/` searches both modes at once:
 //! what Easy has, then what only Advanced has, which Enter switches to.
 
+use super::find;
 use super::view::{Card, ControlView, EasyView, Part, Preview, RowView, SectionView, SettingsHit};
 use super::{
     Bound, Editing, Entry as AdvancedEntry, Facts, FontPicker, History, Mode, Outcome, Set,
@@ -25,7 +26,7 @@ use crate::finder::rank::{Items, Ranking};
 use crate::keymap::{KeyMode, display};
 use crate::options::Window as _;
 use crate::options::easy::{self, Control, Entry, Page};
-use crate::options::{Case, Decimal, Info, Kind, Value, find};
+use crate::options::{Case, Decimal, Info, Kind, Value};
 use crate::render::Ink;
 use clackatoo_protocol::Color;
 
@@ -150,9 +151,12 @@ impl SettingsMenu {
     /// The rows Easy shows, under their headings: the page's, or what a
     /// search found.
     fn easy_sections(&mut self) -> Vec<(String, Vec<Shown>)> {
+        // The daemon's, once it's said them.
+        let daemon = self.daemon;
+        let shown = |entry: &Entry| daemon || !entry.daemons();
         if !self.searching() {
             let mut sections: Vec<(String, Vec<Shown>)> = Vec::new();
-            for entry in easy::on(self.easy.page()) {
+            for entry in easy::on(self.easy.page()).filter(|entry| shown(entry)) {
                 match sections.last_mut() {
                     Some((heading, rows)) if heading == entry.section => {
                         rows.push(Shown::Entry(entry));
@@ -165,7 +169,9 @@ impl SettingsMenu {
         let ranking = &mut self.easy.ranking;
         let found: Vec<Shown> = (0..ranking.len())
             .filter_map(|rank| ranking.get(rank))
-            .map(|index| Shown::Entry(&easy::ENTRIES[index]))
+            .map(|index| &easy::ENTRIES[index])
+            .filter(|entry| shown(entry))
+            .map(Shown::Entry)
             .collect();
         // What only Advanced has: options Easy doesn't show, and keys
         // other than those its Keys page does.
@@ -180,7 +186,6 @@ impl SettingsMenu {
             .filter(|&index| match &self.entries[index] {
                 AdvancedEntry::Option(info) => !easy::shows(info.name),
                 AdvancedEntry::Keys(bound) => !curated.contains(&bound.binding),
-                AdvancedEntry::Coming => false,
             })
             .take(ADVANCED_FOUND)
             .map(Shown::Advanced)
@@ -305,7 +310,6 @@ impl SettingsMenu {
                                 entry.control,
                                 Control::Keys(action) if bound.binding == Binding::Window(action)
                             ),
-                            AdvancedEntry::Coming => false,
                         })
                     }
                     None => None,
@@ -382,7 +386,7 @@ impl SettingsMenu {
         history: &mut History,
     ) -> Outcome {
         if let Some(by) = locked(entry, facts) {
-            return self.open_set_by(by, facts);
+            return self.open_set_by(first_info(entry), by, facts);
         }
         match (&entry.control, part) {
             (Control::Segmented { choices, .. }, Some(Part::Segment(at))) => {
@@ -422,7 +426,7 @@ impl SettingsMenu {
                 _,
             ) => {
                 let info = find(name).expect("an option");
-                let text = typed_value(&facts.store.configured_value(info));
+                let text = typed_value(&facts.configured_value(info));
                 self.editing = Some(Editing::Value { info, text });
                 Outcome::Changed
             }
@@ -451,9 +455,12 @@ impl SettingsMenu {
         match self.easy_focused() {
             Some(Shown::Entry(entry)) => {
                 if let Some(by) = locked(entry, facts) {
+                    let place = match first_info(entry) {
+                        Some(info) => facts.place(info, &by),
+                        None => by.place(facts.dir).unwrap_or_else(|| "your config".into()),
+                    };
                     let said = format!(
-                        "{} sets it, which outdoes what the menu saves: Enter opens it",
-                        by.place(facts.dir).unwrap_or_else(|| "your config".into())
+                        "{place} sets it, which outdoes what the menu saves: Enter opens it"
                     );
                     return self.refuse(&said);
                 }
@@ -476,7 +483,7 @@ impl SettingsMenu {
         match &entry.control {
             Control::Toggle(name) => {
                 let info = find(name).expect("an option");
-                let Value::Bool(on) = facts.store.configured_value(info) else {
+                let Value::Bool(on) = facts.configured_value(info) else {
                     return Outcome::Nothing;
                 };
                 let next = Value::Bool(!on);
@@ -484,7 +491,7 @@ impl SettingsMenu {
             }
             Control::Segmented { choices, .. } => {
                 let len = choices.len();
-                let near = choice_of(entry, |info| facts.store.configured_value(info), true);
+                let near = choice_of(entry, |info| facts.configured_value(info), true);
                 let next = near.map_or(0, |at| stepped(at, by, len, round));
                 self.pick_choice(entry, next, facts, history)
             }
@@ -510,7 +517,7 @@ impl SettingsMenu {
                     }
                     _ => return Outcome::Nothing,
                 };
-                let now = hundredths(&facts.store.configured_value(info));
+                let now = hundredths(&facts.configured_value(info));
                 let next = if by > 0 {
                     now.saturating_add(*step).min(high)
                 } else {
@@ -521,7 +528,7 @@ impl SettingsMenu {
             }
             Control::Stepper { option, step, .. } => {
                 let info = find(option).expect("an option");
-                let Value::Number(now) = facts.store.configured_value(info) else {
+                let Value::Number(now) = facts.configured_value(info) else {
                     return Outcome::Nothing;
                 };
                 let Kind::Number { min, max, .. } = info.kind else {
@@ -622,11 +629,11 @@ impl SettingsMenu {
         let by = locked(entry, facts).or_else(|| {
             (entry.control.options().iter())
                 .filter_map(|name| find(name).ok())
-                .map(|info| facts.store.set_by_in(facts.window, info))
+                .map(|info| facts.set_by_in(info))
                 .find(|by| by.at.is_some())
         });
         match by {
-            Some(by) => self.open_set_by(by, facts),
+            Some(by) => self.open_set_by(first_info(entry), by, facts),
             None => self.refuse("no line of config set it"),
         }
     }
@@ -737,7 +744,7 @@ impl SettingsMenu {
                         self.go_to_advanced(index)
                     }
                     (Shown::Entry(entry), SettingsHit::Lock(_)) => match locked(entry, facts) {
-                        Some(by) => self.open_set_by(by, facts),
+                        Some(by) => self.open_set_by(first_info(entry), by, facts),
                         None => Outcome::Changed,
                     },
                     (Shown::Entry(entry), SettingsHit::Control(_, Part::Slider(at))) => {
@@ -767,7 +774,7 @@ impl SettingsMenu {
     /// whether it's the one picked.
     fn agent_cards(&self, facts: &Facts) -> Vec<(String, String, bool, bool)> {
         let info = find("agent").expect("an option");
-        let configured = match facts.store.configured_value(info) {
+        let configured = match facts.configured_value(info) {
             Value::Text(agent) if !agent.is_empty() => agent,
             _ => "claude".to_owned(),
         };
@@ -845,6 +852,9 @@ impl SettingsMenu {
         } else {
             Vec::new()
         };
+        // Whether a row shows the daemon's settings.
+        let daemons = (sections.iter().flat_map(|(_, rows)| rows))
+            .any(|shown| matches!(shown, Shown::Entry(entry) if entry.daemons()));
         let mut drawn = Vec::new();
         for (heading, rows) in sections {
             let mut views = Vec::new();
@@ -869,14 +879,24 @@ impl SettingsMenu {
             ),
             _ => None,
         };
-        let (footer, warning) = match (&self.said, editing, &self.said_saved) {
-            (Some((said, warning)), ..) | (None, None, Some((said, warning))) => {
+        // Why the daemon's config doesn't run, while it doesn't, on a page
+        // of the daemon's settings.
+        let failure = (facts.daemon)
+            .and_then(|daemon| daemon.failure.as_ref())
+            .filter(|_| daemons)
+            .map(|failure| {
+                format!("The daemon's config doesn't run, so it goes by what last did: {failure}")
+            });
+        let (footer, warning) = match (&self.said, editing, &self.said_saved, failure) {
+            (Some((said, warning)), ..) | (None, None, Some((said, warning)), _) => {
                 (said.clone(), *warning)
             }
-            (None, Some(how), _) => (how.to_owned(), false),
-            (None, None, None) => (SAVES.into(), false),
+            (None, Some(how), ..) => (how.to_owned(), false),
+            (None, None, None, Some(failure)) => (failure, true),
+            (None, None, None, None) => (SAVES.into(), false),
         };
         EasyView {
+            machine: super::daemon_elsewhere(facts).filter(|_| daemons),
             query: self.picker.query().to_owned(),
             typing: self.typing,
             page: (!searching).then_some(self.easy.page),
@@ -909,7 +929,6 @@ impl SettingsMenu {
                         (info.name.to_owned(), info.description.to_owned())
                     }
                     AdvancedEntry::Keys(bound) => (display(&bound.keys), bound.does()),
-                    AdvancedEntry::Coming => (String::new(), String::new()),
                 };
                 return RowView {
                     label,
@@ -945,19 +964,17 @@ impl SettingsMenu {
         }
         let mut notes = Vec::new();
         // What it is now, if that's not what's configured.
-        let differs = infos.iter().any(|info| {
-            !info.restart && facts.store.get(info) != facts.store.configured_value(info)
-        });
+        let differs = infos
+            .iter()
+            .any(|info| !info.restart && facts.get(info) != facts.configured_value(info));
         if differs && lock.is_none() {
             let now = match &entry.control {
                 Control::Segmented { choices, .. } => {
-                    let at = choice_of(entry, |info| facts.store.get(info), false);
+                    let at = choice_of(entry, |info| facts.get(info), false);
                     (at.and_then(|at| choices.get(at))).map_or_else(
                         || {
                             (infos.iter())
-                                .map(|info| {
-                                    crate::options::show_value(info, &facts.store.get(info))
-                                })
+                                .map(|info| crate::options::show_value(info, &facts.get(info)))
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         },
@@ -965,7 +982,7 @@ impl SettingsMenu {
                     )
                 }
                 _ => infos.first().map_or_else(String::new, |info| {
-                    easy_value(entry, info, &facts.store.get(info))
+                    easy_value(entry, info, &facts.get(info))
                 }),
             };
             notes.push((
@@ -974,18 +991,29 @@ impl SettingsMenu {
             ));
         }
         for info in &infos {
-            if let Some((value, _)) = facts.store.local(facts.window, info) {
+            if let Some((value, _)) = facts.local(info) {
                 notes.push((
                     format!("This window's own: {}.", shown_value(info, value)),
                     Ink::Muted,
                 ));
             }
         }
-        let configured = |name: &str| {
-            find(name).map_or(Value::Bool(false), |info| {
-                facts.store.configured_value(info)
-            })
-        };
+        // One the daemon reads as it starts, changed since.
+        let waits = (infos.iter()).any(|info| {
+            info.scope == crate::options::Scope::Daemon
+                && info.restart
+                && facts.get(info) != facts.configured_value(info)
+        });
+        if waits && lock.is_none() {
+            let mut chars = super::RESTARTS.chars();
+            let said: String = (chars.next().map(|first| first.to_ascii_uppercase()))
+                .into_iter()
+                .chain(chars)
+                .collect();
+            notes.push((format!("{said}."), Ink::Muted));
+        }
+        let configured =
+            |name: &str| find(name).map_or(Value::Bool(false), |info| facts.configured_value(info));
         let control = match &entry.control {
             Control::Toggle(name) => ControlView::Toggle(configured(name) == Value::Bool(true)),
             Control::Segmented { choices, .. } => ControlView::Segmented {
@@ -1092,11 +1120,8 @@ impl SettingsMenu {
     /// Appearance's sample, as the options say it's drawn: line numbers,
     /// the cursor's line lit, and the size a slider is being dragged to.
     fn preview(&self, facts: &Facts) -> Preview {
-        let get = |name: &str| {
-            find(name).map_or(Value::Bool(false), |info| {
-                facts.store.configured_value(info)
-            })
-        };
+        let get =
+            |name: &str| find(name).map_or(Value::Bool(false), |info| facts.configured_value(info));
         let number = get("number") == Value::Bool(true);
         let relative = get("relativenumber") == Value::Bool(true);
         let width = match get("numberwidth") {
@@ -1191,7 +1216,13 @@ impl SettingsMenu {
 fn locked(entry: &Entry, facts: &Facts) -> Option<crate::options::SetBy> {
     (entry.control.options().iter())
         .filter_map(|name| find(name).ok())
-        .find_map(|info| facts.locked(info).cloned())
+        .find_map(|info| facts.locked(info))
+}
+
+/// The first of `entry`'s options, which says whose config its places are
+/// in: none for keys.
+fn first_info(entry: &Entry) -> Option<&'static Info> {
+    (entry.control.options().first()).and_then(|name| find(name).ok())
 }
 
 /// `at`, a step `by` on among `len`: going round from one end to the other
@@ -1207,7 +1238,7 @@ fn stepped(at: usize, by: isize, len: usize, round: bool) -> usize {
 
 /// Which of `entry`'s choices its options are configured as, if any.
 fn picked_choice(entry: &Entry, facts: &Facts) -> Option<usize> {
-    choice_of(entry, |info| facts.store.configured_value(info), false)
+    choice_of(entry, |info| facts.configured_value(info), false)
 }
 
 /// Which of `entry`'s choices its options, as `value` gives them, are, or

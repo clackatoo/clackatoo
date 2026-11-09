@@ -4,16 +4,19 @@
 //! itself). `:mappersist` binds keys and saves them, as the menu's keys
 //! section does.
 
-use clackatoo_protocol::{FileLocation, OpenFile, PaneTerminal, Request, Side};
+use clackatoo_protocol::{
+    DaemonSettings, FileLocation, OpenFile, OptionSaved, PaneTerminal, Request, Response, Side,
+    wire,
+};
 
 use super::{Asked, Desk};
 use crate::finder::view::FinderView;
 use crate::input::KeyPress;
 use crate::options::persist::Change;
 use crate::options::settings_lua::Mapping;
-use crate::options::{Case, SetBy};
+use crate::options::{Case, Scope, SetBy};
 use crate::settings::view::{EasyView, SettingsHit};
-use crate::settings::{Facts, History, Mode, Outcome, SettingsMenu};
+use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, SettingsMenu};
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
@@ -62,6 +65,7 @@ impl Desk {
                 keys: &keys,
                 dir: dir.as_deref(),
                 automating: self.automating,
+                daemon: self.daemon_settings.as_ref(),
             };
             menu.follow_keys(&facts, client.keys_changes());
             with(&mut menu, &facts, &mut history)
@@ -90,6 +94,7 @@ impl Desk {
                 keys: &keys,
                 dir: dir.as_deref(),
                 automating: self.automating,
+                daemon: self.daemon_settings.as_ref(),
             };
             SettingsMenu::new(query, case, mode, &facts, client.keys_changes())
         };
@@ -106,6 +111,113 @@ impl Desk {
                 Asked::SettingsAgents,
             );
         }
+        self.ask_daemon_settings();
+    }
+
+    /// Asks the daemon for its settings, for the menu, if it can say them:
+    /// the menu lists them once it has, and as they change after.
+    fn ask_daemon_settings(&mut self) {
+        if self.connected && self.daemon_has(wire::DAEMON_SETTINGS) {
+            self.request(Request::DaemonSettings, Asked::DaemonSettings);
+        }
+    }
+
+    /// Takes in the daemon's settings it was asked for. Returns whether to
+    /// draw.
+    pub(super) fn daemon_settings_answered(&mut self, response: Response) -> bool {
+        match response {
+            Response::DaemonSettings(settings) => self.daemon_settings_came(&settings, None),
+            Response::Error(err) => {
+                log::warn!("the daemon wouldn't say its settings: {err}");
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The daemon's answer to a change to its option `info`: refused at
+    /// once, it's as it was, and the menu says why.
+    pub(super) fn daemon_option_answered(
+        &mut self,
+        info: &'static crate::options::Info,
+        response: Response,
+    ) -> bool {
+        let Response::Error(err) = response else {
+            return false;
+        };
+        self.warn_saved(format!("daemon.{} wasn't saved: {err}", info.name));
+        // What the menu counted on goes, as the daemon says it is.
+        self.ask_daemon_settings();
+        true
+    }
+
+    /// The daemon's settings, `settings`, as it says them now its config
+    /// has run again, and what came of this window's change, `saved`, if
+    /// that's why. A config that's newly gone wrong is said, in the bar,
+    /// whether the menu's open or not. Returns whether to draw.
+    pub(crate) fn daemon_settings_came(
+        &mut self,
+        settings: &DaemonSettings,
+        saved: Option<OptionSaved>,
+    ) -> bool {
+        let before = (self.daemon_settings.as_ref()).and_then(|daemon| daemon.failure.clone());
+        let facts = DaemonFacts::new(settings, self.remote);
+        let failed = facts
+            .failure
+            .clone()
+            .filter(|failure| Some(failure) != before.as_ref());
+        self.daemon_settings = Some(facts);
+        self.settings_changed();
+        match saved {
+            Some(OptionSaved {
+                name,
+                refused: Some(why),
+                ..
+            }) => self.warn_saved(format!("daemon.{name} wasn't saved: {why}")),
+            Some(OptionSaved {
+                name,
+                value: Some(value),
+                ..
+            }) => self.say_saved(format!(
+                "saved daemon.{name} = {value} in daemon/settings.lua"
+            )),
+            Some(OptionSaved { name, .. }) => {
+                self.say_saved(format!(
+                    "daemon.{name} saved in daemon/settings.lua no more"
+                ));
+            }
+            None => {
+                if let Some(failure) = failed {
+                    self.warn(format!(
+                        "the daemon's config doesn't run, so it goes by what last did: {failure}"
+                    ));
+                }
+            }
+        }
+        true
+    }
+
+    /// Saves the daemon's option `info` as `value`, or takes it out, as
+    /// the daemon does it: the menu shows it so at once, until the daemon
+    /// says how it went.
+    fn save_daemon_option(
+        &mut self,
+        info: &'static crate::options::Info,
+        value: Option<crate::options::Value>,
+    ) {
+        if !self.daemon_has(wire::DAEMON_SETTINGS) {
+            return self.warn_saved("this daemon is too old to change its settings here".into());
+        }
+        if let Some(daemon) = &mut self.daemon_settings {
+            daemon.counting_on(info, value.clone());
+        }
+        self.request(
+            Request::SetDaemonOption {
+                name: info.name.to_owned(),
+                value: value.as_ref().map(crate::options::Value::text),
+            },
+            Asked::DaemonOption(info),
+        );
     }
 
     /// The mode the menu was used in last, as the file it's remembered in
@@ -303,6 +415,15 @@ impl Desk {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Close => self.settings = None,
             Outcome::Set(sets) => {
+                // The daemon's are saved by the daemon, which runs them.
+                let (daemons, sets): (Vec<_>, Vec<_>) =
+                    (sets.into_iter()).partition(|set| set.info.scope == Scope::Daemon);
+                for set in daemons {
+                    self.save_daemon_option(set.info, set.saved);
+                }
+                if sets.is_empty() {
+                    return;
+                }
                 let mut saved = Vec::new();
                 for set in sets {
                     // One read only as a window opens is saved, for windows
@@ -328,7 +449,11 @@ impl Desk {
             }
             Outcome::Open(place) => {
                 self.settings = None;
-                self.open_config_line(&place);
+                self.open_config_line(&place, false);
+            }
+            Outcome::OpenDaemons(place) => {
+                self.settings = None;
+                self.open_config_line(&place, true);
             }
         }
     }
@@ -368,10 +493,11 @@ impl Desk {
     }
 
     /// Opens the config's line at `place` in an editor beside the focused
-    /// pane. The config is this machine's, so it's opened only by a daemon
-    /// on this machine: another machine's would open a file of its own of
-    /// that path, if it had one.
-    fn open_config_line(&mut self, place: &crate::options::provenance::Place) {
+    /// pane. The window's config is this machine's, so it's opened only by
+    /// a daemon on this machine: another machine's would open a file of its
+    /// own of that path, if it had one. The daemon's, if `daemons`, is on
+    /// the daemon's machine, wherever that is.
+    fn open_config_line(&mut self, place: &crate::options::provenance::Place, daemons: bool) {
         let path = place.file.to_string();
         let name = (std::path::Path::new(&path).file_name())
             .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
@@ -382,7 +508,7 @@ impl Desk {
         // A pane of another machine's makes panes there, unless the daemon
         // can be told this one.
         let elsewhere = own.is_none() && self.pane_machine(shown.pane).is_some();
-        if self.remote || elsewhere {
+        if elsewhere || self.remote && !daemons {
             return self.refuse(format!(
                 "{name} is on this machine; the workspace's daemon is on another"
             ));

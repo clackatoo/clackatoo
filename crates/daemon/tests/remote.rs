@@ -89,6 +89,7 @@ impl TestDaemon {
             logind: None,
             history: None,
             notes: Vec::new(),
+            own_config: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
             hints: clackatoo_daemon::HintRules::default(),

@@ -29,6 +29,26 @@ pub enum Value {
 /// Whole numbers, as an option holds several: `colorcolumn`'s columns.
 pub type List = Vec<u32>;
 
+impl Value {
+    /// It as text, as `:set` takes it after `=`, and `true` or `false` for
+    /// one on or off: as the daemon tells windows its options (see
+    /// [`Info::read`]).
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Bool(on) => on.to_string(),
+            Self::Number(number) => number.to_string(),
+            Self::Decimal(number) => number.to_string(),
+            Self::List(numbers) => {
+                let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
+                numbers.join(",")
+            }
+            Self::Choice(word) => (*word).to_owned(),
+            Self::Text(text) => text.clone(),
+        }
+    }
+}
+
 /// A number to two decimal places, as `fontsize`'s 10.5. It's kept in
 /// hundredths, so options still compare exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -282,6 +302,20 @@ impl Info {
         };
         self.check(&value)?;
         Ok(value)
+    }
+
+    /// Reads `text` as [`Value::text`] writes one of this option's values.
+    ///
+    /// # Errors
+    ///
+    /// What it holds, if `text` isn't that.
+    pub fn read(&self, text: &str) -> Result<Value, String> {
+        match (self.kind, text) {
+            (Kind::Bool, "true") => Ok(Value::Bool(true)),
+            (Kind::Bool, "false") => Ok(Value::Bool(false)),
+            (Kind::Bool, _) => Err(self.wants()),
+            _ => self.parse(text),
+        }
     }
 
     /// What values the option holds, for messages.

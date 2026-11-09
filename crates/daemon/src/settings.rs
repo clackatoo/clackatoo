@@ -22,10 +22,12 @@
 //! `machine.toml` and `web.toml`. The first build with this config moves
 //! what they set into `settings.lua`, once (see [`migrate`]).
 
-mod literal;
+pub mod file;
+pub mod literal;
 mod lua;
 mod migrate;
 pub mod options;
+mod saving;
 
 pub use lua::{module_name, read as read_file, read_text};
 
@@ -39,7 +41,7 @@ use literal::Literal;
 
 use crate::agents::{self, CustomAgent, SubagentLimits};
 use crate::profiles::Change;
-use crate::schema::{Place, SetBy, Source, Value};
+use crate::schema::{Info, Place, SetBy, Source, Value};
 
 /// What the daemon's config set: its options, its agents and its
 /// profiles, each with what set it.
@@ -48,6 +50,8 @@ pub struct Settings {
     options: BTreeMap<&'static str, (Value, SetBy)>,
     agents: Vec<(CustomAgent, SetBy)>,
     profiles: Vec<(Change, SetBy)>,
+    /// The modules it required, as files, to watch for changes.
+    modules: Vec<PathBuf>,
 }
 
 /// What went wrong running the daemon's config.
@@ -68,6 +72,21 @@ pub struct Loaded {
     /// What the first window the user is at is told: what was moved from
     /// the old TOML files, and what went wrong.
     pub notes: Vec<String>,
+    /// Why the config didn't run, if it didn't.
+    pub failure: Option<String>,
+}
+
+/// The daemon's own config, as it started: where it is, to watch it, run
+/// it again and save in it as the daemon runs, and what it set then.
+#[derive(Clone, Debug)]
+pub struct Own {
+    /// Where it is.
+    pub dirs: Dirs,
+    /// What it set, or the last that ran without a mistake, as the daemon
+    /// started: what the daemon goes by, of what it reads only then.
+    pub settings: Settings,
+    /// Why it didn't run, as the daemon started, if it didn't.
+    pub failure: Option<String>,
 }
 
 /// The file in the state directory the settings that last ran without a
@@ -543,6 +562,30 @@ impl Dirs {
         vec![self.daemon.join("lua"), self.shared.clone()]
     }
 
+    /// The config directory itself.
+    #[must_use]
+    pub fn config(&self) -> &Path {
+        self.daemon.parent().unwrap_or(&self.daemon)
+    }
+
+    /// The folders to watch for the config's files changing, as it last
+    /// ran as `settings` say: the config directory, for `daemon/` and
+    /// `lua/` made, the folders the files are in and modules are found
+    /// in, and those of the modules it required.
+    #[must_use]
+    pub fn watched(&self, settings: &Settings) -> Vec<PathBuf> {
+        let mut dirs = vec![self.config().to_owned(), self.daemon.clone()];
+        dirs.extend(self.modules());
+        for module in &settings.modules {
+            if let Some(dir) = module.parent()
+                && !dirs.iter().any(|each| each == dir)
+            {
+                dirs.push(dir.to_owned());
+            }
+        }
+        dirs
+    }
+
     /// The config's files, `settings.lua` then `init.lua`, those there.
     fn chunks(&self) -> Result<Vec<lua::Chunk>, Failure> {
         let mut chunks = Vec::new();
@@ -632,14 +675,16 @@ pub fn load(dirs: &Dirs, when: When) -> Loaded {
         None => dirs.chunks(),
     };
     let ran = chunks.and_then(|chunks| run_apart(chunks, dirs.modules(), when));
+    let mut failed = None;
     let settings = match ran {
         Ok(settings) => {
             keep_good(dirs, &settings);
             settings
         }
         Err(failure) => {
-            let said = failure.said.replace(&format!("{}/", config(dirs)), "");
+            let said = shortened(dirs, &failure.said);
             log::error!("the daemon's config: {said}");
+            failed = Some(said.clone());
             let (settings, kept) = match last_good(dirs) {
                 Some(settings) => (settings, "kept its settings from the last time it ran"),
                 None => (
@@ -654,7 +699,89 @@ pub fn load(dirs: &Dirs, when: When) -> Loaded {
             settings
         }
     };
-    Loaded { settings, notes }
+    Loaded {
+        settings,
+        notes,
+        failure: failed,
+    }
+}
+
+/// `said` of the config in `dirs`, its files named from the config
+/// directory, as `daemon/init.lua:3`.
+fn shortened(dirs: &Dirs, said: &str) -> String {
+    said.replace(&format!("{}/", config(dirs)), "")
+}
+
+/// Runs the daemon's config again, as its files have changed, once the
+/// daemon has started: what it sets now, kept as the last good, or what
+/// went wrong, said with its files named from the config directory. The
+/// old TOML files aren't looked at again, nor what last ran without a
+/// mistake: the daemon goes on by what it has. It takes the time a fresh
+/// start may, and blocks the thread meanwhile, so it's run off the loop.
+///
+/// # Errors
+///
+/// What went wrong running it.
+pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
+    let ran = dirs
+        .chunks()
+        .and_then(|chunks| run_apart(chunks, dirs.modules(), When::Starting));
+    match ran {
+        Ok(settings) => {
+            keep_good(dirs, &settings);
+            Ok(settings)
+        }
+        Err(failure) => {
+            let said = shortened(dirs, &failure.said);
+            log::warn!("the daemon's config: {said}");
+            Err(said)
+        }
+    }
+}
+
+/// Saves `info`'s option, one of [`options::ALL`], as `value` in
+/// `settings.lua`, or with none takes it out, and runs the config with it
+/// (see [`rerun`]): what it sets now. Only the option's own lines change.
+/// If the config doesn't run with it, `settings.lua` is put back as it
+/// was, so a window's change never leaves the daemon's config broken. The
+/// folder is locked meanwhile, so two changes never meet.
+///
+/// # Errors
+///
+/// Why it wasn't saved: what's wrong with `settings.lua`, or writing it, or
+/// running the config with it.
+pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
+    let _lock = file::lock(&dirs.daemon)?;
+    let path = dirs.daemon.join("settings.lua");
+    let before = lua::read(&path)?;
+    let mut model = saving::Model::parse(before.as_deref().unwrap_or_default())
+        .map_err(|why| format!("daemon/settings.lua's {why}, so it wasn't changed"))?;
+    model.set(info, value)?;
+    let text = model.render();
+    // Nothing to take out of no file makes none.
+    let written = before.as_deref() != Some(text.as_str())
+        && (before.is_some() || text != saving::Model::parse("")?.render());
+    if written {
+        file::replace(&path, &text, file::PRIVATE)?;
+    }
+    match rerun(dirs) {
+        Ok(settings) => Ok(settings),
+        Err(said) if !written => Err(said),
+        Err(said) => {
+            let put_back = match &before {
+                Some(before) => file::replace(&path, before, file::PRIVATE),
+                None => std::fs::remove_file(&path).map_err(|err| err.to_string()),
+            };
+            match put_back {
+                Ok(()) => Err(format!(
+                    "{said}, so daemon/settings.lua was put back as it was"
+                )),
+                Err(err) => Err(format!(
+                    "{said}, and daemon/settings.lua couldn't be put back as it was: {err}"
+                )),
+            }
+        }
+    }
 }
 
 /// What the daemon's config last came to, cheaply, writing nothing: for

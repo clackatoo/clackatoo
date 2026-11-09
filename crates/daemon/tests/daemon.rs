@@ -131,6 +131,7 @@ impl TestDaemon {
             logind: None,
             history: None,
             notes: Vec::new(),
+            own_config: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
             hints: clackatoo_daemon::HintRules::default(),
@@ -6936,6 +6937,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Picture { .. }
             | Event::Notified { .. }
             | Event::LendBeside { .. }
+            | Event::DaemonSettings { .. }
             | Event::NativeRequest { .. }
             | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {
@@ -26799,4 +26801,195 @@ fn the_daemons_children_start_at_the_usual_priority_in_leaves_of_their_own() {
     let log = daemon.dir.path().join("agent.log");
     let (nice, policy, _) = moved_to(child_running(&log.to_string_lossy()), "agents");
     assert_eq!((nice, policy), (expected, 0), "the agent");
+}
+
+/// The daemon's settings as the next event says them, and what came of a
+/// change this window asked for, if it says.
+fn next_daemon_settings(
+    client: &mut Client,
+) -> (
+    clackatoo_protocol::DaemonSettings,
+    Option<clackatoo_protocol::OptionSaved>,
+) {
+    loop {
+        if let Event::DaemonSettings { settings, saved } = client
+            .next_event()
+            .unwrap_or_else(starved("the daemon's settings"))
+        {
+            return (settings, saved);
+        }
+    }
+}
+
+/// The daemon's option `name`, as `settings` say it.
+fn daemon_option<'a>(
+    settings: &'a clackatoo_protocol::DaemonSettings,
+    name: &str,
+) -> &'a clackatoo_protocol::DaemonOption {
+    (settings.options.iter())
+        .find(|option| option.name == name)
+        .unwrap_or_else(|| panic!("no option {name}"))
+}
+
+/// The daemon's own config is watched and run again as its files change,
+/// agents it adds are new chats' at once, and a window's menu saves its
+/// options in settings.lua: a change the config won't run with is put
+/// back, one init.lua sets is refused, and a broken init.lua keeps the
+/// last good, saying why (CLACKA-237).
+#[test]
+fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
+    use clackatoo_daemon::settings;
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let dirs = settings::Dirs {
+            daemon: dir.join("config/daemon"),
+            shared: dir.join("config/lua"),
+            state: Some(dir.join("config/state")),
+        };
+        std::fs::create_dir_all(&dirs.daemon).unwrap();
+        config.own_config = Some(settings::Own {
+            dirs,
+            settings: settings::Settings::default(),
+            failure: None,
+        });
+    });
+    let config = daemon.dir.path().join("config");
+    let mut client = daemon.client();
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let Response::DaemonSettings(settings) = client.request(&Request::DaemonSettings).unwrap()
+    else {
+        panic!("no settings");
+    };
+    let working = daemon_option(&settings, "subagents.working");
+    assert_eq!(working.value, "16");
+    assert_eq!(working.by.source, clackatoo_protocol::OptionSource::Default);
+    assert!(!working.restart);
+    assert!(daemon_option(&settings, "web.mode").restart);
+    assert_eq!(settings.dir, config.display().to_string());
+
+    // init.lua made: run again, its agent a new chat's at once.
+    std::fs::write(
+        config.join("daemon/init.lua"),
+        "daemon.subagents.working = 8\ndaemon.agents.mine = { command = { \"mine-acp\" } }\n",
+    )
+    .unwrap();
+    let (settings, saved) = next_daemon_settings(&mut client);
+    assert_eq!(saved, None);
+    let working = daemon_option(&settings, "subagents.working");
+    assert_eq!(working.value, "8");
+    assert_eq!(working.by.source, clackatoo_protocol::OptionSource::Config);
+    let at = working.by.at.as_ref().unwrap();
+    assert!(
+        at.file.ends_with("daemon/init.lua") && at.line == 1,
+        "{at:?}"
+    );
+    let Response::ChatChoices(choices) = client
+        .request(&Request::ChatChoices {
+            pane: None,
+            on: None,
+        })
+        .unwrap()
+    else {
+        panic!("no choices");
+    };
+    assert!(
+        choices.agents.iter().any(|agent| agent.agent == "mine"),
+        "{:?}",
+        choices.agents
+    );
+
+    // A window's menu saves one, as the config runs it.
+    let set = |name: &str, value: Option<&str>| Request::SetDaemonOption {
+        name: name.into(),
+        value: value.map(str::to_owned),
+    };
+    let saving = client.request(&set("terminals.notify_after", Some("30")));
+    assert_eq!(saving.unwrap(), Response::Done);
+    let (settings, saved) = next_daemon_settings(&mut client);
+    let saved = saved.unwrap();
+    assert_eq!(
+        (saved.name.as_str(), saved.refused),
+        ("terminals.notify_after", None)
+    );
+    assert_eq!(
+        daemon_option(&settings, "terminals.notify_after").value,
+        "30"
+    );
+    let file = std::fs::read_to_string(config.join("daemon/settings.lua")).unwrap();
+    assert!(
+        file.contains("\ndaemon.terminals.notify_after = 30\n"),
+        "{file}"
+    );
+
+    // One read as the daemon starts waits for that, and says so.
+    client
+        .request(&set("images.total_mb", Some("512")))
+        .unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    let images = daemon_option(&settings, "images.total_mb");
+    assert_eq!(
+        (images.value.as_str(), images.running.as_deref()),
+        ("512", Some("256"))
+    );
+    // One that changes as the daemon runs doesn't wait.
+    client.request(&set("history.lines", Some("500"))).unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    let lines = daemon_option(&settings, "history.lines");
+    assert_eq!(
+        (lines.value.as_str(), lines.running.as_deref()),
+        ("500", None)
+    );
+
+    // What init.lua sets outdoes the menu, which is refused.
+    let Response::Error(refused) = client
+        .request(&set("subagents.working", Some("4")))
+        .unwrap()
+    else {
+        panic!("not refused");
+    };
+    assert!(
+        refused.to_string().contains("daemon/init.lua:1"),
+        "{refused}"
+    );
+
+    // One the config won't run with is put back, and said.
+    client
+        .request(&set("subagents.default", Some("12")))
+        .unwrap();
+    let (settings, saved) = next_daemon_settings(&mut client);
+    let refused = saved.unwrap().refused.unwrap();
+    assert!(
+        refused.contains("at most daemon.subagents.working"),
+        "{refused}"
+    );
+    assert!(refused.contains("put back"), "{refused}");
+    assert_eq!(daemon_option(&settings, "subagents.default").value, "6");
+    let file = std::fs::read_to_string(config.join("daemon/settings.lua")).unwrap();
+    assert!(!file.contains("subagents.default"), "{file}");
+
+    // A broken init.lua keeps what last ran, and says why.
+    std::fs::write(
+        config.join("daemon/init.lua"),
+        "daemon.subagents.working = \"lots\"\n",
+    )
+    .unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    let failure = settings.failure.as_deref().unwrap_or_default();
+    assert!(failure.starts_with("daemon/init.lua:1:"), "{failure}");
+    assert_eq!(daemon_option(&settings, "subagents.working").value, "8");
+    assert_eq!(
+        daemon_option(&settings, "terminals.notify_after").value,
+        "30"
+    );
+
+    // Put right, it runs.
+    std::fs::write(
+        config.join("daemon/init.lua"),
+        "daemon.subagents.working = 9\n",
+    )
+    .unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    assert_eq!(settings.failure, None);
+    assert_eq!(daemon_option(&settings, "subagents.working").value, "9");
 }

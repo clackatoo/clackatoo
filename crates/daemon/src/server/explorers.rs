@@ -120,6 +120,15 @@ const INDEX_HEAR: WatchFlags = WatchFlags::MOVED_TO
     .union(WatchFlags::CREATE)
     .union(WatchFlags::DELETE);
 
+/// What's heard of in a directory watched for the daemon's config: a
+/// file written, or written by renaming a new one over it, as editors
+/// do, made, or taken away.
+const CONFIG_HEAR: WatchFlags = WatchFlags::CLOSE_WRITE
+    .union(WatchFlags::MOVED_TO)
+    .union(WatchFlags::MOVED_FROM)
+    .union(WatchFlags::CREATE)
+    .union(WatchFlags::DELETE);
+
 /// What's heard of in a directory watched for a display's sockets.
 const DISPLAY_HEAR: WatchFlags = WatchFlags::CREATE
     .union(WatchFlags::DELETE)
@@ -373,12 +382,14 @@ pub(super) struct Watched {
     index: Vec<PathBuf>,
     /// What it is to the display, watched for its sockets.
     display: Option<display::Watched>,
+    /// It's a folder of the daemon's config, watched for its files.
+    config: bool,
 }
 
 impl Watched {
     /// Whether it's on nothing any more, so the watch can go.
     fn unused(&self) -> bool {
-        self.uncapped() && self.index.is_empty() && self.display.is_none()
+        self.uncapped() && self.index.is_empty() && self.display.is_none() && !self.config
     }
 
     /// Whether it's on nothing counted against [`MAX_WATCHES`]: only for
@@ -393,15 +404,16 @@ impl Watched {
 
 impl Watched {
     /// Notes what inotify says happened in it, `flags`, to the file
-    /// `name` in it, if it says, for signs and the display, as each wants
-    /// to hear it: its git directory, if its index changed, in `indexes`,
-    /// and whether a display's socket appeared or went in `sockets`.
+    /// `name` in it, if it says, for signs, the display and the daemon's
+    /// config, as each wants to hear it: its git directory, if its index
+    /// changed, in `indexes`, whether a display's socket appeared or went
+    /// in `sockets`, and whether a file of config changed in `config`.
     fn heard_by_others(
         &self,
         flags: ReadFlags,
         name: Option<&[u8]>,
         indexes: &mut Vec<PathBuf>,
-        sockets: &mut bool,
+        (sockets, config): (&mut bool, &mut bool),
     ) {
         let heard = |hear: WatchFlags| flags.intersects(ReadFlags::from_bits_retain(hear.bits()));
         if name == Some(b"index") && heard(INDEX_HEAR) {
@@ -413,6 +425,13 @@ impl Watched {
         }
         if let (Some(kind), Some(name)) = (self.display, name) {
             *sockets |= heard(DISPLAY_HEAR) && display::socket(kind, name);
+        }
+        // A file of Luau, or the config's own folders, made or gone.
+        if self.config
+            && heard(CONFIG_HEAR)
+            && let Some(name) = name
+        {
+            *config |= name.ends_with(b".lua") || name == b"daemon" || name == b"lua";
         }
     }
 }
@@ -994,6 +1013,28 @@ impl Daemon {
         self.unwatch(|watched| watched.index.retain(|watched| watched != git_dir));
     }
 
+    /// Watches `dir`, a folder of the daemon's config, for its files,
+    /// unless it's watched for them already. Returns whether it's watched:
+    /// a folder that isn't there isn't, until the folder it's in says it's
+    /// been made.
+    pub(super) fn add_config_watch(&mut self, dir: &Path) -> bool {
+        match self.add_watch(dir, usize::MAX, CONFIG_HEAR) {
+            Ok(watch) => {
+                let watched = self.explorers.watches.entry(watch).or_default();
+                if !watched.config {
+                    watched.config = true;
+                    self.other_watch(watch);
+                }
+                true
+            }
+            Err(Unwatched::NoInstance | Unwatched::NoRoom | Unwatched::Full) => false,
+            Err(Unwatched::Failed(err)) => {
+                log::debug!("{} won't be watched for config: {err}", dir.display());
+                false
+            }
+        }
+    }
+
     /// Watches the directories the display's sockets are in that aren't
     /// watched, if the display is followed. One that can't be is tried
     /// again later, and one watched again has the display read again, as
@@ -1192,6 +1233,7 @@ impl Daemon {
         self.watch_indexes_again();
         self.watch_for_servers_again();
         self.watch_diagnosed_again();
+        self.watch_config();
         self.watch_display();
         if let Some(display) = &self.display {
             display.sockets_changed();
@@ -1340,6 +1382,7 @@ impl Daemon {
         // a display's socket appeared or went.
         let mut indexes: Vec<PathBuf> = Vec::new();
         let mut sockets = false;
+        let mut config = false;
         let mut buffer = [MaybeUninit::uninit(); 4096];
         let mut reader = inotify::Reader::new(inotify, &mut buffer);
         // Read until there's nothing left, or until `most` have been and
@@ -1375,7 +1418,7 @@ impl Daemon {
                 index.push(wd);
             }
             if let Some(watched) = self.explorers.watches.get(&wd) {
-                watched.heard_by_others(flags, name, &mut indexes, &mut sockets);
+                watched.heard_by_others(flags, name, &mut indexes, (&mut sockets, &mut config));
             }
             let listing = flags.intersects(RELIST);
             if listing {
@@ -1386,7 +1429,7 @@ impl Daemon {
             }
         }
         self.explorers.unread = unread;
-        self.tell_others(indexes, sockets, everything);
+        self.tell_others(indexes, (sockets, config), everything);
         self.files_touched(&touched, everything);
         self.due_again((relist, &touched, index), everything);
         self.forget_watches(&gone);
@@ -1457,18 +1500,28 @@ impl Daemon {
     }
 
     /// Tells signs that the indexes in the git directories `indexes` have
-    /// changed, and the display that a socket has appeared or gone, if
-    /// `sockets`. With `everything`, changes were lost: any may have.
-    fn tell_others(&mut self, mut indexes: Vec<PathBuf>, mut sockets: bool, everything: bool) {
+    /// changed, the display that a socket has appeared or gone, if
+    /// `sockets`, and the daemon's config that its files have, if
+    /// `config`. With `everything`, changes were lost: any may have.
+    fn tell_others(
+        &mut self,
+        mut indexes: Vec<PathBuf>,
+        (mut sockets, mut config): (bool, bool),
+        everything: bool,
+    ) {
         if everything {
             indexes = (self.explorers.watches.values())
                 .flat_map(|watched| watched.index.iter().cloned())
                 .collect();
             sockets = true;
+            config = true;
         }
         self.indexes_changed(indexes);
         if sockets && let Some(display) = &self.display {
             display.sockets_changed();
+        }
+        if config {
+            self.config_files_changed();
         }
     }
 
@@ -2289,12 +2342,12 @@ mod tests {
         assert_eq!(watches.len(), 1, "{watches:?}");
         let (watch, paths) = watches[0].clone();
         assert_eq!(paths, [git.clone(), link.clone()]);
-        let (mut indexes, mut sockets) = (Vec::new(), false);
+        let (mut indexes, mut sockets, mut config) = (Vec::new(), false, false);
         daemon.explorers.watches[&watch].heard_by_others(
             ReadFlags::MOVED_TO,
             Some(b"index"),
             &mut indexes,
-            &mut sockets,
+            (&mut sockets, &mut config),
         );
         assert_eq!(indexes, [git.clone(), link.clone()]);
 

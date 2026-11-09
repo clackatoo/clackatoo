@@ -926,6 +926,8 @@ fn variant(request: &Request) -> &'static str {
         Request::KeepHistory { .. } => "KeepHistory",
         Request::NotifyPhone { .. } => "NotifyPhone",
         Request::Unmask { .. } => "Unmask",
+        Request::DaemonSettings => "DaemonSettings",
+        Request::SetDaemonOption { .. } => "SetDaemonOption",
     }
 }
 
@@ -1227,6 +1229,11 @@ fn own() -> Vec<Request> {
         },
         Request::WatchConnections { answer: true },
         Request::Lent,
+        Request::DaemonSettings,
+        Request::SetDaemonOption {
+            name: "subagents.working".into(),
+            value: Some("8".into()),
+        },
     ]
 }
 

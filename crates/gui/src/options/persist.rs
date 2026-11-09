@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::Context;
+use clackatoo_daemon::settings::file;
 
 use super::settings_lua::{Mapping, Model};
 use super::{Info, Scope, Value};
@@ -68,7 +69,7 @@ pub(crate) fn file(info: &Info) -> &'static str {
     match info.scope {
         Scope::Window => "client/settings.lua",
         Scope::Startup(_) => "client/startup.toml",
-        Scope::Daemon => "the daemon's config",
+        Scope::Daemon => "daemon/settings.lua",
     }
 }
 
@@ -167,10 +168,8 @@ fn write(dir: &Path, change: &Change) -> anyhow::Result<()> {
     locked(&client, || match info.scope {
         Scope::Window => settings_lua(&settings, value.is_some(), |model| model.set(info, value)),
         Scope::Startup(_) => crate::startup::persist(&client.join("startup.toml"), info, value),
-        Scope::Daemon => anyhow::bail!(
-            "{} is the daemon's, which has no settings file yet",
-            info.name
-        ),
+        // Saved by the daemon, which may be on another machine.
+        Scope::Daemon => anyhow::bail!("{} is the daemon's, which saves it itself", info.name),
     })
 }
 
@@ -181,12 +180,7 @@ pub(crate) fn locked<T>(
     client: &Path,
     change: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    std::fs::create_dir_all(client)
-        .with_context(|| format!("couldn't make {}", client.display()))?;
-    let lock = std::fs::File::open(client)
-        .with_context(|| format!("couldn't open {}", client.display()))?;
-    lock.lock()
-        .with_context(|| format!("couldn't lock {}", client.display()))?;
+    let _lock = file::lock(client).map_err(anyhow::Error::msg)?;
     change()
 }
 
@@ -216,82 +210,13 @@ fn settings_lua(
     replace(path, &rendered, PRIVATE)
 }
 
-/// Where `path` is, past any links: itself, if it's no link, or isn't
-/// there.
-fn through_links(path: &Path) -> anyhow::Result<PathBuf> {
-    /// As many links as the kernel follows.
-    const MOST: usize = 40;
-    let mut path = path.to_owned();
-    for _ in 0..MOST {
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                let target = std::fs::read_link(&path)
-                    .with_context(|| format!("couldn't read the link {}", path.display()))?;
-                // A link's relative target is from the link's folder.
-                path = path.parent().unwrap_or(Path::new("/")).join(target);
-            }
-            _ => return Ok(path),
-        }
-    }
-    anyhow::bail!("{} is a link to links that go round", path.display())
-}
+/// Who may read and write a new settings.lua: only its owner.
+pub(crate) const PRIVATE: u32 = file::PRIVATE;
 
-/// Who may read and write a new settings.lua: only its owner, as config
-/// can say what's private.
-pub(crate) const PRIVATE: u32 = 0o600;
-
-/// Replaces the file at `path` with `text`, all at once, so whatever reads
-/// it meanwhile reads either the old file or the new one, and a crash
-/// leaves one or the other on the disk. The file keeps its mode, or a new
-/// one has `mode`. A file half written is never left behind. A link, as
-/// stow and home-manager make, stays one: the file it goes to is replaced.
+/// Replaces the file at `path` with `text`, whole, as the daemon replaces
+/// its own settings (see [`file::replace`]).
 pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let linked = through_links(path)?;
-    let (link, path) = (path, linked.as_path());
-    let dir = path.parent().context("the file is in a directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("couldn't make {}", dir.display()))?;
-    let name = path.file_name().context("the file has a name")?;
-    let mode =
-        (std::fs::metadata(path)).map_or(mode, |metadata| metadata.permissions().mode() & 0o7777);
-    let partial = dir.join(format!(
-        ".{}.{}.partial",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let written = (|| -> anyhow::Result<()> {
-        let mut file = (std::fs::OpenOptions::new())
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&partial)
-            .with_context(|| {
-                if link == path {
-                    format!("couldn't write in {}", dir.display())
-                } else {
-                    format!(
-                        "couldn't write in {}, where {} links to",
-                        dir.canonicalize().as_deref().unwrap_or(dir).display(),
-                        link.display()
-                    )
-                }
-            })?;
-        // As the old file was, whatever the umask says.
-        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&partial, path)
-            .with_context(|| format!("couldn't replace {}", path.display()))?;
-        // The rename itself, kept.
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok(())
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
+    file::replace(path, text, mode).map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

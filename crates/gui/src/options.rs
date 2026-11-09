@@ -39,7 +39,11 @@ pub(crate) trait Window {
 
 impl Window for Info {
     fn default_value(&self) -> Value {
-        DEFAULTS.get(self)
+        match self.scope {
+            // The daemon's, as the settings menu shows them.
+            Scope::Daemon => clackatoo_daemon::settings::options::default_of(self),
+            Scope::Window | Scope::Startup(_) => DEFAULTS.get(self),
+        }
     }
 
     fn index(&self) -> usize {

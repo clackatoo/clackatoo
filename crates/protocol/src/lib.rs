@@ -69,6 +69,7 @@ mod machines;
 mod mention;
 mod native;
 mod review;
+mod settings;
 mod shown;
 mod view;
 pub mod wire;
@@ -144,6 +145,9 @@ pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
+pub use settings::{
+    DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy, OptionSource,
+};
 pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
@@ -158,7 +162,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 151;
+pub const PROTOCOL_VERSION: u32 = 152;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -744,6 +748,19 @@ pub enum Event {
         side: Side,
         /// What kind of pane it is, to show in its place until it's shown.
         kind: PaneKind,
+    },
+    /// The daemon's config ran again, as its files changed, a window's
+    /// menu changed one of its options, or the daemon upgraded: its
+    /// settings now. `saved` says what came of the change a window asked
+    /// for with [`Request::SetDaemonOption`], to that window alone. Sent
+    /// to every window of protocol 152 or later
+    /// ([`wire::DAEMON_SETTINGS`]), never to a web device or a daemon
+    /// relaying.
+    DaemonSettings {
+        /// The settings.
+        settings: DaemonSettings,
+        /// What came of this window's change, if this is that.
+        saved: Option<OptionSaved>,
     },
 }
 
@@ -1826,6 +1843,25 @@ pub enum Request {
         /// A line of the run to show, or `None` to mask them again.
         line: Option<u64>,
     },
+    /// The daemon's settings, for a window's settings menu. Answered with
+    /// [`Response::DaemonSettings`]; a web device's is refused. Only to a
+    /// daemon of protocol 152 or later ([`wire::DAEMON_SETTINGS`]).
+    DaemonSettings,
+    /// Saves the daemon's option `name` as `value`, as `:set` takes it
+    /// after `=` (`true` or `false` for one on or off), in
+    /// `daemon/settings.lua`, or with none, takes it out; then runs the
+    /// daemon's config again. If the config doesn't run with it, the file
+    /// is put back as it was. Answered with [`Response::Done`] once it's
+    /// under way, then [`Event::DaemonSettings`] says what came of it.
+    /// Refused if the user's own `daemon/init.lua` sets the option, and
+    /// from a web device. Only to a daemon of protocol 152 or later
+    /// ([`wire::DAEMON_SETTINGS`]).
+    SetDaemonOption {
+        /// The option, as config sets it after `daemon.`: `web.mode`.
+        name: String,
+        /// What it's saved as.
+        value: Option<String>,
+    },
 }
 
 /// What [`Request::KeepHistory`] changes.
@@ -2062,6 +2098,8 @@ pub enum Response {
     Image(ImageAnswer),
     /// Answers [`Request::AttachPicture`]: what it shows.
     Picture(Picture),
+    /// Answers [`Request::DaemonSettings`].
+    DaemonSettings(DaemonSettings),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

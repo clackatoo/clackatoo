@@ -68,8 +68,8 @@ use crate::shortcuts::bindings::Hint;
 use crate::vim::Stroke;
 
 /// What the menu needs to know of the window to show its rows and change
-/// them: the options as every window shares them, and this one's own, and
-/// the keys bound.
+/// them: the options as every window shares them, and this one's own, the
+/// keys bound, and the daemon's settings, if it's said them.
 pub(crate) struct Facts<'a> {
     pub(crate) store: &'a Store,
     pub(crate) window: u32,
@@ -79,14 +79,207 @@ pub(crate) struct Facts<'a> {
     /// The keys are an agent's, through native window access, which can't
     /// save keys (see `Desk::automating`).
     pub(crate) automating: bool,
+    /// The daemon's settings, as it last said them.
+    pub(crate) daemon: Option<&'a DaemonFacts>,
+}
+
+/// The daemon's settings, as the window was last told them (see
+/// [`clackatoo_protocol::DaemonSettings`]): those of its options this
+/// build knows, each with what set it, and what the daemon goes by, if
+/// that isn't it yet.
+#[derive(Debug, Default)]
+pub(crate) struct DaemonFacts {
+    /// The daemon's machine, if it isn't this one: then the menu says the
+    /// daemon's settings are that machine's.
+    pub(crate) elsewhere: Option<String>,
+    /// The daemon's config directory, on its machine, which its places are
+    /// said from.
+    dir: std::path::PathBuf,
+    /// Why its config, as its files are now, didn't run, if it didn't.
+    pub(crate) failure: Option<String>,
+    options: Vec<DaemonValue>,
+}
+
+/// One of the daemon's options, as it said it.
+#[derive(Debug)]
+struct DaemonValue {
+    info: &'static Info,
+    /// As its config sets it.
+    value: Value,
+    /// What the daemon goes by, if it isn't that yet.
+    running: Option<Value>,
+    by: SetBy,
+}
+
+impl DaemonFacts {
+    /// What `settings` say, of a daemon on another machine, named so, if
+    /// `elsewhere`.
+    pub(crate) fn new(settings: &clackatoo_protocol::DaemonSettings, elsewhere: bool) -> Self {
+        use clackatoo_protocol::OptionSource;
+        let place = |place: &clackatoo_protocol::OptionPlace| Place {
+            file: place.file.as_str().into(),
+            line: place.line,
+        };
+        let options = (settings.options.iter())
+            .filter_map(|option| {
+                // A newer daemon's, or one this build can't hold, isn't shown.
+                let info = clackatoo_daemon::settings::options::find(&option.name)?;
+                let value = info.read(&option.value).ok()?;
+                let running = (option.running.as_deref()).and_then(|text| info.read(text).ok());
+                let by = SetBy {
+                    source: match option.by.source {
+                        OptionSource::Default => Source::Default,
+                        OptionSource::Settings => Source::Settings,
+                        OptionSource::Config => Source::Config,
+                    },
+                    loading: option.by.source != OptionSource::Default,
+                    at: option.by.at.as_ref().map(place),
+                    inner: option.by.inner.as_ref().map(place),
+                };
+                Some(DaemonValue {
+                    info,
+                    value,
+                    running,
+                    by,
+                })
+            })
+            .collect();
+        Self {
+            elsewhere: elsewhere.then(|| settings.machine.clone()),
+            dir: settings.dir.clone().into(),
+            failure: settings.failure.clone(),
+            options,
+        }
+    }
+
+    fn of(&self, info: &Info) -> Option<&DaemonValue> {
+        self.options.iter().find(|each| each.info.name == info.name)
+    }
+
+    /// Whether the daemon said its option `info`.
+    pub(crate) fn knows(&self, info: &Info) -> bool {
+        self.of(info).is_some()
+    }
+
+    /// Counts on `info`'s option being saved as `value`, or with none, taken
+    /// out, as the daemon is asked to: the menu shows it so at once, and
+    /// steps from it, until the daemon says how it went.
+    pub(crate) fn counting_on(&mut self, info: &Info, value: Option<Value>) {
+        let Some(each) = self
+            .options
+            .iter_mut()
+            .find(|each| each.info.name == info.name)
+        else {
+            return;
+        };
+        let in_force = each.running.take().unwrap_or_else(|| each.value.clone());
+        each.by = if value.is_some() {
+            SetBy::SAVED
+        } else {
+            SetBy::DEFAULT
+        };
+        each.value = value.unwrap_or_else(|| info.default_value());
+        each.running = (info.restart && in_force != each.value).then_some(in_force);
+    }
+}
+
+/// Whose the daemon's settings are, as the menu's header says, if they're
+/// another machine's: `daemon on desk`.
+pub(crate) fn daemon_elsewhere(facts: &Facts) -> Option<String> {
+    let machine = facts.daemon?.elsewhere.as_ref()?;
+    Some(format!("daemon on {machine}"))
+}
+
+/// The option called `name`, the window's or, written `group.name`, the
+/// daemon's.
+pub(crate) fn find(name: &str) -> Result<&'static Info, String> {
+    match name.contains('.') {
+        true => clackatoo_daemon::settings::options::find(name)
+            .ok_or_else(|| format!("the daemon has no option ‘{name}’")),
+        false => crate::options::find(name),
+    }
 }
 
 impl Facts<'_> {
+    /// The daemon's option `info`, if it's one, as the daemon said it.
+    fn daemons(&self, info: &Info) -> Option<&DaemonValue> {
+        if info.scope != Scope::Daemon {
+            return None;
+        }
+        self.daemon?.of(info)
+    }
+
+    /// `info`'s option as every window has it now; or the daemon's, as the
+    /// daemon goes by it.
+    fn get(&self, info: &Info) -> Value {
+        match self.daemons(info) {
+            Some(each) => each.running.clone().unwrap_or_else(|| each.value.clone()),
+            None if info.scope == Scope::Daemon => info.default_value(),
+            None => self.store.get(info),
+        }
+    }
+
+    /// `info`'s option as it's configured, which the menu saves: what the
+    /// config set as it loaded, or what's been saved since.
+    fn configured_value(&self, info: &Info) -> Value {
+        match self.daemons(info) {
+            Some(each) => each.value.clone(),
+            None if info.scope == Scope::Daemon => info.default_value(),
+            None => self.store.configured_value(info),
+        }
+    }
+
+    /// What `info`'s option is configured as, and what configured it, if
+    /// anything did.
+    fn configured(&self, info: &Info) -> Option<(Value, SetBy)> {
+        if info.scope == Scope::Daemon {
+            let each = self.daemons(info)?;
+            return (each.by.source != Source::Default)
+                .then(|| (each.value.clone(), each.by.clone()));
+        }
+        self.store.configured(info).cloned()
+    }
+
+    /// This window's own value of `info`'s option, if it has one.
+    fn local(&self, info: &Info) -> Option<&(Value, SetBy)> {
+        match info.scope {
+            Scope::Daemon => None,
+            Scope::Window | Scope::Startup(_) => self.store.local(self.window, info),
+        }
+    }
+
+    /// What set `info`'s option as this window has it.
+    fn set_by_in(&self, info: &Info) -> SetBy {
+        match self.daemons(info) {
+            Some(each) => each.by.clone(),
+            None if info.scope == Scope::Daemon => SetBy::DEFAULT,
+            None => self.store.set_by_in(self.window, info),
+        }
+    }
+
+    /// What last set `info`'s option for every window.
+    fn set_by(&self, info: &Info) -> SetBy {
+        match self.daemons(info) {
+            Some(each) => each.by.clone(),
+            None if info.scope == Scope::Daemon => SetBy::DEFAULT,
+            None => self.store.set_by(info),
+        }
+    }
+
+    /// The config directory `info`'s places are said from: the daemon's,
+    /// on its machine, for its options.
+    fn dir_of(&self, info: &Info) -> Option<&Path> {
+        match (info.scope, self.daemon) {
+            (Scope::Daemon, Some(daemon)) => Some(&daemon.dir),
+            _ => self.dir,
+        }
+    }
+
     /// `info`'s option as this window has it.
     fn shown(&self, info: &Info) -> Value {
-        match self.store.local(self.window, info) {
+        match self.local(info) {
             Some((value, _)) => value.clone(),
-            None => self.store.get(info),
+            None => self.get(info),
         }
     }
 
@@ -95,7 +288,7 @@ impl Facts<'_> {
     /// windows opened after.
     fn value(&self, info: &Info) -> Value {
         if info.restart {
-            self.store.configured_value(info)
+            self.configured_value(info)
         } else {
             self.shown(info)
         }
@@ -103,8 +296,8 @@ impl Facts<'_> {
 
     /// Where the user's own config sets `info`'s option as it loads, if
     /// it does: then it's locked.
-    fn locked(&self, info: &Info) -> Option<&SetBy> {
-        let (_, by) = self.store.configured(info)?;
+    fn locked(&self, info: &Info) -> Option<SetBy> {
+        let (_, by) = self.configured(info)?;
         by.config_loading().then_some(by)
     }
 
@@ -113,11 +306,11 @@ impl Facts<'_> {
     /// saved since; and for startup.toml's, a value the process started
     /// with that isn't the default.
     fn saved(&self, info: &Info) -> Option<Value> {
-        match self.store.configured(info) {
-            Some((value, by)) if by.source == Source::Settings => Some(value.clone()),
+        match self.configured(info) {
+            Some((value, by)) if by.source == Source::Settings => Some(value),
             Some(_) => None,
             None => {
-                let start = self.store.configured_value(info);
+                let start = self.configured_value(info);
                 (matches!(info.scope, Scope::Startup(_)) && start != info.default_value())
                     .then_some(start)
             }
@@ -144,6 +337,12 @@ impl Facts<'_> {
     fn said(&self, by: &SetBy) -> String {
         by.said(self.dir)
     }
+
+    /// Where `by` set `info`'s option, as the menu says it, or else "your
+    /// config".
+    fn place(&self, info: &Info, by: &SetBy) -> String {
+        (by.place(self.dir_of(info))).unwrap_or_else(|| "your config".into())
+    }
 }
 
 /// What a key did to the menu.
@@ -167,6 +366,8 @@ pub(crate) enum Outcome {
     /// The line at `place` is to be opened in an editor, and the menu
     /// closed.
     Open(Place),
+    /// The same, for a line of the daemon's config, on its machine.
+    OpenDaemons(Place),
     /// The fonts installed are wanted, for the font picker: see
     /// [`SettingsMenu::fonts`].
     Fonts,
@@ -227,8 +428,8 @@ pub(crate) struct Set {
 enum Section {
     Options(Category),
     Keys,
-    /// The daemon's own settings, which come later (CLACKA-237 phase 4).
-    Daemon,
+    /// The daemon's options, after the window's.
+    Daemon(Category),
 }
 
 impl Section {
@@ -236,7 +437,8 @@ impl Section {
         match self {
             Self::Options(category) => category.title(),
             Self::Keys => "Keys",
-            Self::Daemon => "Daemon",
+            Self::Daemon(Category::Agents) => "The daemon's agents",
+            Self::Daemon(category) => category.title(),
         }
     }
 }
@@ -286,16 +488,14 @@ impl Bound {
 enum Entry {
     Option(&'static Info),
     Keys(Bound),
-    /// What the daemon's section says, for now.
-    Coming,
 }
 
 impl Entry {
     fn section(&self) -> Section {
         match self {
+            Self::Option(info) if info.scope == Scope::Daemon => Section::Daemon(info.category),
             Self::Option(info) => Section::Options(info.category),
             Self::Keys(_) => Section::Keys,
-            Self::Coming => Section::Daemon,
         }
     }
 }
@@ -396,6 +596,8 @@ pub(crate) struct SettingsMenu {
     /// The agents the daemon knows, for Easy's cards: each one's name,
     /// what to show, and whether it's installed.
     agents: Vec<(String, String, bool)>,
+    /// The daemon's settings are listed, as it's said them.
+    daemon: bool,
 }
 
 /// Why an agent's keys don't change keys, as the window says too.
@@ -403,6 +605,10 @@ const AGENTS_SAVE_NO_KEYS: &str = "an agent's input can't save keys";
 
 /// What the font picker lists for the system's monospace font, first.
 const SYSTEM_FONT: &str = "the system's monospace font";
+
+/// When a change to one of the daemon's options it reads only as it
+/// starts takes effect.
+pub(crate) const RESTARTS: &str = "takes effect at the daemon's next upgrade or restart";
 
 impl SettingsMenu {
     /// The menu, its rows made from `facts`, with `query` typed, matching
@@ -417,12 +623,16 @@ impl SettingsMenu {
             ranking: Ranking::new(case, false),
             editing: None,
             said: None,
-            name_cols: ALL.iter().map(|info| info.name.len()).max().unwrap_or(0),
+            name_cols: (ALL.iter().chain(clackatoo_daemon::settings::options::ALL))
+                .map(|info| info.name.len())
+                .max()
+                .unwrap_or(0),
             keys_seen,
             mode,
             easy: easy::Easy::new(case),
             said_saved: None,
             agents: Vec::new(),
+            daemon: false,
         };
         menu.fill(facts);
         if !query.is_empty() {
@@ -433,9 +643,10 @@ impl SettingsMenu {
     }
 
     /// Makes the rows again, as the bindings have changed since they were
-    /// made, keeping the row picked where it can.
+    /// made, or the daemon has said its settings, keeping the row picked
+    /// where it can.
     pub(crate) fn follow_keys(&mut self, facts: &Facts, keys_seen: u64) {
-        if keys_seen == self.keys_seen {
+        if keys_seen == self.keys_seen && facts.daemon.is_some() == self.daemon {
             return;
         }
         self.keys_seen = keys_seen;
@@ -476,8 +687,19 @@ impl SettingsMenu {
             ));
             self.entries.push(Entry::Keys(bound));
         }
-        self.items.push("daemon coming");
-        self.entries.push(Entry::Coming);
+        // The daemon's, as it's said them, after.
+        self.daemon = facts.daemon.is_some();
+        let daemons = (clackatoo_daemon::settings::options::ALL.iter())
+            .filter(|info| facts.daemon.is_some_and(|daemon| daemon.knows(info)));
+        for info in daemons {
+            self.items.push(&format!(
+                "{} daemon.{0} {} {} daemon",
+                info.name,
+                info.description,
+                Section::Daemon(info.category).title()
+            ));
+            self.entries.push(Entry::Option(info));
+        }
         self.ranking.add(&self.items);
         self.picker.clamp(self.ranking.len());
     }
@@ -488,7 +710,6 @@ impl SettingsMenu {
         Some(match &self.entries[index] {
             Entry::Option(info) => info.name.to_owned(),
             Entry::Keys(bound) => bound.name(),
-            Entry::Coming => "daemon".to_owned(),
         })
     }
 
@@ -815,10 +1036,10 @@ impl SettingsMenu {
     /// locked row is set in.
     fn act(&mut self, facts: &Facts, history: &mut History) -> Outcome {
         match self.picked() {
-            None | Some(Entry::Coming) => Outcome::Nothing,
+            None => Outcome::Nothing,
             Some(Entry::Option(info)) => {
                 if let Some(by) = facts.locked(info) {
-                    return self.open_set_by(by.clone(), facts);
+                    return self.open_set_by(Some(info), by, facts);
                 }
                 match info.kind {
                     Kind::Bool | Kind::Choice(_) => self.step(1, facts, history),
@@ -827,7 +1048,7 @@ impl SettingsMenu {
                         Outcome::Fonts
                     }
                     _ => {
-                        let text = typed_value(&facts.store.get(info));
+                        let text = typed_value(&facts.configured_value(info));
                         self.editing = Some(Editing::Value { info, text });
                         Outcome::Changed
                     }
@@ -838,7 +1059,7 @@ impl SettingsMenu {
                     .map(|&mode| facts.keys.bound_by(mode, &bound.keys))
                     .find(SetBy::config_loading);
                 if let Some(by) = by {
-                    return self.open_set_by(by, facts);
+                    return self.open_set_by(None, by, facts);
                 }
                 if bound.typed().is_none() {
                     return self.refuse(
@@ -860,29 +1081,40 @@ impl SettingsMenu {
         Outcome::Changed
     }
 
-    /// Opens where `by` set it, if it says, or says it doesn't.
-    fn open_set_by(&mut self, by: SetBy, facts: &Facts) -> Outcome {
-        if let Some(place) = by.at {
-            return Outcome::Open(place);
+    /// Opens where `by` set `info`'s option, or keys, if it says, or says
+    /// it doesn't: a line of the daemon's config on the daemon's machine.
+    fn open_set_by(&mut self, info: Option<&Info>, by: SetBy, facts: &Facts) -> Outcome {
+        let daemons = info.is_some_and(|info| info.scope == Scope::Daemon);
+        match by.at {
+            Some(place) if daemons => Outcome::OpenDaemons(place),
+            Some(place) => Outcome::Open(place),
+            None => {
+                let said = match info {
+                    Some(info) => by.said(facts.dir_of(info)),
+                    None => facts.said(&by),
+                };
+                self.refuse(&format!("{said}, at no line clackatoo knows"))
+            }
         }
-        let said = format!("{}, at no line clackatoo knows", facts.said(&by));
-        self.refuse(&said)
     }
 
     /// `o`: opens the line that set the row's value, if a line did.
     fn open(&mut self, facts: &Facts) -> Outcome {
-        let by = match self.picked() {
-            Some(Entry::Option(info)) => facts.store.set_by_in(facts.window, info),
-            Some(Entry::Keys(bound)) => (bound.modes.iter())
-                .map(|&mode| facts.keys.bound_by(mode, &bound.keys))
-                .find(|by| by.at.is_some())
-                .unwrap_or(SetBy::DEFAULT),
-            _ => return Outcome::Nothing,
+        let (info, by) = match self.picked() {
+            Some(Entry::Option(info)) => (Some(info), facts.set_by_in(info)),
+            Some(Entry::Keys(bound)) => (
+                None,
+                (bound.modes.iter())
+                    .map(|&mode| facts.keys.bound_by(mode, &bound.keys))
+                    .find(|by| by.at.is_some())
+                    .unwrap_or(SetBy::DEFAULT),
+            ),
+            None => return Outcome::Nothing,
         };
         if by.at.is_none() {
             return self.refuse("no line of config set it");
         }
-        self.open_set_by(by, facts)
+        self.open_set_by(info, by, facts)
     }
 
     /// Changes the option picked to `value`, if it isn't locked, noting
@@ -909,19 +1141,20 @@ impl SettingsMenu {
         {
             let said = format!(
                 "{} sets {}, which outdoes what the menu saves: Enter opens it",
-                by.place(facts.dir).unwrap_or_else(|| "your config".into()),
+                facts.place(info, &by),
                 info.name
             );
             return self.refuse(&said);
         }
         // One read only as a window opens is only saved, so it's as it was
-        // if what's saved is.
+        // if what's saved is; and the daemon's are only saved, as the
+        // daemon runs what's saved.
         let changed: Vec<Set> = (sets.into_iter())
             .filter(|Set { info, live, saved }| {
                 facts.saved(info) != *saved
                     || !info.restart
-                        && (facts.store.get(info) != *live
-                            || facts.store.local(facts.window, info).is_some())
+                        && info.scope != Scope::Daemon
+                        && (facts.get(info) != *live || facts.local(info).is_some())
             })
             .collect();
         if changed.is_empty() {
@@ -930,7 +1163,7 @@ impl SettingsMenu {
         let undo = (changed.iter())
             .map(|set| Set {
                 info: set.info,
-                live: facts.store.get(set.info),
+                live: facts.get(set.info),
                 saved: facts.saved(set.info),
             })
             .collect();
@@ -1020,15 +1253,15 @@ impl SettingsMenu {
         let locked = match &undo {
             Undo::Options(sets) => (sets.iter()).find_map(|set| {
                 let by = facts.locked(set.info)?;
-                Some((by.clone(), set.info.name.to_owned(), "sets"))
+                Some((facts.place(set.info, &by), set.info.name.to_owned(), "sets"))
             }),
             Undo::Keys(changes) => (changes.iter()).find_map(|(mapping, _)| {
                 let by = facts.keys_locked(&mapping.modes, &mapping.keys)?;
-                Some((by, display(&mapping.keys), "binds"))
+                let place = by.place(facts.dir).unwrap_or_else(|| "your config".into());
+                Some((place, display(&mapping.keys), "binds"))
             }),
         };
-        if let Some((by, what, does)) = locked {
-            let place = by.place(facts.dir).unwrap_or_else(|| "your config".into());
+        if let Some((place, what, does)) = locked {
             return self.refuse(&format!("{place} {does} {what} now, so it can't be undone"));
         }
         match undo {
@@ -1050,7 +1283,7 @@ impl SettingsMenu {
         let Some(Entry::Option(info)) = self.picked() else {
             return Outcome::Nothing;
         };
-        if facts.store.local(facts.window, info).is_none() {
+        if facts.local(info).is_none() {
             return self.refuse(&format!("this window has no {} of its own", info.name));
         }
         Outcome::ClearLocal(info)
@@ -1288,7 +1521,7 @@ impl SettingsMenu {
         FinderView {
             title: "Settings",
             side: Some(side),
-            place: None,
+            place: daemon_elsewhere(facts),
             query,
             count,
             selected: self.picker.shown_selected(len),
@@ -1333,7 +1566,7 @@ impl SettingsMenu {
         let index = self.ranking.get(rank)?;
         let accents = self.ranking.matched_chars(self.items.get(index));
         let mut pieces: Vec<(String, Ink)> = Vec::new();
-        let mut tag: Option<(String, Ink)> = None;
+        let tag: Option<(String, Ink)>;
         // The characters of what's matched that a piece of the row shows,
         // from where it starts in the row's text.
         let matched_in = |piece: &str, from: usize| -> Vec<bool> {
@@ -1354,17 +1587,16 @@ impl SettingsMenu {
                 lit.resize(name.chars().count(), false);
                 pieces.push((name, if changed { Ink::Bold } else { Ink::Plain }));
                 pieces.push((shown_value(info, &facts.value(info)), Ink::Plain));
+                let differs = facts.get(info) != facts.configured_value(info);
                 tag = if let Some(by) = facts.locked(info) {
-                    Some((short_place(by), Ink::Muted))
-                } else if facts.store.local(facts.window, info).is_some() {
+                    Some((short_place(&by), Ink::Muted))
+                } else if facts.local(info).is_some() {
                     Some(("this window's own".into(), Ink::Muted))
-                } else if !info.restart
-                    && facts.store.get(info) != facts.store.configured_value(info)
-                {
+                } else if !info.restart && differs {
                     Some(("not saved".into(), Ink::Caution))
-                } else if info.restart
-                    && facts.store.get(info) != facts.store.configured_value(info)
-                {
+                } else if info.restart && differs && info.scope == Scope::Daemon {
+                    Some(("at next upgrade or restart".into(), Ink::Muted))
+                } else if info.restart && differs {
                     Some(("for windows opened after".into(), Ink::Muted))
                 } else {
                     None
@@ -1384,9 +1616,6 @@ impl SettingsMenu {
                     }
                     _ => (KeyMode::letters(&bound.modes), Ink::Muted),
                 });
-            }
-            Entry::Coming => {
-                pieces.push(("Coming: the daemon's own settings".into(), Ink::Muted));
             }
         }
         let mut text = String::new();
@@ -1637,14 +1866,6 @@ fn key_hints(pairs: &[(&str, &str)]) -> Said {
 fn detail(picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> PreviewView {
     let said = match picked {
         None => Vec::new(),
-        Some(Entry::Coming) => vec![
-            vec![("The daemon's own settings".into(), Ink::Bold)],
-            vec![(
-                "Coming: agents, the web app and this machine, now in the daemon's TOML files."
-                    .into(),
-                Ink::Plain,
-            )],
-        ],
         Some(Entry::Option(info)) => option_detail(info, facts),
         Some(Entry::Keys(bound)) => keys_detail(bound, facts),
     };
@@ -1664,6 +1885,9 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
     if !info.short.is_empty() {
         title.push((format!("  {}", info.short), Ink::Muted));
     }
+    if info.scope == Scope::Daemon {
+        title.push(("  the daemon's".into(), Ink::Muted));
+    }
     let mut said = vec![
         title,
         vec![(info.description.to_owned(), Ink::Plain)],
@@ -1676,14 +1900,14 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
         ),
         labelled("Takes", takes(info), Ink::Plain),
     ];
-    let shared = facts.store.get(info);
-    let configured = facts.store.configured_value(info);
-    let from = match facts.store.configured(info) {
+    let shared = facts.get(info);
+    let configured = facts.configured_value(info);
+    let from = match facts.configured(info) {
         // Saved since the config loaded, at no line yet.
         Some((_, by)) if by.source == Source::Settings && by.at.is_none() => {
             format!("saved in {}", crate::options::persist::file(info))
         }
-        Some((_, by)) => facts.said(by),
+        Some((_, by)) => by.said(facts.dir_of(info)),
         None if configured != info.default_value() => "as the window opened: startup.toml".into(),
         None => "as it starts".into(),
     };
@@ -1695,38 +1919,51 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
             shown_value(info, &shared)
         );
         // One read as a window opens is as this one opened, and is for
-        // windows opened after.
+        // windows opened after; one the daemon reads as it starts, as it
+        // started.
         if info.restart {
             said.push(labelled("Now", now, Ink::Muted));
         } else {
             said.push(labelled("Now", now, Ink::Caution));
-            said.push(labelled(
-                "",
-                facts.said(&facts.store.set_by(info)),
-                Ink::Muted,
-            ));
+            said.push(labelled("", facts.said(&facts.set_by(info)), Ink::Muted));
         }
     }
-    if let Some((value, by)) = facts.store.local(facts.window, info) {
+    if let Some((value, by)) = facts.local(info) {
         let own = format!("this window's own: {}", shown_value(info, value));
         said.push(labelled("Here", own, Ink::Plain));
         said.push(labelled("", facts.said(by), Ink::Muted));
     }
-    let file = crate::options::persist::file(info).to_owned();
+    let mut file = crate::options::persist::file(info).to_owned();
+    if let (Scope::Daemon, Some(machine)) =
+        (info.scope, facts.daemon.and_then(|d| d.elsewhere.as_ref()))
+    {
+        file = format!("{file} on {machine}");
+    }
     said.push(labelled("Saved in", file, Ink::Plain));
     let later = match info.scope {
         Scope::Startup(_) if info.restart => Some("takes effect for windows opened after"),
         Scope::Startup(_) => Some("takes effect for windows opened after, and this one now"),
-        Scope::Window | Scope::Daemon => None,
+        Scope::Daemon if info.restart => Some(RESTARTS),
+        Scope::Daemon => Some("takes effect at once, for what the daemon starts from then on"),
+        Scope::Window => None,
     };
     if let Some(later) = later {
         said.push(labelled("", later.into(), Ink::Muted));
+    }
+    if let (Scope::Daemon, Some(failure)) = (
+        info.scope,
+        facts.daemon.and_then(|daemon| daemon.failure.as_ref()),
+    ) {
+        said.push(Vec::new());
+        let failed =
+            format!("The daemon's config doesn't run, so it goes by what last did: {failure}");
+        said.push(vec![(failed, Ink::Caution)]);
     }
     said.push(Vec::new());
     if let Some(by) = facts.locked(info) {
         let locked = format!(
             "Locked: {}, which outdoes what the menu saves",
-            facts.said(by)
+            by.said(facts.dir_of(info))
         );
         said.push(vec![(locked, Ink::Caution)]);
         said.push(key_hints(&[("Enter", "opens it")]));
@@ -1746,7 +1983,7 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
         pairs.push(("h l", "step"));
     }
     pairs.extend([("r", "default"), ("u", "undo")]);
-    if facts.store.local(facts.window, info).is_some() {
+    if facts.local(info).is_some() {
         pairs.push(("x", "clears this window's"));
     }
     said.push(key_hints(&pairs));
@@ -1871,6 +2108,7 @@ fn shown_value(info: &Info, value: &Value) -> String {
     match value {
         Value::Bool(true) => "on".into(),
         Value::Bool(false) => "off".into(),
+        Value::Number(0) if info.scope == Scope::Daemon => "0 (none)".into(),
         Value::Number(0) if matches!(info.kind, Kind::Number { or_zero: true, .. }) => {
             "0 (the window's choice)".into()
         }
@@ -2044,6 +2282,7 @@ mod tests {
             keys,
             dir: None,
             automating: false,
+            daemon: None,
         }
     }
 

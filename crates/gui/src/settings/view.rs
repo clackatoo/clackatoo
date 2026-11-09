@@ -56,6 +56,9 @@ pub(crate) struct EasyView {
     pub(crate) fonts: Option<FontsView>,
     /// The row whose slider is being dragged.
     pub(crate) sliding: Option<usize>,
+    /// Whose the daemon's settings the page shows are, said in the
+    /// header, if they're another machine's: `daemon on desk`.
+    pub(crate) machine: Option<String>,
 }
 
 /// Appearance's sample: lines of text in runs of ink, as a terminal and
@@ -729,7 +732,7 @@ pub(crate) fn lay_out(
         shown: &shown,
         mono: false,
         typing: view.typing,
-        count: None,
+        count: view.machine.as_deref(),
     };
     lay_header(&mut lay, header, Mode::Easy, &search);
 
@@ -2062,6 +2065,7 @@ mod tests {
             warning: false,
             fonts: None,
             sliding: Some(0),
+            machine: None,
         }
     }
 

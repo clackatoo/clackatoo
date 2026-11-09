@@ -57,7 +57,7 @@ impl Page {
         match self {
             Self::Appearance => "How text looks in terminals and editors.",
             Self::Editor => "Indenting, searching, and what language servers add.",
-            Self::Terminals => "Marks, pasting, and the clipboard.",
+            Self::Terminals => "Marks, what's kept after a restart, and pasting.",
             Self::Agents => "Which agent a new chat starts with, and what it may do.",
             Self::Keys => "Keys for what you do most, recorded as you press them.",
             Self::Machines => "Working on other machines, and how they show here.",
@@ -68,12 +68,12 @@ impl Page {
     pub(crate) fn note(self) -> Option<&'static str> {
         match self {
             Self::Terminals => Some(
-                "What terminals keep across a restart, and the notice when a long command ends, \
-                 are the daemon's settings: the menu doesn't change them yet.",
+                "What's kept after a restart, and wide emoji, are the daemon's: saved in its \
+                 daemon/settings.lua.",
             ),
             Self::Agents => Some(
-                "Add another agent, such as OpenCode, in the daemon's config, where the limits \
-                 on subagents are set too.",
+                "Add another agent, such as OpenCode, in the daemon's daemon/init.lua: new chats \
+                 can start with it at once. Advanced has every limit on subagents.",
             ),
             Self::Keys => Some("Every key, in every mode, and what set it, is in Advanced."),
             Self::Machines => Some(
@@ -151,6 +151,14 @@ pub(crate) enum Control {
     Text(&'static str),
     /// The keys bound to one of the window's own actions, to record more.
     Keys(Action),
+}
+
+impl Entry {
+    /// Whether it shows the daemon's options, which are named
+    /// `group.name`, as `history.keep`.
+    pub(crate) fn daemons(&self) -> bool {
+        (self.control.options().iter()).any(|name| name.contains('.'))
+    }
 }
 
 impl Control {
@@ -504,6 +512,31 @@ pub(crate) const ENTRIES: &[Entry] = &[
             choice("None", &["none"]),
         ],
     ),
+    toggle(
+        Terminals,
+        "After a restart",
+        "Keep what terminals showed",
+        "Scrollback comes back dimmed above the new prompt. Kept only on the daemon's machine.",
+        "history.keep",
+    ),
+    choices(
+        Terminals,
+        "After a restart",
+        ("Lines kept of each terminal", ""),
+        &["history.lines"],
+        &[
+            choice("1,000", &["1000"]),
+            choice("10,000", &["10000"]),
+            choice("50,000", &["50000"]),
+        ],
+    ),
+    toggle(
+        Terminals,
+        "Drawing",
+        "Wide emoji",
+        "An emoji with variation selector 16 takes two columns, in terminals started from now on.",
+        "terminals.vs16",
+    ),
     choices(
         Terminals,
         "Pasting",
@@ -568,6 +601,16 @@ pub(crate) const ENTRIES: &[Entry] = &[
         "Helpers inside one turn, folded under the Task's card.",
         "claudetask",
     ),
+    stepper(
+        Agents,
+        "Subagents",
+        (
+            "Working at once",
+            "Chats agents start that may work at the same time, in all.",
+        ),
+        "subagents.working",
+        (1, ""),
+    ),
     choices(
         Agents,
         "While they work",
@@ -578,6 +621,16 @@ pub(crate) const ENTRIES: &[Entry] = &[
             choice("Questions", &["questions"]),
             choice("Nothing", &["off"]),
         ],
+    ),
+    stepper(
+        Agents,
+        "While they work",
+        (
+            "When a long command finishes, after",
+            "A notification for a command in a terminal you can't see.",
+        ),
+        "terminals.notify_after",
+        (5, "s"),
     ),
     toggle(
         Agents,
@@ -698,7 +751,8 @@ pub(crate) fn shows(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::{Kind, find};
+    use crate::options::Kind;
+    use crate::settings::find;
 
     #[test]
     fn every_entry_names_options_that_exist_with_a_control_that_fits_them() {
@@ -712,7 +766,7 @@ mod tests {
                 match &entry.control {
                     Control::Toggle(_) => assert_eq!(kind, Kind::Bool, "{label}"),
                     Control::Segmented { .. } => assert!(
-                        matches!(kind, Kind::Bool | Kind::Choice(_)),
+                        matches!(kind, Kind::Bool | Kind::Choice(_) | Kind::Number { .. }),
                         "{label}: {name} is {kind:?}"
                     ),
                     Control::Slider { min, max, step, .. } => {

@@ -269,6 +269,11 @@ pub struct DaemonConfig {
     /// config as it started: what was moved into it from the old TOML
     /// files, and what went wrong (see [`settings`]).
     pub notes: Vec<String>,
+    /// The daemon's own config, which it watches, runs again as it
+    /// changes, and saves what windows' settings menus change in: `None`
+    /// but as `clackatoo daemon` starts (see
+    /// [`configured`](Self::configured)), and in tests that give one.
+    pub own_config: Option<settings::Own>,
 }
 
 /// How terminals' history is kept across a restart of the daemon (see
@@ -558,11 +563,17 @@ impl DaemonConfig {
     /// set, for what's read of it beyond, as the daemon's priority.
     #[must_use]
     pub fn configured(when: settings::When) -> (Self, settings::Settings) {
-        let loaded = (settings::Dirs::from_env())
-            .map(|dirs| settings::load(&dirs, when))
+        let dirs = settings::Dirs::from_env();
+        let loaded = (dirs.as_ref())
+            .map(|dirs| settings::load(dirs, when))
             .unwrap_or_default();
         let mut config = Self::from_settings(&loaded.settings);
         config.notes.splice(0..0, loaded.notes);
+        config.own_config = dirs.map(|dirs| settings::Own {
+            dirs,
+            settings: loaded.settings.clone(),
+            failure: loaded.failure,
+        });
         (config, loaded.settings)
     }
 
@@ -747,6 +758,7 @@ impl DaemonConfig {
             },
             history: history_from(settings, &non_empty),
             notes,
+            own_config: None,
         }
     }
 }

@@ -980,3 +980,143 @@ fn the_cog_opens_the_menu_in_the_mode_used_last_and_closes_it() {
     desk.toggle_settings();
     assert_eq!(desk.settings_mode_shown(), Some(Mode::Easy));
 }
+
+/// The daemon's settings as a daemon on `machine` says them: each option
+/// at its default, but `subagents.working`, which its init.lua sets at
+/// line 2, and `images.total_mb`, saved in its settings.lua, which it
+/// goes by once it restarts.
+fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
+    use clackatoo_daemon::settings::options;
+    use clackatoo_protocol::{DaemonOption, OptionPlace, OptionSetBy, OptionSource};
+    let dir = "/home/u/.config/clackatoo";
+    let by = |source, file: &str, line| OptionSetBy {
+        source,
+        at: Some(OptionPlace {
+            file: format!("{dir}/daemon/{file}"),
+            line,
+        }),
+        inner: None,
+    };
+    let options = (options::ALL.iter())
+        .map(|info| {
+            let mut option = DaemonOption {
+                name: info.name.to_owned(),
+                value: options::default_of(info).text(),
+                running: None,
+                restart: info.restart,
+                by: OptionSetBy {
+                    source: OptionSource::Default,
+                    at: None,
+                    inner: None,
+                },
+            };
+            match info.name {
+                "subagents.working" => {
+                    option.value = "8".into();
+                    option.by = by(OptionSource::Config, "init.lua", 2);
+                }
+                "images.total_mb" => {
+                    option.value = "512".into();
+                    option.running = Some("256".into());
+                    option.by = by(OptionSource::Settings, "settings.lua", 3);
+                }
+                _ => {}
+            }
+            option
+        })
+        .collect();
+    clackatoo_protocol::DaemonSettings {
+        machine: machine.into(),
+        dir: dir.into(),
+        options,
+        failure: None,
+    }
+}
+
+/// Easy shows the daemon's rows once the daemon has said its settings,
+/// and a change goes to the daemon to save, shown at once; what its
+/// init.lua sets is locked; one it reads only as it starts says it waits
+/// for that; and a remote window says whose they are (CLACKA-237).
+#[test]
+fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
+    use crate::settings::view::{ControlView, Part, SettingsHit};
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    let asked = answer_all(&mut desk);
+    assert!(asked.contains(&Request::DaemonSettings), "{asked:#?}");
+    desk.settings_pointer(SettingsHit::Page(2));
+    assert!(
+        !(easy(&mut desk).sections.iter()).any(|section| section.heading == "After a restart"),
+        "the daemon hasn't said them yet"
+    );
+    desk.daemon_settings_came(&daemon_said("desk"), None);
+    let (row, keep) = easy_row(&mut desk, "Keep what terminals showed");
+    assert_eq!(keep.control, ControlView::Toggle(true));
+    assert_eq!(easy(&mut desk).machine, None);
+    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
+    let asked = answer_all(&mut desk);
+    assert_eq!(
+        asked,
+        [Request::SetDaemonOption {
+            name: "history.keep".into(),
+            value: Some("false".into()),
+        }]
+    );
+    // Counted on at once, waiting for a restart.
+    let (_, keep) = easy_row(&mut desk, "Keep what terminals showed");
+    assert_eq!(keep.control, ControlView::Toggle(false));
+    assert_eq!(
+        keep.notes,
+        vec![(
+            "Takes effect at the daemon's next upgrade or restart.".to_owned(),
+            crate::render::Ink::Muted
+        )]
+    );
+    // The daemon says it couldn't: as it was, and why.
+    desk.daemon_settings_came(
+        &daemon_said("desk"),
+        Some(clackatoo_protocol::OptionSaved {
+            name: "history.keep".into(),
+            value: Some("false".into()),
+            refused: Some("daemon/settings.lua's line 4 isn't one clackatoo wrote".into()),
+        }),
+    );
+    let view = easy(&mut desk);
+    assert!(
+        view.warning && view.footer.contains("line 4"),
+        "{}",
+        view.footer
+    );
+    let (_, keep) = easy_row(&mut desk, "Keep what terminals showed");
+    assert_eq!(keep.control, ControlView::Toggle(true));
+
+    // What its init.lua sets is locked, at its place.
+    desk.settings_pointer(SettingsHit::Page(3));
+    let (_, working) = easy_row(&mut desk, "Working at once");
+    assert_eq!(working.lock.as_deref(), Some("init.lua:2"));
+    assert_eq!(working.control, ControlView::Stepper("8".into()));
+
+    // Advanced lists them all, after the keys, saying where each is kept.
+    type_keys(&mut desk, "m");
+    type_keys(&mut desk, "/images.total_mb");
+    named(&mut desk, NamedKey::Enter);
+    let (picked, _, preview) = menu(&mut desk);
+    assert!(picked.starts_with("images.total_mb"), "{picked}");
+    assert!(picked.ends_with("at next upgrade or restart"), "{picked}");
+    assert!(
+        preview
+            .iter()
+            .any(|line| line == "Saved in  daemon/settings.lua"),
+        "{preview:#?}"
+    );
+    assert!(
+        (preview.iter()).any(|line| line.contains("daemon's next upgrade or restart")),
+        "{preview:#?}"
+    );
+
+    // A remote window says whose they are.
+    desk.remote = true;
+    desk.daemon_settings_came(&daemon_said("desk"), None);
+    let view = desk.finder_view((30, 100), None).expect("the menu");
+    assert_eq!(view.place.as_deref(), Some("daemon on desk"));
+}

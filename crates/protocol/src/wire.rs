@@ -470,6 +470,12 @@ gates! {
     /// an older daemon, with no masks, is never sent. Lines are masked
     /// for every peer, whatever its protocol.
     SECRET_REGIONS = 151,
+    /// The daemon's settings in a window's settings menu (CLACKA-237):
+    /// `Request::DaemonSettings`, answered with `Response::DaemonSettings`,
+    /// `Request::SetDaemonOption`, and `Event::DaemonSettings`, sent as the
+    /// daemon's config runs again. An older daemon is never asked, and an
+    /// older window never told: its menu has no daemon's settings.
+    DAEMON_SETTINGS = 152,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -822,6 +828,7 @@ impl Since for Event {
             Self::Image(_) | Self::Picture { .. } => IMAGES,
             Self::Notified { .. } => TERMINAL_STANDARDS_2,
             Self::LendBeside { .. } => FEDERATION_2,
+            Self::DaemonSettings { .. } => DAEMON_SETTINGS,
         }
     }
 }
@@ -1300,6 +1307,16 @@ impl Downgrade for ClientMessage {
             return Downgraded::Refused;
         }
         if wire < SECRET_REGIONS && matches!(self, Self::Request(crate::Request::Unmask { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < DAEMON_SETTINGS
+            && matches!(
+                self,
+                Self::Request(
+                    crate::Request::DaemonSettings | crate::Request::SetDaemonOption { .. }
+                )
+            )
+        {
             return Downgraded::Refused;
         }
         if wire < HARNESS
@@ -1878,6 +1895,7 @@ impl Downgrade for ServerMessage {
                 | Event::Picture { .. }
                 | Event::Notified { .. }
                 | Event::LendBeside { .. }
+                | Event::DaemonSettings { .. }
                 | Event::Files {
                     update:
                         FilesUpdate::Changed { .. }
@@ -2826,7 +2844,8 @@ mod tests {
         // folder, which only a client that can answer it is asked; what
         // came of image work, and what a picture pane shows, which only a
         // client that asked is sent; and a program's notification, which
-        // only a newer window is sent.
+        // only a newer window is sent; and the daemon's settings, which an
+        // older window's menu doesn't show.
         matches!(
             message,
             ServerMessage::Event(
@@ -2836,6 +2855,7 @@ mod tests {
                         | FilesUpdate::Notice(_),
                     ..
                 } | Event::Paired { .. }
+                    | Event::DaemonSettings { .. }
                     | Event::Image(_)
                     | Event::Picture { .. }
                     | Event::Notified { .. }

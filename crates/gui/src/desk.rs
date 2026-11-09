@@ -127,6 +127,10 @@ enum Asked {
     ChatChoices,
     /// The same, for the settings menu's cards of agents.
     SettingsAgents,
+    /// The daemon's settings, for the settings menu.
+    DaemonSettings,
+    /// A change to one of the daemon's settings the menu asked for.
+    DaemonOption(&'static crate::options::Info),
     /// The chats, every one, to mark the tabs and workspaces with what
     /// they're doing.
     Chats,
@@ -513,6 +517,9 @@ pub(crate) struct Desk {
     /// saves of each are on their way, and what it was configured to
     /// before them, to put back if one fails.
     settings_pending: std::collections::HashMap<&'static str, Pending>,
+    /// The daemon's settings, as it last said them, for the settings
+    /// menu: none until the menu has asked, or from an older daemon.
+    daemon_settings: Option<crate::settings::DaemonFacts>,
     /// What the last new chat started from the start page had, for the
     /// next to start with.
     last_chat: crate::start::LastChat,
@@ -1946,6 +1953,10 @@ impl Desk {
             }
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::SettingsAgents)) => self.settings_agents(response),
+            Some(Asker::Window(Asked::DaemonSettings)) => self.daemon_settings_answered(response),
+            Some(Asker::Window(Asked::DaemonOption(info))) => {
+                self.daemon_option_answered(info, response)
+            }
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
             Some(Asker::Window(Asked::Reattached(terminal))) => {
                 if let Response::Error(err) = response {

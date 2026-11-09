@@ -71,12 +71,14 @@ pub(super) fn request_names(request: &Request) -> Asked {
     let mut names = Vec::new();
     match *request {
         // What only this machine's own clients ask: what it's connected
-        // to, and what it lends.
+        // to, what it lends, and its own settings.
         Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::Forget { .. }
         | Request::WatchConnections { .. }
-        | Request::Lent => return Asked::Own,
+        | Request::Lent
+        | Request::DaemonSettings
+        | Request::SetDaemonOption { .. } => return Asked::Own,
         Request::Review(ref action) => return Asked::Review(action.clone()),
         // Naming nothing of another machine's.
         Request::ListTerminals

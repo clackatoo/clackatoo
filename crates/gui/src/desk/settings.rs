@@ -464,7 +464,7 @@ impl Desk {
 
     /// Says what was saved, in the bar, and along the settings menu's foot
     /// if it's open.
-    fn say_saved(&mut self, said: String) {
+    pub(super) fn say_saved(&mut self, said: String) {
         self.settings_changed();
         if let Some(menu) = &mut self.settings {
             menu.saved(&said, false);
@@ -473,7 +473,7 @@ impl Desk {
     }
 
     /// Says what wasn't saved, and why, as [`Desk::say_saved`] does.
-    fn warn_saved(&mut self, said: String) {
+    pub(super) fn warn_saved(&mut self, said: String) {
         self.settings_changed();
         if let Some(menu) = &mut self.settings {
             menu.saved(&said, true);

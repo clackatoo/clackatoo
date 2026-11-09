@@ -113,6 +113,8 @@ struct State {
     /// Whose file is running.
     source: Cell<Source>,
     files: RefCell<Vec<Arc<str>>>,
+    /// The modules required, as files.
+    modules: RefCell<Vec<PathBuf>>,
     /// What went wrong in the API, as it's said, with where: each time,
     /// as `pcall` may have caught some, and the run gone on.
     failed: RefCell<Vec<Failure>>,
@@ -192,6 +194,7 @@ pub(crate) fn run(
         profiles: RefCell::default(),
         source: Cell::new(Source::Settings),
         files: RefCell::default(),
+        modules: RefCell::default(),
         failed: RefCell::default(),
     });
     let (lua, store) = sandbox(&state, dirs, limit).map_err(|err| Failure {
@@ -524,6 +527,7 @@ fn require(lua: &Lua, state: &Rc<State>, dirs: Vec<PathBuf>) -> mlua::Result<mlu
                 format!("there's no module `{name}` in daemon/lua/ or lua/"),
             ));
         };
+        state.modules.borrow_mut().push(path.clone());
         let module: LuaValue = (lua.load(text))
             .set_name(format!("@{}", path.display()))
             .set_mode(ChunkMode::Text)
@@ -665,6 +669,7 @@ fn gather(state: &State, store: &Table) -> Result<Settings, Failure> {
         options,
         agents,
         profiles,
+        modules: state.modules.take(),
     })
 }
 

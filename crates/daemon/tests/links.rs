@@ -208,6 +208,7 @@ impl World {
             logind: None,
             history: None,
             notes: Vec::new(),
+            own_config: None,
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),
