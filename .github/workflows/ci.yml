@@ -60,7 +60,8 @@ jobs:
           shared-key: clippy
           # Only main's caches are kept, so branches can't fill them.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # With the lifecycle tests, which are left out without their feature.
+      - run: cargo clippy --workspace --all-targets --features clackatoo/lifecycle --locked -- -D warnings
       # The web app as it's built, for the browser.
       - run: cargo clippy -p clackatoo-web --target wasm32-unknown-unknown --locked -- -D warnings
 
@@ -92,6 +93,67 @@ jobs:
       # server as a test harness too.
       - run: cargo nextest run --workspace --locked --profile ci
       - run: cargo test --workspace --locked --doc
+
+  lifecycle:
+    # The daemon under a real systemd, stopped with its scope, upgraded and
+    # killed (crates/clackatoo/tests/lifecycle.rs). The runner's user has
+    # no systemd user manager running, so logind is asked to keep one, as
+    # it does for a user who lingers, and the tests make their scopes in
+    # it.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lifecycle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Keep a systemd user manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 100); do
+            [ -S "$runtime/bus" ] && break
+            sleep 0.1
+          done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
+      - name: Check it makes scopes
+        run: systemd-run --user --scope --quiet --collect true
+      # The fake agent the tests' chats talk to.
+      - run: cargo build -p clackatoo-daemon --examples --locked
+      - run: cargo test -p clackatoo --features lifecycle --test lifecycle --locked
+
+  keystrokes:
+    # The keystroke gate's measurements (crates/bench/src/e2e/gate.rs), on
+    # each push to main, for the record only: a runner's machine differs
+    # from one run to the next, so they're never checked against the
+    # baseline, which is measured on one machine. `scripts/release` checks
+    # it there.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - name: Install a software GPU, to build frames on
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: keystrokes
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo bench --profile quick --locked -p clackatoo --bench e2e -- gate
 
   fuzz:
     # The fuzz targets (fuzz/, a workspace of their own) still build
