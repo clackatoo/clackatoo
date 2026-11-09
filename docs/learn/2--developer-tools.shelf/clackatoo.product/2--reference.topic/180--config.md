@@ -41,6 +41,7 @@ end)
 
 ```text
 ~/.config/clackatoo/        or $XDG_CONFIG_HOME/clackatoo/
+  client/settings.lua       options :setpersist saved, run before init.lua
   client/init.lua           the window's config
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
@@ -61,9 +62,10 @@ window starting up, and a typical config takes under a millisecond. The window
 never waits for it to show itself: keys pressed before it has run do what they
 do without it.
 
-`:reload` runs the config again, from the start. Everything the old config
-bound or listened for goes, the window's own keys come back first, and options
-go back to how they start, including those changed with `:set`.
+`:reload` runs the config again, from the start: `settings.lua`, then
+`init.lua`. Everything the old config bound or listened for goes, the window's
+own keys come back first, and options go back to how they start, including
+those changed with `:set`.
 
 
 ### The daemon's name
@@ -214,42 +216,94 @@ writes it.
 | `:set numberwidth=5` | Sets a number. |
 | `:set colorcolumn=80,120` | Sets a list, with commas between its numbers. `:set cc=` sets none. |
 | `:set showbreak=↪\ ` | Sets text; `\ ` is a space and `\\` a backslash. |
+| `:set number&` | Puts it back as it starts. |
 | `:set` | Shows the options changed from how they start. |
+| `:verbose set number?` | Shows it, and [where it was set](~clackatoo/reference/config#where-an-option-was-set). |
 
 Several can go after one `:set`, such as `:set nu rnu`. Each option has a
 short name, as in Vim, which works everywhere the long one does.
+
+### Font
 
 | Option | Short | Is | Starts |
 |---|---|---|---|
 | `font` | `gfn` | The font family terminals and editors are drawn in, as `fc-list : family` names it, such as `JetBrains Mono`. Empty is your system's monospace font. A family that isn't installed is refused, and the font stays as it was. `--font` or `CLACKATOO_FONT` outdoes what `init.lua` sets as it runs, but not `:set` or what your keys set afterward. | your system's |
 | `fontsize` | `fsz` | The size text is drawn at, in points, from 4 to 200, such as `12` or `10.5`. The window keeps its size, and the panes fit as many cells as now fit, as when it's resized. `--font-size` or `CLACKATOO_FONT_SIZE` outdoes what `init.lua` sets as it runs. | 12 |
+
+### Editors
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
 | `number` | `nu` | Line numbers down an [editor](~clackatoo/reference/editor-view#line-numbers)'s left, the cursor's line showing its own. | on |
 | `relativenumber` | `rnu` | The other lines show how far they are from the cursor's, for counts such as `5j`. Without `number`, the cursor's line shows 0. | on |
 | `numberwidth` | `nuw` | The fewest columns the line numbers take, with the space after them, from 1 to 20. | 4 |
 | `cursorline` | `cul` | The cursor's line is lit faintly across an editor, so the eye finds it. | on |
 | `colorcolumn` | `cc` | Columns marked down an editor, such as `80`, to keep lines short by. A list, counting from 1, as the bottom bar's column does, up to 9999. | none |
 | `virtualtext` | `vt` | What a [language server](~clackatoo/reference/languages#language-servers) says is wrong with a line, written dimly after its end: the worst, if there are several. | on |
+| `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor-view#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
+| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor-view#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
 | `wrap` | `wrap` | A line too long for an editor's pane goes on over as many rows as it needs. Off, the view scrolls sideways to follow the cursor. | on |
 | `linebreak` | `lbr` | Wrapped lines break between words, not in them. | on |
 | `breakindent` | `bri` | Wrapped rows start as far in as their line is indented. | on |
 | `showbreak` | `sbr` | Text drawn at the start of each wrapped row. | none |
 | `scrolloff` | `so` | The fewest lines kept in view above and below an editor's cursor. Half the pane or more keeps the cursor's line in the middle. | 5 |
-| `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
+| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor-view#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
+
+### Editing
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
 | `tabstop` | `ts` | How wide a tab is drawn: to the next column that's a multiple of it, from 1 to 32. | 4 |
 | `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor-view#tabs-and-indenting) by, as does <kbd>Tab</kbd> where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
 | `expandtab` | `et` | Indents with spaces, not tabs, where no line nearby is indented yet. A file keeps the kind of indent it has. | on |
 | `smartindent` | `si` | A new line, and one where `}`, `]` or `)` is typed first or `:` ends `else` and the like, is [indented](~clackatoo/reference/editor-view#tabs-and-indenting) as its language's tree-sitter rules say, not Vim's rules for C, a moment after it's given the line before's indent. Off, it keeps the line before's. `=` indents by the rules either way. | on |
 | `autoread` | `ar` | A file changed on disk by something other than an agent is read again if it has no changes not written, as an edit `u` undoes. Off, or with changes, the bottom bar says so. | on |
-| `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. <kbd>Esc</kbd> puts them back; <kbd>Enter</kbd> keeps them, and is the search. Off, nothing moves until <kbd>Enter</kbd>. | on |
-| `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
+| `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/languages#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
 | `tildeop` | `top` | `~` takes a motion, as `g~` does. | off |
 | `startofline` | `sol` | These go to the line's first character that isn't blank, as Vim's do: `gg`, `G` and <kbd>Ctrl</kbd>+<kbd>Home</kbd>, `H`, `M` and `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd>, <kbd>Ctrl</kbd>+<kbd>U</kbd>, <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Page Down</kbd> and <kbd>Page Up</kbd>, in editors and terminals; and in an editor, `:` and a line number, and deleting, shifting or indenting whole lines (`dd`, `dj`, `dG`, `>>`, `<<`, `==`, and their kin). Off, as Neovim's are, they keep the column, as `j` and `k` do. Yanks and <kbd>Ctrl</kbd>+<kbd>E</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd> keep it either way, and `:d` goes to the first non-blank either way. | off |
+
+### Searching
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
 | `ignorecase` | `ic` | Searches ignore case, in editors, in a terminal's normal mode, in a chat's and in lists'. An editor ignores the case of plain English letters only: `é` doesn't match `É`. | on |
 | `smartcase` | `scs` | With `ignorecase`, a search with a capital letter in it matches case, in editors, terminals, chats and lists. Does nothing without `ignorecase`, as in Vim. | on |
 | `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until <kbd>Esc</kbd> or `:nohlsearch`. Off, only the match the search went to is lit. | on |
+| `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. <kbd>Esc</kbd> puts them back; <kbd>Enter</kbd> keeps them, and is the search. Off, nothing moves until <kbd>Enter</kbd>. | on |
+| `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
+
+### Completion and language servers
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
+| `completion` | `cmp` | Asks the language server what could finish a word as you type it. Off, <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> still ask. | on |
+| `completedelay` | `cmpd` | How long typing pauses, up to 2000 milliseconds, before completion asks, so a burst of keys asks once. 0 asks at every key. | 40 |
+| `completeaccept` | `cmpa` | What <kbd>Enter</kbd> does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to <kbd>Ctrl</kbd>+<kbd>Y</kbd>. | `picked` |
+| `completetab` | `cmpt` | <kbd>Tab</kbd> accepts the picked item too. | off |
+| `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
+| `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/languages#language-servers) says; where it's given a value a little brighter. | on |
+| `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/languages#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
+| `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/languages#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
+
+### The clipboard
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
 | `clipboard` | `cb` | Which of the desktop's the unnamed register goes along with, for what's yanked or deleted in an editor and yanked in a terminal or a chat: the clipboard (`unnamedplus`), the primary selection (`unnamed`), or neither (`none`), keeping it the window's own but for `"+` and `"*`. | `unnamedplus` |
 | `osc52` | `osc52` | What programs in a terminal can do with the clipboard through OSC 52: `copy`, `paste`, `copy-paste`, or `off`. What they copy goes to `"+` and `"*` too. Reading is off unless allowed, since whatever runs in the terminal would get the clipboard. Only the window that last typed into the terminal acts, and text is capped at 1 MiB. | `copy` |
 | `pasteimage` | `pi` | How <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> [pastes an image](~clackatoo/reference/typing#pasting-an-image) into a terminal: `path`, kept in a file on the terminal's machine whose path is pasted, or `clipboard`, put on that machine's clipboard and <kbd>Ctrl</kbd>+<kbd>V</kbd> typed, which needs a desktop session there. A chat attaches the image either way. | `path` |
+
+### Terminals
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
+| `blockmarks` | `bm` | Which finished commands a terminal marks at the end of their prompt's line, where the shell says how they ended: those that failed, with a red `✗` and their exit status (`failed`), every one, with a faint `✓` for those that worked (`all`), or none (`none`). | `failed` |
+| `predictecho` | `pe` | Shows what's typed in a terminal at once, underlined, before its echo comes back: `auto` for a daemon on another machine whose round trip is over 30 ms or has stalled moments before, `always`, or `never`. | `auto` |
+
+### Agents
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
 | `agent` | `ag` | The agent `:Agent` and <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` open a chat with: `claude`, `codex`, `gemini`, or one in the daemon's [`agents.toml`](~clackatoo/reference/agent-settings#which-agent). Empty leaves it to the daemon. | `claude` |
 | `agenttools` | `agt` | What a new chat's agent can do with [clackatoo's tools](~clackatoo/reference/agent-tools#what-the-agent-can-show-you): `ask` before running commands or typing, `allow` commands in its own terminals, or `off`. | `ask` |
 | `claudetask` | `ct` | A new Claude Code chat keeps Claude Code's own Task tool, which runs helpers inside one turn, folded under the Task's [card](~clackatoo/reference/chat-view#claude-code-s-own-subagents). Off, Claude hands work on only as [subagents](~clackatoo/reference/chats-together#subagents), which you can watch. Other agents have no such tool. | off |
@@ -258,30 +312,90 @@ short name, as in Vim, which works everywhere the long one does.
 | `carryover` | `co` | About the most of a chat's conversation, in tokens, that an agent the chat moves to hears, from 1000 to 50000, but never more than a quarter of its context. | 20000 |
 | `notify` | `ntf` | Which chats you can't see get a [desktop notification](~clackatoo/reference/chat-view#desktop-notifications): `all` (those that finish, fail, or ask something), `questions`, or `off`. | `all` |
 | `rewindfiles` | `rwf` | What [rewinding a chat](~clackatoo/reference/agent-changes#rewinding-and-branches), or switching its branch, does to the files the turns it takes out changed: `ask` each time, `undo` them, or `keep` them. `:rewind!` undoes them without asking. | `ask` |
-| `updatecheck` | `uc` | Look for a new release at most once a day, a while after the window opens, and say so in the bar. It sends one request to api.github.com, saying the version. | on |
-| `predictecho` | `pe` | Shows what's typed in a terminal at once, underlined, before its echo comes back: `auto` for a daemon on another machine whose round trip is over 30 ms or has stalled moments before, `always`, or `never`. | `auto` |
-| `blockmarks` | `bm` | Which finished commands a terminal marks at the end of their prompt's line, where the shell says how they ended: those that failed, with a red `✗` and their exit status (`failed`), every one, with a faint `✓` for those that worked (`all`), or none (`none`). | `failed` |
-| `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
+
+### The window
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
+| `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
 | `whichkeydelay` | `wkd` | How long, up to 5000 milliseconds, keys that start others, as <kbd>Space</kbd> does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with <kbd>Ctrl</kbd> or <kbd>Alt</kbd>, as <kbd>Ctrl</kbd>+<kbd>B</kbd>, show it at once; 0 shows it at once for every key. | 400 |
+| `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/typing#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `explorerwidth` | `ew` | How wide a [file explorer](~clackatoo/reference/explorer) opens, in columns: 0 is 30, or a quarter of the tab if that's narrower; otherwise from 10 to 200. | 0 |
 | `explorerhidden` | `eh` | File explorers show hidden files when they open. | off |
-| `completion` | `cmp` | Asks the language server what could finish a word as you type it. Off, <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> still ask. | on |
-| `completedelay` | `cmpd` | How long typing pauses, up to 2000 milliseconds, before completion asks, so a burst of keys asks once. 0 asks at every key. | 40 |
-| `completeaccept` | `cmpa` | What <kbd>Enter</kbd> does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to <kbd>Ctrl</kbd>+<kbd>Y</kbd>. | `picked` |
-| `completetab` | `cmpt` | <kbd>Tab</kbd> accepts the picked item too. | off |
-| `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
-| `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/languages#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
-| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor-view#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
-| `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/languages#language-servers) says; where it's given a value a little brighter. | on |
-| `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/languages#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
-| `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor-view#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
-| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor-view#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
-| `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/typing#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
-| `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/languages#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
+| `updatecheck` | `uc` | Look for a new release at most once a day, a while after the window opens, and say so in the bar. It sends one request to api.github.com, saying the version. | on |
+| `renderer` | — | The graphics API windows draw with: `vulkan`, fastest where it works well, or `opengl`, which on some machines with two GPUs opens a window much sooner. It's read from [`startup.toml`](~clackatoo/reference/frame#settings) as the window process starts, so `:set` can't change it: `:setpersist renderer=opengl` saves it for windows opened after. | `vulkan` |
+| `priority` | — | Whether windows [run ahead](~clackatoo/reference/cli#staying-quick-on-a-busy-machine) of your other programs (`high`) or as they do (`normal`). Read from `startup.toml` as the window process starts, so only `:setpersist` changes it, for windows opened after. | `high` |
+
+### Other machines
+
+| Option | Short | Is | Starts |
+|---|---|---|---|
+| `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/connecting#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as
-`client.opt.number = 1`, is a mistake.
+`client.opt.number = 1`, is a mistake. `renderer` and `priority` are read only
+as a window opens, so `client.opt` reads them but can't set them, and neither
+can `:set`.
+
+### Saving options: settings.lua
+
+`:setpersist`, or `:setp`, is `:set` that also saves what it sets, so it's set
+again in every window that opens after, and after a `:reload`. It takes what
+`:set` takes, and Tab completes the same:
+
+```text
+:setp nowrap colorcolumn=80,120
+```
+
+Most options are saved in `client/settings.lua`, beside `init.lua`. The font,
+its size, `renderer` and `priority` are saved in
+[`startup.toml`](~clackatoo/reference/frame#settings) instead, as the window
+needs them before any Lua runs, keeping the rest of that file, comments
+included. `:setp number&` puts an option back as it starts and takes it out of
+the file.
+
+clackatoo writes `settings.lua`, and says so at its top. It holds a line for
+each option saved, set as your config would set it:
+
+```lua
+-- Written by clackatoo, whose :setpersist and settings menu rewrite it whole.
+-- Your own config goes in init.lua, which runs after this and outdoes it.
+
+client.opt.wrap = false
+client.opt.colorcolumn = { 80, 120 }
+```
+
+It runs before `init.lua`, so anything `init.lua` sets outdoes it. An option
+your `init.lua` sets as it loads, or a module it requires, isn't saved: `:setp`
+sets it for now, and the bottom bar says which line of yours sets it, such as
+`client/init.lua:12 sets wrap, so it's set for now and not saved`. Change that
+line instead, or take it out.
+
+Each save reads the file again, changes the one option, and writes the file
+whole, in place of the old one all at once, so saving from one window never
+undoes what another saved. The writing happens off the window's thread. Options
+are written in the order they're listed here; one this build doesn't know,
+saved by a newer one, is kept as it was. If the file has a line clackatoo
+didn't write, nothing is saved, and the bottom bar names the line: move it to
+`init.lua`. A line `settings.lua` can't set, such as an option a newer build
+saved, is said in the bottom bar, and the rest are set all the same.
+
+### Where an option was set
+
+`:verbose set` shows what last set each option it shows, as Vim's does:
+
+```text
+:verbose set wrap? cc? nu?
+nowrap · set in client/init.lua:4  colorcolumn=80,120 · saved in client/settings.lua:5  number · as it starts
+```
+
+An option can be as it starts; set as the window opened, by `startup.toml` or
+the command line; saved in `settings.lua`; set in your config as it loaded,
+with the line, and the line of a module's helper that really set it if that's
+elsewhere, as `client/init.lua:3 (in lua/opts.lua:8)`; set by your config after
+it loaded, by a handler or a binding; or set with `:set` or a key. A `:set`
+your config runs, with `client.cmd`, is your config's, at its line.
 
 ## Events and handles
 
@@ -359,7 +473,8 @@ stderr, for a window opened in a process of its own).
 
 - The daemon's only config files are `agents.toml`, `machine.toml` and
   `web.toml`.
-- `init.lua` isn't run again when it changes: use `:reload`.
+- `init.lua` and `settings.lua` aren't run again when they change: use
+  `:reload`. Windows already open don't see what another saved until then.
 - Bindings made in Lua don't show in <kbd>Ctrl</kbd>+<kbd>B</kbd>'s list in
   the bottom bar.
 - Keypresses are the only event.

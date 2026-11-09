@@ -63,6 +63,7 @@ mod session;
 mod shortcuts;
 mod smooth;
 mod start;
+pub mod startup;
 mod tutor;
 mod updates;
 mod vim;
@@ -330,6 +331,7 @@ fn open_here(
         runtime: options.runtime,
         config: options.config,
         graphics_api: options.graphics_api,
+        priority: options.priority,
         listen: None,
         share,
     };
@@ -411,6 +413,7 @@ fn host(
         runtime,
         config,
         graphics_api,
+        priority,
         listen,
         share: true,
     };

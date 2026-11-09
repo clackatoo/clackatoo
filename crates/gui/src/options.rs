@@ -10,6 +10,14 @@
 //! change it makes, whoever asked for it, so the copy ends up the same
 //! whatever order changes cross in.
 
+pub(crate) mod persist;
+pub(crate) mod provenance;
+pub(crate) mod settings_lua;
+mod store;
+
+pub(crate) use provenance::SetBy;
+pub(crate) use store::Store;
+
 /// An option's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Value {
@@ -126,18 +134,120 @@ pub(crate) enum Kind {
     Text,
 }
 
-/// An option, as config and `:set` know it.
+/// An option, as config and `:set` know it: the schema every option is
+/// declared in once, which the Lua API, `:set` and its completion, the
+/// docs' table of options and the settings menu all go by.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Info {
     pub(crate) name: &'static str,
-    /// The short name, as Vim's: `nu` for `number`.
+    /// The short name, as Vim's: `nu` for `number`. Empty for those that
+    /// have none.
     pub(crate) short: &'static str,
     pub(crate) kind: Kind,
     /// Short help shown in command completion.
     pub(crate) description: &'static str,
+    /// Where it's listed with others like it, as the docs and the settings
+    /// menu list them.
+    pub(crate) category: Category,
+    /// Where it's kept when it's saved (see [`Scope`]).
+    pub(crate) scope: Scope,
+    /// It's read only as a window opens, so changing it waits for the next
+    /// window: `:set` refuses it, and `:setpersist` saves it for then.
+    pub(crate) restart: bool,
+    /// It may be set for one window alone, with `:setlocal`, over the
+    /// value every window shares, as Vim's window-local options can. None
+    /// is yet: `:setlocal` comes with one Lua for every window (CLACKA-237
+    /// phase 1b).
+    pub(crate) local: bool,
 }
 
+/// Where an option's value is kept when it's saved, with `:setpersist`
+/// or the settings menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The window's: `client/settings.lua`, which runs before `init.lua`.
+    Window,
+    /// `client/startup.toml`, under this key, as the window needs it
+    /// before config runs.
+    Startup(&'static str),
+    /// The daemon's own config.
+    #[expect(
+        dead_code,
+        reason = "the daemon's options come with its Luau config (CLACKA-237 phase 3)"
+    )]
+    Daemon,
+}
+
+/// A group of options like each other, in the order they're listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Category {
+    Font,
+    Editor,
+    Editing,
+    Search,
+    Code,
+    Clipboard,
+    Terminals,
+    Agents,
+    Window,
+    Connections,
+}
+
+impl Category {
+    /// Its name, as a heading.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the settings menu shows it (CLACKA-237 phase 2)")
+    )]
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Font => "Font",
+            Self::Editor => "Editors",
+            Self::Editing => "Editing",
+            Self::Search => "Searching",
+            Self::Code => "Completion and language servers",
+            Self::Clipboard => "The clipboard",
+            Self::Terminals => "Terminals",
+            Self::Agents => "Agents",
+            Self::Window => "The window",
+            Self::Connections => "Other machines",
+        }
+    }
+}
+
+/// The value every option starts with, unless the window was told
+/// otherwise (see [`Info::default_value`]).
+static DEFAULTS: std::sync::LazyLock<Options> = std::sync::LazyLock::new(Options::default);
+
 impl Info {
+    /// The value it has until something sets it.
+    pub(crate) fn default_value(&self) -> Value {
+        DEFAULTS.get(self)
+    }
+
+    /// Its place in [`ALL`], which provenance is kept by.
+    pub(crate) fn index(&self) -> usize {
+        (ALL.iter())
+            .position(|info| std::ptr::eq(info, self))
+            .expect("every option is in ALL")
+    }
+
+    /// Whether it can be set now, as the window runs: not if it's read only
+    /// as a window opens, saying why and how it's set.
+    pub(crate) fn settable_now(&self) -> Result<(), String> {
+        if !self.restart {
+            return Ok(());
+        }
+        let place = match self.scope {
+            Scope::Startup(_) => " in startup.toml",
+            Scope::Window | Scope::Daemon => "",
+        };
+        Err(format!(
+            "{} is read as a window opens: :setpersist saves it{place}, for windows opened after",
+            self.name
+        ))
+    }
+
     /// Checks `value` is one this option can hold, saying why not.
     fn check(&self, value: &Value) -> Result<(), String> {
         match (self.kind, value) {
@@ -372,11 +482,38 @@ macro_rules! kind {
     };
 }
 
+/// An option's [`Scope`]: the window's, or saved in startup.toml under a
+/// key.
+macro_rules! scope {
+    () => {
+        Scope::Window
+    };
+    ($key:literal) => {
+        Scope::Startup($key)
+    };
+}
+
+/// Whether an option's declared `restart`.
+macro_rules! restart {
+    () => {
+        false
+    };
+    (restart) => {
+        true
+    };
+}
+
 /// Declares the options: [`Options`], with a field for each, and [`ALL`].
+/// Each is written as `name("short", "description") in Category`, then
+/// `, startup "key"` for one kept in startup.toml, with `restart` after
+/// for one only read as a window opens; then its type, with its range,
+/// and its default.
 macro_rules! options {
     ($(
         $(#[doc = $doc:literal])+
-        $name:ident ($short:literal, $description:literal): $type:ident $(($min:literal ..= $max:literal))? = $default:expr;
+        $name:ident ($short:literal, $description:literal) in $category:ident
+            $(, startup $key:literal $($restart:ident)?)?
+            : $type:ident $(($min:literal ..= $max:literal))? = $default:expr;
     )+) => {
         /// The value of every option.
         #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,6 +539,10 @@ macro_rules! options {
                 short: $short,
                 description: $description,
                 kind: kind!($type $($min ..= $max)?),
+                category: Category::$category,
+                scope: scope!($($key)?),
+                restart: restart!($($($restart)?)?),
+                local: false,
             },
         )+];
 
@@ -431,72 +572,76 @@ macro_rules! options {
 }
 
 options! {
+    /// The font family terminals and editors are drawn in, by its name, as
+    /// `fc-list : family` lists them: `JetBrains Mono`, say. Empty is your
+    /// system's monospace font. In `:set`, a space is written `\ `. A
+    /// family that isn't installed is refused, and the font stays as it
+    /// was. `--font` or `$CLACKATOO_FONT` overrides what `init.lua` sets
+    /// as it runs, but not what's set after, by `:set` or a key it binds.
+    font("gfn", "Font family for terminals and editors") in Font, startup "font": String = String::new();
+    /// The size text is drawn at, in points, as 12 or 10.5. Changing it,
+    /// or `font`, keeps the window's size, and fits as many cells in as
+    /// now fit, as resizing the window does. `--font-size` or
+    /// `$CLACKATOO_FONT_SIZE` overrides what `init.lua` sets as it runs,
+    /// but not what's set after.
+    fontsize("fsz", "Font size in points") in Font, startup "font-size": Decimal (4..=200) = Decimal::whole(12);
     /// Line numbers down an editor's left.
-    number("nu", "Show line numbers"): bool = true;
+    number("nu", "Show line numbers") in Editor: bool = true;
     /// Each line's number as how far it is from the cursor's line, so the
     /// count for a motion such as `5j` can be read off. With `number`,
     /// the cursor's line shows its own number; without, 0.
-    relativenumber("rnu", "Show line numbers relative to the cursor"): bool = true;
+    relativenumber("rnu", "Show line numbers relative to the cursor") in Editor: bool = true;
     /// The fewest cells the line numbers take, with the space after them.
-    numberwidth("nuw", "Minimum width of the line-number column"): u32 (1..=20) = 4;
+    numberwidth("nuw", "Minimum width of the line-number column") in Editor: u32 (1..=20) = 4;
     /// The cursor's line lit faintly, across the pane, so the eye finds it.
-    cursorline("cul", "Highlight the cursor’s line"): bool = true;
+    cursorline("cul", "Highlight the cursor’s line") in Editor: bool = true;
     /// Columns marked down an editor, such as 80, to keep lines short by.
     /// They count from 1, as the bar's column does.
-    colorcolumn("cc", "Mark guide columns in the editor"): List (1..=9999) = List::new();
+    colorcolumn("cc", "Mark guide columns in the editor") in Editor: List (1..=9999) = List::new();
     /// What's wrong with a line, as its language server says, written
     /// after the line's end: the worst, if there are several.
-    virtualtext("vt", "Show diagnostics beside editor lines"): bool = true;
+    virtualtext("vt", "Show diagnostics beside editor lines") in Editor: bool = true;
     /// A column of signs left of the line numbers, saying which lines are
     /// added, changed or deleted since the file's text in git's index, as
     /// gitsigns.nvim shows them. Kept for every file while it's on, so the
     /// text doesn't move when the first change comes.
-    gitsigns("gs", "Show Git changes in the gutter"): bool = true;
+    gitsigns("gs", "Show Git changes in the gutter") in Editor: bool = true;
     /// A column of its own, right of git's signs, colouring the lines an
     /// agent changed that you haven't reviewed, in a colour for each
     /// chat. It shows only while a file has such lines, or `:blame` is
     /// on.
-    agentsigns("as", "Mark unreviewed agent changes in the gutter"): bool = true;
-    /// How wide a file explorer down the tab's left opens, in cells, as
-    /// `<Space>e` and `:Explore` open it. It keeps its share of the tab as
-    /// the window resizes. 0, as it starts, opens it at 30 cells, or a
-    /// quarter of the tab if that's narrower, but never under 10.
-    explorerwidth("ew", "Initial width of the file explorer"): OrZero (10..=200) = 0;
-    /// What each turn of a chat spent, its tokens and, where the agent
-    /// says, its cost, under the turn; and what the session has cost, in
-    /// the chat's usage, where the agent says.
-    chatcost("chc", "Show what chat turns spend, and session cost"): bool = true;
-    /// File explorers show hidden files, those whose names start with `.`,
-    /// as they open. `.` shows or hides them in each.
-    explorerhidden("eh", "Show hidden files in new explorers"): bool = false;
-    /// The fewest lines kept in view above and below the cursor, so what's
-    /// around it shows as it moves. Half the pane or more keeps the
-    /// cursor's line in the middle.
-    scrolloff("so", "Lines kept visible above and below the cursor"): u32 (0..=9999) = 5;
-    /// Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct.
-    smoothscroll("sms", "Animate mouse-wheel scrolling"): bool = true;
+    agentsigns("as", "Mark unreviewed agent changes in the gutter") in Editor: bool = true;
     /// A line too long for the pane goes on over as many rows as it needs,
     /// rather than off the pane's right edge. `j` and `k` still move by
     /// line, and `gj` and `gk` by row.
-    wrap("wrap", "Wrap long lines to fit the pane"): bool = true;
+    wrap("wrap", "Wrap long lines to fit the pane") in Editor: bool = true;
     /// With `wrap`, a line is broken between words, after a blank or one
     /// of `!@*-+;:,./?`, rather than at the last cell that fits.
-    linebreak("lbr", "Wrap at word boundaries"): bool = true;
+    linebreak("lbr", "Wrap at word boundaries") in Editor: bool = true;
     /// With `wrap`, the rows a line goes on over start as far in as the
     /// line is indented, so the code's shape still shows. At least 20
     /// cells are kept for the text.
-    breakindent("bri", "Preserve indentation on wrapped rows"): bool = true;
+    breakindent("bri", "Preserve indentation on wrapped rows") in Editor: bool = true;
     /// With `wrap`, drawn at the start of the rows a line goes on over,
     /// after their indent: `↪ `, say. In `:set`, a space is written `\ `.
-    showbreak("sbr", "Text marking the start of wrapped rows"): String = String::new();
+    showbreak("sbr", "Text marking the start of wrapped rows") in Editor: String = String::new();
+    /// The fewest lines kept in view above and below the cursor, so what's
+    /// around it shows as it moves. Half the pane or more keeps the
+    /// cursor's line in the middle.
+    scrolloff("so", "Lines kept visible above and below the cursor") in Editor: u32 (0..=9999) = 5;
+    /// How a Markdown file opens in an editor: as its text (`raw`), or
+    /// rendered, as prose, with its headings, lists, tables and code drawn
+    /// as such (`rendered`). `:markdown` and `<Space>tm` turn each editor
+    /// from one to the other.
+    markdownview("mdv", "How Markdown files open") in Editor: MarkdownView = MarkdownView::Raw;
     /// How wide a tab is drawn: to the next column that's a multiple of it.
-    tabstop("ts", "Display width of a tab"): u32 (1..=32) = 4;
+    tabstop("ts", "Display width of a tab") in Editing: u32 (1..=32) = 4;
     /// The columns `>>`, `<<` and Tab indent by. 0 means `tabstop`'s, so
     /// the two can't drift apart.
-    shiftwidth("sw", "Number of columns per indentation step"): u32 (0..=32) = 0;
+    shiftwidth("sw", "Number of columns per indentation step") in Editing: u32 (0..=32) = 0;
     /// Indent with spaces, not tabs, where no line nearby is indented yet.
     /// A file keeps the kind of indent it has.
-    expandtab("et", "Indent new code with spaces"): bool = true;
+    expandtab("et", "Indent new code with spaces") in Editing: bool = true;
     /// A new line, one where `}`, `]` or `)` is typed first, and one where
     /// `:` ends `else`, `elif`, `except`, `finally`, `case` or `default`,
     /// is indented as the file's language says: by the rules of its
@@ -505,108 +650,91 @@ options! {
     /// right a moment later, unless its indent has been typed in, or
     /// another change made meanwhile. Off, a new line keeps the line
     /// before's. `=` indents by the rules either way.
-    smartindent("si", "Indent code using its language’s rules"): bool = true;
-    /// Searches ignore case...
-    ignorecase("ic", "Ignore letter case when searching"): bool = true;
-    /// ...unless, with `ignorecase`, what's searched for has a capital.
-    smartcase("scs", "Match case when the search contains capitals"): bool = true;
-    /// Every match of the last search in view is lit up, in editors, in
-    /// terminals' normal mode and in chats, the one the search went to
-    /// brighter than the rest, until Esc or `:nohlsearch`, and again at
-    /// the next search, `n` or `N`. Off, only that one is.
-    hlsearch("hls", "Highlight every match of the last search"): bool = true;
-    /// While `/` or `?` is typed, in editors, terminals' normal mode and
-    /// chats, the cursor and the view go to the match the search would
-    /// go to, from where it started, and its matches are lit, as Neovim's
-    /// `incsearch`: Esc puts them back, Enter keeps them. Off, nothing
-    /// moves until Enter.
-    incsearch("is", "Show where a search goes while it's typed"): bool = true;
-    /// While `:s` is typed, show what it would do, in place, as Neovim
-    /// does; and the matches of `:g`'s pattern. Nothing changes until
-    /// Enter, and Esc puts the view back. `none` shows nothing.
-    inccommand("icm", "Preview substitutions while typing"): InCommand = InCommand::NoSplit;
-    /// `~` is an operator, as `g~` is, taking a motion: `~w`. Off, it
-    /// turns over the case of the character under the cursor, and moves
-    /// on past it.
-    tildeop("top", "Make ~ take a motion like g~"): bool = false;
-    /// `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, the paging keys, and in
-    /// an editor `:` and a line number and deleting, shifting or
-    /// indenting whole lines, go to the line's first character that isn't
-    /// blank, as Vim's do. Off, as Neovim's are, they keep the column, as
-    /// `j` and `k` do.
-    startofline("sol", "Move to the first non-blank character on line jumps"): bool = false;
-    /// `:w` formats the file first, as its language server does.
-    formatonsave("fos", "Format files before saving"): bool = false;
+    smartindent("si", "Indent code using its language’s rules") in Editing: bool = true;
     /// A file changed on disk by something other than an agent, as a git
     /// checkout or another editor changes one, is read again, if its
     /// buffer has no changes not saved: as an edit, which `u` undoes. Off,
     /// or with changes, the bar says so, and `:e!` takes the file's
     /// version, `:w!` keeps yours. Agents' changes are taken either way.
-    autoread("ar", "Reload unchanged buffers when their files change"): bool = true;
-    /// What's done when a file is opened in a language that isn't
-    /// installed, or whose language server isn't.
-    languageinstall("li", "How missing language support is installed"): LanguageInstall = LanguageInstall::Ask;
-    /// Type through the desktop's input method, as Chinese, Japanese and
-    /// Korean are typed, and as an emoji picker sends its emoji, while keys
-    /// type text. Off, keys go straight to the pane, in case the input
-    /// method gets in the way.
-    ime("ime", "Enable the desktop input method"): bool = true;
+    autoread("ar", "Reload unchanged buffers when their files change") in Editing: bool = true;
+    /// `:w` formats the file first, as its language server does.
+    formatonsave("fos", "Format files before saving") in Editing: bool = false;
+    /// `~` is an operator, as `g~` is, taking a motion: `~w`. Off, it
+    /// turns over the case of the character under the cursor, and moves
+    /// on past it.
+    tildeop("top", "Make ~ take a motion like g~") in Editing: bool = false;
+    /// `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, the paging keys, and in
+    /// an editor `:` and a line number and deleting, shifting or
+    /// indenting whole lines, go to the line's first character that isn't
+    /// blank, as Vim's do. Off, as Neovim's are, they keep the column, as
+    /// `j` and `k` do.
+    startofline("sol", "Move to the first non-blank character on line jumps") in Editing: bool = false;
+    /// Searches ignore case...
+    ignorecase("ic", "Ignore letter case when searching") in Search: bool = true;
+    /// ...unless, with `ignorecase`, what's searched for has a capital.
+    smartcase("scs", "Match case when the search contains capitals") in Search: bool = true;
+    /// Every match of the last search in view is lit up, in editors, in
+    /// terminals' normal mode and in chats, the one the search went to
+    /// brighter than the rest, until Esc or `:nohlsearch`, and again at
+    /// the next search, `n` or `N`. Off, only that one is.
+    hlsearch("hls", "Highlight every match of the last search") in Search: bool = true;
+    /// While `/` or `?` is typed, in editors, terminals' normal mode and
+    /// chats, the cursor and the view go to the match the search would
+    /// go to, from where it started, and its matches are lit, as Neovim's
+    /// `incsearch`: Esc puts them back, Enter keeps them. Off, nothing
+    /// moves until Enter.
+    incsearch("is", "Show where a search goes while it's typed") in Search: bool = true;
+    /// While `:s` is typed, show what it would do, in place, as Neovim
+    /// does; and the matches of `:g`'s pattern. Nothing changes until
+    /// Enter, and Esc puts the view back. `none` shows nothing.
+    inccommand("icm", "Preview substitutions while typing") in Search: InCommand = InCommand::NoSplit;
     /// As a word is typed in an editor, or a character its language server
     /// says should ask, such as `.`, ask the server what could be typed
     /// and show it in a menu under the cursor. Off, Ctrl+Space, Ctrl+N and
     /// Ctrl+P still ask.
-    completion("cmp", "Suggest code as you type in editors"): bool = true;
+    completion("cmp", "Suggest code as you type in editors") in Code: bool = true;
     /// How long typing a word pauses, in milliseconds, before the language
     /// server is asked what could finish it, so a burst of keys asks once.
     /// 0 asks at every key.
-    completedelay("cmpd", "Delay before asking for code completion, in ms"): u32 (0..=2000) = 40;
-    /// How long keys that start others wait, in milliseconds, before a
-    /// panel lists what can come next, as which-key.nvim's does, so keys
-    /// typed quickly, as `<Space>pf`, never flash it. Keys held with Ctrl
-    /// or Alt, as Ctrl+B, show it at once, as the window's own prefixes;
-    /// the bar marks the keys waiting at once either way. 0 shows it at
-    /// once for every key.
-    whichkeydelay("wkd", "Delay before showing keybinding hints, in ms"): u32 (0..=5000) = 400;
+    completedelay("cmpd", "Delay before asking for code completion, in ms") in Code: u32 (0..=2000) = 40;
     /// Which keys accept the item picked in the completion menu, besides
     /// Ctrl+Y, which always does: Enter, once an item has been moved to
     /// with Ctrl+N, Ctrl+P or the arrows; Enter, always; or Ctrl+Y alone,
     /// Enter always making a new line.
-    completeaccept("cmpa", "Keys that accept an editor completion"): CompleteAccept = CompleteAccept::Picked;
+    completeaccept("cmpa", "Keys that accept an editor completion") in Code: CompleteAccept = CompleteAccept::Picked;
     /// Tab accepts the item picked in the completion menu too, as in VS
     /// Code, rather than indenting.
-    completetab("cmpt", "Accept editor completions with Tab"): bool = false;
+    completetab("cmpt", "Accept editor completions with Tab") in Code: bool = false;
     /// While a call's arguments are typed in an editor, its signature shows
     /// over the cursor, with the argument being typed in bold, as the
     /// language server says.
-    signaturehelp("sig", "Show function signatures while typing arguments"): bool = true;
+    signaturehelp("sig", "Show function signatures while typing arguments") in Code: bool = true;
     /// Once the cursor rests on a name in an editor in normal mode, the
     /// other places it's used in the file are lit, as its language server
     /// says: where it's written a little brighter than where it's read.
-    highlightuses("hlu", "Highlight uses of the name under the cursor"): bool = true;
+    highlightuses("hlu", "Highlight uses of the name under the cursor") in Code: bool = true;
     /// What the language server would have written inline between a
     /// file's text is drawn there, muted: the types of names bound without
     /// one written, and the names of the parameters arguments are for.
     /// They're never part of the text: the cursor, motions, searches and
     /// yanks pass them by. `<Space>th` toggles it.
-    inlayhints("ih", "Show type and parameter hints in editors"): bool = true;
-    /// How a Markdown file opens in an editor: as its text (`raw`), or
-    /// rendered, as prose, with its headings, lists, tables and code drawn
-    /// as such (`rendered`). `:markdown` and `<Space>tm` turn each editor
-    /// from one to the other.
-    markdownview("mdv", "How Markdown files open"): MarkdownView = MarkdownView::Raw;
+    inlayhints("ih", "Show type and parameter hints in editors") in Code: bool = true;
+    /// What's done when a file is opened in a language that isn't
+    /// installed, or whose language server isn't.
+    languageinstall("li", "How missing language support is installed") in Code: LanguageInstall = LanguageInstall::Ask;
     /// Which of the desktop's the unnamed register goes along with, as in
     /// Neovim: the clipboard, so what's yanked or deleted in an editor, or
     /// yanked in a terminal, can be pasted anywhere, and `p` puts what was
     /// copied anywhere; the primary selection, which a middle click pastes;
     /// or neither, the registers being the window's own but for `"+` and
     /// `"*`.
-    clipboard("cb", "Clipboard used by the unnamed register"): Clipboard = Clipboard::UnnamedPlus;
+    clipboard("cb", "Clipboard used by the unnamed register") in Clipboard: Clipboard = Clipboard::UnnamedPlus;
     /// What programs in terminals may do with the clipboard, through OSC
     /// 52, as Neovim and tmux do, even over ssh: put text on it (`copy`),
     /// read what's there (`paste`), both, or neither. Reading is off
     /// unless asked for, since the clipboard may hold a password, and
     /// whatever runs in a terminal would get it.
-    osc52("osc52", "Clipboard access allowed to terminal programs"): Osc52 = Osc52::Copy;
+    osc52("osc52", "Clipboard access allowed to terminal programs") in Clipboard: Osc52 = Osc52::Copy;
     /// How the clipboard's image reaches the program in a terminal, as
     /// Ctrl+Shift+Alt+V pastes it: `path`, kept in a file on the
     /// terminal's machine, in `~/.cache/clackatoo/pastes`, whose path is
@@ -615,11 +743,24 @@ options! {
     /// Ctrl+V typed, for a program that reads the clipboard itself. That
     /// needs a desktop session there; without one, the path is pasted, and
     /// the bar says so. A chat takes the image either way.
-    pasteimage("pi", "How an image is pasted into a terminal"): PasteImage = PasteImage::Path;
+    pasteimage("pi", "How an image is pasted into a terminal") in Clipboard: PasteImage = PasteImage::Path;
+    /// Which commands a terminal marks at the end of their prompt's line,
+    /// once they've finished, where the shell says how they ended:
+    /// `failed` marks those that failed with a dim red `✗` and their exit
+    /// status, as `✗ 2`; `all` marks those that worked too, with a dim
+    /// `✓`; `none` marks none.
+    blockmarks("bm", "Which finished shell commands receive status marks") in Terminals: BlockMarks = BlockMarks::Failed;
+    /// What's typed in a terminal shows at once, underlined, before the
+    /// daemon's screen shows the program's echo, as mosh shows it, so
+    /// typing over a slow link doesn't wait for the round trip: `auto`
+    /// does this only for a daemon on another machine, while its round
+    /// trip is over 30 ms or a key has just taken a long time; `always`
+    /// does it even for a daemon on this machine; `never` doesn't.
+    predictecho("pe", "When to predict typing over remote connections") in Terminals: PredictEcho = PredictEcho::Auto;
     /// The agent `:Agent` and Ctrl+B `a` open a chat with, by its name:
     /// `claude`, `codex`, `gemini`, or one the daemon's `agents.toml`
     /// adds. Empty is the daemon's default, Claude Code.
-    agent("ag", "Default provider for new agent chats"): String = "claude".to_owned();
+    agent("ag", "Default provider for new agent chats") in Agents: String = "claude".to_owned();
     /// What a new chat's agent may do with clackatoo's own tools, which
     /// show you things beside the chat: open files, run commands in
     /// terminals you can watch, and read them. `ask` asks in the chat
@@ -627,26 +768,30 @@ options! {
     /// outside the chat's project; `allow` runs commands in its own
     /// terminals without asking, but asks the rest; `off` gives it no
     /// tools. The chat's Tools setting changes it later.
-    agenttools("agt", "Default tool permissions for new chats"): AgentTools = AgentTools::Ask;
+    agenttools("agt", "Default tool permissions for new chats") in Agents: AgentTools = AgentTools::Ask;
     /// A new chat with Claude Code keeps Claude Code's own Task tool,
     /// which runs helpers inside one turn, folded under the Task's card. Off, as it is
     /// unless you turn it on, Claude hands work on as every agent does,
     /// with clackatoo's `start_chat` and `start_chats`, in chats you see
     /// as cards and can open, steer and undo. Other agents have no Task
     /// tool.
-    claudetask("ct", "Allow Claude’s internal Task tool in new chats"): bool = false;
+    claudetask("ct", "Allow Claude’s internal Task tool in new chats") in Agents: bool = false;
     /// A new chat starts with its Browser setting on: its agent gets tools
     /// that drive a headless browser of clackatoo's, with a profile of its
     /// own, never yours, and asks before its first page. Off, as it is
     /// unless you turn it on, a chat gets no browser until you turn it on
     /// in the chat's settings.
-    chatbrowser("cbr", "Enable browser tools in new chats"): bool = false;
+    chatbrowser("cbr", "Enable browser tools in new chats") in Agents: bool = false;
+    /// What each turn of a chat spent, its tokens and, where the agent
+    /// says, its cost, under the turn; and what the session has cost, in
+    /// the chat's usage, where the agent says.
+    chatcost("chc", "Show what chat turns spend, and session cost") in Agents: bool = true;
     /// About the most of a conversation, in tokens, a chat tells an agent
     /// it moves to, as the model menu moves it from Claude Code to Codex,
     /// say: the newest turns whole, older ones a line each. An agent it
     /// goes back to hears only what happened since, as briefly. No more
     /// than the daemon takes.
-    carryover("co", "Token budget for context handed to another provider"): u32 (1000..=50_000) = 20_000;
+    carryover("co", "Token budget for context handed to another provider") in Agents: u32 (1000..=50_000) = 20_000;
     /// Which chats you can't see the desktop shows a notification for:
     /// one whose agent finished or failed, or asks you something, while
     /// the window doesn't have the focus or the chat isn't in the tab
@@ -654,37 +799,56 @@ options! {
     /// `off` of none. A notification is taken back once you look at its
     /// chat, and clicking it goes there. A subagent's finishing tells the
     /// chat that started it, not you, but its questions are yours.
-    notify("ntf", "Desktop notifications for chats you can’t see"): Notify = Notify::All;
+    notify("ntf", "Desktop notifications for chats you can’t see") in Agents: Notify = Notify::All;
     /// What rewinding a chat's conversation, or switching it to another
     /// branch, does to the files the turns it takes out changed: `ask`
     /// asks each time; `undo` undoes them, as `u` undoes a turn; `keep`
     /// leaves them as they are. `:rewind!` undoes them without asking,
     /// leaving out any that can't be.
-    rewindfiles("rwf", "Undo files a chat rewind takes out"): RewindFiles = RewindFiles::Ask;
+    rewindfiles("rwf", "Undo files a chat rewind takes out") in Agents: RewindFiles = RewindFiles::Ask;
+    /// Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct.
+    smoothscroll("sms", "Animate mouse-wheel scrolling") in Window: bool = true;
+    /// How long keys that start others wait, in milliseconds, before a
+    /// panel lists what can come next, as which-key.nvim's does, so keys
+    /// typed quickly, as `<Space>pf`, never flash it. Keys held with Ctrl
+    /// or Alt, as Ctrl+B, show it at once, as the window's own prefixes;
+    /// the bar marks the keys waiting at once either way. 0 shows it at
+    /// once for every key.
+    whichkeydelay("wkd", "Delay before showing keybinding hints, in ms") in Window: u32 (0..=5000) = 400;
+    /// Type through the desktop's input method, as Chinese, Japanese and
+    /// Korean are typed, and as an emoji picker sends its emoji, while keys
+    /// type text. Off, keys go straight to the pane, in case the input
+    /// method gets in the way.
+    ime("ime", "Enable the desktop input method") in Window: bool = true;
+    /// How wide a file explorer down the tab's left opens, in cells, as
+    /// `<Space>e` and `:Explore` open it. It keeps its share of the tab as
+    /// the window resizes. 0, as it starts, opens it at 30 cells, or a
+    /// quarter of the tab if that's narrower, but never under 10.
+    explorerwidth("ew", "Initial width of the file explorer") in Window: OrZero (10..=200) = 0;
+    /// File explorers show hidden files, those whose names start with `.`,
+    /// as they open. `.` shows or hides them in each.
+    explorerhidden("eh", "Show hidden files in new explorers") in Window: bool = false;
     /// Look for a new release of clackatoo, at most once a day, a while
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.
-    updatecheck("uc", "Check for new Clackatoo releases"): bool = true;
-    /// What's typed in a terminal shows at once, underlined, before the
-    /// daemon's screen shows the program's echo, as mosh shows it, so
-    /// typing over a slow link doesn't wait for the round trip: `auto`
-    /// does this only for a daemon on another machine, while its round
-    /// trip is over 30 ms or a key has just taken a long time; `always`
-    /// does it even for a daemon on this machine; `never` doesn't.
-    predictecho("pe", "When to predict typing over remote connections"): PredictEcho = PredictEcho::Auto;
-    /// Which commands a terminal marks at the end of their prompt's line,
-    /// once they've finished, where the shell says how they ended:
-    /// `failed` marks those that failed with a dim red `✗` and their exit
-    /// status, as `✗ 2`; `all` marks those that worked too, with a dim
-    /// `✓`; `none` marks none.
-    blockmarks("bm", "Which finished shell commands receive status marks"): BlockMarks = BlockMarks::Failed;
+    updatecheck("uc", "Check for new Clackatoo releases") in Window: bool = true;
+    /// The graphics API windows draw with: Vulkan, fastest where it works
+    /// well, or OpenGL, which on some machines with two GPUs opens a
+    /// window much sooner. Read from startup.toml as the window process
+    /// starts, so only `:setp` changes it, for windows opened after.
+    renderer("", "Graphics API windows draw with") in Window, startup "renderer" restart: Renderer = Renderer::Vulkan;
+    /// Whether the window's thread asks to run ahead of the user's other
+    /// programs, as the daemon's loop does (see
+    /// `clackatoo_daemon::priority`). Read from startup.toml as the
+    /// window process starts, so only `:setp` changes it.
+    priority("", "Whether windows run ahead of other programs") in Window, startup "priority" restart: Priority = Priority::High;
     /// When a workspace from another machine, one `:connect` brought in,
     /// says which machine it's on after its name, as `notes@desk`:
     /// `ambiguous` only while another workspace has the same name,
     /// `always` for every one, `never` for none. Its ring, in place of the
     /// dot, says it's from another machine whatever this says, and the
     /// mouse over it says which, and how its connection is.
-    showhost("shh", "When workspace names include their machine"): ShowHost = ShowHost::Ambiguous;
+    showhost("shh", "When workspace names include their machine") in Connections: ShowHost = ShowHost::Ambiguous;
     /// Ports forwarded to a daemon on another machine (`:portforward`)
     /// send as background traffic: only as fast as the link takes them
     /// without a queue growing, so keys and screens never wait behind a
@@ -693,20 +857,7 @@ options! {
     /// link that's slower whenever it's busy, as some Wi-Fi is, where
     /// background traffic gets little. A change counts for connections
     /// made after; what the window sends changes at once.
-    forwardpace("fp", "Pace forwarded traffic to keep remote input responsive"): bool = true;
-    /// The font family terminals and editors are drawn in, by its name, as
-    /// `fc-list : family` lists them: `JetBrains Mono`, say. Empty is your
-    /// system's monospace font. In `:set`, a space is written `\ `. A
-    /// family that isn't installed is refused, and the font stays as it
-    /// was. `--font` or `$CLACKATOO_FONT` overrides what `init.lua` sets
-    /// as it runs, but not what's set after, by `:set` or a key it binds.
-    font("gfn", "Font family for terminals and editors"): String = String::new();
-    /// The size text is drawn at, in points, as 12 or 10.5. Changing it,
-    /// or `font`, keeps the window's size, and fits as many cells in as
-    /// now fit, as resizing the window does. `--font-size` or
-    /// `$CLACKATOO_FONT_SIZE` overrides what `init.lua` sets as it runs,
-    /// but not what's set after.
-    fontsize("fsz", "Font size in points"): Decimal (4..=200) = Decimal::whole(12);
+    forwardpace("fp", "Pace forwarded traffic to keep remote input responsive") in Connections: bool = true;
 }
 
 choice! {
@@ -898,6 +1049,44 @@ choice! {
     }
 }
 
+choice! {
+    /// The graphics API `renderer` says windows draw with.
+    Renderer {
+        /// Vulkan.
+        Vulkan = "vulkan",
+        /// OpenGL.
+        OpenGl = "opengl",
+    }
+}
+
+impl From<crate::GraphicsApi> for Renderer {
+    fn from(api: crate::GraphicsApi) -> Self {
+        match api {
+            crate::GraphicsApi::Vulkan => Self::Vulkan,
+            crate::GraphicsApi::OpenGl => Self::OpenGl,
+        }
+    }
+}
+
+impl From<Renderer> for crate::GraphicsApi {
+    fn from(renderer: Renderer) -> Self {
+        match renderer {
+            Renderer::Vulkan => Self::Vulkan,
+            Renderer::OpenGl => Self::OpenGl,
+        }
+    }
+}
+
+choice! {
+    /// Whether `priority` has windows run ahead of other programs.
+    Priority {
+        /// Ahead of them.
+        High = "high",
+        /// As they do.
+        Normal = "normal",
+    }
+}
+
 /// The option called `name`, or by its short name; or why there's none,
 /// with the name nearest it if it looks like a slip. Tab lists them all,
 /// so the error doesn't.
@@ -910,7 +1099,7 @@ pub(crate) fn find(name: &str) -> Result<&'static Info, String> {
 
 fn lookup(name: &str) -> Option<&'static Info> {
     ALL.iter()
-        .find(|info| info.name == name || info.short == name)
+        .find(|info| info.name == name || (!info.short.is_empty() && info.short == name))
 }
 
 /// The name of an option, or its short name, nearest `name`, of those
@@ -961,22 +1150,28 @@ impl Options {
     /// How `info`'s option is written in `:set`: `number`, `nonumber`,
     /// `numberwidth=4`, or `colorcolumn=80,120`.
     pub(crate) fn show(&self, info: &Info) -> String {
-        match self.get(info) {
-            Value::Bool(true) => info.name.to_owned(),
-            Value::Bool(false) => format!("no{}", info.name),
-            Value::Number(number) => format!("{}={number}", info.name),
-            Value::Decimal(number) => format!("{}={number}", info.name),
-            Value::List(numbers) => {
-                let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
-                format!("{}={}", info.name, numbers.join(","))
-            }
-            Value::Choice(word) => format!("{}={word}", info.name),
-            Value::Text(text) => {
-                let text = (text.replace('\\', "\\\\"))
-                    .replace(' ', "\\ ")
-                    .replace('\t', "\\\t");
-                format!("{}={text}", info.name)
-            }
+        show_value(info, &self.get(info))
+    }
+}
+
+/// How `:set` writes `info`'s option as `value`: `number`, `nonumber`,
+/// `numberwidth=4`, or `colorcolumn=80,120`.
+pub(crate) fn show_value(info: &Info, value: &Value) -> String {
+    match value {
+        Value::Bool(true) => info.name.to_owned(),
+        Value::Bool(false) => format!("no{}", info.name),
+        Value::Number(number) => format!("{}={number}", info.name),
+        Value::Decimal(number) => format!("{}={number}", info.name),
+        Value::List(numbers) => {
+            let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
+            format!("{}={}", info.name, numbers.join(","))
+        }
+        Value::Choice(word) => format!("{}={word}", info.name),
+        Value::Text(text) => {
+            let text = (text.replace('\\', "\\\\"))
+                .replace(' ', "\\ ")
+                .replace('\t', "\\\t");
+            format!("{}={text}", info.name)
         }
     }
 }
@@ -1053,10 +1248,12 @@ pub(crate) enum Setting {
     Flip(&'static Info),
     /// Say what it is: `nu?`, or a number's name alone.
     Show(&'static Info),
+    /// Put it back to its default: `nu&`.
+    Default(&'static Info),
 }
 
 /// What the words after `:set` ask for, as Vim reads them: `number`,
-/// `nonumber`, `number!` or `invnumber`, `number?`, `numberwidth=5`,
+/// `nonumber`, `number!` or `invnumber`, `number?`, `number&`, `numberwidth=5`,
 /// `colorcolumn=80,120`, `colorcolumn=` for none, and `showbreak=>\ ` for
 /// text with a space.
 pub(crate) fn parse_set(words: &str) -> Result<Vec<Setting>, String> {
@@ -1109,6 +1306,9 @@ fn parse_setting(word: &str) -> Result<Setting, String> {
     }
     if let Some(name) = word.strip_suffix('?') {
         return Ok(Setting::Show(find(name)?));
+    }
+    if let Some(name) = word.strip_suffix('&') {
+        return Ok(Setting::Default(find(name)?));
     }
     // `nu!`, `nonu!` and `invnu` turn it over; `nonu` turns it off.
     let (name, flip) = match word.strip_suffix('!') {
@@ -1453,5 +1653,59 @@ mod tests {
             assert_eq!(case(ic, scs).exact("word"), exact_lower, "{ic} {scs}");
             assert_eq!(case(ic, scs).exact("Word"), exact_upper, "{ic} {scs}");
         }
+    }
+
+    /// The reference page's tables of options, which say more of each than
+    /// the schema, with links: each must list every option, in the order
+    /// they're declared, under its category's heading, with its short name
+    /// and default as the schema has them. A test rather than a generated
+    /// table, so the page's words stay written for people.
+    #[test]
+    fn the_docs_list_every_option_as_the_schema_declares_it() {
+        const PAGE: &str = include_str!(
+            "../../../docs/learn/2--developer-tools.shelf/clackatoo.product/2--reference.topic/180--config.md"
+        );
+        let section = PAGE
+            .split_once("\n## Options\n")
+            .and_then(|(_, rest)| rest.split("\n## ").next())
+            .expect("the page has its options");
+        // The table of what `:set` takes comes before the first heading.
+        let mut heading = "";
+        let mut listed = Vec::new();
+        for line in section.lines() {
+            if let Some(title) = line.strip_prefix("### ") {
+                heading = title;
+            } else if line.starts_with("| `") && !heading.is_empty() {
+                let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+                let [_, name, short, .., starts, _] = cells[..] else {
+                    panic!("a row of four cells: {line}");
+                };
+                listed.push(format!("{heading} | {name} | {short} | {starts}"));
+            }
+        }
+        let quoted = |text: &str| format!("`{text}`");
+        let declared: Vec<String> = (ALL.iter())
+            .map(|info| {
+                let short = match info.short {
+                    "" => "—".to_owned(),
+                    short => quoted(short),
+                };
+                let starts = match (info.name, info.default_value()) {
+                    (_, Value::Bool(on)) => (if on { "on" } else { "off" }).to_owned(),
+                    (_, Value::Number(number)) => number.to_string(),
+                    (_, Value::Decimal(number)) => number.to_string(),
+                    (_, Value::List(numbers)) if numbers.is_empty() => "none".to_owned(),
+                    (_, Value::List(numbers)) => quoted(&format!("{numbers:?}")),
+                    (_, Value::Choice(word)) => quoted(word),
+                    // Empty is the system's font, as the page says.
+                    ("font", Value::Text(text)) if text.is_empty() => "your system's".to_owned(),
+                    (_, Value::Text(text)) if text.is_empty() => "none".to_owned(),
+                    (_, Value::Text(text)) => quoted(&text),
+                };
+                let (title, name) = (info.category.title(), quoted(info.name));
+                format!("{title} | {name} | {short} | {starts}")
+            })
+            .collect();
+        assert_eq!(listed, declared);
     }
 }

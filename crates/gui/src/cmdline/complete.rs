@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn the_first_word_completes_commands_and_after_a_mark_panes() {
         assert_eq!(choices("Ex", &none()), ["Explore"]);
-        assert_eq!(choices("se", &none()), ["set"]);
+        assert_eq!(choices("se", &none()), ["set", "setpersist"]);
         assert_eq!(
             choices("Re", &none()),
             [

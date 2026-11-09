@@ -60,6 +60,7 @@
 //! and Ctrl+Shift+I go back and forward through all of it, in any mode, a
 //! pane's prompt included.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Side, WorkspaceId};
@@ -68,8 +69,9 @@ use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place, ReviewWhich};
 use crate::editor::HunkAction;
 use crate::finder;
-use crate::keymap::{KeyMode, Keymap, WhichKeys, parse_keys, parse_modes};
+use crate::keymap::{Chord, KeyMode, Keymap, WhichKeys, parse_keys, parse_modes};
 use crate::layout::Direction;
+use crate::options::SetBy;
 use crate::vim::{KeyState, Mode};
 
 /// How many choices the palette lists at once: workspaces, or what Tab
@@ -158,13 +160,22 @@ pub(crate) enum ReviewKey {
     Comment,
 }
 
-/// The window's keymap, which starts with its own keys bound.
+/// The window's keymap, which starts with its own keys bound, and what
+/// last bound, or unbound, each of the config's.
 #[derive(Debug)]
-pub(crate) struct Keys(Keymap<Binding>);
+pub(crate) struct Keys {
+    map: Keymap<Binding>,
+    /// What last bound or unbound keys in a mode, for those config has:
+    /// the rest are as the window starts them.
+    set_by: HashMap<(KeyMode, Vec<Chord>), SetBy>,
+}
 
 impl Default for Keys {
     fn default() -> Self {
-        Self(defaults())
+        Self {
+            map: defaults(),
+            set_by: HashMap::new(),
+        }
     }
 }
 
@@ -172,13 +183,34 @@ impl std::ops::Deref for Keys {
     type Target = Keymap<Binding>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.map
     }
 }
 
 impl std::ops::DerefMut for Keys {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.map
+    }
+}
+
+impl Keys {
+    /// Notes `by` as what last bound or unbound `keys` in `modes`.
+    pub(crate) fn set_by(&mut self, modes: &[KeyMode], keys: &[Chord], by: SetBy) {
+        for &mode in modes {
+            self.set_by.insert((mode, keys.to_vec()), by.clone());
+        }
+    }
+
+    /// What last bound or unbound `keys` in `mode`: the default, if it's
+    /// as the window starts it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the settings menu shows it (CLACKA-237 phase 2)")
+    )]
+    pub(crate) fn bound_by(&self, mode: KeyMode, keys: &[Chord]) -> SetBy {
+        (self.set_by.get(&(mode, keys.to_vec())))
+            .cloned()
+            .unwrap_or(SetBy::DEFAULT)
     }
 }
 
@@ -524,7 +556,7 @@ impl Desk {
                 }
             }
             Action::ToggleInlayHints => {
-                self.run_set("inlayhints!");
+                self.run_set("inlayhints!", false, false);
                 let on = self.options.inlayhints;
                 self.say(
                     if on {

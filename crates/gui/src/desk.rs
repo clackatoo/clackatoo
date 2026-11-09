@@ -452,14 +452,14 @@ pub(crate) struct Desk {
     macros: macros::Macros,
     /// Where you've been, to go back to.
     jumps: jumps::Jumps,
-    /// The options, as config and `:set` have set them.
-    options: Options,
-    /// The options as the window started: their defaults, but for the font
-    /// it was told to draw with. Config run again starts from these.
-    start_options: Options,
-    /// The options the command line set, or the environment, which config
-    /// doesn't change.
-    fixed: Vec<&'static crate::options::Info>,
+    /// The options, as config and `:set` have set them, as the window
+    /// started them, and what set each.
+    options: crate::options::Store,
+    /// What `:setpersist` saves come back on.
+    saving: settings::Saving,
+    /// What sets options with `:set` while the config's command runs it,
+    /// as `client.cmd("set nonu")`: the config, at its line.
+    set_by: Option<crate::options::SetBy>,
     /// The `font` and `fontsize` the window draws text in, as last put
     /// into its fonts.
     font_in_use: settings::FontInUse,
@@ -625,7 +625,6 @@ impl Desk {
     pub(crate) fn options(&self) -> &Options {
         &self.options
     }
-
     pub(crate) fn finished(&self) -> bool {
         self.finished
     }
@@ -2741,7 +2740,11 @@ impl Desk {
                 return self.warn("an agent's input can't reload the config".into());
             }
             Command::Reload => return self.reload_lua(),
-            Command::Set(words) => return self.run_set(&words),
+            Command::Set {
+                words,
+                persist,
+                verbose,
+            } => return self.run_set(&words, persist, verbose),
             Command::Update(host) => return self.ask_update(host),
             Command::Connect { host, share } => return self.ask_connect(host, share),
             Command::Disconnect(host) => return self.ask_disconnect(host),
@@ -2904,7 +2907,7 @@ impl Desk {
             Command::Keep(how) => self.keep_running(how),
             Command::Trust { action, folder } => self.trust_command(action, folder),
             Command::Reload
-            | Command::Set(_)
+            | Command::Set { .. }
             | Command::Update(_)
             | Command::Connect { .. }
             | Command::Disconnect(_)
@@ -3046,6 +3049,7 @@ mod tests {
     mod remedies;
     mod restored;
     mod scrolling;
+    mod settings;
     mod shared;
     mod shortcuts;
     mod subagents;
@@ -10620,7 +10624,13 @@ mod tests {
         // What Lua says by itself while a chat has Control isn't done.
         let close = || crate::lua::FromLua::Close { pane: PaneId(1) };
         desk.lua_says(close(), true);
-        desk.lua_says(crate::lua::FromLua::Command("bg make".into()), true);
+        desk.lua_says(
+            crate::lua::FromLua::Command {
+                line: "bg make".into(),
+                by: crate::options::SetBy::DEFAULT,
+            },
+            true,
+        );
         assert_eq!(desk.take_outbox(), []);
         // For the user's own key, it is.
         desk.lua_says(close(), false);

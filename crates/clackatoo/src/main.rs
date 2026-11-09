@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-mod config;
 mod connections;
 mod desktop;
 mod display;
@@ -26,6 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
+use clackatoo_gui::startup as config;
 use clackatoo_protocol::{
     NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal, Request, Response, Size, TerminalId,
 };

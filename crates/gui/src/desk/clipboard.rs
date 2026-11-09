@@ -82,7 +82,7 @@ mod tests {
             Osc52::CopyPaste => "copy-paste",
             Osc52::Off => "off",
         };
-        desk.set_option(info, Value::Choice(word));
+        desk.set_option(info, Value::Choice(word), crate::options::SetBy::RUNTIME);
         assert_eq!(desk.options.osc52, to);
     }
 

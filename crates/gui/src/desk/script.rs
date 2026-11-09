@@ -9,17 +9,28 @@ use clackatoo_protocol::{PaneId, Request};
 use super::{Asked, Desk};
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::{self, Chord};
-use crate::lua::{FromLua, INIT_TIME, KeyInfo, Lua, PaneInfo, Scope, ToLua, WINDOW, World};
-use crate::options::Options;
+use crate::lua::{
+    FromLua, INIT_TIME, KeyInfo, Lua, PaneInfo, Scope, Source, ToLua, WINDOW, Wake, World,
+};
 
 use super::bindings::Binding;
 
-/// Starts the config's Lua, if there's a config, with the options as the
-/// window's are as it starts.
-pub(crate) struct LuaStart(pub(crate) Box<StartLua>);
+/// Where the config is, to start its Lua from, and a reload to start it
+/// again, and `:setpersist` to save settings in.
+pub(crate) struct LuaStart {
+    pub(crate) source: Source,
+    /// Makes what wakes the window: when Lua has something for it, or a
+    /// setting it asked to save has been.
+    pub(crate) wake: Box<dyn Fn() -> Wake>,
+}
 
-/// What [`LuaStart`] holds.
-type StartLua = dyn Fn(&Options) -> Option<Lua>;
+impl LuaStart {
+    /// Starts the config's Lua, if there's a config, with the options as
+    /// the window's are.
+    fn lua(&self, options: &crate::options::Options) -> Option<Lua> {
+        Lua::start(self.source.clone(), options.clone(), (self.wake)())
+    }
+}
 
 impl fmt::Debug for LuaStart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -31,7 +42,7 @@ impl fmt::Debug for LuaStart {
 #[derive(Debug, Default)]
 pub(super) struct Script {
     lua: Option<Lua>,
-    start: Option<LuaStart>,
+    pub(super) start: Option<LuaStart>,
     /// Lua's keypress handlers, in the order they were registered.
     handlers: Vec<(u64, Scope)>,
     /// The world as Lua was last told it.
@@ -52,7 +63,7 @@ const RUNNING_TIME: Duration = INIT_TIME.saturating_add(Duration::from_secs(1));
 impl Desk {
     /// Starts the config's Lua with `start`, which a reload starts again.
     pub(crate) fn start_lua(&mut self, start: LuaStart) {
-        self.script.lua = (start.0)(&self.options);
+        self.script.lua = start.lua(&self.options);
         self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
         self.script.start = Some(start);
     }
@@ -88,7 +99,7 @@ impl Desk {
         self.script = super::script::Script::default();
         self.keymap = super::bindings::Keys::default();
         self.reset_options();
-        self.script.lua = start.as_ref().and_then(|start| (start.0)(&self.options));
+        self.script.lua = start.as_ref().and_then(|start| start.lua(&self.options));
         self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
         self.say(match &self.script.lua {
             Some(_) => "reloaded the config".into(),
@@ -155,7 +166,8 @@ impl Desk {
         for message in said {
             self.lua_says(message, guarded);
         }
-        redraw
+        // Settings saved come back the same way.
+        self.settings_saved() || redraw
     }
 
     /// Asks Lua whether the key `message` describes stops, doing whatever
@@ -311,14 +323,17 @@ impl Desk {
     /// Starts Lua on `config`, and does what it says as it runs, for tests.
     #[cfg(test)]
     pub(super) fn lua_from(&mut self, config: &str) {
-        let config = config.to_owned();
-        self.start_lua(LuaStart(Box::new(move |options| {
-            Lua::start(
-                crate::lua::Source::Text(config.clone()),
-                options.clone(),
-                Box::new(|| {}),
-            )
-        })));
+        self.lua_in(Source::Text(config.to_owned()));
+    }
+
+    /// Starts Lua on the config in `source`, and does what it says as it
+    /// runs, for tests.
+    #[cfg(test)]
+    pub(super) fn lua_in(&mut self, source: Source) {
+        self.start_lua(LuaStart {
+            source,
+            wake: Box::new(|| Box::new(|| {})),
+        });
         self.lua_ready();
     }
 
@@ -340,7 +355,7 @@ impl Desk {
         if guarded
             && let FromLua::Split { .. }
             | FromLua::Close { .. }
-            | FromLua::Command(_)
+            | FromLua::Command { .. }
             | FromLua::Forward(_)
             | FromLua::Connect { .. }
             | FromLua::Disconnect(_) = message
@@ -358,9 +373,11 @@ impl Desk {
                 keys,
                 binding,
                 desc,
+                by,
             } => {
                 let desc = desc.as_deref().and_then(said_in_panel);
                 (self.keymap).bind(&modes, &keys, Binding::Lua(binding), desc.as_deref());
+                self.keymap.set_by(&modes, &keys, by);
                 self.forget_waiting();
             }
             FromLua::Remap {
@@ -368,17 +385,20 @@ impl Desk {
                 keys,
                 to,
                 desc,
+                by,
             } => {
                 let desc = desc.as_deref().and_then(said_in_panel);
                 (self.keymap).bind(&modes, &keys, Binding::Keys(to), desc.as_deref());
+                self.keymap.set_by(&modes, &keys, by);
                 self.forget_waiting();
             }
             FromLua::Group { modes, keys, name } => {
                 let name = name.as_deref().and_then(said_in_panel);
                 self.keymap.name_group(&modes, &keys, name.as_deref());
             }
-            FromLua::Unmap { modes, keys } => {
+            FromLua::Unmap { modes, keys, by } => {
                 self.keymap.unbind(&modes, &keys);
+                self.keymap.set_by(&modes, &keys, by);
                 self.forget_waiting();
             }
             FromLua::Subscribe { handler, scope } => self.script.handlers.push((handler, scope)),
@@ -411,12 +431,17 @@ impl Desk {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
             FromLua::Focus { pane } => self.show_pane(pane),
-            FromLua::Command(line) => match crate::command::parse(&line) {
+            FromLua::Command { line, by } => match crate::command::parse(&line) {
                 // Not from the config being run.
                 Ok(crate::command::Command::Reload) => {
                     self.say("the config can't reload itself".into());
                 }
-                Ok(command) => self.run(command),
+                Ok(command) => {
+                    // What it sets, the config's line set.
+                    self.set_by = Some(by);
+                    self.run(command);
+                    self.set_by = None;
+                }
                 Err(message) => self.warn(message),
             },
             FromLua::Forward(spec) => {
@@ -425,7 +450,7 @@ impl Desk {
             }
             FromLua::Connect { host, share } => self.config_connects(host, share),
             FromLua::Disconnect(host) => self.config_disconnects(host),
-            FromLua::Set { option, value } => self.config_sets(option, value),
+            FromLua::Set { option, value, by } => self.config_sets(option, value, by),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");
                 self.say(text);

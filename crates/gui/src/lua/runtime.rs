@@ -20,10 +20,11 @@ use clackatoo_protocol::{Content, PaneId, Side, TabId, WorkspaceId};
 use mlua::thread::ThreadStatus;
 use mlua::{Function, Lua, MultiValue, Table, Thread, Value, VmState};
 
-use super::{FromLua, KeyInfo, Scope, Source, ToLua, WINDOW, Wake, World};
+use super::{Chunk, FromLua, KeyInfo, Scope, Source, ToLua, WINDOW, Wake, World};
 use crate::command::Kind;
 use crate::keymap::{KeyMode, parse_keys, parse_modes};
-use crate::options::{self, Options};
+use crate::options::provenance::{Place, Source as SetFrom};
+use crate::options::{self, Options, SetBy};
 
 /// How long `init.lua` may run before it's stopped.
 pub(crate) const INIT_TIME: Duration = Duration::from_secs(2);
@@ -44,6 +45,10 @@ struct State {
     bindings: RefCell<HashMap<u64, Function>>,
     handlers: RefCell<HashMap<u64, (Scope, Function)>>,
     next: Cell<u64>,
+    /// Which of the config's files is loading, while one is.
+    loading: Cell<Option<SetFrom>>,
+    /// The files of Lua that have set something, each kept once.
+    files: RefCell<Vec<Arc<str>>>,
 }
 
 impl State {
@@ -58,14 +63,61 @@ impl State {
         self.next.set(id);
         id
     }
+
+    /// `file`, as kept once.
+    fn file(&self, file: &str) -> Arc<str> {
+        let mut files = self.files.borrow_mut();
+        if let Some(kept) = files.iter().find(|kept| ***kept == *file) {
+            return kept.clone();
+        }
+        let kept: Arc<str> = file.into();
+        files.push(kept.clone());
+        kept
+    }
+
+    /// What's setting something now, from Lua: the config's file that's
+    /// loading, or the config later, as a handler; and the lines of the
+    /// user's code on the stack, from Luau's debug info. Worked out only
+    /// when something's set.
+    fn set_by(&self, lua: &Lua) -> SetBy {
+        /// Deeper than any config's calls go, to stop at.
+        const DEEPEST: usize = 200;
+        let mut inner = None;
+        let mut at = None;
+        for level in 0..DEEPEST {
+            let Some(frame) = lua.inspect_stack(level, |debug| {
+                // The config's files are named `@path`; the prelude and
+                // the core's functions, which aren't the user's, aren't.
+                let file = self.file(debug.source().source?.strip_prefix('@')?);
+                let line = u32::try_from(debug.current_line()?).ok()?;
+                Some(Place { file, line })
+            }) else {
+                break;
+            };
+            if let Some(place) = frame {
+                if inner.is_none() {
+                    inner = Some(place.clone());
+                }
+                at = Some(place);
+            }
+        }
+        let inner = inner.filter(|inner| Some(inner) != at.as_ref());
+        let loading = self.loading.get();
+        SetBy {
+            source: loading.unwrap_or(SetFrom::Config),
+            loading: loading.is_some(),
+            at,
+            inner,
+        }
+    }
 }
 
-/// Runs `init.lua`, whose path and text are `init`, with `options` as the
-/// window's are, then whatever the window asks, until the window lets go
-/// of its end.
+/// Runs the config's `chunks`, `settings.lua` then `init.lua`, with
+/// `options` as the window's are, then whatever the window asks, until the
+/// window lets go of its end.
 pub(super) fn run(
     source: &Source,
-    (path, text): (&str, &str),
+    chunks: &[Chunk],
     options: Options,
     (from_window, to_window): (&Receiver<ToLua>, Sender<FromLua>),
     wake: Wake,
@@ -78,6 +130,8 @@ pub(super) fn run(
         bindings: RefCell::default(),
         handlers: RefCell::default(),
         next: Cell::new(0),
+        loading: Cell::new(None),
+        files: RefCell::default(),
     });
     let mut runtime = match Runtime::new(source, &state) {
         Ok(runtime) => runtime,
@@ -87,14 +141,18 @@ pub(super) fn run(
             return;
         }
     };
-    match runtime
-        .lua
-        .load(text)
-        .set_name(format!("@{path}"))
-        .into_function()
-    {
-        Ok(init) => runtime.start(&init, (), INIT_TIME),
-        Err(err) => runtime.report(&err),
+    // A mistake in one stops only that one: what clackatoo saved doesn't
+    // keep the user's own config from running, nor the other way round.
+    for chunk in chunks {
+        state.loading.set(Some(chunk.from));
+        match (runtime.lua.load(&chunk.text))
+            .set_name(format!("@{}", chunk.path))
+            .into_function()
+        {
+            Ok(function) => runtime.start(&function, (), INIT_TIME),
+            Err(err) => runtime.report(&err),
+        }
+        state.loading.set(None);
     }
     state.tell(FromLua::Ready);
     while let Ok(message) = from_window.recv() {
@@ -348,15 +406,30 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "set_option",
-        lua.create_function(move |_, (name, value): (String, Value)| {
-            let option = options::find(&name).map_err(mlua::Error::runtime)?;
-            let value = option_value(option, &value).map_err(mlua::Error::runtime)?;
-            s.options
-                .borrow_mut()
-                .set(option, value.clone())
-                .map_err(mlua::Error::runtime)?;
-            s.tell(FromLua::Set { option, value });
-            Ok(())
+        lua.create_function(move |lua, (name, value): (String, Value)| {
+            let set = || -> Result<_, String> {
+                let option = options::find(&name)?;
+                option.settable_now()?;
+                let value = option_value(option, &value)?;
+                s.options.borrow_mut().set(option, value.clone())?;
+                Ok((option, value))
+            };
+            let by = s.set_by(lua);
+            match set() {
+                Ok((option, value)) => {
+                    s.tell(FromLua::Set { option, value, by });
+                    Ok(())
+                }
+                // settings.lua is clackatoo's, written for whichever build
+                // wrote it: one that can't be set is said, and the rest
+                // are set all the same.
+                Err(err) if by.source == SetFrom::Settings && by.loading => {
+                    let at = (by.at).map(|at| format!("{}:{}: ", at.file, at.line));
+                    s.tell(FromLua::Error(format!("{}{err}", at.unwrap_or_default())));
+                    Ok(())
+                }
+                Err(err) => Err(mlua::Error::runtime(err)),
+            }
         })?,
     )?;
     Ok(())
@@ -459,7 +532,8 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     core.set(
         "map",
         lua.create_function(
-            move |_, (modes, keys, handler, options): (String, String, Value, Option<Table>)| {
+            move |lua, (modes, keys, handler, options): (String, String, Value, Option<Table>)| {
+                let by = s.set_by(lua);
                 let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
                 let (desc, wrong) = binding_options(&keys, options)?;
                 let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
@@ -479,6 +553,7 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                             keys,
                             to,
                             desc,
+                            by,
                         });
                         warn(&s);
                         return Ok(());
@@ -496,6 +571,7 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                     keys,
                     binding,
                     desc,
+                    by,
                 });
                 warn(&s);
                 Ok(())
@@ -505,10 +581,11 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "unmap",
-        lua.create_function(move |_, (modes, keys): (String, String)| {
+        lua.create_function(move |lua, (modes, keys): (String, String)| {
             let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
             let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
-            s.tell(FromLua::Unmap { modes, keys });
+            let by = s.set_by(lua);
+            s.tell(FromLua::Unmap { modes, keys, by });
             Ok(())
         })?,
     )?;
@@ -640,8 +717,9 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "command",
-        lua.create_function(move |_, line: String| {
-            s.tell(FromLua::Command(line));
+        lua.create_function(move |lua, line: String| {
+            let by = s.set_by(lua);
+            s.tell(FromLua::Command { line, by });
             Ok(())
         })?,
     )?;

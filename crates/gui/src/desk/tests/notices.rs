@@ -245,12 +245,12 @@ fn what_happened_while_the_window_was_away_is_marked_not_told() {
 #[test]
 fn the_notify_option_says_which_are_told() {
     let (mut desk, said) = notified_desk();
-    desk.run_set("notify=questions");
+    desk.run_set("notify=questions", false, false);
     desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
     desk.chats_changed(vec![summary(5, 2, Ready), asking(6, 2)]);
     assert_eq!(taken(&said), [asks(6)]);
     // Off takes back what's shown, and tells of nothing.
-    desk.run_set("notify=off");
+    desk.run_set("notify=off", false, false);
     assert_eq!(taken(&said), [Said::Withdraw(6)]);
     desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
     desk.chats_changed(vec![summary(5, 2, Ready), asking(6, 2)]);

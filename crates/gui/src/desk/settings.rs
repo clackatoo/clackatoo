@@ -1,12 +1,15 @@
-//! The desk's options: setting them, from `:set` and config, and passing
-//! them on to the panes they change.
+//! The desk's options: setting them, from `:set` and config, saving them
+//! with `:setpersist`, and passing them on to the panes they change.
 
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
 use super::Desk;
 use crate::fonts::Fonts;
 use crate::lua::ToLua;
-use crate::options::{self, Decimal, Info, Setting, Value};
+use crate::options::persist::{self, Saved};
+use crate::options::{self, Decimal, Info, SetBy, Setting, Store, Value};
 
 /// The `font` and `fontsize` the window draws text in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,15 +38,37 @@ impl Default for FontInUse {
     }
 }
 
+/// Where what `:setpersist` saves comes back, once it's written.
+#[derive(Debug)]
+pub(super) struct Saving {
+    reply: Sender<Saved>,
+    answers: Receiver<Saved>,
+}
+
+impl Default for Saving {
+    fn default() -> Self {
+        let (reply, answers) = mpsc::channel();
+        Self { reply, answers }
+    }
+}
+
+#[cfg(test)]
+impl Saving {
+    /// Waits for the next setting to be saved, for tests.
+    pub(super) fn wait(&self) -> Saved {
+        (self.answers)
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("saved")
+    }
+}
+
 impl Desk {
     /// Starts from `options` rather than the defaults, as the command line
     /// and startup.toml set them, before config runs. Config leaves those
     /// in `fixed` alone, which the command line set.
     pub(crate) fn start_options(&mut self, options: options::Options, fixed: Vec<&'static Info>) {
         self.font_in_use = FontInUse::of(&options);
-        self.start_options = options.clone();
-        self.options = options;
-        self.fixed = fixed;
+        self.options = Store::new(options, fixed);
         self.options_changed();
     }
 
@@ -58,13 +83,13 @@ impl Desk {
         }));
     }
 
-    /// Sets `info`'s option to `value` for config, unless `init.lua` is
-    /// running and the command line set it: what's set where the window
-    /// starts outdoes the config file, which may be shared between
-    /// machines. Once it's run, the config's handlers set options as `:set`
-    /// does, as you asked them to, now.
-    pub(super) fn config_sets(&mut self, info: &'static Info, value: Value) {
-        if self.config_running(Instant::now()) && self.fixed.contains(&info) {
+    /// Sets `info`'s option to `value` for config, `by` its line, unless
+    /// the config is loading and the command line set it: what's set where
+    /// the window starts outdoes the config file, which may be shared
+    /// between machines. Once it's loaded, the config's handlers set
+    /// options as `:set` does, as you asked them to, now.
+    pub(super) fn config_sets(&mut self, info: &'static Info, value: Value, by: SetBy) {
+        if by.loading && self.options.fixed(info) {
             log::info!(
                 "config sets {}, but the command line set it, so it stays {}",
                 info.name,
@@ -77,7 +102,7 @@ impl Desk {
             });
             return;
         }
-        self.set_option(info, value);
+        self.set_option(info, value, by);
     }
 
     /// Draws text in `fonts` as the `font` and `fontsize` options say, if
@@ -106,7 +131,7 @@ impl Desk {
             Err(err) => {
                 let font = options::find("font").expect("an option");
                 let family = self.font_in_use.family.clone();
-                self.set_option(font, Value::Text(family.clone()));
+                self.set_option(font, Value::Text(family.clone()), SetBy::RUNTIME);
                 self.warn(format!("{err:#}, so the font stays as it was"));
                 let used = FontInUse {
                     family,
@@ -125,10 +150,10 @@ impl Desk {
         changed
     }
 
-    /// Sets `info`'s option to `value`, which it can hold, telling Lua
-    /// and the panes if that changes it.
-    pub(super) fn set_option(&mut self, info: &'static Info, value: Value) {
-        if let Ok(true) = self.options.set(info, value) {
+    /// Sets `info`'s option to `value`, which it can hold, noting `by` as
+    /// what set it, and telling Lua and the panes if that changes it.
+    pub(super) fn set_option(&mut self, info: &'static Info, value: Value, by: SetBy) {
+        if let Ok(true) = self.options.set(info, value, by) {
             self.options_changed();
         }
         // Lua hears every change, even its own, so its copy ends up as the
@@ -139,8 +164,10 @@ impl Desk {
         });
     }
 
-    /// Carries out `:set` with `words` after it.
-    pub(super) fn run_set(&mut self, words: &str) {
+    /// Carries out `:set` with `words` after it, saving what it sets where
+    /// it's kept too if `persist`, as `:setpersist` does, and saying what
+    /// set each option it shows if `verbose`, as `:verbose set` does.
+    pub(super) fn run_set(&mut self, words: &str, persist: bool, verbose: bool) {
         let settings = match options::parse_set(words) {
             Ok(settings) => settings,
             Err(err) => {
@@ -150,10 +177,10 @@ impl Desk {
         };
         if settings.is_empty() {
             // As in Vim: the options not as they started.
-            let start = &self.start_options;
+            let start = self.options.start();
             let changed: Vec<String> = (options::ALL.iter())
                 .filter(|info| self.options.get(info) != start.get(info))
-                .map(|info| self.options.show(info))
+                .map(|info| self.option_shown(info, verbose))
                 .collect();
             self.say(if changed.is_empty() {
                 "every option is as it started".into()
@@ -162,21 +189,123 @@ impl Desk {
             });
             return;
         }
+        // The config's own line, if its command runs this.
+        let by = self.set_by.clone().unwrap_or(SetBy::RUNTIME);
         let mut shown = Vec::new();
         for setting in settings {
-            match setting {
-                Setting::To(info, value) => self.set_option(info, value),
-                Setting::Flip(info) => {
-                    if let Value::Bool(on) = self.options.get(info) {
-                        self.set_option(info, Value::Bool(!on));
-                    }
+            let (info, value) = match setting {
+                Setting::To(info, value) => (info, Some(value)),
+                Setting::Flip(info) => match self.options.get(info) {
+                    Value::Bool(on) => (info, Some(Value::Bool(!on))),
+                    _ => continue,
+                },
+                Setting::Default(info) => (info, None),
+                Setting::Show(info) => {
+                    shown.push(self.option_shown(info, verbose));
+                    continue;
                 }
-                Setting::Show(info) => shown.push(self.options.show(info)),
+            };
+            if info.restart && persist {
+                // Saved for the next window, as it's read only then.
+                self.persist(info, value);
+                continue;
+            }
+            if let Err(why) = info.settable_now() {
+                self.warn(why);
+                continue;
+            }
+            let now = value.clone().unwrap_or_else(|| info.default_value());
+            self.set_option(info, now, by.clone());
+            if persist {
+                self.persist_unless_configured(info, value);
             }
         }
         if !shown.is_empty() {
             self.say(shown.join("  "));
         }
+    }
+
+    /// `info`'s option as `:set` shows it, with what set it if `verbose`.
+    fn option_shown(&self, info: &Info, verbose: bool) -> String {
+        let shown = self.options.show(info);
+        if !verbose {
+            return shown;
+        }
+        let said = self.options.set_by(info).said(self.config_dir());
+        format!("{shown} · {said}")
+    }
+
+    /// Saves `info`'s option as `value`, as `:setpersist` does, unless the
+    /// user's own config set it as it loaded, which would outdo what's
+    /// saved: then it's set for now only, and the bar says where config
+    /// sets it.
+    fn persist_unless_configured(&mut self, info: &'static Info, value: Option<Value>) {
+        let configured = (self.options.configured(info))
+            .filter(|(_, by)| by.config_loading())
+            .map(|(_, by)| by.place(self.config_dir()));
+        match configured {
+            Some(place) => {
+                let place = place.unwrap_or_else(|| "your config".into());
+                self.warn(format!(
+                    "{place} sets {}, so it's set for now and not saved",
+                    info.name
+                ));
+            }
+            None => self.persist(info, value),
+        }
+    }
+
+    /// Has `info`'s option saved as `value`, or with none, taken out of
+    /// its file, off the window's thread; [`settings_saved`](Self::settings_saved) says what
+    /// came of it.
+    fn persist(&mut self, info: &'static Info, value: Option<Value>) {
+        let Some(start) = &self.script.start else {
+            return self.warn("there's no config directory to save settings in".into());
+        };
+        let Some(dir) = start.source.dir() else {
+            return self.warn("there's no config directory to save settings in".into());
+        };
+        persist::save(dir, info, value, self.saving.reply.clone(), (start.wake)());
+    }
+
+    /// clackatoo's config directory, if the window has one.
+    pub(super) fn config_dir(&self) -> Option<&Path> {
+        self.script.start.as_ref()?.source.dir()
+    }
+
+    /// Says what came of saving settings since last asked. Returns whether
+    /// anything did.
+    pub(super) fn settings_saved(&mut self) -> bool {
+        let saved: Vec<Saved> = self.saving.answers.try_iter().collect();
+        let any = !saved.is_empty();
+        for saved in saved {
+            self.said_saved(saved);
+        }
+        any
+    }
+
+    pub(super) fn said_saved(&mut self, saved: Saved) {
+        let Saved {
+            info,
+            value,
+            file,
+            result,
+        } = saved;
+        if let Err(why) = result {
+            return self.warn(format!("{} wasn't saved: {why}", info.name));
+        }
+        let later = if info.restart {
+            ", for windows opened after"
+        } else {
+            ""
+        };
+        self.say(match value {
+            Some(value) => format!(
+                "saved {} in {file}{later}",
+                options::show_value(info, &value)
+            ),
+            None => format!("{} is saved in {file} no more{later}", info.name),
+        });
     }
 
     /// Passes the options on to the panes, as they've changed.
@@ -197,9 +326,9 @@ impl Desk {
     }
 
     /// Puts the options back as they start, as a config run again from
-    /// the start does.
+    /// the start does, forgetting what set them.
     pub(super) fn reset_options(&mut self) {
-        self.options = self.start_options.clone();
+        self.options.reset();
         self.options_changed();
     }
 }

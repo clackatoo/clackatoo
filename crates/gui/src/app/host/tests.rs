@@ -15,6 +15,7 @@ fn host(share: bool) -> (Host, mpsc::Receiver<Wake>) {
         runtime: RuntimeDir::at(PathBuf::from("/unused-host-test")),
         config: None,
         graphics_api: GraphicsApi::Vulkan,
+        priority: false,
         listen: None,
         share,
     };

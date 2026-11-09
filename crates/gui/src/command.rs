@@ -182,8 +182,14 @@ pub(crate) enum Command {
     Markdown,
     /// Run the config again, from the start.
     Reload,
-    /// `:set`: change options, or say what they are, as these words say.
-    Set(String),
+    /// `:set`: change options, or say what they are, as these words say;
+    /// and with `persist`, `:setpersist`, save them where they're kept too.
+    /// `verbose`, as `:verbose set` asks, says what set each it shows.
+    Set {
+        words: String,
+        persist: bool,
+        verbose: bool,
+    },
     /// `:Files`, `:Grep`, `:Buffers`, `:Symbols` and the like: the finder,
     /// with this typed.
     Find { kind: finder::Kind, query: String },
@@ -435,7 +441,24 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         "close" => return Ok(Command::Close),
         "reload" => return Ok(Command::Reload),
-        "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
+        "set" | "se" | "setpersist" | "setp" => {
+            return Ok(Command::Set {
+                words: argument.unwrap_or_default().to_owned(),
+                persist: matches!(word, "setpersist" | "setp"),
+                verbose: false,
+            });
+        }
+        "verbose" | "verb" => {
+            return match argument.map(parse) {
+                Some(Ok(Command::Set { words, persist, .. })) => Ok(Command::Set {
+                    words,
+                    persist,
+                    verbose: true,
+                }),
+                Some(Err(why)) => Err(why),
+                _ => Err("only :set and :setpersist take :verbose: :verbose set number?".into()),
+            };
+        }
         "Registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "nohlsearch" | "noh" => return Ok(Command::NoHighlight),
         "Marks" => return Ok(Command::Marks),
@@ -1003,6 +1026,8 @@ command_names! {
     "trusted" => "List the folders trusted to run language servers",
     "reload" => "Reload your Lua configuration",
     "set" => "View or change settings",
+    "setpersist" => "Change settings and save them",
+    "verbose" => "Say where options were set: :verbose set",
     "Registers" => "Show the contents of registers",
     "nohlsearch" => "Stop highlighting the last search's matches",
     "Marks" => "Jump to a saved mark",
@@ -1066,7 +1091,8 @@ command_names! {
 /// Arguments (paths, hosts, patterns and keys) must never pass through this.
 pub(crate) fn canonical(name: &str) -> &str {
     const ALIASES: &[&str] = &[
-        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex", "noh", "bd",
+        "ws", "se", "setp", "verb", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex",
+        "noh", "bd",
     ];
     NAMES
         .iter()
@@ -1114,7 +1140,7 @@ pub(crate) fn takes(word: &str) -> Takes {
     match word {
         "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" | "trust"
         | "untrust" => Takes::Path,
-        "set" | "se" => Takes::Options,
+        "set" | "se" | "setpersist" | "setp" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
         "agentaccess" => Takes::Words(&["off", "inspect", "control"]),
@@ -1201,6 +1227,10 @@ mod tests {
         ("reload", ""),
         ("set", ""),
         ("se", "set"),
+        ("setpersist", ""),
+        ("setp", "setpersist"),
+        ("verbose", ""),
+        ("verb", "verbose"),
         ("Registers", ""),
         ("nohlsearch", ""),
         ("noh", "nohlsearch"),
@@ -1699,7 +1729,18 @@ mod tests {
         assert_eq!(parse("3"), Ok(Command::Tab(3)));
         assert!(matches!(parse("-"), Ok(Command::Open { .. })));
         assert!(matches!(parse("-Terminal"), Ok(Command::Open { .. })));
-        assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
+        let set = |words: &str, persist, verbose| {
+            Ok(Command::Set {
+                words: words.into(),
+                persist,
+                verbose,
+            })
+        };
+        assert_eq!(parse("set nowrap"), set("nowrap", false, false));
+        assert_eq!(parse("setp nowrap"), set("nowrap", true, false));
+        assert_eq!(parse("verbose set nu?"), set("nu?", false, true));
+        assert_eq!(parse("verb setpersist nu"), set("nu", true, true));
+        assert!(parse("verbose Files").is_err());
         assert_eq!(parse("Marks"), Ok(Command::Marks));
         assert_eq!(parse("Messages"), Ok(Command::Messages));
         assert_eq!(parse("recover"), Ok(Command::Recover { drop: false }));

@@ -146,6 +146,8 @@ pub(crate) struct Process {
     pub(crate) config: Option<PathBuf>,
     /// The graphics API the process draws with.
     pub(crate) graphics_api: GraphicsApi,
+    /// Whether its thread asked to run ahead of the user's other programs.
+    pub(crate) priority: bool,
     /// The socket other processes ask this one for windows on, if they do:
     /// `window.sock`, or its group's (see [`handoff::group_socket`]).
     pub(crate) listen: Option<PathBuf>,
@@ -349,13 +351,15 @@ impl Host {
         // The config runs alongside everything else starting.
         let lua_start = self.process.config.clone().map(|dir| {
             let proxy = proxy();
-            desk::LuaStart(Box::new(move |options| {
-                let proxy = proxy.clone();
-                let wake: lua::Wake = Box::new(move || {
-                    let _ = proxy.send_event(SessionEvent::Lua);
-                });
-                lua::Lua::start(lua::Source::Dir(dir.clone()), options.clone(), wake)
-            }))
+            desk::LuaStart {
+                source: lua::Source::Dir(dir),
+                wake: Box::new(move || -> lua::Wake {
+                    let proxy = proxy.clone();
+                    Box::new(move || {
+                        let _ = proxy.send_event(SessionEvent::Lua);
+                    })
+                }),
+            }
         });
         let mut session = Session::waiting(runtime, proxy()).from(spec.origin.clone());
         if !spec.pick_remote {
@@ -368,7 +372,17 @@ impl Host {
         let fixed = spec.font_fixed.options();
         let pick = spec.pick_remote;
         let mut app = App::new(started, Some(startup), session, spec, self.link.clone());
-        // Before config runs, which starts from them.
+        // Before config runs, which starts from them, with what the process
+        // started with, which only a new process changes.
+        let start = options::Options {
+            renderer: self.process.graphics_api.into(),
+            priority: if self.process.priority {
+                options::Priority::High
+            } else {
+                options::Priority::Normal
+            },
+            ..start
+        };
         app.start_options(start, fixed);
         if pick {
             app.pick_machine();

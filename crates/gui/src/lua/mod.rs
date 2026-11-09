@@ -17,7 +17,7 @@ mod runtime;
 pub(crate) use runtime::INIT_TIME;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,8 @@ use clackatoo_protocol::{PaneId, Side, TabId, Workspaces};
 use crate::command::Kind;
 use crate::desk::Shown;
 use crate::keymap::{Chord, KeyMode};
-use crate::options::{Info, Options, Value};
+use crate::options::provenance::Source as SetFrom;
+use crate::options::{Info, Options, SetBy, Value};
 
 /// How long a key waits for Lua to say whether it goes on, before it goes
 /// on as if Lua had said nothing.
@@ -41,25 +42,59 @@ pub(crate) type Wake = Box<dyn Fn() + Send>;
 /// Where the config is.
 #[derive(Clone, Debug)]
 pub(crate) enum Source {
-    /// The config directory, holding `client/init.lua`, and the modules
-    /// it requires in `client/lua/` and `lua/`.
+    /// The config directory, holding `client/settings.lua` and
+    /// `client/init.lua`, and the modules they require in `client/lua/`
+    /// and `lua/`.
     Dir(PathBuf),
-    /// Config given whole, for tests.
+    /// An `init.lua` given whole, for tests.
     #[cfg(test)]
     Text(String),
 }
 
+/// One file of the config, run in turn as it loads.
+pub(crate) struct Chunk {
+    pub(crate) path: String,
+    pub(crate) text: String,
+    /// What it sets is set by, as provenance says.
+    pub(crate) from: SetFrom,
+}
+
 impl Source {
-    /// The config's `init.lua`, if it has one.
-    fn init(&self) -> Option<(String, String)> {
+    /// The config's files, in the order they run: `settings.lua`, which
+    /// clackatoo writes, then the user's own `init.lua`, which outdoes it;
+    /// each if it's there.
+    fn chunks(&self) -> Vec<Chunk> {
         match self {
-            Self::Dir(dir) => {
-                let path = dir.join("client/init.lua");
+            Self::Dir(dir) => [
+                ("client/settings.lua", SetFrom::Settings),
+                ("client/init.lua", SetFrom::Config),
+            ]
+            .into_iter()
+            .filter_map(|(file, from)| {
+                let path = dir.join(file);
                 let text = std::fs::read_to_string(&path).ok()?;
-                Some((path.display().to_string(), text))
-            }
+                Some(Chunk {
+                    path: path.display().to_string(),
+                    text,
+                    from,
+                })
+            })
+            .collect(),
             #[cfg(test)]
-            Self::Text(text) => Some(("init.lua".into(), text.clone())),
+            Self::Text(text) => vec![Chunk {
+                path: "init.lua".into(),
+                text: text.clone(),
+                from: SetFrom::Config,
+            }],
+        }
+    }
+
+    /// The config directory, if it's one.
+    pub(crate) fn dir(&self) -> Option<&Path> {
+        match self {
+            Self::Dir(dir) => Some(dir),
+            #[cfg(test)]
+            Self::Text(_) => None,
         }
     }
 }
@@ -144,10 +179,13 @@ pub(crate) enum FromLua {
         binding: u64,
         /// What it does, for the panel of keys.
         desc: Option<String>,
+        /// Where the config bound it.
+        by: SetBy,
     },
     Unmap {
         modes: Vec<KeyMode>,
         keys: Vec<Chord>,
+        by: SetBy,
     },
     /// Binds `keys` in `modes` to typing `to`.
     Remap {
@@ -155,6 +193,7 @@ pub(crate) enum FromLua {
         keys: Vec<Chord>,
         to: Vec<Chord>,
         desc: Option<String>,
+        by: SetBy,
     },
     /// Names the bindings `keys` start in `modes`, for the panel of keys,
     /// as which-key.nvim's `group` does; or with no name, stops naming
@@ -190,8 +229,12 @@ pub(crate) enum FromLua {
     Focus {
         pane: PaneId,
     },
-    /// Run a command, as if typed after `:`.
-    Command(String),
+    /// Run a command, as if typed after `:`, as the config's line `by`
+    /// asked.
+    Command {
+        line: String,
+        by: SetBy,
+    },
     /// Forward a port, as `:portforward` does, but saying nothing in a
     /// window on this machine, which has none to forward: a config runs in
     /// every window.
@@ -207,14 +250,16 @@ pub(crate) enum FromLua {
     /// Have the daemon end its connection to another machine, as
     /// `:disconnect HOST` does.
     Disconnect(String),
-    /// Set an option, to a value it can hold.
+    /// Set an option, to a value it can hold, as the config's line `by`
+    /// asked.
     Set {
         option: &'static Info,
         value: Value,
+        by: SetBy,
     },
     /// Something went wrong, as this says.
     Error(String),
-    /// `init.lua` has run.
+    /// The config has loaded: `settings.lua`, then `init.lua`.
     Ready,
 }
 
@@ -227,18 +272,21 @@ pub(crate) struct Lua {
 }
 
 impl Lua {
-    /// Starts running `source`'s `init.lua` on a thread of its own, with
-    /// `options` as the window's are, or returns `None` if there's no
-    /// `init.lua`.
+    /// Starts running `source`'s config on a thread of its own, its
+    /// `settings.lua` then its `init.lua`, with `options` as the window's
+    /// are, or returns `None` if it has neither.
     pub(crate) fn start(source: Source, options: Options, wake: Wake) -> Option<Self> {
-        let (path, text) = source.init()?;
+        let chunks = source.chunks();
+        if chunks.is_empty() {
+            return None;
+        }
         let (to, to_receiver) = mpsc::channel();
         let (from_sender, from) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("lua".into())
             .spawn(move || {
                 let channels = (&to_receiver, from_sender);
-                runtime::run(&source, (&path, &text), options, channels, wake);
+                runtime::run(&source, &chunks, options, channels, wake);
             });
         if let Err(err) = spawned {
             log::warn!("couldn't start Lua: {err}");
@@ -321,6 +369,24 @@ mod tests {
     use super::*;
     use crate::keymap::parse_keys;
 
+    /// What Lua said, with what set each thing left out, as these tests
+    /// don't look at it: `provenance` tests do.
+    fn plain(said: Vec<FromLua>) -> Vec<FromLua> {
+        (said.into_iter())
+            .map(|mut message| {
+                if let FromLua::Map { by, .. }
+                | FromLua::Remap { by, .. }
+                | FromLua::Unmap { by, .. }
+                | FromLua::Set { by, .. }
+                | FromLua::Command { by, .. } = &mut message
+                {
+                    *by = SetBy::DEFAULT;
+                }
+                message
+            })
+            .collect()
+    }
+
     fn start(config: &str) -> (Lua, Vec<FromLua>) {
         let lua = Lua::start(
             Source::Text(config.into()),
@@ -328,7 +394,7 @@ mod tests {
             Box::new(|| {}),
         )
         .expect("Lua started");
-        let said = lua.ready();
+        let said = plain(lua.ready());
         lua.send(ToLua::World(world(&[1, 2])));
         (lua, said)
     }
@@ -406,19 +472,21 @@ mod tests {
     }
 
     fn bound(lua: &mut Lua, binding: u64, pane: u32) -> (Option<bool>, Vec<FromLua>) {
-        lua.decide(|seq| ToLua::Bound {
+        let (stop, said) = lua.decide(|seq| ToLua::Bound {
             seq,
             key: key("k", pane),
             binding,
-        })
+        });
+        (stop, plain(said))
     }
 
     fn pressed(lua: &mut Lua, name: &str) -> (Option<bool>, Vec<FromLua>) {
-        lua.decide(|seq| ToLua::Key {
+        let (stop, said) = lua.decide(|seq| ToLua::Key {
             seq,
             key: key(name, 1),
             handlers: vec![1, 5, 3],
-        })
+        });
+        (stop, plain(said))
     }
 
     #[test]
@@ -440,16 +508,19 @@ mod tests {
                     keys: parse_keys("<C-b>t").unwrap(),
                     binding: 1,
                     desc: None,
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Map {
                     modes: vec![KeyMode::Normal, KeyMode::Insert],
                     keys: parse_keys("x").unwrap(),
                     binding: 2,
                     desc: None,
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Unmap {
                     modes: vec![KeyMode::Normal, KeyMode::Insert, KeyMode::Visual],
                     keys: parse_keys("<C-b>x").unwrap(),
+                    by: SetBy::DEFAULT,
                 },
             ]
         );
@@ -483,18 +554,21 @@ mod tests {
                     keys: parse_keys("gx").unwrap(),
                     binding: 1,
                     desc: Some("open the link".into()),
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Remap {
                     modes: vec![KeyMode::Normal, KeyMode::Visual],
                     keys: parse_keys("gi").unwrap(),
                     to: parse_keys("gri").unwrap(),
                     desc: Some("go in".into()),
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Map {
                     modes: vec![KeyMode::Normal],
                     keys: parse_keys("gy").unwrap(),
                     binding: 2,
                     desc: None,
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Group {
                     modes: vec![KeyMode::Normal],
@@ -509,23 +583,31 @@ mod tests {
             ]
         );
         let counted = |lua: &mut Lua, count| {
-            lua.decide(|seq| ToLua::Bound {
-                seq,
-                key: KeyInfo {
-                    count,
-                    ..key("gx", 1)
-                },
-                binding: 1,
-            })
-            .1
+            plain(
+                lua.decide(|seq| ToLua::Bound {
+                    seq,
+                    key: KeyInfo {
+                        count,
+                        ..key("gx", 1)
+                    },
+                    binding: 1,
+                })
+                .1,
+            )
         };
         assert_eq!(
             counted(&mut lua, Some(3)),
-            [FromLua::Command("count 3 3".into())]
+            [FromLua::Command {
+                line: "count 3 3".into(),
+                by: SetBy::DEFAULT,
+            }]
         );
         assert_eq!(
             counted(&mut lua, None),
-            [FromLua::Command("count 0 1".into())],
+            [FromLua::Command {
+                line: "count 0 1".into(),
+                by: SetBy::DEFAULT,
+            }],
             "as Vim's v:count and v:count1"
         );
     }
@@ -627,6 +709,7 @@ mod tests {
                     keys: parse_keys("p").unwrap(),
                     binding: 2,
                     desc: None,
+                    by: SetBy::DEFAULT,
                 },
                 FromLua::Subscribe {
                     handler: 3,
@@ -767,6 +850,7 @@ mod tests {
         let set = |name, value| FromLua::Set {
             option: find(name).unwrap(),
             value,
+            by: SetBy::DEFAULT,
         };
         assert_eq!(
             said,
@@ -837,10 +921,11 @@ mod tests {
         let set = |name, value| FromLua::Set {
             option: find(name).unwrap(),
             value,
+            by: SetBy::DEFAULT,
         };
         let size = |number: f64| Value::Decimal(Decimal::exact(number).unwrap());
         assert_eq!(
-            lua.ready(),
+            plain(lua.ready()),
             [
                 set("font", Value::Text("JetBrains Mono".into())),
                 set("fontsize", size(10.25)),
@@ -899,6 +984,7 @@ mod tests {
         let set = |name, value| FromLua::Set {
             option: find(name).unwrap(),
             value,
+            by: SetBy::DEFAULT,
         };
         assert_eq!(
             said,
@@ -975,5 +1061,147 @@ mod tests {
                 "{said:?}"
             );
         }
+    }
+
+    /// A config directory holding `files`, by their paths in it.
+    fn config_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn settings_lua_runs_first_and_what_set_each_option_is_known_by_its_line() {
+        use crate::options::find;
+        use crate::options::provenance::{Place, Source as From};
+        let dir = config_dir(&[
+            (
+                "client/settings.lua",
+                "-- Written by clackatoo.\nclient.opt.number = false\n\
+                 client.opt.nosuch = 1\nclient.opt.wrap = false\n",
+            ),
+            (
+                "client/init.lua",
+                "local keys = require('keys')\n\nclient.opt.nuw = 6\nkeys.setup()\n\
+                 client.keys.map('n', 'k', function()\n  client.opt.ts = 8\nend)\n\
+                 client.cmd('set nolbr')\n",
+            ),
+            (
+                "lua/keys.lua",
+                "client.opt.so = 3\nreturn {\n  setup = function()\n    client.opt.rnu = false\n  end,\n}\n",
+            ),
+        ]);
+        let file = |name: &str| -> std::sync::Arc<str> {
+            dir.path().join(name).display().to_string().into()
+        };
+        let place = |name, line| {
+            Some(Place {
+                file: file(name),
+                line,
+            })
+        };
+        let by = |from, loading, at, inner| SetBy {
+            source: from,
+            loading,
+            at,
+            inner,
+        };
+        let mut lua = Lua::start(
+            Source::Dir(dir.path().into()),
+            Options::default(),
+            Box::new(|| {}),
+        )
+        .expect("Lua started");
+        let said = lua.ready();
+        let set = |name, value, by| FromLua::Set {
+            option: find(name).unwrap(),
+            value,
+            by,
+        };
+        let settings = |line| {
+            by(
+                From::Settings,
+                true,
+                place("client/settings.lua", line),
+                None,
+            )
+        };
+        let init = |line, inner| by(From::Config, true, place("client/init.lua", line), inner);
+        let [
+            number,
+            FromLua::Error(nosuch),
+            wrap,
+            scrolloff,
+            numberwidth,
+            relativenumber,
+            FromLua::Map { by: map, .. },
+            FromLua::Command { by: command, .. },
+        ] = &said[..]
+        else {
+            panic!("{said:?}")
+        };
+        assert_eq!(*number, set("number", Value::Bool(false), settings(2)));
+        // A line of settings.lua this build can't set is said, and the
+        // rest are set all the same.
+        assert_eq!(
+            *nosuch,
+            format!("{}:3: no option ‘nosuch’", file("client/settings.lua"))
+        );
+        assert_eq!(*wrap, set("wrap", Value::Bool(false), settings(4)));
+        // A module's own line, and the user's that required it.
+        assert_eq!(
+            *scrolloff,
+            set(
+                "scrolloff",
+                Value::Number(3),
+                init(1, place("lua/keys.lua", 1))
+            )
+        );
+        assert_eq!(
+            *numberwidth,
+            set("numberwidth", Value::Number(6), init(3, None))
+        );
+        assert_eq!(
+            *relativenumber,
+            set(
+                "relativenumber",
+                Value::Bool(false),
+                init(4, place("lua/keys.lua", 4))
+            )
+        );
+        assert_eq!(*map, init(5, None));
+        assert_eq!(*command, init(8, None));
+        // After it's loaded, a handler's line, as the config's.
+        let (_, said) = lua.decide(|seq| ToLua::Bound {
+            seq,
+            key: key("k", 1),
+            binding: 1,
+        });
+        assert_eq!(
+            said,
+            [set(
+                "tabstop",
+                Value::Number(8),
+                by(From::Config, false, place("client/init.lua", 6), None)
+            )]
+        );
+    }
+
+    #[test]
+    fn options_read_only_as_a_window_opens_are_read_but_not_set() {
+        let (_, said) =
+            start("assert(client.opt.renderer == 'vulkan')\nclient.opt.renderer = 'opengl'");
+        assert!(
+            matches!(
+                &said[..],
+                [FromLua::Error(err)] if err == "init.lua:2: renderer is read as a window opens: \
+                    :setpersist saves it in startup.toml, for windows opened after"
+            ),
+            "{said:?}"
+        );
     }
 }

@@ -244,13 +244,15 @@ impl Window {
         app.start_options(start, Vec::new());
         // The config, if there's one, as `run` starts it.
         if let Some(dir) = config {
-            app.start_lua(crate::desk::LuaStart(Box::new(move |options| {
-                let sender = sender.clone();
-                let wake: crate::lua::Wake = Box::new(move || {
-                    let _ = sender.send(SessionEvent::Lua);
-                });
-                crate::lua::Lua::start(crate::lua::Source::Dir(dir.clone()), options.clone(), wake)
-            })));
+            app.start_lua(crate::desk::LuaStart {
+                source: crate::lua::Source::Dir(dir),
+                wake: Box::new(move || -> crate::lua::Wake {
+                    let sender = sender.clone();
+                    Box::new(move || {
+                        let _ = sender.send(SessionEvent::Lua);
+                    })
+                }),
+            });
         }
         app.start_tutor(tutor);
         app.start_recall(crate::cmdline::recall::Start::read());

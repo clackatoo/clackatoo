@@ -68,7 +68,7 @@ fn ctrl_shift_alt_v_pastes_the_clipboards_image_into_a_terminal() {
     assert!(!unbound.binds(&pressed));
     desk.finish_terminal_image(TerminalId(1), Ok(Pasted::Image(image())));
     assert_eq!(pastes(&mut desk), [(TerminalId(1), ImagePaste::Path)]);
-    desk.run_set("pasteimage=clipboard");
+    desk.run_set("pasteimage=clipboard", false, false);
     desk.finish_terminal_image(TerminalId(1), Ok(Pasted::Image(image())));
     assert_eq!(pastes(&mut desk), [(TerminalId(1), ImagePaste::Clipboard)]);
     // Text isn't an image: nothing's asked, and the bar says why.

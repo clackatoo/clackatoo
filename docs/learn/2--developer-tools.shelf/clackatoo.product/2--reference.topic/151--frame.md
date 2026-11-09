@@ -238,6 +238,10 @@ clackatoo config --unset renderer  # back to its default
 clackatoo config                   # all of them, and where the file is
 ```
 
+In the window, [`:setpersist`](~clackatoo/reference/config#saving-options-settings-lua)
+saves them too, as `:setp fontsize=13` or `:setp renderer=opengl`, the same
+way. `renderer` and `priority` take effect in windows opened after.
+
 A mistake in the file never stops the window opening. Each setting with a
 mistake, such as an unknown name or a value of the wrong kind, is reported on
 stderr and left at its default, and the rest still apply.
