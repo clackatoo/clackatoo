@@ -158,6 +158,7 @@ fn span(style: Style, cursor: Option<CursorShape>) -> Element {
         (Attributes::ITALIC, "it"),
         (Attributes::HIDDEN, "hd"),
         (Attributes::STRIKETHROUGH, "st"),
+        (Attributes::OVERLINE, "ol"),
     ] {
         span = span.class_if(attributes.contains(attribute), class);
     }
@@ -328,6 +329,15 @@ mod tests {
             ]
         );
         assert_eq!(span.get("class"), Some("bo"));
+        let overlined = Style {
+            attributes: Attributes::OVERLINE | Attributes::STRIKETHROUGH,
+            ..Style::DEFAULT
+        };
+        let row = super::row(&line(&[(overlined, "x")]), 4, Widths::LEGACY, None, None);
+        let Node::Element(span) = &row.children[0] else {
+            panic!("a span");
+        };
+        assert_eq!(span.get("class"), Some("st ol"));
         assert_eq!(css(Ink::Indexed(232)), "#080808");
         assert_eq!(css(Ink::Indexed(16)), "#000000");
     }

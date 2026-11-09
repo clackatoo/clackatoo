@@ -820,6 +820,23 @@ mod queries {
     }
 
     #[test]
+    fn an_overline_is_set_reset_and_said() {
+        let t = after(4, 1, "a\x1b[53mb\x1b[55mc");
+        let overline = |col| {
+            style_at(&t, 0, col)
+                .attributes
+                .contains(Attributes::OVERLINE)
+        };
+        assert_eq!(
+            (overline(0), overline(1), overline(2)),
+            (false, true, false)
+        );
+        assert_eq!(replies("\x1b[1;53m\x1bP$qm\x1b\\"), "\x1bP1$r0;1;53m\x1b\\");
+        // "Smol", terminfo's name for it.
+        assert!(replies("\x1bP+q536D6F6C\x1b\\").starts_with("\x1bP1+r536D6F6C="));
+    }
+
+    #[test]
     fn settings_are_answered_as_the_sequences_that_set_them() {
         assert_eq!(
             replies("\x1b[1;31m\x1bP$qm\x1b\\"),

@@ -1379,6 +1379,14 @@ impl Renderer {
                         colors.foreground,
                     ));
                 }
+                // Along the cell's top, as an underline is along its foot.
+                if style.attributes.contains(Attributes::OVERLINE) {
+                    self.overlays.push(Rect::solid(
+                        [left, top],
+                        [width, cell.stroke],
+                        colors.foreground,
+                    ));
+                }
             }
             if scene.scroll.is_some() {
                 for rect in &mut self.rects[starts.0..] {
@@ -2163,6 +2171,61 @@ mod tests {
             (starts[1] - 2.0).abs() < f32::EPSILON && (starts[2] - 4.0).abs() < f32::EPSILON,
             "{starts:?}"
         );
+    }
+
+    #[test]
+    fn an_overline_is_drawn_along_the_cells_top() {
+        let Some((device, _)) = crate::tests::gpu() else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        let mut fonts = crate::tests::fonts(1.0);
+        let overlined = clackatoo_term::Style {
+            attributes: Attributes::OVERLINE,
+            ..clackatoo_term::Style::DEFAULT
+        };
+        let mut builder = clackatoo_term::RowBuilder::new(10);
+        builder.push("a", &clackatoo_term::Style::DEFAULT, false);
+        builder.push("bc", &overlined, false);
+        let row = builder.finish(false);
+        let rows = [&row];
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        #[allow(clippy::cast_precision_loss)]
+        let cell = [fonts.cell.width as f32, fonts.cell.height as f32];
+        let picture = Picture {
+            scenes: &[Scene {
+                scroll: None,
+                origin: [0.0, 40.0],
+                size: [10.0 * cell[0], cell[1]],
+                rows: &rows,
+                cursor: None,
+                normal_mode: false,
+                highlights: &[],
+            }],
+            fills: &[],
+            over: &[],
+            texts: &[],
+            glyphs: &[],
+            over_glyphs: &[],
+            images: &[],
+            transparent: false,
+        };
+        renderer.build(&picture, &mut fonts);
+        // One line a cell, over b and c alone, at the row's top.
+        let lines: Vec<([f32; 2], [f32; 2])> = (renderer.overlays.iter())
+            .map(|rect| (rect.origin, rect.size))
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for (at, (origin, size)) in lines.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let left = (at + 1) as f32 * cell[0];
+            assert!((origin[0] - left).abs() < 0.5, "{lines:?}");
+            assert!((origin[1] - 40.0).abs() < 0.5, "{lines:?}");
+            assert!(
+                (size[0] - cell[0]).abs() < 0.5 && size[1] > 0.0,
+                "{lines:?}"
+            );
+        }
     }
 
     /// A row `width` cells wide holding `text`, continuing on the next if

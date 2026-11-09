@@ -37,6 +37,8 @@ pub(crate) fn apply<'a>(style: &mut Style, params: impl IntoIterator<Item = &'a 
             [27] => attributes.remove(Attributes::INVERSE),
             [28] => attributes.remove(Attributes::HIDDEN),
             [29] => attributes.remove(Attributes::STRIKETHROUGH),
+            [53] => attributes.insert(Attributes::OVERLINE),
+            [55] => attributes.remove(Attributes::OVERLINE),
             [n @ 30..=37] => style.fg = Color::Indexed(standard(*n - 30)),
             [38, ..] => {
                 if let Some(color) = extended_color(param, &mut params) {
@@ -70,7 +72,7 @@ pub(crate) fn apply<'a>(style: &mut Style, params: impl IntoIterator<Item = &'a 
 pub(crate) fn describe(style: &Style) -> String {
     use std::fmt::Write;
 
-    const ATTRIBUTES: [(Attributes, u8); 7] = [
+    const ATTRIBUTES: [(Attributes, u8); 8] = [
         (Attributes::BOLD, 1),
         (Attributes::DIM, 2),
         (Attributes::ITALIC, 3),
@@ -78,6 +80,7 @@ pub(crate) fn describe(style: &Style) -> String {
         (Attributes::INVERSE, 7),
         (Attributes::HIDDEN, 8),
         (Attributes::STRIKETHROUGH, 9),
+        (Attributes::OVERLINE, 53),
     ];
     let mut out = String::from("0");
     for (attribute, number) in ATTRIBUTES {

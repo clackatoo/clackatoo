@@ -82,6 +82,9 @@ const CAPABILITIES: &[(&str, Option<&str>)] = &[
     // The cursor's shape.
     ("Ss", Some("\x1b[%p1%d q")),
     ("Se", Some("\x1b[0 q")),
+    // Overlines.
+    ("Smol", Some("\x1b[53m")),
+    ("Rmol", Some("\x1b[55m")),
     // Synchronized output, mode 2026.
     ("Sync", Some("\x1b[?2026%?%p1%{1}%-%tl%eh%;")),
     // Bracketed paste.

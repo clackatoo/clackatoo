@@ -1296,6 +1296,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Left and right margins (DECLRMM, DECSLRM): programs can scroll and wrap within a box of the screen",
     },
     News {
+        id: "overline",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Overlined text (SGR 53) is drawn, in windows and on the phone",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

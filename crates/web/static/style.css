@@ -249,6 +249,9 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .grid .it { font-style: italic; }
 .grid .hd { color: transparent !important; }
 .grid .st { text-decoration-line: line-through; }
+/* An overline along the cell's top, drawn as an image over the background,
+   so it goes with any underline or strikethrough, and the cursor's shadow. */
+.grid .ol { background-image: linear-gradient(currentColor, currentColor); background-size: 100% 0.07em; background-repeat: no-repeat; background-position: top; }
 .grid .u1, .grid .u2, .grid .u3, .grid .u4, .grid .u5 { text-decoration-line: underline; }
 .grid .u2 { text-decoration-style: double; }
 .grid .u3 { text-decoration-style: wavy; }

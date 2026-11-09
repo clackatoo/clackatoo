@@ -41,6 +41,9 @@ bitflags! {
         const HIDDEN = 1 << 5;
         /// SGR 9.
         const STRIKETHROUGH = 1 << 6;
+        /// SGR 53: a line over the text. A window older than protocol 143
+        /// keeps the bit and draws nothing for it.
+        const OVERLINE = 1 << 7;
     }
 }
 

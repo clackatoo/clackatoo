@@ -346,7 +346,7 @@ pub(crate) struct Style {
     pub(crate) bg: Color,
     pub(crate) underline_color: Color,
     /// Bold 1, dim 2, italic 4, blink 8, inverse 16, hidden 32,
-    /// strikethrough 64.
+    /// strikethrough 64, overline 128 (a bit no build before it wrote).
     pub(crate) attributes: u16,
     pub(crate) underline: Underline,
 }
@@ -876,11 +876,12 @@ mod tests {
             (Attributes::INVERSE, 16),
             (Attributes::HIDDEN, 32),
             (Attributes::STRIKETHROUGH, 64),
+            (Attributes::OVERLINE, 128),
         ];
         for (attribute, bit) in bits {
             assert_eq!(attribute.bits(), bit, "{attribute:?}");
         }
-        assert_eq!(Attributes::all().bits(), 127);
+        assert_eq!(Attributes::all().bits(), 255);
     }
 
     #[test]
