@@ -145,19 +145,30 @@ impl FakeBus {
     /// Takes the daemon from logging in to asking for the lock, answering
     /// as the bus and logind would: returns the call asking for it.
     fn up_to_the_lock(&mut self) -> Message {
-        let hello = self.call();
-        assert_eq!(hello.member.as_deref(), Some("Hello"));
-        self.answer(&hello, ":1.5");
-        let owner = self.call();
-        assert_eq!(owner.member.as_deref(), Some("GetNameOwner"));
+        let owner = self.up_to_the_name();
         self.answer(&owner, LOGIND);
-        for _ in 0..3 {
-            assert_eq!(self.call().member.as_deref(), Some("AddMatch"));
-        }
         let inhibit = self.call();
         assert_eq!(inhibit.member.as_deref(), Some("Inhibit"));
         assert_eq!(inhibit.body, inhibit_body().as_bytes());
         inhibit
+    }
+
+    /// Takes the daemon from logging in to asking for logind's name, which
+    /// it asks only once it hears of a new one: returns that call.
+    fn up_to_the_name(&mut self) -> Message {
+        let hello = self.call();
+        assert_eq!(hello.member.as_deref(), Some("Hello"));
+        self.answer(&hello, ":1.5");
+        let first = self.call();
+        assert_eq!(first.member.as_deref(), Some("AddMatch"));
+        let rule = first.args("s").unwrap().string().unwrap().to_owned();
+        assert!(rule.contains("NameOwnerChanged"), "{rule}");
+        for _ in 0..2 {
+            assert_eq!(self.call().member.as_deref(), Some("AddMatch"));
+        }
+        let owner = self.call();
+        assert_eq!(owner.member.as_deref(), Some("GetNameOwner"));
+        owner
     }
 
     /// Passes the lock, a pipe's write end, answering `inhibit`, and
@@ -407,4 +418,29 @@ fn logind_starting_again_is_heard_under_its_new_name() {
     drop(lock);
     assert!(ended(&held));
     assert!(inhibitor.news().is_empty());
+}
+
+/// logind not running as the daemon asks for its name: it's asked for its
+/// lock once the bus says it is.
+#[test]
+fn logind_not_running_yet_is_asked_once_it_is() {
+    let Connected {
+        dir: _dir,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
+    let owner = bus.up_to_the_name();
+    let none = Sent::Error(owner.serial, "org.freedesktop.DBus.Error.NameHasNoOwner");
+    bus.send(BUS, none, ("s", &string("no owner")), None);
+    bus.logind_moved("", LOGIND);
+    let inhibit = bus.call();
+    assert_eq!(inhibit.member.as_deref(), Some("Inhibit"));
+    let held = bus.lock(&inhibit);
+    bus.signal(LOGIND, "PrepareForShutdown", true);
+    let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
+        panic!("not the shutdown, with the lock");
+    };
+    drop(lock);
+    assert!(ended(&held));
 }

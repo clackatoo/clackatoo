@@ -196,30 +196,43 @@ fn listen(
     }
     let hello = bus.hello()?;
     bus.answer(hello, WAIT)?;
-    // Only logind's own signals count: anyone could send one to the
-    // daemon's connection.
-    let asked = bus.get_name_owner(LOGIN)?;
-    let mut owner = (bus.answer(asked, WAIT)?.args("s"))
-        .and_then(|mut args| args.string().map(str::to_owned))
-        .ok_or_else(|| unexpected("logind's name"))?;
+    // logind gets a new name each time it starts again, as an upgrade of
+    // systemd restarts it: heard from before its name is asked, so a new
+    // one as it's asked is never missed.
+    bus.add_match(&format!(
+        "type='signal',sender='{BUS}',interface='{BUS}',member='NameOwnerChanged',arg0='{LOGIN}'"
+    ))?;
     for member in ["PrepareForShutdown", "PrepareForSleep"] {
         bus.add_match(&format!(
             "type='signal',sender='{LOGIN}',path='{LOGIN_PATH}',interface='{MANAGER}',\
              member='{member}'"
         ))?;
     }
-    // logind gets a new name each time it starts again, as an upgrade of
-    // systemd restarts it.
-    bus.add_match(&format!(
-        "type='signal',sender='{BUS}',interface='{BUS}',member='NameOwnerChanged',arg0='{LOGIN}'"
-    ))?;
-    let mut asking = Some(inhibit(&mut bus)?);
+    // Only logind's own signals count: anyone could send one to the
+    // daemon's connection. Its name is taken in turn with what else comes,
+    // so whichever of its answer and a new name the bus sent last wins.
+    let mut naming = Some(bus.get_name_owner(LOGIN)?);
+    let mut owner = String::new();
+    let mut asking: Option<u32> = None;
     let mut lock: Option<OwnedFd> = None;
     loop {
         let (message, mut fds) = bus.receive()?;
         let Some(message) = message else {
             continue;
         };
+        if naming.is_some() && message.reply_serial == naming {
+            naming = None;
+            match logind_name(&message) {
+                Some(name) => {
+                    owner = name;
+                    if asking.is_none() {
+                        asking = Some(inhibit(&mut bus)?);
+                    }
+                }
+                None => log::info!("logind isn't running: its lock is asked for once it is"),
+            }
+            continue;
+        }
         if asking.is_some() && message.reply_serial == asking {
             asking = None;
             // In place of any from logind before it started again.
@@ -277,6 +290,16 @@ fn coming(message: &Message) -> Option<Coming> {
     } else {
         None
     }
+}
+
+/// logind's name on the bus, if `message`, the answer to asking, says it
+/// has one.
+fn logind_name(message: &Message) -> Option<String> {
+    if !message.is(Kind::Reply) {
+        return None;
+    }
+    let name = message.args("s")?.string()?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// logind's new name on the bus, empty if it has gone, if `message` is
