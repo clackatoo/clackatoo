@@ -178,7 +178,8 @@ impl AskedSnapshot {
     }
 
     /// Each screen's keyboard flags, the titles and the progress, as a
-    /// live terminal keeps them. The titles aren't bounded yet.
+    /// live terminal keeps them, the titles as they were written: bounded
+    /// as a pushed title is by [`Terminal::restore_asked`](crate::Terminal::restore_asked).
     pub(crate) fn restore(&self) -> ([keyboard::Stack; 2], &[String], Option<TaskProgress>) {
         let keyboard = (self.keyboard.each_ref())
             .map(|flags| keyboard::Stack::from_parts(flags.base, &flags.pushed));

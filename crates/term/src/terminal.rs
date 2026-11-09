@@ -1622,6 +1622,9 @@ impl Emulator {
             let (width, height) = (self.width(), self.height());
             self.alternate
                 .get_or_insert_with(|| Grid::new(width, height, 0, Compaction::Off));
+            // A program that switches to it starts with no keyboard flags,
+            // whatever one that ended without popping them left.
+            self.keyboard_alternate = keyboard::Stack::default();
         }
         self.screen = screen;
         // A viewer was showing the other screen.
@@ -1893,8 +1896,11 @@ impl Emulator {
                 self.shell_mark(kind, options);
             }
             b"A" => {
-                // The program that said how far it had got has ended.
+                // The program that said how far it had got has ended, and
+                // so has one that asked for keys in kitty's encoding and
+                // didn't pop it, so the shell gets Ctrl+C as ^C again.
                 self.progress = None;
+                self.keyboard_primary = keyboard::Stack::default();
                 let block = self.blocks.prompt();
                 self.mark_cursor_row(block, false);
                 // Forget the blocks no row is marked with any more.
@@ -2078,11 +2084,44 @@ impl Emulator {
     /// Queues `bytes`, one whole reply, unless [`MAX_REPLIES`] are
     /// waiting already: a program asking faster than it reads gets no
     /// more answers, and never part of one, until they're taken.
+    ///
+    /// Replies are typed into the program as if from the keyboard, so one
+    /// that isn't [`safe_reply`] is never sent: it could only be made
+    /// of what a program printed, which could have it type anything.
     pub(crate) fn reply(&mut self, bytes: &[u8]) {
+        if !safe_reply(bytes) {
+            debug_assert!(false, "an unsafe reply: {bytes:?}");
+            log::error!(
+                "not replying {:?}: it isn't one",
+                String::from_utf8_lossy(bytes)
+            );
+            return;
+        }
         if self.replies.len() + bytes.len() <= MAX_REPLIES {
             self.replies.extend_from_slice(bytes);
         }
     }
+}
+
+/// Whether `bytes` are made only as replies are: escape sequences (ESC
+/// followed by `[`, `]`, `P` or `\`), BEL to end a string, and letters,
+/// digits and the few marks replies hold. No other control, nothing
+/// beyond ASCII, and never Enter: nothing a program could have printed to
+/// be typed for it.
+pub(crate) fn safe_reply(bytes: &[u8]) -> bool {
+    let mut after_escape = false;
+    bytes.iter().all(|&byte| {
+        let ok = if after_escape {
+            matches!(byte, b'[' | b']' | b'P' | b'\\')
+        } else {
+            byte == 0x1B
+                || byte == 0x07
+                || byte.is_ascii_alphanumeric()
+                || b";:?$+/=>|.- ".contains(&byte)
+        };
+        after_escape = byte == 0x1B && !after_escape;
+        ok
+    }) && !after_escape
 }
 
 /// What ends an answer to an OSC string ended with BEL if `bell`, or
