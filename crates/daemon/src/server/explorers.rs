@@ -347,8 +347,9 @@ pub(super) struct Watched {
     pub(super) buffers: Vec<BufferId>,
     /// The language servers it's watched for, and its path for each.
     servers: Vec<(ServerId, PathBuf)>,
-    /// The git directory it is, watched for its index for signs.
-    index: Option<PathBuf>,
+    /// The git directory it is, watched for its index for signs, at each
+    /// path signs know it by.
+    index: Vec<PathBuf>,
     /// What it is to the display, watched for its sockets.
     display: Option<display::Watched>,
 }
@@ -360,7 +361,7 @@ impl Watched {
             && self.repo.is_none()
             && self.buffers.is_empty()
             && self.servers.is_empty()
-            && self.index.is_none()
+            && self.index.is_empty()
             && self.display.is_none()
     }
 }
@@ -378,12 +379,12 @@ impl Watched {
         sockets: &mut bool,
     ) {
         let heard = |hear: WatchFlags| flags.intersects(ReadFlags::from_bits_retain(hear.bits()));
-        if let Some(git_dir) = &self.index
-            && name == Some(b"index")
-            && heard(INDEX_HEAR)
-            && !indexes.contains(git_dir)
-        {
-            indexes.push(git_dir.clone());
+        if name == Some(b"index") && heard(INDEX_HEAR) {
+            for git_dir in &self.index {
+                if !indexes.contains(git_dir) {
+                    indexes.push(git_dir.clone());
+                }
+            }
         }
         if let (Some(kind), Some(name)) = (self.display, name) {
             *sockets |= heard(DISPLAY_HEAR) && display::socket(kind, name);
@@ -930,14 +931,14 @@ impl Daemon {
     /// Returns whether it's watched.
     pub(super) fn add_index_watch(&mut self, git_dir: &Path) -> bool {
         if (self.explorers.watches.values())
-            .any(|watched| watched.index.as_deref() == Some(git_dir))
+            .any(|watched| watched.index.iter().any(|watched| watched == git_dir))
         {
             return true;
         }
         match self.add_watch(git_dir, usize::MAX, INDEX_HEAR) {
             Ok(watch) => {
                 let watched = self.explorers.watches.entry(watch).or_default();
-                watched.index = Some(git_dir.to_owned());
+                watched.index.push(git_dir.to_owned());
                 true
             }
             Err(err) => {
@@ -949,11 +950,7 @@ impl Daemon {
 
     /// No longer watches the git directory `git_dir` for its index.
     pub(super) fn remove_index_watch(&mut self, git_dir: &Path) {
-        self.unwatch(|watched| {
-            if watched.index.as_deref() == Some(git_dir) {
-                watched.index = None;
-            }
-        });
+        self.unwatch(|watched| watched.index.retain(|watched| watched != git_dir));
     }
 
     /// Watches the directories the display's sockets are in that aren't
@@ -1366,7 +1363,7 @@ impl Daemon {
     fn tell_others(&mut self, mut indexes: Vec<PathBuf>, mut sockets: bool, everything: bool) {
         if everything {
             indexes = (self.explorers.watches.values())
-                .filter_map(|watched| watched.index.clone())
+                .flat_map(|watched| watched.index.iter().cloned())
                 .collect();
             sockets = true;
         }
@@ -2167,6 +2164,45 @@ mod tests {
             })),
             ..Dir::default()
         }
+    }
+
+    /// Two paths to one git directory, as a link to it gives, are one
+    /// watch, which each hears its index on, and which goes only once
+    /// neither wants it.
+    #[test]
+    fn two_paths_to_one_git_directory_share_its_watch_till_both_go() {
+        needs_inotify();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (git, link) = (root.join("git"), root.join("link"));
+        std::fs::create_dir(&git).unwrap();
+        std::os::unix::fs::symlink(&git, &link).unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(&root);
+        assert!(daemon.add_index_watch(&git));
+        assert!(daemon.add_index_watch(&link));
+        let of_index = |daemon: &Daemon| -> Vec<(i32, Vec<PathBuf>)> {
+            (daemon.explorers.watches.iter())
+                .filter(|(_, watched)| !watched.index.is_empty())
+                .map(|(&watch, watched)| (watch, watched.index.clone()))
+                .collect()
+        };
+        let watches = of_index(&daemon);
+        assert_eq!(watches.len(), 1, "{watches:?}");
+        let (watch, paths) = watches[0].clone();
+        assert_eq!(paths, [git.clone(), link.clone()]);
+        let (mut indexes, mut sockets) = (Vec::new(), false);
+        daemon.explorers.watches[&watch].heard_by_others(
+            ReadFlags::MOVED_TO,
+            Some(b"index"),
+            &mut indexes,
+            &mut sockets,
+        );
+        assert_eq!(indexes, [git.clone(), link.clone()]);
+
+        daemon.remove_index_watch(&git);
+        assert_eq!(of_index(&daemon), [(watch, vec![link.clone()])]);
+        daemon.remove_index_watch(&link);
+        assert!(!daemon.explorers.watches.contains_key(&watch));
     }
 
     #[test]
