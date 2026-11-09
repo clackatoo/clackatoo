@@ -143,7 +143,7 @@ pub use review::{
 pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
-    LinkTarget, Links, Node, NodeId, Patch, Run, View, ViewUpdate,
+    LinkTarget, Links, Node, NodeId, Patch, Restarted, Run, View, ViewUpdate,
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
@@ -154,7 +154,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 145;
+pub const PROTOCOL_VERSION: u32 = 146;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1737,6 +1737,36 @@ pub enum Request {
         /// The picture pane.
         picture: PictureId,
     },
+    /// Changes whether the history of the terminal `pane` shows is kept
+    /// across a restart of the daemon, as `how` says. Only a user asks
+    /// this, in a window or with the `clackatoo` command: no agent's tool
+    /// does, and a web device's is refused. Answered with
+    /// [`Response::Text`], saying what's kept now. Only to a daemon of
+    /// protocol 146 or later ([`wire::KEPT_HISTORY`]).
+    KeepHistory {
+        /// The pane, in a tab or a background tab.
+        pane: PaneId,
+        /// What's changed.
+        how: HistoryKeeping,
+    },
+}
+
+/// What [`Request::KeepHistory`] changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryKeeping {
+    /// Its history is kept across a restart, as every terminal's is
+    /// unless marked otherwise.
+    On,
+    /// It isn't, from now on: what's kept of it is let go at once, and
+    /// the mark is kept with the layout.
+    Off,
+    /// What's kept of it is let go now, and what it shows now isn't kept,
+    /// though what comes after is, unless it's marked off.
+    Forget,
+    /// The block the line numbered so is in (see
+    /// [`clackatoo_term::Block`]), its command and what it printed, is
+    /// kept even though the terminal's history is marked off.
+    BlockAt(u64),
 }
 
 /// What [`Request::Tutor`] does. The daemon chooses each lesson's folder,

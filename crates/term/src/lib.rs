@@ -23,6 +23,8 @@ mod document;
 #[doc(hidden)]
 pub mod fuzzing;
 mod grid;
+pub mod hints;
+mod kept;
 pub mod keyboard;
 mod links;
 pub mod mouse;
@@ -51,6 +53,8 @@ pub use colours::Palette;
 pub use damage::Damage;
 pub use document::{MOST_LINES, MOST_TEXT, Match, Position, matches_in};
 pub use grid::Grid;
+pub use hints::Hints;
+pub use kept::{KeptCopy, KeptHistory, KeptLines};
 pub use links::{Hyperlink, LinkId};
 pub use paste::{bracketed_paste, paste, shell_quoted, unbracketed};
 pub use progress::TaskProgress;

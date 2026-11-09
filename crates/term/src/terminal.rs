@@ -206,6 +206,14 @@ impl Terminal {
         self.emulator.grid()
     }
 
+    pub(crate) fn primary_mut(&mut self) -> &mut Grid {
+        &mut self.emulator.primary
+    }
+
+    pub(crate) fn shown_grid_mut(&mut self) -> &mut Grid {
+        self.emulator.grid_mut()
+    }
+
     /// Whether the alternate screen is showing.
     #[must_use]
     pub fn is_alternate_screen(&self) -> bool {

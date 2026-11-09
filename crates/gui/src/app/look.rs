@@ -849,6 +849,7 @@ mod tests {
             display: None,
             links: None,
             logind: None,
+            history: None,
             ..DaemonConfig::from_env()
         };
         let mut daemon = Daemon::bind(&runtime.socket_path(), config).unwrap();

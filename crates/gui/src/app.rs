@@ -3045,7 +3045,9 @@ fn drawings<'a>(
             terminal: Some(terminal),
             tile,
             rows,
-            marked: state.block_marks(height),
+            marked: (state.block_marks(height).into_iter())
+                .chain(state.restart_rows(height))
+                .collect(),
             cursor,
             highlights: state.highlights(height),
             normal_mode: has_focus && normal,

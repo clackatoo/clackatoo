@@ -1937,6 +1937,7 @@ pub(super) mod tests {
             display: None,
             pastes: None,
             logind: None,
+            history: None,
             keep_wait: crate::DEFAULT_KEEP_WAIT,
             images: crate::ImageLimits::default(),
         };

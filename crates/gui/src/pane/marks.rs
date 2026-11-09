@@ -7,7 +7,7 @@
 //! the window keeps the prompts of its screen's rows and of the history
 //! it fetched, and how blocks ended, by their numbers.
 
-use clackatoo_term::{Row, RowBuilder, Style};
+use clackatoo_term::{Attributes, Row, RowBuilder, Style};
 
 use super::{Document, Pane};
 use crate::colors;
@@ -98,6 +98,90 @@ impl Pane {
         }
         marked
     }
+}
+
+impl Pane {
+    /// The rows in a view `height` lines tall of history kept from before
+    /// the daemon last restarted, each as it's drawn instead: dimmed, as
+    /// what came before, and the line saying where the restart was drawn
+    /// across the pane as a line, when it was in the local time zone
+    /// (CLACKA-242). Never part of the text: the line's own text, which
+    /// a window older than protocol 146 shows, is what's copied.
+    pub(crate) fn restart_rows(&self, height: usize) -> Vec<(usize, Row)> {
+        let Some(screen) = self
+            .screen
+            .as_ref()
+            .filter(|screen| !screen.state.alternate)
+        else {
+            return Vec::new();
+        };
+        let Some(restarted) = screen.state.restarted else {
+            return Vec::new();
+        };
+        let top = self.view_top();
+        let shown = top..(top + height as u64).min(restarted.line + 1);
+        if shown.is_empty() {
+            return Vec::new();
+        }
+        let width = usize::from(screen.size.cols().min(self.shown_size(screen).cols()));
+        let document = Document(self);
+        let overlay = self.overlay.as_ref().map(|overlay| overlay.shown.line);
+        let mut rows = Vec::new();
+        for line in shown {
+            let at = usize::try_from(line - top).expect("within the height");
+            if overlay == Some(line) {
+                continue;
+            }
+            if line == restarted.line {
+                rows.push((at, divider(restarted.at, width)));
+            } else if let Some(row) = document.line(line) {
+                rows.push((at, dimmed(row)));
+            }
+        }
+        rows
+    }
+}
+
+/// The line saying the daemon restarted at `at`, in seconds since 1970,
+/// `width` columns wide: `── restarted 9 Nov 14:02 ───…`, dimmed.
+fn divider(at: i64, width: usize) -> Row {
+    let when = jiff::Timestamp::from_second(at)
+        .map(|at| at.to_zoned(jiff::tz::TimeZone::system()))
+        .map_or_else(
+            |_| String::new(),
+            |at| at.strftime(" %-d %b %H:%M").to_string(),
+        );
+    let text = format!("── restarted{when} ");
+    let width = width.max(mono_width(&text));
+    let mut builder = RowBuilder::new(width);
+    let style = Style {
+        attributes: Attributes::DIM,
+        ..Style::DEFAULT
+    };
+    builder.push(&text, &style, true);
+    let rule = "─".repeat(width - builder.filled());
+    builder.push(&rule, &style, true);
+    builder.finish(false)
+}
+
+/// `row` dimmed: each cell in its own style, and dim.
+fn dimmed(row: &Row) -> Row {
+    let mut builder = RowBuilder::new(row.width());
+    let mut cell = String::new();
+    for (at, &value) in row.cells().iter().enumerate() {
+        if value.is_wide_spacer() {
+            continue;
+        }
+        cell.clear();
+        row.push_text(at, &mut cell);
+        let mut style = *row.style(value);
+        style.attributes |= Attributes::DIM;
+        if cell.is_empty() {
+            cell.push(' ');
+        }
+        builder.push(&cell, &style, true);
+    }
+    builder.finish(row.is_wrapped())
 }
 
 /// `row` with `text` written in `style` from column `col`, past the end
@@ -307,6 +391,37 @@ mod tests {
     fn full_screen_programs_show_no_marks() {
         let pane = pane(&terminal(20, 4, &(ran("false", "", 1) + "\x1b[?1049h")));
         assert_eq!(marked(&pane, 4), []);
+    }
+
+    /// History kept from before a restart is drawn dimmed, and the line
+    /// saying where the restart was, across the pane (CLACKA-242).
+    #[test]
+    fn history_from_before_a_restart_is_dimmed_under_a_line() {
+        let mut old = terminal(40, 3, "one\r\n\x1b[31mtwo\x1b[m\r\nthree");
+        old.compact_scrollback();
+        let kept = old.copy_to_keep(100).lines(None, usize::MAX);
+        let history = kept.history(&Config::default(), "-- restarted --").unwrap();
+        let mut terminal = terminal(40, 3, "");
+        assert_eq!(terminal.take_kept_history(history, 0), Some(3));
+        terminal.advance(b"$ ");
+        let mut pane = pane(&terminal);
+        // Nothing of it shows at the live screen.
+        assert!(pane.restart_rows(3).is_empty());
+        assert!(pane.wheel(4, [0, 0], Modifiers::default()));
+        serve(&mut pane, &terminal);
+        let rows = pane.restart_rows(4);
+        let texts: Vec<(usize, String)> = (rows.iter())
+            .map(|(at, row)| (*at, row.text().trim_end().to_owned()))
+            .collect();
+        assert_eq!(texts[0], (0, "one".to_owned()));
+        assert_eq!(texts[1], (1, "two".to_owned()));
+        assert!(texts[3].1.starts_with("── restarted"), "{texts:?}");
+        assert!(texts[3].1.ends_with("─"), "across the pane: {texts:?}");
+        assert_eq!(rows[3].1.width(), 40);
+        // Each keeps its colour, and is dim.
+        let style = rows[1].1.style(rows[1].1.cells()[0]);
+        assert_eq!(style.fg, clackatoo_term::Color::Indexed(1));
+        assert!(style.attributes.contains(Attributes::DIM));
     }
 
     #[test]

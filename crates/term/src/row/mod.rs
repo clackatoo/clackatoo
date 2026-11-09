@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, CellFlags, StyleIndex};
+use crate::hints::Hints;
 use crate::links::LinkId;
 use crate::size::Size;
 use crate::style::Style;
@@ -75,6 +76,8 @@ struct Extras {
     lookup: StyleLookup,
     /// Where a shell's block starts (see [`crate::blocks`]).
     mark: Option<Mark>,
+    /// How private its text is (see [`crate::hints`]).
+    hints: Hints,
 }
 
 impl Row {
@@ -323,6 +326,7 @@ impl Row {
             extras.graphemes.clear();
             extras.lookup.invalidate();
             extras.mark = None;
+            extras.hints = Hints::empty();
         }
         self.wrapped = false;
         self.padded = false;
@@ -569,6 +573,27 @@ impl Row {
 
     pub(crate) fn take_mark(&mut self) -> Option<Mark> {
         self.extras.as_mut()?.mark.take()
+    }
+
+    /// How private the row's text is (see [`crate::hints`]).
+    #[must_use]
+    pub fn hints(&self) -> Hints {
+        self.extras
+            .as_ref()
+            .map_or(Hints::empty(), |extras| extras.hints)
+    }
+
+    /// Adds `hints` to the row's.
+    pub(crate) fn add_hints(&mut self, hints: Hints) {
+        if !hints.is_empty() {
+            self.extras_mut().hints |= hints;
+        }
+    }
+
+    pub(crate) fn take_hints(&mut self) -> Hints {
+        self.extras
+            .as_mut()
+            .map_or(Hints::empty(), |extras| std::mem::take(&mut extras.hints))
     }
 
     fn extras_mut(&mut self) -> &mut Extras {

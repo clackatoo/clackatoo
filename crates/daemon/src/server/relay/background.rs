@@ -63,6 +63,29 @@ impl Daemon {
         Ok(keep)
     }
 
+    /// `keep`, changing what's kept of the history of the terminal `local`
+    /// shows, on the daemon of the connection at `at`, if it's that one's
+    /// own and it keeps terminals' history, as of protocol 146. Or why
+    /// not.
+    pub(super) fn keep_history_there(
+        &self,
+        token: Token,
+        at: usize,
+        local: PaneId,
+        keep: (Request, Then),
+    ) -> Renumbered {
+        if self.is_web_device(token) {
+            return Err(Error::Other(
+                "a device on the web app can't change what's kept of a terminal".into(),
+            ));
+        }
+        self.background_there(at, Some(local))?;
+        if self.link_wire(at) < wire::KEPT_HISTORY {
+            return Err(self.too_old(at, "keeping terminals' history"));
+        }
+        Ok(keep)
+    }
+
     /// Whether the daemon of the connection at `at` keeps background tabs
     /// and terminals running, as of protocol 96, for the pane `local` of
     /// its workspaces, if one is named: not one of another machine's in

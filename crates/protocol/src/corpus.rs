@@ -1682,6 +1682,45 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::PAIRED, sample)),
     );
+    // A terminal that came back with its history after a restart, and
+    // what's kept of terminals' history changed (CLACKA-242).
+    samples.extend(
+        [
+            Server(ServerMessage::Event(Event::View {
+                terminal: TerminalId(4),
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: GridState {
+                        restarted: Some(crate::Restarted {
+                            line: 96,
+                            at: 1_794_000_000,
+                        }),
+                        ..grid_state()
+                    },
+                    lines: Vec::new(),
+                    links: links(),
+                    marks: BlockMarks::default(),
+                }]),
+            })),
+            Client(ClientMessage::Request(Request::KeepHistory {
+                pane: PaneId(5),
+                how: crate::HistoryKeeping::On,
+            })),
+            Client(ClientMessage::Request(Request::KeepHistory {
+                pane: PaneId(5),
+                how: crate::HistoryKeeping::Off,
+            })),
+            Client(ClientMessage::Request(Request::KeepHistory {
+                pane: PaneId(5),
+                how: crate::HistoryKeeping::Forget,
+            })),
+            Client(ClientMessage::Request(Request::KeepHistory {
+                pane: PaneId(5),
+                how: crate::HistoryKeeping::BlockAt(12),
+            })),
+        ]
+        .map(|sample| (crate::wire::KEPT_HISTORY, sample)),
+    );
     // A terminal's search for the match a count says (CLACKA-171).
     samples.extend(
         [
@@ -4166,6 +4205,7 @@ fn grid_state() -> GridState {
         fed: true,
         keyboard: 13,
         progress: Some(TaskProgress::Paused(Some(40))),
+        restarted: None,
     }
 }
 

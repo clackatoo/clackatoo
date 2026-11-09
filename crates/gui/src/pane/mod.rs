@@ -177,6 +177,9 @@ pub(crate) struct Pane {
     hovered: Option<links::Hover>,
     /// A link clicked or `gx`ed, for the desk to open.
     opening: Option<crate::links::Target>,
+    /// The line of the block `gs` asked to keep across a restart, for the
+    /// desk to ask the daemon to.
+    keeping_block: Option<u64>,
     /// How many links the screen may know of before those no row shows
     /// are forgotten.
     links_kept: usize,
@@ -223,6 +226,7 @@ impl Pane {
             blank: RowBuilder::new(0).finish(false),
             hovered: None,
             opening: None,
+            keeping_block: None,
             links_kept: links::KEPT_LINKS,
             predictor: Predictor::new(),
             overlay: None,

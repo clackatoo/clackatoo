@@ -306,6 +306,9 @@ pub(crate) enum Command {
     /// `:keep`, `:keep always`, `:keep off`: the focused terminal kept
     /// running so, or not.
     Keep(clackatoo_protocol::Keeping),
+    /// `:keep history [on|off]`, `:forget`: what's kept of the focused
+    /// terminal's history across a restart.
+    KeepHistory(clackatoo_protocol::HistoryKeeping),
     /// `:trust [DIR]`, `:untrust [DIR]`, `:trusted`: a folder trusted to
     /// run its language servers, or not, or those marked listed.
     Trust {
@@ -499,6 +502,12 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         "bg" | "bgpane" | "Background" => return background_command(word, argument),
         "keep" => return keep_command(argument),
+        "forget" => {
+            return match argument {
+                None => Ok(Command::KeepHistory(clackatoo_protocol::HistoryKeeping::Forget)),
+                Some(argument) => Err(format!("forget takes nothing after it, but has {argument:?}")),
+            };
+        }
         "trust" | "untrust" | "trusted" => return trust_command(word, argument),
         _ => {}
     }
@@ -544,12 +553,21 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
 /// `:keep`, with `argument` after it: how the focused terminal is kept
 /// running.
 fn keep_command(argument: Option<&str>) -> Result<Command, String> {
-    use clackatoo_protocol::Keeping;
+    use clackatoo_protocol::{HistoryKeeping, Keeping};
+    let mut words = argument.unwrap_or_default().split_whitespace();
+    if let Some("history") = words.next() {
+        let how = match (words.next(), words.next()) {
+            (None | Some("on"), None) => HistoryKeeping::On,
+            (Some("off"), None) => HistoryKeeping::Off,
+            _ => return Err("keep history takes on or off".into()),
+        };
+        return Ok(Command::KeepHistory(how));
+    }
     Ok(Command::Keep(match argument {
         None => Keeping::Restore,
         Some("always") => Keeping::Always,
         Some("off") => Keeping::Off,
-        Some(other) => return Err(format!("keep takes always or off, not {other:?}")),
+        Some(other) => return Err(format!("keep takes always, off or history, not {other:?}")),
     }))
 }
 
@@ -1033,6 +1051,7 @@ command_names! {
     "bgpane" => "Move the focused terminal to the background",
     "Background" => "Browse background tabs",
     "keep" => "Restart this terminal command when the daemon starts",
+    "forget" => "Forget this terminal's history kept across a restart",
     "trust" => "Let this folder's language servers run its code",
     "untrust" => "Stop this folder's language servers running its code",
     "trusted" => "List the folders trusted to run language servers",
@@ -1165,7 +1184,7 @@ pub(crate) fn takes(word: &str) -> Takes {
             "prev_hunk",
         ]),
         "devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
-        "keep" => Takes::Words(&["always", "off"]),
+        "keep" => Takes::Words(&["always", "off", "history"]),
         "Review" => Takes::Words(&["chat", "turn", "base"]),
         "reviewkeep" | "reviewreject" => Takes::Words(&["file", "turn", "all"]),
         _ => Takes::Nothing,
@@ -1271,6 +1290,7 @@ mod tests {
         ("bgpane", ""),
         ("Background", ""),
         ("keep", ""),
+        ("forget", ""),
         ("trust", ""),
         ("untrust", ""),
         ("trusted", ""),

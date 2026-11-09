@@ -291,6 +291,7 @@ dependencies = [
  "clackatoo-syntax",
  "clackatoo-term",
  "clackatoo-text",
+ "flate2",
  "globset",
  "httparse",
  "ignore",

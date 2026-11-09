@@ -252,6 +252,7 @@ fn argument_description(command: &str, word: &str) -> &'static str {
         ("devices", "unlock") => "Re-enable pairing after too many failed attempts",
         ("keep", "always") => "Restart this command when it exits, too",
         ("keep", "off") => "Stop restarting this terminal command",
+        ("keep", "history") => "Keep this terminal's history across a restart, on or off",
         ("Review", "chat") => "Review all changes made by this chat",
         ("Review", "turn") => "Review the last turn, or a numbered turn",
         ("Review", "base") => "Review all changes since the branch’s base",
@@ -612,7 +613,7 @@ mod tests {
         for prefix in ["re", "Re", "RE", "rE"] {
             assert_eq!(choices(prefix, &none()), choices("re", &none()));
         }
-        assert_eq!(choices("f", &none()), ["Files", "fork", "format"]);
+        assert_eq!(choices("f", &none()), ["Files", "forget", "fork", "format"]);
         assert_eq!(
             choices("M", &none()),
             ["markdown", "Marks", "Messages", "move"]

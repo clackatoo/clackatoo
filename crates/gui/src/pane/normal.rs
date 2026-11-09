@@ -67,6 +67,10 @@ pub(super) enum TerminalAction {
     /// `]]`, or `[[` if not `forward`: to the start of the shell's block
     /// after the cursor's line, or before it.
     Block { forward: bool },
+    /// `gs`: keeps the shell's block the cursor is on, its command and
+    /// what it printed, across a restart, though the terminal's history
+    /// is marked not to be kept.
+    KeepBlock,
 }
 
 /// How a terminal reads keys: every motion, as a move and as what `y`
@@ -74,7 +78,7 @@ pub(super) enum TerminalAction {
 /// operator and `i` its only way into insert mode; marks and macros, as
 /// every pane has them; a register only before a yank, which keeps its
 /// text there; but nothing that changes text, as it has none to change,
-/// and no `*` or `#` yet. Esc, `gx`, `[[` and `]]` are its own.
+/// and no `*` or `#` yet. Esc, `gx`, `gs`, `[[` and `]]` are its own.
 pub(super) struct TerminalKeys;
 
 impl Dialect for TerminalKeys {
@@ -86,6 +90,7 @@ impl Dialect for TerminalKeys {
             TerminalAction::OpenLink => "Open link under cursor",
             TerminalAction::Block { forward: true } => "Next shell block",
             TerminalAction::Block { forward: false } => "Previous shell block",
+            TerminalAction::KeepBlock => "Keep this command's output across a restart",
         }
         .into()
     }
@@ -116,7 +121,11 @@ impl Dialect for TerminalKeys {
         _keys: &mut Reader<'_>,
         _visual: bool,
     ) -> Option<Read<Self::Own>> {
-        (stroke.plain()? == 'x').then_some(Read::Yes(TerminalAction::OpenLink))
+        match stroke.plain()? {
+            'x' => Some(Read::Yes(TerminalAction::OpenLink)),
+            's' => Some(Read::Yes(TerminalAction::KeepBlock)),
+            _ => None,
+        }
     }
 
     fn after_bracket(
@@ -311,6 +320,10 @@ impl Pane {
             }
             Action::Own(TerminalAction::OpenLink) => self.open_link_at_cursor(),
             Action::Own(TerminalAction::Block { forward }) => self.jump_to_block(forward),
+            Action::Own(TerminalAction::KeepBlock) => {
+                self.keeping_block = self.cursor.map(|cursor| cursor.at.line);
+                true
+            }
             Action::Operate(..)
             | Action::Insert(_)
             | Action::DeleteChars { .. }

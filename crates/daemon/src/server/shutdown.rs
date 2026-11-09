@@ -224,6 +224,58 @@ mod tests {
         assert!(kept().contains("\"kept\""), "{}", kept());
     }
 
+    /// As logind says the machine is shutting down, terminals' history is
+    /// written too, its lock let go only once that's on disk as well, and
+    /// a terminal closing with everything ending keeps its file (CLACKA-242).
+    #[test]
+    fn a_shutdown_has_terminals_history_written_before_the_lock_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        config.workspaces = Some(dir.path().join("state/workspaces"));
+        let history = dir.path().join("state/history");
+        config.history = Some(crate::HistoryConfig::in_dir(history.clone()));
+        daemon.keeping = super::super::restore::Keeping::new(&config);
+        daemon.config = config;
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        daemon.workspaces.new_workspace("kept".to_owned(), terminal);
+        if let Some(Hosted::Pty(pty)) = daemon
+            .terminals
+            .get_mut(&terminal)
+            .map(|slot| &mut slot.terminal)
+        {
+            pty.emulator_mut().advance(b"printed before\r\n");
+        }
+        daemon.history_moved_on(terminal);
+
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        daemon.keep_now(Some(write), true);
+        let mut byte = [0];
+        // Both writers' copies of the lock closed: written.
+        assert_eq!(rustix::io::read(&read, &mut byte).unwrap(), 0);
+        let key = crate::history::key(daemon.id, terminal.0);
+        let kept = crate::history::read(&history, &key)
+            .unwrap()
+            .expect("a file");
+        assert!(
+            kept.texts().contains(&"printed before"),
+            "{:?}",
+            kept.texts()
+        );
+
+        // Closing with everything else, it keeps its file.
+        daemon.close_terminal(terminal).unwrap();
+        daemon.keep_last();
+        daemon.kept_last();
+        assert!(crate::history::read(&history, &key).unwrap().is_some());
+    }
+
     /// Reaps terminal `id` once its program has ended, as the loop does.
     fn reaped(daemon: &mut Daemon, id: TerminalId) {
         let deadline = Instant::now() + Duration::from_secs(10);

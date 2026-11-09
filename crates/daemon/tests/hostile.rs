@@ -107,6 +107,7 @@ impl TestDaemon {
             display: None,
             pastes: None,
             logind: None,
+            history: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
         };

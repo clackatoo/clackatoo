@@ -123,8 +123,9 @@ file was opened from (or its file's own folder if that's gone), and with its
 changes not saved if it had any, as `[No Name]` files do; explorers and
 folders keep their root; boards and reviews come back too, and chats on their
 sessions, a [subagent](~clackatoo/reference/agents-lasting#what-lasts) still
-its chat's. Scrollback and running programs don't. An editor whose file has
-been deleted is left out.
+its chat's. Running programs don't, but what each terminal printed does (see
+[Scrollback after a restart](#scrollback-after-a-restart)). An editor whose
+file has been deleted is left out.
 
 A shutdown or reboot keeps them too, even though it ends your shells along
 with the daemon. Before the machine shuts down, systemd's login manager,
@@ -172,6 +173,65 @@ kept differs from the panes it hands over, as when its last write failed.
 
 To start once with none, run `clackatoo stop`, then
 [`clackatoo daemon --fresh`](~clackatoo/reference/cli#daemon).
+
+### Scrollback after a restart
+
+Each terminal's history comes back with it, above the new shell's prompt: its
+last 10,000 lines, with their colours, weights and underlines, and the lines
+on its screen. A window draws them dimmed, under a line across the pane that
+says when the restart was: `── restarted 9 Nov 14:02 ───`. That line is drawn
+by the window, not printed into the terminal, so no program can write over
+it; a window or phone from before this release shows its text as a plain
+line. It's history only: nothing in it runs, or reaches the new shell.
+Restarted again, a terminal keeps the lines from before each restart, each
+restart's line among them.
+
+**When it's written:** the daemon notes which terminals printed something, and
+writes theirs every 30 seconds, as it stops or upgrades, and before the
+machine sleeps or shuts down (logind waits for it, as it does for the
+workspaces). A crash, a power cut or `kill -9` keeps what was written last.
+Writing happens on a thread of its own: the daemon only takes a copy of each
+terminal's newest lines, which it can do in a moment, and leaves turning them
+into a file to the thread. A terminal printing without a pause is put off a
+few rounds, until its output rests. A daemon started with
+`--scrollback-compaction off` keeps fewer lines: the newest that fit in 2 MiB
+of cells.
+
+**Where:** a file for each terminal in `~/.local/state/clackatoo/history`, a
+folder only you may open (0700), each file only yours to read (0600), written
+beside its old copy, synced and renamed over it, so a crash leaves the old one
+or the new, never half of one. Each holds at most 10,000 lines and 8 MiB of
+text, compressed. A terminal you close takes its file with it, and a restart
+removes the files of terminals that didn't come back. Only the daemon that
+keeps the workspaces keeps terminals' history.
+
+**What's never kept:**
+
+- an agent's own terminals, and the panes that show what an agent's command
+  printed;
+- a terminal you marked off (below), but for the commands you kept.
+
+**Your say over it:**
+
+| Command | What it does |
+|---|---|
+| `:forget` | Drops what's kept of the focused terminal at once, and what it shows now: only what comes after is kept. |
+| `:keep history off` | Keeps none of its history from now on. The mark is kept with the layout, so it lasts across restarts. |
+| `:keep history on` | Keeps it again. |
+| `gs` in normal mode | In a terminal marked off, keeps the command the cursor is on, with what it printed, all the same. |
+
+These are yours alone: no agent's tool asks them, and a
+[device on the web app](~clackatoo/reference/phone) can't.
+
+**Settings,** in the daemon's environment:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CLACKATOO_HISTORY` | `~/.local/state/clackatoo/history` | The folder it's kept in, or `off` to keep none. |
+| `CLACKATOO_HISTORY_LINES` | `10000` | The most lines kept of each terminal. |
+| `CLACKATOO_HISTORY_EVERY` | `30` | How often, in seconds, what changed is written. |
+
+Images programs show aren't kept: what comes back is the text around them.
 
 ### Keeping a terminal running
 

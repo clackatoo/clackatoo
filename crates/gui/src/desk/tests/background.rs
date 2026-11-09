@@ -426,6 +426,44 @@ fn ctrl_f_forwards_a_lent_background_shell_from_its_machine() {
     ));
 }
 
+/// `:keep history`, `:forget` and `gs` change what's kept of the focused
+/// terminal's history across a restart (CLACKA-242).
+#[test]
+fn what_is_kept_of_the_focused_terminals_history_is_changed_as_asked() {
+    use clackatoo_protocol::HistoryKeeping;
+    let mut desk = desk(with_background(Vec::new(), Vec::new()));
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    for (line, how) in [
+        ("keep history", HistoryKeeping::On),
+        ("keep history on", HistoryKeeping::On),
+        ("keep history off", HistoryKeeping::Off),
+        ("forget", HistoryKeeping::Forget),
+    ] {
+        command(&mut desk, line);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::KeepHistory {
+                pane: PaneId(1),
+                how
+            }]
+        );
+    }
+    for line in ["keep history maybe", "forget everything"] {
+        command(&mut desk, line);
+        assert!(answer_all(&mut desk).is_empty(), "{line}");
+    }
+    // `gs` keeps the block on the cursor's line.
+    type_text(&mut desk, "gs");
+    assert!(matches!(
+        &answer_all(&mut desk)[..],
+        [Request::KeepHistory {
+            pane: PaneId(1),
+            how: HistoryKeeping::BlockAt(_),
+        }]
+    ));
+}
+
 #[test]
 fn keep_marks_the_focused_terminal_and_its_tab_says_so() {
     use clackatoo_protocol::{Keeping, Kept};

@@ -285,6 +285,10 @@ impl Asked {
 }
 
 /// What's sent to a client of this daemon.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one for each message sent, at once: boxing would allocate for each event"
+)]
 pub(super) enum Out {
     /// A frame, encoded for it.
     Frame(Vec<u8>),

@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::damage::Damage;
+use crate::hints::Hints;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::snapshot::{Captured, Line, LineLinks, RestoreError};
@@ -145,6 +146,19 @@ impl Grid {
         self.scrollback.end()
     }
 
+    /// The history line that says where history kept from before a
+    /// restart of the daemon ends, and when the restart was, in seconds
+    /// since 1970, until history is cleared (see
+    /// [`Terminal::take_kept_history`](crate::Terminal::take_kept_history)).
+    #[must_use]
+    pub fn restarted(&self) -> Option<(u64, i64)> {
+        self.scrollback.restarted()
+    }
+
+    pub(crate) fn set_restarted(&mut self, restarted: Option<(u64, i64)>) {
+        self.scrollback.set_restarted(restarted);
+    }
+
     /// A number that changes whenever history's lines are renumbered:
     /// when it is cleared, or a resize takes back the start of the line the
     /// screen's top row continues and puts it back rewrapped. Line numbers
@@ -191,6 +205,88 @@ impl Grid {
             .zip(&self.rows)
             .filter_map(|(line, row)| Some((line, row.mark()?)));
         self.scrollback.marks().chain(screen)
+    }
+
+    /// Every line with hints of how private it is (see [`crate::hints`]),
+    /// in history then on screen, numbered as in [`crate::document`].
+    pub(crate) fn hints(&self) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        let end = self.scrollback.end();
+        let screen = (end..)
+            .zip(&self.rows)
+            .map(|(line, row)| (line, row.hints()))
+            .filter(|(_, hints)| !hints.is_empty());
+        self.scrollback.hints().chain(screen)
+    }
+
+    /// The lines numbered `first` or later with hints, as
+    /// [`hints`](Self::hints) gives them.
+    pub(crate) fn hints_from(&self, first: u64) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        let end = self.scrollback.end();
+        let screen = (end..)
+            .zip(&self.rows)
+            .skip(usize::try_from(first.saturating_sub(end)).unwrap_or(usize::MAX))
+            .map(|(line, row)| (line, row.hints()))
+            .filter(|(_, hints)| !hints.is_empty());
+        self.scrollback.hints_from(first).chain(screen)
+    }
+
+    /// Gives the lines in `hints` those hints, numbered as
+    /// [`hints`](Self::hints) numbers them, in place of any they had.
+    /// Lines that aren't held are left out.
+    pub(crate) fn set_hints(&mut self, hints: &[(u64, Hints)]) {
+        let end = self.scrollback.end();
+        self.scrollback
+            .set_hints(hints.iter().copied().filter(|&(line, _)| line < end));
+        for row in &mut self.rows {
+            row.take_hints();
+        }
+        for &(line, hints) in hints {
+            if let Some(row) = self.screen_row_mut(line) {
+                row.add_hints(hints);
+            }
+        }
+    }
+
+    /// Adds `hints` to the lines numbered within `lines`, as
+    /// [`hints`](Self::hints) numbers them.
+    pub(crate) fn add_hints(&mut self, lines: std::ops::Range<u64>, hints: Hints) {
+        let end = self.scrollback.end();
+        self.scrollback
+            .add_hints(lines.start..lines.end.min(end), hints);
+        for line in lines.start.max(end)..lines.end {
+            match self.screen_row_mut(line) {
+                Some(row) => row.add_hints(hints),
+                None => break,
+            }
+        }
+    }
+
+    /// The screen's row numbered `line` in the document, if it's on screen.
+    fn screen_row_mut(&mut self, line: u64) -> Option<&mut Row> {
+        line.checked_sub(self.scrollback.end())
+            .and_then(|line| usize::try_from(line).ok())
+            .and_then(|line| self.rows.get_mut(line))
+    }
+
+    /// A copy of the newest `most` lines of history, cheap to take (see
+    /// [`Scrollback::copy_newest`]), and the screen's rows.
+    pub(crate) fn copy_newest(&self, most: usize) -> (Scrollback, Vec<Row>) {
+        (
+            self.scrollback.copy_newest(most),
+            self.rows.iter().cloned().collect(),
+        )
+    }
+
+    /// Takes `history` for the grid's own, keeping its limit and when it's
+    /// compacted, if the grid's own holds nothing and none has ever been
+    /// stored, so no line yet has a number. Says whether it was taken.
+    pub(crate) fn take_history(&mut self, history: Scrollback) -> bool {
+        if self.scrollback.end() != 0 {
+            return false;
+        }
+        self.scrollback = history;
+        self.damage = Self::all_damaged();
+        true
     }
 
     /// Marks the lines in `marks`, numbered as [`marks`](Self::marks)
@@ -399,6 +495,8 @@ impl Grid {
                 if let Some(mark) = mark.take() {
                     out.set_mark(Some(mark));
                 }
+                // Each row the line's text lands on keeps how private it is.
+                out.add_hints(row.hints());
                 if std::mem::take(&mut top) {
                     screen_top = rows.len();
                 }

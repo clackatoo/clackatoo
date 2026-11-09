@@ -73,6 +73,7 @@ mod finder;
 mod fits;
 mod forwards;
 mod groups;
+mod history;
 mod hover;
 mod keep;
 mod language;
@@ -1084,6 +1085,8 @@ pub struct Daemon {
     recovery: recovery::Recovery,
     /// Keeping the workspaces from one run of the daemon to the next.
     keeping: restore::Keeping,
+    /// Keeping terminals' history from one run of the daemon to the next.
+    histories: history::Histories,
     /// What's kept of the terminals in background tabs.
     background: background::Backgrounds,
     /// The terminals kept running always, and how running each again
@@ -1286,6 +1289,7 @@ impl Daemon {
             forwards: forwards::Forwards::default(),
             recovery: recovery::Recovery::default(),
             keeping,
+            histories: history::Histories::default(),
             machine,
             signer,
             mcp_run: tools::run_key(),
@@ -1413,6 +1417,7 @@ impl Daemon {
         }
         // What programs asked of their terminals: the keys' encoding, the
         // titles pushed, how far a task has got.
+        daemon.take_histories(&state.histories);
         for asked in &state.asked {
             let slot = daemon.terminals.get_mut(&TerminalId(asked.terminal));
             if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
@@ -1699,6 +1704,7 @@ impl Daemon {
         let mut trusted = Vec::new();
         let mut exes = Vec::new();
         let mut asked = Vec::new();
+        let mut histories = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
@@ -1727,6 +1733,7 @@ impl Daemon {
                     let blocks = terminal.emulator().trusted_blocks();
                     let exe = terminal.exe();
                     let programs_asked = terminal.emulator().asked_snapshot();
+                    histories.extend(self.hand_over_history(terminal.id(), terminal.emulator()));
                     let (terminal, shell) = terminal.hand_over(&mut fds);
                     if programs_asked != clackatoo_term::AskedSnapshot::default() {
                         asked.push(handover::Asked {
@@ -1904,6 +1911,7 @@ impl Daemon {
                     closed: self.hand_over_closed(),
                 }),
                 images,
+                histories,
             },
             fds,
             version: handover::VERSION,
@@ -2017,6 +2025,7 @@ impl Daemon {
                     .chain(self.next_recovery_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .chain(self.keeping.due())
+                    .chain(self.history_due())
                     .chain(self.links.due())
                     .chain(self.relay_due())
                     .chain(self.next_lent_due())
@@ -2124,6 +2133,7 @@ impl Daemon {
             self.send_browser_frames();
             self.send_reviews();
             self.keep_if_due();
+            self.keep_histories_if_due();
             self.send_view_updates();
             self.transmit_quic();
             // Floods last, once this turn's updates have gone out, and
@@ -2519,6 +2529,7 @@ impl Daemon {
         self.terminal_moved_on(id);
         self.background_moved_on(id);
         self.kept_moved_on(id);
+        self.history_moved_on(id);
         self.note_shell(id);
     }
 
@@ -2903,7 +2914,10 @@ impl Daemon {
             self.sources.remove(token.0);
         }
         let terminal = match slot.terminal {
-            Hosted::Pty(terminal) => terminal,
+            Hosted::Pty(terminal) => {
+                self.history_closed(id);
+                terminal
+            }
             Hosted::Chat(chat) => {
                 // Its branches stay off the start page once it's gone.
                 self.note_branches_of(&chat);
@@ -3841,6 +3855,7 @@ impl Daemon {
             Request::UnlockPairing => self.unlock_pairing(token),
             Request::SeenPaired { device } => self.seen_paired(token, device),
             Request::Tutor(files) => self.tutor_files(token, files),
+            Request::KeepHistory { pane, how } => self.serve_keep_history(token, pane, how),
             Request::Connect {
                 host,
                 command,

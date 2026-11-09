@@ -1403,6 +1403,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "markdown",
         what: "Images: :e plan.png opens one to zoom and pan, Markdown shows its images, chats fetch theirs whole",
     },
+    News {
+        id: "history-kept",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Terminals' scrollback comes back after a restart, dimmed above the new prompt; :forget and :keep history off",
+    },
 ];
 
 impl News {

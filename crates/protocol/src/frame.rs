@@ -180,8 +180,15 @@ fn agent_parent_prefix(
         0
     };
     let fed = usize::from(wire >= wire::FED_TERMINALS);
-    let mut fields = [0; 8];
-    let later = if wire >= wire::TERMINAL_STANDARDS {
+    // Since 146, where a restart was: a tag, and two varints with Some.
+    let mut fields = [0; 32];
+    let later = if wire >= wire::KEPT_HISTORY {
+        postcard::to_slice(
+            &(state.keyboard, state.progress, state.restarted),
+            &mut fields,
+        )?
+        .len()
+    } else if wire >= wire::TERMINAL_STANDARDS {
         postcard::to_slice(&(state.keyboard, state.progress), &mut fields)?.len()
     } else {
         0
@@ -872,7 +879,10 @@ mod tests {
                     };
                     let fed = usize::from(wire >= wire::FED_TERMINALS);
                     // The flags' byte; Some, Running and its percent.
-                    let later = if wire >= wire::TERMINAL_STANDARDS {
+                    // And since 146, None for where a restart was.
+                    let later = if wire >= wire::KEPT_HISTORY {
+                        1 + 3 + 1
+                    } else if wire >= wire::TERMINAL_STANDARDS {
                         1 + 3
                     } else {
                         0

@@ -29,6 +29,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, StyleIndex};
+use crate::hints::Hints;
 use crate::row::{Row, RowBuilder};
 use crate::snapshot::{self, Captured, Line};
 use crate::style::Style;
@@ -44,6 +45,10 @@ const PAGE_TEXT_LEN: usize = 32 * 1024;
 /// so a long flood into a huge scrollback can't hold a raw copy of all of
 /// it. The default 10,000 lines fit at any width up to 200 columns.
 const RAW_CELLS_MAX: usize = 2 * 1024 * 1024;
+
+/// The most cells of rows not compacted yet that
+/// [`Scrollback::copy_newest`] copies: 2 MiB of them.
+const COPIED_RAW_CELLS: usize = 256 * 1024;
 
 /// When rows in history are compacted, trading time for memory.
 ///
@@ -95,6 +100,13 @@ pub(crate) struct Scrollback {
     style_indices: StyleIndices,
     /// The held lines a shell marked, by number, oldest first.
     marks: VecDeque<(u64, Mark)>,
+    /// The held lines with hints of how private they are (see
+    /// [`crate::hints`]), by number, oldest first.
+    hints: VecDeque<(u64, Hints)>,
+    /// The line that says where history kept from before a restart of the
+    /// daemon ends, and when the restart was, in seconds since 1970 (see
+    /// [`crate::kept`]), until history is cleared.
+    restarted: Option<(u64, i64)>,
 }
 
 /// Page palette indices by style, hashed cheaply: the keys come from the
@@ -154,6 +166,8 @@ impl Scrollback {
             compaction,
             style_indices: StyleIndices::default(),
             marks: VecDeque::new(),
+            hints: VecDeque::new(),
+            restarted: None,
         }
     }
 
@@ -175,6 +189,10 @@ impl Scrollback {
         if let Some(mark) = row.take_mark() {
             self.marks.push_back((self.stored, mark));
         }
+        let hints = row.take_hints();
+        if !hints.is_empty() {
+            self.hints.push_back((self.stored, hints));
+        }
         self.stored += 1;
         let mut spare = None;
         if self.compaction == Compaction::Eager {
@@ -193,6 +211,9 @@ impl Scrollback {
             let first = self.first();
             while self.marks.front().is_some_and(|&(line, _)| line < first) {
                 self.marks.pop_front();
+            }
+            while self.hints.front().is_some_and(|&(line, _)| line < first) {
+                self.hints.pop_front();
             }
         }
         spare
@@ -246,7 +267,21 @@ impl Scrollback {
             {
                 row.set_mark(self.marks.pop_back().map(|(_, mark)| mark));
             }
+            if self
+                .hints
+                .back()
+                .is_some_and(|&(line, _)| line == self.stored)
+            {
+                row.add_hints(
+                    self.hints
+                        .pop_back()
+                        .map_or(Hints::empty(), |(_, hints)| hints),
+                );
+            }
             rows.push(row);
+        }
+        if self.restarted.is_some_and(|(line, _)| line >= self.stored) {
+            self.restarted = None;
         }
         rows.reverse();
         rows
@@ -341,6 +376,123 @@ impl Scrollback {
         self.raw = VecDeque::new();
         self.raw_cells = 0;
         self.marks = VecDeque::new();
+        self.hints = VecDeque::new();
+        self.restarted = None;
+    }
+
+    /// See [`Scrollback::restarted`](Self#structfield.restarted).
+    pub(crate) fn restarted(&self) -> Option<(u64, i64)> {
+        self.restarted
+    }
+
+    pub(crate) fn set_restarted(&mut self, restarted: Option<(u64, i64)>) {
+        self.restarted = restarted.filter(|&(line, _)| line < self.stored);
+    }
+
+    /// The held lines with hints, by number, oldest first.
+    pub(crate) fn hints(&self) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        self.hints.iter().copied()
+    }
+
+    /// The held lines numbered `first` or later with hints, by number,
+    /// oldest first, found by halving rather than walked to.
+    pub(crate) fn hints_from(&self, first: u64) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        let start = self.hints.partition_point(|&(line, _)| line < first);
+        self.hints.range(start..).copied()
+    }
+
+    /// Gives the held lines in `hints` those hints, by number, oldest
+    /// first, in place of any they had. Others are left out.
+    pub(crate) fn set_hints(&mut self, hints: impl IntoIterator<Item = (u64, Hints)>) {
+        let held = self.first()..self.stored;
+        self.hints = hints
+            .into_iter()
+            .filter(|(line, hints)| held.contains(line) && !hints.is_empty())
+            .collect();
+    }
+
+    /// Adds `hints` to the held lines numbered within `lines`.
+    pub(crate) fn add_hints(&mut self, lines: std::ops::Range<u64>, hints: Hints) {
+        let lines = lines.start.max(self.first())..lines.end.min(self.stored);
+        if lines.is_empty() || hints.is_empty() {
+            return;
+        }
+        let mut merged = VecDeque::with_capacity(self.hints.len());
+        let mut old = std::mem::take(&mut self.hints).into_iter().peekable();
+        for line in lines.clone() {
+            while let Some(&(before, had)) = old.peek().filter(|&&(at, _)| at < line) {
+                merged.push_back((before, had));
+                old.next();
+            }
+            let had = old
+                .next_if(|&(at, _)| at == line)
+                .map_or(Hints::empty(), |(_, had)| had);
+            merged.push_back((line, had | hints));
+        }
+        merged.extend(old);
+        self.hints = merged;
+    }
+
+    /// A copy of the newest `most` lines, cheap enough to take on the
+    /// daemon's event loop: the pages that hold them copied whole, as they
+    /// are, and the rows not compacted yet. Read it elsewhere with
+    /// [`rows`](Self::rows), numbered from [`first`](Self::first).
+    pub(crate) fn copy_newest(&self, most: usize) -> Self {
+        let mut keep = most.min(self.len());
+        // Rows not compacted are copied cell by cell: no more than
+        // COPIED_RAW_CELLS of them, the newest, as with `Compaction::Off`
+        // they could be all of history. Then no record is either, as the
+        // lines kept must follow on from one another.
+        let mut cells = 0;
+        let raw_kept = (self.raw.iter().rev())
+            .take(keep)
+            .take_while(|row| {
+                cells += row.width();
+                cells <= COPIED_RAW_CELLS
+            })
+            .count();
+        if raw_kept < keep.min(self.raw.len()) {
+            keep = raw_kept;
+        }
+        let raw: VecDeque<Row> = self
+            .raw
+            .range(self.raw.len() - raw_kept..)
+            .cloned()
+            .collect();
+        let mut wanted = keep - raw_kept;
+        let mut pages = VecDeque::new();
+        for page in self.pages.iter().rev() {
+            if wanted == 0 {
+                break;
+            }
+            let held = page.records.len() - page.first;
+            let mut copy = page.clone();
+            if held > wanted {
+                copy.first = page.records.len() - wanted;
+            }
+            wanted -= held.min(wanted);
+            pages.push_front(copy);
+        }
+        let first = self.stored - keep as u64;
+        Self {
+            pages,
+            records: keep - raw_kept,
+            raw_cells: raw.iter().map(Row::width).sum(),
+            raw,
+            stored: self.stored,
+            generation: self.generation,
+            limit: keep,
+            compaction: Compaction::Off,
+            style_indices: StyleIndices::default(),
+            marks: VecDeque::new(),
+            hints: self.hints_from(first).collect(),
+            restarted: None,
+        }
+    }
+
+    /// The number of the oldest line held.
+    pub(crate) fn oldest(&self) -> u64 {
+        self.first()
     }
 
     /// Every line as a row, oldest first, at the width it had.
@@ -936,6 +1088,21 @@ mod tests {
         assert_eq!(newest.text(), "more");
         assert_eq!(*newest.style(newest.cells()[0]), blue);
         history.assert_invariants();
+    }
+
+    #[test]
+    fn a_copy_takes_no_more_raw_cells_than_allowed_and_only_the_newest_lines() {
+        let mut history = Scrollback::new(100_000, Compaction::Off);
+        let width = 512;
+        let rows = COPIED_RAW_CELLS / width + 10;
+        for n in 0..rows {
+            history.push(row(&n.to_string(), width));
+        }
+        let copy = history.copy_newest(rows);
+        assert_eq!(copy.len(), COPIED_RAW_CELLS / width);
+        assert_eq!(copy.oldest(), (rows - copy.len()) as u64);
+        let last = copy.rows().last().unwrap().text();
+        assert_eq!(last, (rows - 1).to_string());
     }
 
     #[test]

@@ -465,6 +465,33 @@ impl HostedTerminal {
         &mut self.emulator
     }
 
+    /// Its ID.
+    pub(crate) fn id(&self) -> TerminalId {
+        self.id
+    }
+
+    /// Takes `kept`, history kept from before the daemon restarted at
+    /// `at`, as its own, if its program hasn't printed a line yet (see
+    /// [`Terminal::take_kept_history`]).
+    pub(crate) fn take_kept_history(
+        &mut self,
+        kept: clackatoo_term::KeptHistory,
+        at: i64,
+    ) -> Option<u64> {
+        self.emulator.take_kept_history(kept, at)
+    }
+
+    /// Puts back how private its lines are, and where its history from
+    /// before a restart ends, as the build it was handed over by said.
+    pub(crate) fn restore_history_marks(
+        &mut self,
+        hints: &[(u64, clackatoo_term::Hints)],
+        restarted: Option<(u64, i64)>,
+    ) {
+        self.emulator.set_hints(hints);
+        self.emulator.set_restarted(restarted);
+    }
+
     /// Says what colours the terminal is drawn in, for programs that ask
     /// (see [`Terminal::set_palette`]).
     pub(crate) fn set_palette(&mut self, palette: Option<clackatoo_term::Palette>) {

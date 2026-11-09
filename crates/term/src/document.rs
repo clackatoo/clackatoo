@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use crate::hints::{Hints, KEPT_FROM_AGENTS};
 use crate::row::Row;
 use crate::terminal::Terminal;
 
@@ -103,13 +104,57 @@ impl Terminal {
     /// taken whole. No more than [`MOST_TEXT`] and [`MOST_LINES`].
     #[must_use]
     pub fn text(&self, from: Position, to: Position, whole_lines: bool) -> String {
+        self.text_leaving_out(from, to, whole_lines, Hints::empty())
+    }
+
+    /// The text from `from` to `to`, as [`text`](Self::text) gives it,
+    /// for an agent to read: each run of lines kept from agents (see
+    /// [`crate::hints`]) is [`KEPT_FROM_AGENTS`] instead, on a line of
+    /// its own.
+    #[must_use]
+    pub fn text_for_agents(&self, from: Position, to: Position, whole_lines: bool) -> String {
+        self.text_leaving_out(from, to, whole_lines, Hints::NOAGENT)
+    }
+
+    fn text_leaving_out(
+        &self,
+        from: Position,
+        to: Position,
+        whole_lines: bool,
+        leaving_out: Hints,
+    ) -> String {
         let (from, to) = if from <= to { (from, to) } else { (to, from) };
         let last = to.line.min(self.document_bounds().1);
+        let hinted = if leaving_out.is_empty() {
+            Vec::new()
+        } else {
+            self.document_hints(from.line)
+        };
+        let mut hinted = hinted.into_iter().peekable();
+        let mut left_out = false;
         let mut text = String::new();
         for (line, row) in self.lines_between(from.line, to.line) {
             if text.len() > MOST_TEXT {
                 break;
             }
+            while hinted.next_if(|&(at, _)| at < line).is_some() {}
+            if hinted
+                .next_if(|&(at, _)| at == line)
+                .is_some_and(|(_, hints)| hints.intersects(leaving_out))
+            {
+                if !left_out {
+                    left_out = true;
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(KEPT_FROM_AGENTS);
+                    if line != last {
+                        text.push('\n');
+                    }
+                }
+                continue;
+            }
+            left_out = false;
             let start = if whole_lines || line != from.line {
                 0
             } else {

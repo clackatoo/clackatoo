@@ -207,6 +207,10 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
         .env("CLACKATOO_UDP_PORTS", "off")
         .env_remove("CLACKATOO_LSP_TRACE")
         .env_remove("CLACKATOO_RECOVERY")
+        .env_remove("CLACKATOO_HISTORY")
+        .env_remove("CLACKATOO_HISTORY_LINES")
+        // Terminals' history written every second, not every half minute.
+        .env("CLACKATOO_HISTORY_EVERY", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
@@ -1161,5 +1165,285 @@ fn a_program_a_shutdown_ends_after_an_upgrade_comes_back_where_it_was() {
     let pid = pid_of(&mut client, terminal);
     eventually("the new shell is where sleep was", || {
         std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|now| now == folder)
+    });
+}
+
+/// A shell in a terminal 80 columns wide, in the daemon's home.
+fn shell_80() -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(80, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    })
+}
+
+/// Whether terminal `id`'s screen shows `text` on a line of its own.
+fn shows(client: &mut Client, id: TerminalId, text: &str) -> bool {
+    client.capture(id).is_ok_and(|view| {
+        let lines = &view.grid().expect("a grid").lines;
+        lines.iter().any(|line| line.text().trim_end() == text)
+    })
+}
+
+/// Terminal `id`'s history lines, oldest first, and where its history
+/// from before a restart ends, as a number among them, if it does.
+fn history_of(client: &mut Client, id: TerminalId) -> (Vec<clackatoo_protocol::Line>, Option<u64>) {
+    let state = client.capture(id).unwrap().grid().expect("a grid").state;
+    let fetched = client.history(id, state.history_end, u16::MAX).unwrap();
+    let restarted = (state.restarted).map(|restarted| restarted.line - fetched.first);
+    let lines = (fetched.lines.into_iter()).map(|line| line.line).collect();
+    (lines, restarted)
+}
+
+fn texts(lines: &[clackatoo_protocol::Line]) -> Vec<String> {
+    (lines.iter())
+        .map(|line| line.text().trim_end().to_owned())
+        .collect()
+}
+
+/// The history files in the daemon's state directory, with when each was
+/// last written.
+fn history_files(daemon: &Process) -> Vec<(PathBuf, SystemTime)> {
+    let dir = daemon.root().join("state/clackatoo/history");
+    (std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "history")
+        })
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect()
+}
+
+/// A terminal's history comes back after the daemon restarts, above the
+/// new shell, with its colours, and a line saying where the restart was:
+/// after it stops, which writes it, and after it's killed, up to what was
+/// last written, a second or so before. Its file is for the user alone,
+/// and goes when the terminal closes for good (CLACKA-242).
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, start to close")]
+fn history_comes_back_after_a_stop_and_after_the_daemon_is_killed() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut daemon = Process::start(&Setup::default());
+    let mut client = daemon.client();
+    client
+        .new_workspace(Some("kept".into()), shell_80())
+        .unwrap();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    // Typed at the prompt, not before it's shown, which would put the
+    // prompt on the line the output starts.
+    eventually("sh shows its prompt", || shows(&mut client, terminal, "$"));
+    client
+        .send_input(
+            terminal,
+            b"printf '\\033[1;31mred line\\033[m\\n'; seq 101 130\r",
+        )
+        .unwrap();
+    eventually("it printed", || shows(&mut client, terminal, "130"));
+    eventually("its history is kept", || history_files(&daemon).len() == 1);
+    let dir = daemon.root().join("state/clackatoo/history");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    let (first_file, _) = history_files(&daemon).remove(0);
+    assert_eq!(mode(&first_file), 0o600);
+    drop(client);
+
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+    let mut client = daemon.client();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let (lines, restarted) = history_of(&mut client, terminal);
+    let restarted = usize::try_from(restarted.expect("a restart")).unwrap();
+    let shown = texts(&lines);
+    assert!(shown[restarted].starts_with("── restarted"), "{shown:?}");
+    let red = (shown.iter().position(|line| line == "red line"))
+        .unwrap_or_else(|| panic!("no red line in {shown:?}: {}", daemon.log()));
+    assert!(red < restarted);
+    // Its colour and weight came back with it.
+    let style = lines[red].runs[0].style;
+    assert_eq!(style.fg, clackatoo_protocol::Color::Indexed(1));
+    assert!(
+        style
+            .attributes
+            .contains(clackatoo_protocol::Attributes::BOLD)
+    );
+    for number in 101..=130 {
+        assert!(
+            shown[..restarted].contains(&number.to_string()),
+            "{shown:?}"
+        );
+    }
+    // Written again under the terminal's new name, the old one gone.
+    eventually("the history is kept under its new name", || {
+        let files = history_files(&daemon);
+        files.len() == 1 && files[0].0 != first_file
+    });
+
+    // What's printed now is written within a second or so; killed, the
+    // daemon keeps what was written by then.
+    let before = history_files(&daemon)[0].1;
+    eventually("sh shows its prompt", || shows(&mut client, terminal, "$"));
+    client
+        .send_input(terminal, b"echo after-a-restart\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, terminal, "after-a-restart")
+    });
+    eventually("what it printed is written", || {
+        history_files(&daemon)
+            .iter()
+            .any(|(_, written)| *written > before)
+    });
+    drop(client);
+    daemon.kill_and_start_again(&Setup::default());
+    let mut client = daemon.client();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let (lines, restarted) = history_of(&mut client, terminal);
+    let shown = texts(&lines);
+    let restarted = usize::try_from(restarted.expect("a restart")).unwrap();
+    let after = (shown.iter().position(|line| line == "after-a-restart"))
+        .unwrap_or_else(|| panic!("{shown:?}"));
+    assert!(after < restarted);
+    // Both restarts are in it, the first's line as any other.
+    let dividers = (shown.iter()).filter(|line| line.starts_with("── restarted"));
+    assert_eq!(dividers.count(), 2, "{shown:?}");
+    assert!(shown.contains(&"red line".to_owned()));
+
+    // Closed for good, its file goes.
+    client.close_terminal(terminal).unwrap();
+    eventually("its file goes", || history_files(&daemon).is_empty());
+}
+
+/// The user's marks on what's kept of a terminal's history: marked off,
+/// nothing is, but for a command's block kept all the same, and the mark
+/// is kept with the layout; forgotten, nothing printed before is
+/// (CLACKA-242).
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, start to restart")]
+fn history_marked_off_or_forgotten_isnt_kept_but_a_block_kept_is() {
+    use clackatoo_protocol::{HistoryKeeping, Request, Response};
+    if !Path::new("/bin/bash").exists() {
+        eprintln!("/bin/bash isn't installed: skipped");
+        return;
+    }
+    let setup = Setup {
+        shell: Some("/bin/bash"),
+        ..Setup::default()
+    };
+    let mut daemon = Process::start(&setup);
+    let mut client = daemon.client();
+    let off = client
+        .new_workspace(Some("off".into()), shell_80())
+        .unwrap();
+    let forgot = client
+        .new_workspace(Some("forgot".into()), shell_80())
+        .unwrap();
+    let list = client.watch_workspaces().unwrap().list;
+    let (off_terminal, forgot_terminal) = (list[0].terminals()[0], list[1].terminals()[0]);
+    let keep = |client: &mut Client, pane, how| match client
+        .request(&Request::KeepHistory { pane, how })
+        .unwrap()
+    {
+        Response::Text(said) => said,
+        other => panic!("{other:?}"),
+    };
+    for terminal in [off_terminal, forgot_terminal] {
+        eventually("bash shows its prompt", || {
+            client.capture(terminal).is_ok_and(|view| {
+                let lines = &view.grid().expect("a grid").lines;
+                lines.iter().any(|line| line.text().contains('$'))
+            })
+        });
+    }
+    keep(&mut client, off, HistoryKeeping::Off);
+    client
+        .send_input(off_terminal, b"echo kept-a''ll-the-same\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, off_terminal, "kept-all-the-same")
+    });
+    // The block it's in, by a line of it.
+    let view = client.capture(off_terminal).unwrap();
+    let grid = view.grid().unwrap();
+    let row = (grid.lines.iter())
+        .position(|line| line.text().trim_end() == "kept-all-the-same")
+        .unwrap();
+    let line = grid.state.history_end + row as u64;
+    let said = keep(&mut client, off, HistoryKeeping::BlockAt(line));
+    assert!(said.contains("kept across a restart"), "{said}");
+    client
+        .send_input(off_terminal, b"echo not-k''ept\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, off_terminal, "not-kept")
+    });
+
+    client
+        .send_input(forgot_terminal, b"echo forgot''ten\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, forgot_terminal, "forgotten")
+    });
+    keep(&mut client, forgot, HistoryKeeping::Forget);
+    client
+        .send_input(forgot_terminal, b"echo remem''bered\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, forgot_terminal, "remembered")
+    });
+    let kept = daemon.root().join("state/clackatoo/workspaces");
+    eventually("the mark is kept with the layout", || {
+        std::fs::read_to_string(&kept).is_ok_and(|text| text.contains("\"history_off\": true"))
+    });
+    drop(client);
+
+    // An upgrade carries the marks over.
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    let mut client = daemon.client();
+    client
+        .send_input(off_terminal, b"echo also-not-k''ept\r")
+        .unwrap();
+    eventually("it printed", || {
+        shows(&mut client, off_terminal, "also-not-kept")
+    });
+    drop(client);
+
+    daemon.signal(Signal::TERM);
+    daemon.exits_within(Duration::from_secs(5));
+    daemon.restart(&setup, &[]);
+    let mut client = daemon.client();
+    let list = client.watch_workspaces().unwrap().list;
+    let (off_terminal, forgot_terminal) = (list[0].terminals()[0], list[1].terminals()[0]);
+    let off_history = texts(&history_of(&mut client, off_terminal).0);
+    assert!(
+        off_history.contains(&"kept-all-the-same".to_owned()),
+        "{off_history:?}"
+    );
+    assert!(
+        !off_history.iter().any(|line| line.contains("not-kept")),
+        "{off_history:?}"
+    );
+    assert!(
+        !off_history.iter().any(|line| line.contains("also-not")),
+        "{off_history:?}"
+    );
+    let forgot_history = texts(&history_of(&mut client, forgot_terminal).0);
+    assert!(
+        forgot_history.contains(&"remembered".to_owned()),
+        "{forgot_history:?}"
+    );
+    assert!(
+        !forgot_history.iter().any(|line| line.contains("forgotten")),
+        "{forgot_history:?}"
+    );
+    // Still marked off, after the restart.
+    eventually("the mark is still kept with the layout", || {
+        std::fs::read_to_string(&kept).is_ok_and(|text| text.contains("\"history_off\": true"))
     });
 }

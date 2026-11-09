@@ -2089,6 +2089,11 @@ impl Daemon {
     /// What `terminal`, in `pane`, has done: its last command, how it
     /// ended, and the last `lines` lines of its output, at most
     /// [`MAX_OUTPUT`] bytes.
+    /// Whether an agent asked for terminal `id`, to run a command in.
+    pub(super) fn agents_terminal(&self, id: TerminalId) -> bool {
+        self.tools.commanded.contains_key(&id)
+    }
+
     fn describe_terminal(&self, pane: PaneId, terminal: TerminalId, lines: usize) -> String {
         let Some(grid) = (self.terminals.get(&terminal)).and_then(|slot| slot.terminal.grid())
         else {
@@ -2895,7 +2900,8 @@ fn last_command(grid: &Terminal, last: u64) -> Option<clackatoo_term::Block> {
 /// Lines `first` to `last` of `grid`'s document, as text.
 fn whole_lines(grid: &Terminal, first: u64, last: u64) -> String {
     use clackatoo_term::Position;
-    grid.text(
+    // Lines a program said to keep from agents are left out.
+    grid.text_for_agents(
         Position {
             line: first,
             col: 0,
@@ -3876,6 +3882,21 @@ mod tests {
         assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
         grid.advance(b"\x1b]133;D;0\x07");
         assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+    }
+
+    /// Lines a program said to keep from agents are never in what an
+    /// agent reads of the terminal (CLACKA-242).
+    #[test]
+    fn agents_read_no_line_kept_from_them() {
+        let mut grid = Terminal::new(
+            clackatoo_term::Size::new(20, 4).unwrap(),
+            &clackatoo_term::Config::default(),
+        );
+        grid.advance(b"login\r\nhunter2\r\nok\r\nnext\r\nlast");
+        grid.add_hints(1..2, clackatoo_term::Hints::NOAGENT);
+        let (first, last) = grid.document_bounds();
+        let text = whole_lines(&grid, first, last);
+        assert_eq!(text, "login\n[secret]\nok\nnext\nlast");
     }
 
     #[test]

@@ -314,6 +314,27 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS }, _, _>"
     )]
     pub progress: Option<TaskProgress>,
+    /// Where the history kept from before the daemon last restarted ends,
+    /// if the terminal came back with some. `None` from a daemon older
+    /// than protocol 146.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::KEPT_HISTORY }, _>",
+        deserialize_with = "wire::since::<{ wire::KEPT_HISTORY }, _, _>"
+    )]
+    pub restarted: Option<Restarted>,
+}
+
+/// Where a terminal's history kept across a restart ends (see
+/// [`GridState::restarted`]): every history line numbered below `line`
+/// came from before the restart, and line `line` itself says so, as text
+/// a window older than protocol 146 shows as it is, and a newer one draws
+/// as a line across the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restarted {
+    /// The number of the history line that says where the restart was.
+    pub line: u64,
+    /// When the daemon restarted, in seconds since 1970.
+    pub at: i64,
 }
 
 /// Provenance and lifecycle of a terminal created by an agent.
@@ -556,6 +577,7 @@ impl GridState {
             fed: false,
             keyboard: terminal.keyboard(),
             progress: terminal.progress(),
+            restarted: (terminal.primary().restarted()).map(|(line, at)| Restarted { line, at }),
         }
     }
 }

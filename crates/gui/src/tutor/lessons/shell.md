@@ -115,11 +115,21 @@ copied "7e84c2e9"
 
 ## After a restart
 
-clackatoo keeps your workspaces, tabs and panes as they change, so they come back after a restart, a shutdown, a crash or a power cut: each terminal as a new shell in the folder it was in, each editor on its file with its cursor where it was, explorers, boards, reviews, and chats, which go on with their agent's session once you look at one or send it a message. Scrollback and running programs don't come back.
+clackatoo keeps your workspaces, tabs and panes as they change, so they come back after a restart, a shutdown, a crash or a power cut: each terminal as a new shell in the folder it was in, each editor on its file with its cursor where it was, explorers, boards, reviews, and chats, which go on with their agent's session once you look at one or send it a message. Running programs don't come back.
+
+What each terminal printed comes back too, as history above its new shell's prompt: its last 10,000 lines, colours and all, dimmed, under a line saying when the restart was. It's only there to read and copy; nothing in it runs. It's written every half minute or so, so a crash keeps all but the last moments.
 
 A terminal that was running a command, such as `cargo watch`, says so at its bottom right. In normal mode, `R` puts it at the new shell's prompt, to read, and Enter runs it; Esc dismisses it, and a click on either does the same. Nothing runs by itself. Typing into the terminal dismisses it too. This works in bash, zsh and fish, started as your shell. A command typed with a space before it is never kept, as shells keep those out of their history, nor is one bash left out of its history some other way, nor one a program only printed: clackatoo's shell integration marks each command with a secret only it and clackatoo know, and only a command marked so is offered.
 
 To start once with no workspaces, run `clackatoo stop`, then `clackatoo daemon --fresh`.
+
+## Keep or forget what a terminal printed
+
+`:forget` drops what's kept of the focused terminal's history at once, and what it shows now: only what comes after is kept. `:keep history off` keeps none of it from now on, and the mark stays with the pane after a restart; `:keep history on` keeps it again.
+
+In a terminal marked off, you can still keep one command: in normal mode, put the cursor on its prompt or output and press `gs`. That command and what it printed are kept, and nothing else.
+
+Agents' own terminals, and the panes showing what an agent's command printed, are never kept.
 
 ## On a busy machine
 

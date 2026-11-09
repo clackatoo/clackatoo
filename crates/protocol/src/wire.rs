@@ -424,6 +424,12 @@ gates! {
     /// `Request::ImageAt`; and `ChatPreview`'s `image`, with whose
     /// thumbnail no pixels are sent.
     IMAGES = 145,
+    /// Terminals' history kept across a restart of the daemon
+    /// (CLACKA-242): where it was restarted, `GridState::restarted`
+    /// (`Restarted`), for a window to dim what came before and draw the
+    /// line between; and changing what's kept, `Request::KeepHistory`
+    /// (`HistoryKeeping`), which only such a window sends.
+    KEPT_HISTORY = 146,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1228,6 +1234,10 @@ impl Downgrade for ClientMessage {
         }
         // Only a window of a daemon that has them says it showed one.
         if wire < PAIRED && matches!(self, Self::Request(crate::Request::SeenPaired { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < KEPT_HISTORY && matches!(self, Self::Request(crate::Request::KeepHistory { .. }))
+        {
             return Downgraded::Refused;
         }
         if wire < HARNESS

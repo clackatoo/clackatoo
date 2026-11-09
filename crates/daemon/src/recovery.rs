@@ -223,7 +223,7 @@ fn decode_start(key: &str, start: &[u8], len: u64) -> Result<(Kept, usize), Stri
 /// in as directories are usually made, then checks it's a directory, not
 /// a link to one, and the user's own, making it the user's alone if it
 /// was there already and wasn't: it holds what the user typed.
-fn make_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn make_dir(dir: &Path) -> io::Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }

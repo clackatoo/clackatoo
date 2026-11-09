@@ -37,6 +37,7 @@ mod git;
 mod group;
 mod handoff;
 mod handover;
+mod history;
 mod hosted;
 mod ignores;
 mod images;
@@ -249,7 +250,53 @@ pub struct DaemonConfig {
     /// chat's, picture pane's or buffer's, and all of them together (see
     /// `images`).
     pub images: ImageLimits,
+    /// How terminals' history is kept from one run of the daemon to the
+    /// next, as the workspaces are (see `history`). `None` keeps none.
+    pub history: Option<HistoryConfig>,
 }
+
+/// How terminals' history is kept across a restart of the daemon (see
+/// `history`): where, how much of each, and how often what changed is
+/// written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryConfig {
+    /// The folder it's kept in, a file per terminal, which only the user
+    /// may open: made so if it isn't there, and refused if it's anyone
+    /// else's, or a link.
+    pub dir: PathBuf,
+    /// The most lines kept of each terminal, its screen's included.
+    pub lines: usize,
+    /// The most bytes of text kept of each terminal, before it's
+    /// compressed: the oldest lines go first.
+    pub bytes: usize,
+    /// How often the history of terminals that have changed is written:
+    /// a crash, or the daemon killed, loses no more than this.
+    pub every: std::time::Duration,
+}
+
+impl HistoryConfig {
+    /// Kept in `dir`, as much and as often as usual.
+    #[must_use]
+    pub fn in_dir(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            lines: DEFAULT_HISTORY_LINES,
+            bytes: DEFAULT_HISTORY_BYTES,
+            every: DEFAULT_HISTORY_EVERY,
+        }
+    }
+}
+
+/// The most lines of a terminal's history kept across a restart, unless
+/// told otherwise: as many as a terminal keeps by default.
+pub const DEFAULT_HISTORY_LINES: usize = 10_000;
+
+/// The most bytes of text of a terminal's history kept across a restart:
+/// 10,000 lines of 200 columns, styled.
+pub const DEFAULT_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+
+/// How often the history of terminals that changed is written.
+pub const DEFAULT_HISTORY_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Where images pasted into terminals are kept, and the programs that put
 /// one on the desktop's clipboard, each reading it from its input.
@@ -639,8 +686,46 @@ impl DaemonConfig {
                 None => Some(dbus::system_address()),
             },
             images: ImageLimits::from_env(non_empty("CLACKATOO_IMAGE_MEMORY").as_deref()),
+            history: history_from_env(&non_empty),
         }
     }
+}
+
+/// How terminals' history is kept, as the environment says:
+/// `$CLACKATOO_HISTORY`, the folder it's kept in, or `off` for none (or
+/// else `history` in [`state_dir`]), `$CLACKATOO_HISTORY_LINES`, the most
+/// lines kept of each terminal, and `$CLACKATOO_HISTORY_EVERY`, how often
+/// in seconds what changed is written.
+fn history_from_env(non_empty: &dyn Fn(&str) -> Option<OsString>) -> Option<HistoryConfig> {
+    let mut config = match non_empty("CLACKATOO_HISTORY") {
+        Some(off) if off == "off" => return None,
+        // Only from somewhere in particular, as a relative path would be
+        // from wherever the daemon happened to start.
+        Some(dir) if Path::new(&dir).is_absolute() => HistoryConfig::in_dir(PathBuf::from(dir)),
+        Some(dir) => {
+            log::warn!(
+                "CLACKATOO_HISTORY isn't an absolute path or `off`: {}",
+                dir.display()
+            );
+            HistoryConfig::in_dir(state_dir()?.join("history"))
+        }
+        None => HistoryConfig::in_dir(state_dir()?.join("history")),
+    };
+    let number = |name: &str| {
+        let value = non_empty(name)?;
+        let number = value.to_str().and_then(|value| value.parse::<u64>().ok());
+        if number.is_none() {
+            log::warn!("{name} isn't a number: {}", value.display());
+        }
+        number
+    };
+    if let Some(lines) = number("CLACKATOO_HISTORY_LINES") {
+        config.lines = usize::try_from(lines).unwrap_or(usize::MAX).min(1_000_000);
+    }
+    if let Some(seconds) = number("CLACKATOO_HISTORY_EVERY") {
+        config.every = std::time::Duration::from_secs(seconds.clamp(1, 24 * 60 * 60));
+    }
+    Some(config)
 }
 
 /// Where language packs are installed: `clackatoo/languages` in

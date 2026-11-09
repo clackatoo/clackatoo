@@ -101,6 +101,39 @@ impl Desk {
         );
     }
 
+    /// Changes what's kept of the focused terminal's history across a
+    /// restart, as `:keep history` and `:forget` ask.
+    pub(super) fn keep_history(&mut self, how: clackatoo_protocol::HistoryKeeping) {
+        let asked = if how == clackatoo_protocol::HistoryKeeping::Forget {
+            ":forget"
+        } else {
+            ":keep history"
+        };
+        if !self.needs_daemon(asked, wire::KEPT_HISTORY) {
+            return;
+        }
+        let Some(shown) = self.shown else { return };
+        self.request(
+            Request::KeepHistory {
+                pane: shown.pane,
+                how,
+            },
+            Asked::Kept,
+        );
+    }
+
+    /// Keeps the block of the terminal `terminal` its pane was asked to
+    /// keep across a restart, with `gs`, if it was, though its history
+    /// is marked off.
+    pub(super) fn keep_pane_block(&mut self, terminal: clackatoo_protocol::TerminalId) {
+        let Some(line) =
+            (self.panes.get_mut(&terminal)).and_then(crate::pane::Pane::take_kept_block)
+        else {
+            return;
+        };
+        self.keep_history(clackatoo_protocol::HistoryKeeping::BlockAt(line));
+    }
+
     /// Whether `pane` shows a chat.
     fn shows_chat(&self, pane: clackatoo_protocol::PaneId) -> bool {
         let Some((_, _, found)) = self.workspaces.find_pane(pane) else {

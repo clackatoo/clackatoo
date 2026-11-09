@@ -1540,6 +1540,10 @@ impl Daemon {
                 let keep = (Request::Keep { pane: remote, how }, Then::Pass);
                 (at, self.keep_there(token, at, pane, keep))
             }),
+            &Request::KeepHistory { pane, how } => self.relayed_pane(pane).map(|(at, remote)| {
+                let keep = (Request::KeepHistory { pane: remote, how }, Then::Pass);
+                (at, self.keep_history_there(token, at, pane, keep))
+            }),
             Request::Background(action) => self.route_background(action),
             _ => None,
         };

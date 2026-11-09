@@ -394,7 +394,8 @@ impl Daemon {
             | Request::Reveal { pane: id, .. }
             | Request::Split { pane: id, .. }
             | Request::Reopen { beside: Some(id) }
-            | Request::Keep { pane: id, .. } => pane(id, false),
+            | Request::Keep { pane: id, .. }
+            | Request::KeepHistory { pane: id, .. } => pane(id, false),
             Request::OpenHere { pane: id, .. }
             | Request::BlankHere { pane: id, .. }
             | Request::Recover { pane: id, .. }

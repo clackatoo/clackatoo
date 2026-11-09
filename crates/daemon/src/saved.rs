@@ -19,8 +19,9 @@
 //! one, is kept as that machine and the number this daemon gave the pane,
 //! which the daemon there keeps with it: a workspace this daemon lent
 //! another is kept with who it's lent to, and that number.
-//! Scrollback and running programs aren't kept: a terminal comes back as
-//! a new shell. A buffer with no file yet, and a chat's browser page,
+//! Running programs aren't kept: a terminal comes back as a new shell,
+//! with its history above it, which is kept in a file of its own (see
+//! `crate::history`), named here, unless the user marked it not to be. A buffer with no file yet, and a chat's browser page,
 //! aren't kept at all.
 //!
 //! # The format
@@ -267,6 +268,16 @@ pub(crate) enum Pane {
         /// over, offers instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keep: Option<Keep>,
+        /// The name of the file its history is kept in, if it's kept
+        /// (see `crate::history`): it comes back above the new shell.
+        /// Builds before then pass this over, and come back with none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history: Option<String>,
+        /// The user marked its history not to be kept but for the blocks
+        /// they kept (`:keep history off`). Builds before then pass this
+        /// over.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        history_off: bool,
     },
     /// A chat with an agent.
     Chat {
@@ -854,6 +865,8 @@ mod tests {
                 ran: ran.map(str::to_owned),
                 elsewhere: None,
                 keep: None,
+                history: None,
+                history_off: false,
             })
         };
         State {
@@ -994,6 +1007,8 @@ mod tests {
             cwd: Some("/home/jack/site".into()),
             ran: Some("trail serve".into()),
             elsewhere: None,
+            history: Some("0000000000000abc-3".into()),
+            history_off: true,
             keep: Some(Keep {
                 command: "trail serve".into(),
                 always: true,
@@ -1016,6 +1031,8 @@ mod tests {
                 ran: Some("trail serve".into()),
                 elsewhere: None,
                 keep: None,
+                history: None,
+                history_off: false,
             }),
             focused: 0,
             zoomed: None,
@@ -1236,6 +1253,8 @@ mod tests {
                 name: Some("jack-ubuntu-laptop".into()),
             }),
             keep: None,
+            history: None,
+            history_off: false,
         };
         kept.workspaces[0].tabs[0].layout = Layout::Pane(borrowed);
         kept.workspaces[0].lent = Some(Lent {
@@ -1324,6 +1343,8 @@ mod tests {
                 ran: None,
                 elsewhere: None,
                 keep: None,
+                history: None,
+                history_off: false,
             })
         );
     }

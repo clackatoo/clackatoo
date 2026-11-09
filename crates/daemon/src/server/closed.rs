@@ -455,11 +455,16 @@ fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
             ran,
             elsewhere,
             keep,
+            history_off,
+            ..
         } => saved::Pane::Terminal {
             cwd,
             ran: ran.or(keep.map(|keep| keep.command)),
             elsewhere,
             keep: None,
+            // Its history went as it closed; whether to keep it stays.
+            history: None,
+            history_off,
         },
         saved::Pane::Chat {
             id,
@@ -696,6 +701,8 @@ mod tests {
                 command: "trail serve".into(),
                 always: true,
             }),
+            history: Some("0000000000000abc-3".into()),
+            history_off: true,
         };
         assert_eq!(
             reopened(kept, false),
@@ -704,6 +711,8 @@ mod tests {
                 ran: Some("trail serve".into()),
                 elsewhere: None,
                 keep: None,
+                history: None,
+                history_off: true,
             }
         );
     }

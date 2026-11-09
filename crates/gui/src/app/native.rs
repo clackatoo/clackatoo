@@ -98,6 +98,7 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         | Request::UnlockPairing
         | Request::RevokeDevice { .. }
         | Request::Keep { .. }
+        | Request::KeepHistory { .. }
         | Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::Forget { .. }

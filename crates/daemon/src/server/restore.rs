@@ -239,6 +239,9 @@ impl Daemon {
     /// shutdown is called off (see `server/shutdown.rs`). Without
     /// anywhere to keep them, the lock is let go at once.
     pub(super) fn keep_now(&mut self, lock: Option<std::os::fd::OwnedFd>, hold: bool) {
+        // Terminals' history too, logind waiting for a copy of its lock.
+        let copy = lock.as_ref().and_then(|lock| lock.try_clone().ok());
+        self.keep_histories_now(copy);
         self.keep_with(lock, true);
         if hold && self.keeping.held.is_none() {
             self.keeping.held = Some(Instant::now() + HOLD_AT_MOST);
@@ -308,12 +311,20 @@ impl Daemon {
     pub(super) fn keep_last(&mut self) {
         self.keeping.due = None;
         self.keep();
+        self.keep_histories_last();
         self.keeping.path = None;
+    }
+
+    /// Whether this daemon keeps the workspaces, and with them terminals'
+    /// history: it holds their lock, and isn't stopping or upgrading.
+    pub(super) fn keeping_workspaces(&self) -> bool {
+        self.keeping.path.is_some()
     }
 
     /// Waits a moment for what [`keep_last`](Self::keep_last) had written
     /// to be written, then lets the file go.
     pub(super) fn kept_last(&mut self) {
+        let until = Instant::now() + KEEP_WAIT;
         if let Some(writer) = self.keeping.writer.take()
             && !writer.stop(KEEP_WAIT)
         {
@@ -322,6 +333,9 @@ impl Daemon {
                 KEEP_WAIT.as_secs()
             );
         }
+        // In the same second: terminals' history has been written on its
+        // own thread meanwhile.
+        self.histories_kept_last(until);
         // Another build may keep them from here on: an upgrade's.
         self.keeping.lock = None;
         // And the sessions the start page leaves out, read again by the
@@ -546,6 +560,8 @@ impl Daemon {
                 cwd: None,
                 ran: None,
                 keep: None,
+                history: None,
+                history_off: false,
                 elsewhere: Some(saved::Elsewhere {
                     machine: borrowed.machine.to_string(),
                     key: borrowed.key,
@@ -558,13 +574,15 @@ impl Daemon {
         let kept = self.workspaces.kept(id);
         let graced = matches!(content, Content::Terminal(terminal) if self.in_grace(terminal));
         match content {
-            Content::Terminal(terminal) => match &self.terminals.get(&terminal)?.terminal {
+            Content::Terminal(terminal_id) => match &self.terminals.get(&terminal_id)?.terminal {
                 // What an agent's command printed, which a restart doesn't
                 // keep: no shell should come back in its place.
                 Hosted::Pty(terminal) if terminal.is_fed() => None,
                 Hosted::Pty(terminal) => {
                     let emulator = terminal.emulator();
                     Some(Pane::Terminal {
+                        history: self.history_key(terminal_id),
+                        history_off: self.history_off(terminal_id),
                         cwd: (terminal.own_directory())
                             .or_else(|| emulator.cwd().map(str::to_owned)),
                         // An offer still open stays open after a restart.
@@ -594,7 +612,7 @@ impl Daemon {
                     })
                 }
                 Hosted::Chat(chat) => Some(Pane::Chat {
-                    id: terminal.0,
+                    id: terminal_id.0,
                     agent: chat.agent().to_owned(),
                     session: chat.session().map(str::to_owned),
                     title: chat.info().title,
@@ -607,7 +625,7 @@ impl Daemon {
                     },
                     task: chat.task(),
                     browser: chat.browser(),
-                    started: self.kept_standing(terminal, chat),
+                    started: self.kept_standing(terminal_id, chat),
                     branches: chat.saved_branches().map(Box::new),
                     subagents: chat.subagents_chosen(),
                 }),
@@ -708,6 +726,8 @@ impl Daemon {
         // change.
         self.keeping.last = Some(state.clone());
         let started = Instant::now();
+        // Terminals' history, read first, all at once.
+        self.read_histories(&state);
         let mut room = MOST_PANES;
         // Chats first, so reviews of them find them made.
         let mut chats = HashMap::new();
@@ -757,6 +777,7 @@ impl Daemon {
             self.workspaces.set_active(active);
         }
         self.workspaces.set_restored(restored);
+        self.history_restored();
         self.workspaces.refresh_background();
         self.restate_backgrounds();
         self.restate_lent_backgrounds();
@@ -1421,7 +1442,12 @@ impl Daemon {
         }
         *room -= 1;
         let made = match pane {
-            Pane::Terminal { cwd, .. } => {
+            Pane::Terminal {
+                cwd,
+                history,
+                history_off,
+                ..
+            } => {
                 // A stat, as opening a file is.
                 let cwd = (cwd.as_deref())
                     .filter(|cwd| Path::new(cwd).is_dir())
@@ -1432,7 +1458,13 @@ impl Daemon {
                     cwd: Some(cwd),
                     record_to: None,
                 };
-                self.pane_content(PaneTerminal::New(terminal), None)
+                let made = self.pane_content(PaneTerminal::New(terminal), None);
+                // Its history above its first prompt, before it has
+                // printed anything.
+                if let Ok(Content::Terminal(id)) = made {
+                    self.restore_history(id, history.as_deref(), *history_off);
+                }
+                made
             }
             Pane::Editor {
                 path,

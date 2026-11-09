@@ -271,6 +271,12 @@ impl Pane {
         true
     }
 
+    /// Takes the line of the block to keep across a restart (`gs`), for
+    /// the desk to ask the daemon to.
+    pub(crate) fn take_kept_block(&mut self) -> Option<u64> {
+        self.keeping_block.take()
+    }
+
     /// Takes the link to open, for the desk to open.
     pub(crate) fn take_opening(&mut self) -> Option<Target> {
         self.opening.take()

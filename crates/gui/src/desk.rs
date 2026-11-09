@@ -2263,6 +2263,7 @@ impl Desk {
         let redraw = self.pane_key(press);
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
+            self.keep_pane_block(terminal);
         }
         redraw || had_message
     }
@@ -2990,6 +2991,7 @@ impl Desk {
             Command::Background(command) => self.background_command(command),
             Command::BackgroundStart(command) => self.start_in_background(command),
             Command::Keep(how) => self.keep_running(how),
+            Command::KeepHistory(how) => self.keep_history(how),
             Command::Trust { action, folder } => self.trust_command(action, folder),
             Command::Reload
             | Command::Set { .. }
