@@ -623,10 +623,7 @@ impl SettingsMenu {
             ranking: Ranking::new(case, false),
             editing: None,
             said: None,
-            name_cols: (ALL.iter().chain(clackatoo_daemon::settings::options::ALL))
-                .map(|info| info.name.len())
-                .max()
-                .unwrap_or(0),
+            name_cols: ALL.iter().map(|info| info.name.len()).max().unwrap_or(0),
             keys_seen,
             mode,
             easy: easy::Easy::new(case),
@@ -1582,7 +1579,19 @@ impl SettingsMenu {
         match &self.entries[index] {
             Entry::Option(info) => {
                 let changed = facts.value(info) != info.default_value();
-                let name = format!("{:<width$}", info.name, width = self.name_cols + 2);
+                // The daemon's, whose names are longer, as wide as theirs,
+                // with a cell less after, leaving room for `init.lua:N`.
+                let width = match info.scope {
+                    Scope::Daemon => {
+                        (clackatoo_daemon::settings::options::ALL.iter())
+                            .map(|info| info.name.len())
+                            .max()
+                            .unwrap_or(0)
+                            + 1
+                    }
+                    Scope::Window | Scope::Startup(_) => self.name_cols + 2,
+                };
+                let name = format!("{:<width$}", info.name);
                 lit.extend(matched_in(info.name, 0));
                 lit.resize(name.chars().count(), false);
                 pieces.push((name, if changed { Ink::Bold } else { Ink::Plain }));
@@ -1595,7 +1604,8 @@ impl SettingsMenu {
                 } else if !info.restart && differs {
                     Some(("not saved".into(), Ink::Caution))
                 } else if info.restart && differs && info.scope == Scope::Daemon {
-                    Some(("at next upgrade or restart".into(), Ink::Muted))
+                    // Read only as the daemon starts: a change waits for it.
+                    Some(("restart".into(), Ink::Caution))
                 } else if info.restart && differs {
                     Some(("for windows opened after".into(), Ink::Muted))
                 } else {
@@ -1629,7 +1639,8 @@ impl SettingsMenu {
         }
         if let Some((tag, ink)) = tag {
             let used = text.chars().count();
-            let room = cols.saturating_sub(used + 2);
+            // A cell at least between it and the value.
+            let room = cols.saturating_sub(used + 1);
             let tag = crate::finder::view::cut(&tag, room, true);
             let pad = cols.saturating_sub(used + tag.chars().count());
             text.extend(std::iter::repeat_n(' ', pad));

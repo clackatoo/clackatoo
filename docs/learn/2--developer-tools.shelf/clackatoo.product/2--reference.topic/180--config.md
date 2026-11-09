@@ -551,7 +551,8 @@ finishes** and the **Subagents** working at once. They show once the daemon
 has said them, so not with a daemon from before them. One your
 `daemon/init.lua` sets is greyed out with its place, as your window's
 `init.lua` is. One the daemon reads only as it starts says it **takes effect
-at the daemon's next upgrade or restart** until then. If the daemon's config
+at the daemon's next upgrade or restart**, lit while a change waits for that.
+If the daemon's config
 doesn't run as its files are now, the foot of a page of its settings says
 why, and the daemon goes by what last ran. In a window whose daemon is on
 another machine, they're that daemon's, and the header says so, as `daemon
@@ -641,8 +642,9 @@ config with it. If the config won't run with it, as
 `daemon.subagents.default` more than `daemon.subagents.working` wouldn't,
 the file is put back as it was, and the foot of the menu says why. One your
 `daemon/init.lua` sets is locked, and <kbd>Enter</kbd> opens that line on the
-daemon's machine. One the daemon reads only as it starts says `at next
-upgrade or restart` at the row's end until then; the rest take effect at
+daemon's machine. One the daemon reads only as it starts says so beside it,
+and `restart` at the row's end while a change waits for its next upgrade or
+restart; the rest take effect at
 once, for what the daemon starts from then on. A web device never sees them,
 and the daemon refuses a change from one.
 

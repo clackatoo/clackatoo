@@ -1,0 +1,30 @@
+# The daemon's settings in the settings menu (CLACKA-237 phase 4): Easy's
+# Terminals and Agents pages, with one the daemon's init.lua sets, locked,
+# and one changed that waits for the daemon's restart; then Advanced's
+# daemon sections.
+size 1280x800
+daemon-config <<END
+daemon.subagents.working = 8
+END
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys }}
+wait-for Keep what terminals showed
+shot easy-terminals
+# Keep what terminals showed, off: saved by the daemon, for its restart.
+keys j<CR>
+sleep 800
+shot easy-terminals-changed
+keys }
+# Down to the subagents working, which the daemon's init.lua sets.
+keys jjjj
+shot easy-agents
+keys m
+keys /daemon<CR>
+shot advanced-daemon
+keys <Esc>
+keys /history.keep<CR>
+shot advanced-history-keep
+keys <Esc>
+keys /subagents.working<CR>
+shot advanced-locked

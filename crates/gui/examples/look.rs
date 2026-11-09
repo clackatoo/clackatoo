@@ -39,6 +39,7 @@
 //! | `file PATH` | Makes an empty file in the project, the folder the first shell starts in |
 //! | `file PATH <<END`, lines, `END` | Makes a file of those lines |
 //! | `config <<END`, lines, `END` | Makes the window's `init.lua` of those lines, which it runs as it opens |
+//! | `daemon-config <<END`, lines, `END` | Makes the daemon's `daemon/init.lua` of those lines, which it runs as it starts, and watches, as a daemon does |
 //! | `kept <<END`, lines, `END` | The workspaces a daemon kept (see `clackatoo_daemon`'s `saved`), with `$PROJECT` for the project's folder: the daemon makes them again as it starts, in place of a shell in the project |
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
@@ -244,6 +245,7 @@ enum Command {
     Buttons(String),
     File(PathBuf, String),
     Config(String),
+    DaemonConfig(String),
     Kept(String),
     Open(String),
     Keys(String),
@@ -315,7 +317,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             "theme" if rest == "dark" => Command::Theme,
             "buttons" => Command::Buttons(rest.to_owned()),
             "theme" => bail!("line {line_number}: the window has only the dark theme so far"),
-            "file" | "config" | "kept" => {
+            "file" | "config" | "daemon-config" | "kept" => {
                 let (path, until) = match rest.split_once("<<") {
                     Some((path, until)) => (path.trim(), Some(until.trim())),
                     None => (rest, None),
@@ -333,14 +335,14 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                         contents.push('\n');
                     }
                 }
-                if word == "config" || word == "kept" {
+                if word != "file" {
                     if !path.is_empty() || until.is_none() {
                         bail!("line {line_number}: `{word}` takes its lines: `{word} <<END`");
                     }
-                    if word == "kept" {
-                        Command::Kept(contents)
-                    } else {
-                        Command::Config(contents)
+                    match word {
+                        "kept" => Command::Kept(contents),
+                        "daemon-config" => Command::DaemonConfig(contents),
+                        _ => Command::Config(contents),
                     }
                 } else {
                     let path = PathBuf::from(path);
@@ -720,6 +722,18 @@ fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Resul
         None => None,
     };
     config.languages = Some(languages(&home.join("languages"))?);
+    // Its own config, in the temporary config directory, as a daemon runs
+    // and watches it.
+    if let Some(dirs) = clackatoo_daemon::settings::Dirs::from_env() {
+        let when = clackatoo_daemon::settings::When::Starting;
+        let loaded = clackatoo_daemon::settings::load(&dirs, when);
+        config.agents.configured = loaded.settings.agents();
+        config.own_config = Some(clackatoo_daemon::settings::Own {
+            dirs,
+            settings: loaded.settings,
+            failure: loaded.failure,
+        });
+    }
     let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
     daemon.install_shell_integration(runtime.path().join("shell"), true);
     if kept.is_some() {
@@ -839,8 +853,9 @@ impl Look {
                     window.rescale(*scale);
                 }
             }
-            // The workspaces kept were made again as the daemon started.
-            Command::Theme | Command::Kept(_) => timed = false,
+            // The workspaces kept were made again as the daemon started,
+            // whose config was there as it did.
+            Command::Theme | Command::Kept(_) | Command::DaemonConfig(_) => timed = false,
             Command::File(path, contents) => {
                 timed = false;
                 let path = self.project.join(path);
@@ -1034,6 +1049,14 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
         Command::Kept(kept) => Some(kept.as_str()),
         _ => None,
     });
+    // The daemon's own config, there as it starts.
+    for step in &steps {
+        if let Command::DaemonConfig(contents) = &step.command {
+            let dir = clackatoo_daemon::config_dir().context("no config directory")?;
+            std::fs::create_dir_all(dir.join("daemon"))?;
+            std::fs::write(dir.join("daemon/init.lua"), contents)?;
+        }
+    }
     let root = PathBuf::from(std::env::var_os(ISOLATED).context("not in a directory of its own")?);
     let ssh = write_fake_ssh(&root)?;
     let daemon = start_daemon(&project, kept, &ssh)?;

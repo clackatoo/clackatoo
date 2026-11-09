@@ -1052,6 +1052,13 @@ fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
     desk.daemon_settings_came(&daemon_said("desk"), None);
     let (row, keep) = easy_row(&mut desk, "Keep what terminals showed");
     assert_eq!(keep.control, ControlView::Toggle(true));
+    assert_eq!(
+        keep.notes,
+        vec![(
+            "Takes effect at the daemon's next upgrade or restart.".to_owned(),
+            crate::render::Ink::Muted
+        )]
+    );
     assert_eq!(easy(&mut desk).machine, None);
     desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
     let asked = answer_all(&mut desk);
@@ -1069,7 +1076,7 @@ fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
         keep.notes,
         vec![(
             "Takes effect at the daemon's next upgrade or restart.".to_owned(),
-            crate::render::Ink::Muted
+            crate::render::Ink::Caution
         )]
     );
     // The daemon says it couldn't: as it was, and why.
@@ -1102,7 +1109,7 @@ fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
     named(&mut desk, NamedKey::Enter);
     let (picked, _, preview) = menu(&mut desk);
     assert!(picked.starts_with("images.total_mb"), "{picked}");
-    assert!(picked.ends_with("at next upgrade or restart"), "{picked}");
+    assert!(picked.ends_with("restart"), "{picked}");
     assert!(
         preview
             .iter()

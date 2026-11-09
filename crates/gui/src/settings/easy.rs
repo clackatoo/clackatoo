@@ -998,19 +998,23 @@ impl SettingsMenu {
                 ));
             }
         }
-        // One the daemon reads as it starts, changed since.
-        let waits = (infos.iter()).any(|info| {
-            info.scope == crate::options::Scope::Daemon
-                && info.restart
-                && facts.get(info) != facts.configured_value(info)
-        });
-        if waits && lock.is_none() {
+        // One the daemon reads only as it starts says so, lit while a
+        // change waits for that.
+        let restarts = (infos.iter())
+            .filter(|info| info.scope == crate::options::Scope::Daemon && info.restart);
+        let (mut restart, mut waits) = (false, false);
+        for info in restarts {
+            restart = true;
+            waits |= facts.get(info) != facts.configured_value(info);
+        }
+        if restart && lock.is_none() {
             let mut chars = super::RESTARTS.chars();
             let said: String = (chars.next().map(|first| first.to_ascii_uppercase()))
                 .into_iter()
                 .chain(chars)
                 .collect();
-            notes.push((format!("{said}."), Ink::Muted));
+            let ink = if waits { Ink::Caution } else { Ink::Muted };
+            notes.push((format!("{said}."), ink));
         }
         let configured =
             |name: &str| find(name).map_or(Value::Bool(false), |info| facts.configured_value(info));
