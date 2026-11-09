@@ -133,7 +133,11 @@ mv Cargo.toml.release Cargo.toml
 # Cargo.lock names each crate's version too; CI builds with --locked.
 "${CARGO:-cargo}" update --workspace --offline --quiet
 # So does the fuzz targets' own lock file, which CI checks with --locked too.
-"${CARGO:-cargo}" update --workspace --offline --quiet --manifest-path fuzz/Cargo.toml
+fuzz_lock=()
+if [ -f fuzz/Cargo.toml ]; then
+    "${CARGO:-cargo}" update --workspace --offline --quiet --manifest-path fuzz/Cargo.toml
+    fuzz_lock=(fuzz/Cargo.lock)
+fi
 
 header="# Changelog"
 if [ -f CHANGELOG.md ]; then
@@ -143,7 +147,7 @@ else
 fi
 mv CHANGELOG.md.release CHANGELOG.md
 
-git add Cargo.toml Cargo.lock fuzz/Cargo.lock CHANGELOG.md "${fixtures[@]}"
+git add Cargo.toml Cargo.lock "${fuzz_lock[@]}" CHANGELOG.md "${fixtures[@]}"
 git commit --quiet -m "chore(release): $tag"
 git tag -a "$tag" -m "clackatoo $version" -m "$section"
 
