@@ -1559,6 +1559,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Programs mark output secret with OSC 3008: masked till zv shows it, never saved, kept from agents",
     },
+    News {
+        id: "settings-daemon",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: ":Settings changes the daemon's settings too, and both configs run again as you save them: no :reload",
+    },
 ];
 
 impl News {

@@ -327,8 +327,9 @@ daemon.subagents.working = 16      -- see Subagent limits
 An agent has `name`, `command`, `mode` and `tasks`, and needs its `command`, a
 list of strings. Anything else, or a field of the wrong kind, is a mistake,
 which stops the config at the line that set the agent: the daemon then keeps
-what it last ran, and says so in a window's bar. The daemon reads it as it
-starts and upgrades, so `clackatoo upgrade` takes a change in. A known
+what it last ran, and says so in a window's bar. The daemon runs its config
+again as you save it, so a new chat can start with a change at once, while
+chats already going keep the agent they have. A known
 agent's name, such as `claude`, runs it with your command, keeping its title
 and what clackatoo knows of it. `CLACKATOO_AGENT` gives Claude Code another
 command, for the daemon it's set for.

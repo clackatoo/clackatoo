@@ -311,8 +311,9 @@ daemon.subagents.notice_turns = 100 -- turns notices start under one of your cha
 A value outside its range is a mistake in the config, never brought into
 range: the daemon keeps what it last ran, and says so in a window's bar. So
 is a name it doesn't know, or a `default` above `working`. With `working`
-below 6 and no `default`, new chats start at `working`. The daemon reads them
-as it starts and upgrades. Lowering `working` lowers any chat's Subagents
+below 6 and no `default`, new chats start at `working`. The daemon takes a
+change in as you save it, and the [settings menu](~clackatoo/reference/config#the-settings-menu)
+changes `working` too. Lowering `working` lowers any chat's Subagents
 setting that's above it. At a depth of 3, your chat's PM can start a builder, which can start
 a helper of its own.
 

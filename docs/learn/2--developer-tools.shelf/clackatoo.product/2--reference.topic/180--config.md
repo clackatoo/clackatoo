@@ -85,6 +85,15 @@ runs the config for itself.
 for goes, the window's own keys come back first, and options go back to how
 they start, including those changed with `:set` and `:setlocal`.
 
+You rarely need it: the windows watch `settings.lua`, `init.lua` and the
+modules they require, and a quarter of a second after one is saved with
+something new in it, they run the config again as `:reload` does, and the
+bar says so. What the settings menu or `:setpersist` saves in `settings.lua`
+isn't a change to run it again for: the windows go by it already. A module
+the config doesn't require yet is picked up once the file that requires it
+changes. If the user's inotify instances are all in use, nothing's watched,
+which the window's log says, and `:reload` still works.
+
 
 ## How a key travels
 
@@ -533,9 +542,20 @@ Every key, in every mode, is in Advanced.
 Easy leaves out what few change: `numberwidth`, `showbreak`, `shiftwidth`,
 `startofline`, `tildeop`, `inccommand`, `hintpattern`, `completedelay`,
 `completeaccept`, `carryover`, `explorerwidth`, `renderer` and `priority`.
-The daemon's own settings, such as what terminals keep across a restart, the
-notice when a long command ends and the limits on subagents, aren't in the
-menu yet: the pages that would have them say so.
+
+Some rows are the [daemon's settings](#the-daemon-s-options), which the
+daemon saves in its own `daemon/settings.lua`: on **Terminals**, **Keep what
+terminals showed** and **Lines kept of each terminal** after a restart, and
+**Wide emoji**; on **Agents**, the notification **When a long command
+finishes** and the **Subagents** working at once. They show once the daemon
+has said them, so not with a daemon from before them. One your
+`daemon/init.lua` sets is greyed out with its place, as your window's
+`init.lua` is. One the daemon reads only as it starts says it **takes effect
+at the daemon's next upgrade or restart** until then. If the daemon's config
+doesn't run as its files are now, the foot of a page of its settings says
+why, and the daemon goes by what last ran. In a window whose daemon is on
+another machine, they're that daemon's, and the header says so, as `daemon
+on desk`.
 
 The search finds what Easy has, then what only Advanced has, which says **in
 Advanced**: <kbd>Enter</kbd> or a click on one switches to Advanced, with it
@@ -560,10 +580,12 @@ keys:
 ### Advanced
 
 Down Advanced's left are its sections: the options' groups, as they're listed
-here, then **Keys**, then **Daemon**, where the daemon's own settings will go.
-Each row is an option and its value, its name in bold if it isn't as it
-starts; beside the list, the row picked is said in full: its value, its
-default, what it takes, where its value comes from, as [`:verbose set`](~clackatoo/reference/config#where-an-option-was-set)
+here, then **Keys**, then the [daemon's](#the-daemon-s-options), group by
+group: This machine, The daemon's agents, Chats agents start, The web app,
+What terminals keep and The daemon's terminals. Each row is an option and its
+value, its name in bold if it isn't as it starts; beside the list, the row
+picked is said in full: its value, its default, what it takes, where its
+value comes from, as [`:verbose set`](~clackatoo/reference/config#where-an-option-was-set)
 says it, and the file it's saved in.
 
 | Key | Does |
@@ -611,6 +633,18 @@ well.
 **This window's own.** An option this window has a value of its own for, from
 [`:setlocal`](~clackatoo/reference/config#one-window-s-own-setlocal), says so
 at the row's end, and `x` takes it away.
+
+**The daemon's.** A daemon option is changed by the daemon: the window asks
+it, and it saves the option in `daemon/settings.lua`, changing only that
+option's line, as the window's `settings.lua` is changed, then runs its
+config with it. If the config won't run with it, as
+`daemon.subagents.default` more than `daemon.subagents.working` wouldn't,
+the file is put back as it was, and the foot of the menu says why. One your
+`daemon/init.lua` sets is locked, and <kbd>Enter</kbd> opens that line on the
+daemon's machine. One the daemon reads only as it starts says `at next
+upgrade or restart` at the row's end until then; the rest take effect at
+once, for what the daemon starts from then on. A web device never sees them,
+and the daemon refuses a change from one.
 
 ### Keys
 
@@ -778,8 +812,19 @@ kept, as for the window's.
 The daemon runs its config as it starts, and each time it
 [upgrades](~clackatoo/reference/cli#upgrade), on a thread of its
 own, before it does anything else; a config of a few dozen lines takes about a
-millisecond. A change takes effect when the daemon next starts: `clackatoo
-upgrade`, which keeps every terminal and agent running, runs it again at once.
+millisecond.
+
+It watches its files too: `daemon/settings.lua`, `daemon/init.lua`, and the
+modules they require, in `daemon/lua/` and `lua/`. A quarter of a second
+after one changes, it runs the config again, on a thread of its own, never
+holding up the terminals. What can change as the daemon runs does, at once,
+for what it starts from then on: the agents and profiles new chats can start
+with, the limits on chats agents start, whether agents go on through
+upgrades, the notification when a long command ends, how terminals started
+then lay out emoji, and how many lines of terminals' history are kept, and
+how often. The rest, as [the daemon's options](#the-daemon-s-options) say,
+is read only as the daemon starts: `clackatoo upgrade`, which keeps every
+terminal and agent running, takes it in.
 
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is
@@ -805,6 +850,10 @@ line of the mistake that stopped it:
 ```text
 the daemon's config went wrong, so it kept its settings from the last time it ran: daemon/init.lua:4: daemon.history.lines is a whole number from 1 to 1000000
 ```
+
+A config that stops running once the daemon has started, as you edit it, is
+the same: the daemon goes on by what it has, and every window says why in its
+bar, as does the settings menu, until the files run again.
 
 Some settings are checked together, once the config has run, at the line that
 set the one that can't be: `daemon.subagents.default` more than
@@ -868,8 +917,11 @@ every start, as tests do.
 
 ## The daemon's options
 
-Each is set as `daemon.` and its name, such as `daemon.web.mode = "public"`,
-and read as the daemon starts or upgrades.
+Each is set as `daemon.` and its name, such as `daemon.web.mode = "public"`.
+Those of this machine, the web app, `daemon.history.keep` and the images'
+limits are read only as the daemon starts or upgrades; the rest change as its
+config runs again (see [When it runs](#when-it-runs)). The
+[settings menu](#the-settings-menu) changes any of them.
 
 ### This machine
 
@@ -963,12 +1015,13 @@ stderr, for a window opened in a process of its own).
 
 ## Known limits
 
-- `init.lua` and `settings.lua` aren't run again when they change: use
-  `:reload`. The daemon's are run again only as it starts or upgrades:
-  `clackatoo upgrade` runs them again, keeping every terminal.
 - The daemon's config only sets settings: it has no events or handles yet.
-- The settings menu has no colour options yet, as no option is a colour, and
-  lists none of the daemon's settings yet: set them in `daemon/init.lua`.
+- The settings menu has no colour options yet, as no option is a colour. The
+  web app's password isn't one of its settings: `clackatoo web password` sets
+  it.
+- A config file that's a link, as stow makes, is watched where the link is:
+  an edit of the file it goes to, made elsewhere, isn't seen until `:reload`,
+  or for the daemon's, the next change beside the link.
 - The settings menu can't record <kbd>Enter</kbd>, <kbd>Esc</kbd> or
   <kbd>Backspace</kbd> as keys, nor <kbd>Ctrl</kbd>+<kbd>;</kbd>, which closes
   it.

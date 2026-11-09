@@ -116,4 +116,20 @@ not finder
 
 ## The daemon's own
 
-The daemon, which runs your terminals and agents, has a config of its own: `daemon/init.lua`, beside `client/`. It sets the daemon's settings, as `daemon.machine.name = "desk"` or `daemon.history.lines = 20000`, adds agents, as `daemon.agents.opencode = { command = { "opencode", "acp" } }`, and sets up the web app, as `daemon.web.mode = "tailscale"`. It runs as the daemon starts and each time it upgrades, so `clackatoo upgrade` takes a change in, keeping every terminal. A mistake in it never stops the daemon: it keeps what last ran, and the bar says what's wrong, with its line. The old `agents.toml`, `machine.toml` and `web.toml` were moved into `daemon/settings.lua` the first time it started.
+The daemon, which runs your terminals and agents, has a config of its own: `daemon/init.lua`, beside `client/`. It sets the daemon's settings, as `daemon.machine.name = "desk"` or `daemon.history.lines = 20000`, adds agents, as `daemon.agents.opencode = { command = { "opencode", "acp" } }`, and sets up the web app, as `daemon.web.mode = "tailscale"`. The daemon runs it again as you save it, so a new chat can start with an agent you add at once; what it reads only as it starts, such as the web app, waits for `clackatoo upgrade`, which keeps every terminal. A mistake in it never stops the daemon: it keeps what last ran, and the bar says what's wrong, with its line. Your window's own `init.lua` runs again as you save it too, as `:reload` runs it. The old `agents.toml`, `machine.toml` and `web.toml` were moved into `daemon/settings.lua` the first time it started.
+
+## The daemon's, in the menu
+
+The settings menu changes the daemon's settings too: it asks the daemon, which saves them in its own `daemon/settings.lua` and runs its config again. Easy's Terminals and Agents pages have the usual ones, such as what terminals keep after a restart; Advanced has every one, after the keys. One the daemon reads only as it starts says it takes effect at its next upgrade or restart. `:Settings history` opens the menu searching for what terminals keep: open it so, and look, changing nothing.
+
+```check
+finder settings
+```
+
+## Done with it
+
+Press Esc twice to close the menu again: once to clear the search, and once more to close it.
+
+```check
+not finder
+```
