@@ -1963,6 +1963,7 @@ fn not_told_turn() -> Turn {
             outcome: Outcome::Failed("its agent didn't tell this turn again".to_owned()),
             raw: None,
             spent: None,
+            remedy: None,
         }),
         files: None,
         from: None,

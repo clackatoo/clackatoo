@@ -23,7 +23,7 @@ use agent_client_protocol_schema::v1::{
 };
 use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
-    Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Sender, Setting,
+    Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Remedy, Sender, Setting,
     SettingChoice, SettingKind, Size, Spent, Switch, TerminalId, TerminalInfo, TerminalStatus,
     Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnNotice, Usage, View,
     ViewUpdate,
@@ -1346,6 +1346,7 @@ impl HostedChat {
             | ChatAction::Rewind { .. }
             | ChatAction::SwitchBranch { .. }
             | ChatAction::Fork { .. }
+            | ChatAction::Remedy { .. }
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
             | ChatAction::Submit { .. }
@@ -2057,6 +2058,7 @@ impl HostedChat {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,
@@ -2542,12 +2544,19 @@ impl HostedChat {
 
     /// The agent finished answering, or failed to.
     pub(crate) fn answered(&mut self, result: Result<StopReason, String>) {
-        self.answered_as(facts::outcome_of(result), None, None);
+        self.answered_as(facts::outcome_of(result), None, None, None);
     }
 
     /// The agent finished answering as `outcome` says, or failed to, in
-    /// its own words `raw`, having spent `spent`.
-    fn answered_as(&mut self, outcome: Outcome, raw: Option<String>, spent: Option<Spent>) {
+    /// its own words `raw`, with `remedy` for it if clackatoo has one,
+    /// having spent `spent`.
+    fn answered_as(
+        &mut self,
+        outcome: Outcome,
+        raw: Option<String>,
+        spent: Option<Spent>,
+        remedy: Option<Remedy>,
+    ) {
         if let Outcome::Failed(why) = &outcome {
             self.user_queue.restart = None;
             // The agent said the same failure by itself as it answered:
@@ -2565,7 +2574,7 @@ impl HostedChat {
             self.hold_wake();
         }
         if self.answering() {
-            self.end_turn_with(outcome, raw, spent);
+            self.end_turn_with(outcome, raw, spent, remedy);
         }
         self.set_state(ChatState::Ready);
     }
@@ -2897,7 +2906,7 @@ impl HostedChat {
     pub(crate) fn update_as(
         &mut self,
         update: SessionUpdate,
-        login: Option<&str>,
+        login: Option<&crate::agents::Login>,
     ) -> Option<Wrote> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
@@ -3499,12 +3508,19 @@ impl HostedChat {
     /// Ends the turn being answered. Tools still running then never
     /// finished.
     fn end_turn(&mut self, outcome: Outcome) {
-        self.end_turn_with(outcome, None, None);
+        self.end_turn_with(outcome, None, None, None);
     }
 
     /// Ends the turn being answered, as [`end_turn`](Self::end_turn), a
-    /// failure in the agent's own words `raw`, having spent `spent`.
-    fn end_turn_with(&mut self, outcome: Outcome, raw: Option<String>, spent: Option<Spent>) {
+    /// failure in the agent's own words `raw`, with `remedy` for it,
+    /// having spent `spent`.
+    fn end_turn_with(
+        &mut self,
+        outcome: Outcome,
+        raw: Option<String>,
+        spent: Option<Spent>,
+        remedy: Option<Remedy>,
+    ) {
         self.set_retrying(None);
         let Some(index) = self.answering_turn() else {
             return;
@@ -3537,6 +3553,7 @@ impl HostedChat {
             outcome,
             raw,
             spent,
+            remedy,
         });
         self.patch_turn(index);
         self.left_in_background(index, left);
@@ -4852,6 +4869,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
             },
             raw: None,
             spent: None,
+            remedy: None,
         }),
         files: None,
         // Put back from the chat's relations, if another agent sent it.
@@ -7029,6 +7047,35 @@ mod tests {
             .position(|a| matches!(a, Action::Prompt(_)))
             .unwrap();
         assert!(setting < prompt);
+    }
+
+    #[test]
+    fn a_failures_remedy_is_done_only_for_the_last_turn_while_the_chat_waits() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "first");
+        c.answered(Err("failed".into()));
+        send(&mut c, "second");
+        // Still being answered.
+        assert!(c.remedy(1).is_err());
+        let refused = crate::agent::Failure {
+            code: -32000,
+            message: "Authentication required".into(),
+            data: None,
+        };
+        let login = crate::agents::Login {
+            said: vec!["claude".to_owned()],
+            run: Some(vec!["/usr/bin/claude".to_owned()]),
+        };
+        c.answered_by(Err(refused), Some(&login));
+        assert_eq!(c.remedy(1), Ok(Remedy::SignIn));
+        // Not for an earlier turn, which failed with nothing to do, nor
+        // one past the last.
+        assert!(c.remedy(0).is_err());
+        assert!(c.remedy(2).is_err());
+        // Nor once another turn's begun.
+        send(&mut c, "third");
+        assert!(c.remedy(1).is_err());
     }
 
     #[test]

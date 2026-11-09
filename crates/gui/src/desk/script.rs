@@ -440,10 +440,10 @@ impl Desk {
 /// line, with nothing that changes which way text runs; or nothing, if
 /// nothing's left.
 fn said_in_panel(text: &str) -> Option<String> {
-    let said: String = (text.chars())
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .filter(|&ch| super::shown_in_names(ch))
-        .collect();
+    let said = clackatoo_term::visible(
+        (text.chars()).map(|ch| if ch.is_control() { ' ' } else { ch }),
+        usize::MAX,
+    );
     let said = said.trim();
     (!said.is_empty()).then(|| said.to_owned())
 }

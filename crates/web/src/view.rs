@@ -8,7 +8,7 @@
 
 use clackatoo_protocol::{
     ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Field, FieldInput, FieldValue, Form,
-    FormAsk, Fullness, Item, Outcome, Said, Setting, SettingKind, Subagent, SubagentStatus,
+    FormAsk, Fullness, Item, Outcome, Remedy, Said, Setting, SettingKind, Subagent, SubagentStatus,
     TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
 };
 
@@ -567,6 +567,9 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
     match turn.end.as_ref().map(|end| &end.outcome) {
         Some(Outcome::Failed(why)) => {
             section = section.child(el("p").class("failed").text(why.clone()));
+            if let Some(button) = remedy_button(node, turn, index) {
+                section = section.child(button);
+            }
         }
         Some(Outcome::Stopped) => section = section.child(el("p").class("muted").text("Stopped")),
         _ => {}
@@ -668,6 +671,27 @@ fn finished(node: &ChatNode, turn: &Turn, open: &OpenChat, index: usize) -> Elem
         card = card.child(answer);
     }
     card
+}
+
+/// The button that does what clackatoo can about `turn`'s failure, as its
+/// end says, if it's `node`'s last, numbered `index`, and the chat waits
+/// for a message or couldn't start: signing in to the agent again, or a
+/// new chat with it, in a new tab, as the window's does.
+fn remedy_button(node: &ChatNode, turn: &Turn, index: usize) -> Option<Element> {
+    let last = index + 1 == node.first_turn as usize + node.turns.len();
+    let waits = matches!(node.state, ChatState::Ready | ChatState::Failed(_));
+    let remedy = turn.end.as_ref()?.remedy.filter(|_| last && waits)?;
+    let label = match remedy {
+        Remedy::SignIn => "Sign in",
+        Remedy::NewChat => "New chat",
+    };
+    let turn = u32::try_from(index).ok()?;
+    Some(
+        el("button")
+            .class("quiet")
+            .action(&Action::Remedy(turn))
+            .text(label),
+    )
 }
 
 /// What the line a turn's work folds under says: how long it took, or
@@ -2207,6 +2231,61 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_last_turn_offers_what_clackatoo_can_do_about_it() {
+        use clackatoo_protocol::Remedy;
+        let failed = |remedy| Turn {
+            woke: None,
+            notice: None,
+            previews: Vec::new(),
+            prompt: "fix it".into(),
+            sent: 0,
+            items: Vec::new(),
+            end: Some(TurnEnd {
+                at: 1_000,
+                outcome: Outcome::Failed("Codex needs you to sign in again".into()),
+                raw: None,
+                spent: None,
+                remedy,
+            }),
+            files: None,
+            from: None,
+            switch: None,
+        };
+        let buttons = |node: &ChatNode, index| {
+            let section = turn(node, &open(), index, 2_000);
+            (section.find_all("data-action").into_iter())
+                .filter_map(|element| {
+                    Some((element.get("data-action")?.to_owned(), element.all_text()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut node = ChatNode {
+            state: ChatState::Ready,
+            first_turn: 4,
+            ..ChatNode::default()
+        };
+        node.turns.push(failed(Some(Remedy::SignIn)));
+        node.turns.push(failed(Some(Remedy::NewChat)));
+        // The last only, asked for by its index counting turns not loaded.
+        assert!(buttons(&node, 0).is_empty());
+        assert_eq!(
+            buttons(&node, 1),
+            [(Action::Remedy(5).encode(), "New chat".to_owned())]
+        );
+        node.turns.pop();
+        assert_eq!(
+            buttons(&node, 0),
+            [(Action::Remedy(4).encode(), "Sign in".to_owned())]
+        );
+        // Not while the agent's at work, nor where the daemon says nothing.
+        node.state = ChatState::Answering;
+        assert!(buttons(&node, 0).is_empty());
+        node.state = ChatState::Ready;
+        node.turns[0] = failed(None);
+        assert!(buttons(&node, 0).is_empty());
+    }
+
+    #[test]
     fn a_finished_turns_work_folds_under_how_long_it_took() {
         let tool = Tool {
             id: "t".into(),
@@ -2237,6 +2316,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,
@@ -2287,6 +2367,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: Some(clackatoo_protocol::Sender {
@@ -2970,6 +3051,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         node.state = ChatState::Ready;
         assert_eq!(said(&node, 20_000), None);

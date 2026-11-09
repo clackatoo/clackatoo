@@ -34,7 +34,9 @@
 use std::collections::VecDeque;
 
 use agent_client_protocol_schema::v1::{ContentBlock, Meta, SessionUpdate, StopReason};
-use clackatoo_protocol::{ChatPatch, Cost, Item, Outcome, Spent, Tool, ToolKind, ToolStatus};
+use clackatoo_protocol::{
+    ChatPatch, ChatState, Cost, Item, Outcome, Remedy, Spent, Tool, ToolKind, ToolStatus, TurnEnd,
+};
 use serde_json::Value;
 
 use super::{Action, HostedChat, Prompt, TurnUid, failure, one_line_notice};
@@ -146,10 +148,36 @@ impl HostedChat {
             .is_some_and(|severity| severity == "error")
     }
 
+    /// What clackatoo can do about turn `turn`'s failure, as its end
+    /// says, to do now: or why not, as it isn't the last turn, it didn't
+    /// fail with one, or the chat is busy.
+    pub(crate) fn remedy(&self, turn: u32) -> Result<Remedy, String> {
+        if !matches!(self.node.state, ChatState::Ready | ChatState::Failed(_)) {
+            return Err("The chat is busy: wait for it to finish.".to_owned());
+        }
+        let last = self.node.turns.len().checked_sub(1);
+        if usize::try_from(turn).ok() != last || last.is_none() {
+            return Err("Only the chat's last turn's failure can be acted on.".to_owned());
+        }
+        let end = (self.node.turns.last()).and_then(|last| last.end.as_ref());
+        match end {
+            Some(TurnEnd {
+                outcome: Outcome::Failed(_),
+                remedy: Some(remedy),
+                ..
+            }) => Ok(*remedy),
+            _ => Err("The last turn didn't fail with anything clackatoo can do about.".to_owned()),
+        }
+    }
+
     /// Takes what a `session_info_update`'s `meta` says of a failure, or
     /// of trying again; `login` is the command that logs in to the agent,
     /// if it's known, for a failure that needs signing in.
-    pub(super) fn session_info(&mut self, meta: Option<&Meta>, login: Option<&str>) {
+    pub(super) fn session_info(
+        &mut self,
+        meta: Option<&Meta>,
+        login: Option<&crate::agents::Login>,
+    ) {
         let Some(meta) = meta else { return };
         // What a session told again says of failures is long past.
         if self.told_again() {
@@ -196,12 +224,16 @@ impl HostedChat {
     /// adapter, to a client that asks for these, leaves its error out of
     /// the turn's words. Any other is of the session, such as its worker
     /// going, or its connection lost: a notice says so. None goes unsaid.
-    /// One that needs signing in names `login`, if it's known.
-    fn failure_said(&mut self, record: &Value, login: Option<&str>) {
-        let said = failure::typed(record, &self.node.agent, login)
-            .unwrap_or_else(|| failure::untyped(record));
+    /// One that needs signing in names `login`, and offers it, if it's
+    /// known.
+    fn failure_said(&mut self, record: &Value, login: Option<&crate::agents::Login>) {
+        let agent = failure::Agent {
+            title: &self.node.agent,
+            login,
+        };
+        let said = failure::typed(record, &agent).unwrap_or_else(|| failure::untyped(record));
         if self.woken() {
-            self.answered_as(Outcome::Failed(said.text), said.raw, None);
+            self.answered_as(Outcome::Failed(said.text), said.raw, None, said.remedy);
         } else {
             self.set_notice(Some(failure_notice(&said.text)));
         }
@@ -399,9 +431,18 @@ impl HostedChat {
     }
 
     /// The agent answered the message, or refused it: why, put in plain
-    /// words if it failed, with `login`, its login command, if known.
-    pub(crate) fn answered_by(&mut self, result: Result<Answer, Failure>, login: Option<&str>) {
-        let agent = self.node.agent.clone();
+    /// words if it failed, with `login`, its login command, if known, to
+    /// say and to offer (see `agents::login_command`).
+    pub(crate) fn answered_by(
+        &mut self,
+        result: Result<Answer, Failure>,
+        login: Option<&crate::agents::Login>,
+    ) {
+        let title = self.node.agent.clone();
+        let agent = failure::Agent {
+            title: &title,
+            login,
+        };
         match result {
             Ok(answer) => {
                 let spent = self.spent(answer.usage.as_ref());
@@ -409,17 +450,18 @@ impl HostedChat {
                 let said = (answer.failure.as_ref())
                     .filter(|_| answer.stop != StopReason::Cancelled)
                     .map(|record| {
-                        failure::typed(record, &agent, login)
-                            .unwrap_or_else(|| failure::untyped(record))
+                        failure::typed(record, &agent).unwrap_or_else(|| failure::untyped(record))
                     });
                 match said {
-                    Some(said) => self.answered_as(Outcome::Failed(said.text), said.raw, spent),
-                    None => self.answered_as(outcome_of(Ok(answer.stop)), None, spent),
+                    Some(said) => {
+                        self.answered_as(Outcome::Failed(said.text), said.raw, spent, said.remedy);
+                    }
+                    None => self.answered_as(outcome_of(Ok(answer.stop)), None, spent, None),
                 }
             }
             Err(refusal) => {
-                let said = failure::refused(&refusal, &agent, login);
-                self.answered_as(Outcome::Failed(said.text), said.raw, None);
+                let said = failure::refused(&refusal, &agent);
+                self.answered_as(Outcome::Failed(said.text), said.raw, None, said.remedy);
             }
         }
     }

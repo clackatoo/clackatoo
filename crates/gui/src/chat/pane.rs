@@ -248,6 +248,13 @@ impl ChatPane {
         std::mem::take(&mut self.view.outputs)
     }
 
+    /// Takes the failed turns whose remedy was asked for, by the last
+    /// turn's button or key, oldest first, by their index on the branch
+    /// shown.
+    pub(crate) fn take_remedies(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.view.remedies)
+    }
+
     /// Opens the agent's plan's shelf above the box, or folds it, or says
     /// why not.
     pub(crate) fn toggle_plan(&mut self) -> Result<(), String> {

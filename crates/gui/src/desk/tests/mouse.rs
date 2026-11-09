@@ -79,6 +79,7 @@ fn leaving_a_chat_for_a_bar_takes_away_its_copy_button() {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             switch: None,

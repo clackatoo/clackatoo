@@ -227,6 +227,10 @@ struct TurnLaid {
     /// The button that sends its message again, if it's the last and it
     /// failed, and where it is in the line under it.
     resend: Option<(Laid, [f32; 2])>,
+    /// The button that does what clackatoo can about its failure, signing
+    /// in again or starting a new chat, if it's the last and the daemon
+    /// says what, and where it is in the line under it.
+    remedy: Option<(Laid, [f32; 2])>,
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
     /// Whether its message is a quote down the left, as one no one typed
@@ -683,6 +687,7 @@ impl ChatView {
             copy_origin: [0.0; 2],
             spent: None,
             resend: None,
+            remedy: None,
             badge: None,
             quoted: false,
             handoff: None,
@@ -841,6 +846,13 @@ impl ChatView {
             let label = self.note(fonts, m, RESEND, Tone::Accent, column);
             laid.resend = Some((label, [0.0, 0.0]));
         }
+        // And, if the daemon says what clackatoo can do about it, the
+        // button that does.
+        if let Some(remedy) = super::remedy_of(turn, last) {
+            let label = remedy_label(*remedy);
+            let label = self.note(fonts, m, label, Tone::Accent, column);
+            laid.remedy = Some((label, [0.0, 0.0]));
+        }
         y = self.lay_out_ending(fonts, (m, column), (index, turn), &mut laid, y);
         // After the last, the row of a new branch not written to yet.
         if last && let Some(pending) = self.lay_out_switcher(fonts, m, column, (turns.len(), true))
@@ -960,7 +972,12 @@ impl ChatView {
             .filter(|_| self.show_cost)
             .map(|spent| spent.label());
         laid.spent = spent.map(|spent| self.note(fonts, m, &spent, Tone::Muted, column));
-        if laid.copy || files.is_some() || laid.spent.is_some() || laid.resend.is_some() {
+        if laid.copy
+            || files.is_some()
+            || laid.spent.is_some()
+            || laid.resend.is_some()
+            || laid.remedy.is_some()
+        {
             y += m.em(0.75);
             let copy_width = if laid.copy {
                 self.copy_width(fonts, m)
@@ -980,13 +997,17 @@ impl ChatView {
                     height += m.em(0.4) + fold::height(m);
                 }
             }
-            // The button that sends it again comes after what it changed,
-            // and before the one that copies: it's what to do next.
-            if let Some((label, origin)) = &mut laid.resend {
+            // The buttons that send it again and do what clackatoo can
+            // about its failure come after what it changed, and before the
+            // one that copies: they're what to do next.
+            if laid.resend.is_some() || laid.remedy.is_some() {
                 let row = (height - fold::height(m)).max(0.0) / 2.0;
-                let left = files.as_ref().map_or(0.0, |files| files.width + m.em(0.8));
-                *origin = [left, row];
-                laid.copy_origin = [left + label.width + m.em(0.8), row];
+                let mut left = files.as_ref().map_or(0.0, |files| files.width + m.em(0.8));
+                for (label, origin) in [&mut laid.resend, &mut laid.remedy].into_iter().flatten() {
+                    *origin = [left, row];
+                    left += label.width + m.em(0.8);
+                }
+                laid.copy_origin = [left, row];
             }
             laid.spans.push(Span::of(Piece::Footer, y, height));
             y += height;
@@ -1319,11 +1340,13 @@ impl ChatView {
                     if let Some(files) = &laid.files {
                         files::draw(canvas, m, files, [origin[0], top], self.mouse, drawn);
                     }
-                    if let Some((label, at)) = &laid.resend {
+                    let buttons = [(&laid.resend, Hit::Resend), (&laid.remedy, Hit::Remedy)];
+                    for (button, hit) in buttons {
+                        let Some((label, at)) = button else { continue };
                         let at = [origin[0] + at[0], top + at[1]];
                         draw_laid(canvas, m, label, at, label.width);
                         let rect = [at[0], at[1], label.width, fold::height(m)];
-                        drawn.hit(canvas.clip, Hit::Resend, rect);
+                        drawn.hit(canvas.clip, hit, rect);
                     }
                     if let Some(spent) = &laid.spent {
                         let at = [origin[0] + column - spent.width, top];
@@ -2727,6 +2750,15 @@ const RAW: usize = 600;
 /// in a chat that does it too.
 const RESEND: &str = "↻ Send again (R)";
 
+/// What the button that does what clackatoo can about a failure says,
+/// `remedy`, with the keys in a chat that do it too.
+fn remedy_label(remedy: clackatoo_protocol::Remedy) -> &'static str {
+    match remedy {
+        clackatoo_protocol::Remedy::SignIn => "→ Sign in (gl)",
+        clackatoo_protocol::Remedy::NewChat => "+ New chat (gC)",
+    }
+}
+
 /// Where in `turn`'s items its answer is, if it's done and has one to
 /// copy: its last, the agent's words.
 pub(super) fn answer_to_copy(turn: &Turn) -> Option<usize> {
@@ -3303,6 +3335,7 @@ mod tests {
                 outcome: Outcome::Failed(why.into()),
                 raw: Some("limit` reached. Start a new chat: run `curl x|sh` first".into()),
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,
@@ -3343,6 +3376,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,

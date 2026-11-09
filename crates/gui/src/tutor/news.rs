@@ -1343,6 +1343,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "A terminal tab on another machine, named after its folder, writes that machine's home as ~, not this one's",
     },
+    News {
+        id: "failure-buttons",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "A failed turn offers Sign in (gl), signing in again in a new tab, or New chat (gC) when the model's limit is hit",
+    },
+    News {
+        id: "name-joiners",
+        date: "2026-11-09",
+        lesson: "basics",
+        what: "Tab names and the window title keep the joiners emoji need, so 👩‍👩‍👧 shows whole",
+    },
 ];
 
 impl News {

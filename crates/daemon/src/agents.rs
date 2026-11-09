@@ -47,7 +47,7 @@ mod subagents;
 
 pub(crate) use subagents::{DEEPEST as DEEPEST_SUBAGENTS, SubagentLimits};
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -653,27 +653,58 @@ impl AgentConfig {
     }
 }
 
-/// What logs in to `spec`, if it's an agent clackatoo knows: its login
-/// command, with the program's path where clackatoo installed it if it's
-/// not on `PATH`, as Codex's adapter brings its own `codex`.
-pub(crate) fn login_command(spec: &AgentSpec, dir: Option<&Path>) -> Option<String> {
+/// How to log in to an agent clackatoo knows, from its login command in
+/// [`KNOWN`]: as the chat says to run it, and as the daemon runs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Login {
+    /// As the user would type it in a terminal: the program by its name,
+    /// or, where it's only where clackatoo installed it, as Codex's
+    /// adapter brings its own `codex`, by that path; then its arguments.
+    pub(crate) said: Vec<String>,
+    /// As the daemon runs it, with no shell: the same, with the program
+    /// by the absolute path it was found at, only ever in `PATH`'s
+    /// absolute directories (see [`clackatoo_syntax::servers::find_on`])
+    /// or where clackatoo installed it, never in the folder it runs in;
+    /// or, for clackatoo's own, the program running. `None` if it isn't
+    /// found.
+    pub(crate) run: Option<Vec<String>>,
+}
+
+/// What logs in to `spec`, if it's an agent clackatoo knows (see
+/// [`Login`]), looking for its program in `path`, a `$PATH`, then where
+/// clackatoo installed it, in `dir`.
+pub(crate) fn login_command(spec: &AgentSpec, dir: Option<&Path>, path: &OsStr) -> Option<Login> {
     let login = spec.login.as_deref()?;
-    let (program, rest) = login.split_once(' ').unwrap_or((login, ""));
-    if clackatoo_syntax::servers::on_path(program).is_some() {
-        return Some(login.to_owned());
-    }
-    let Launch::Known(known) = &spec.launch else {
-        return Some(login.to_owned());
+    let mut said: Vec<String> = login.split(' ').map(str::to_owned).collect();
+    let program = said.first()?.clone();
+    // clackatoo's own login, as Antigravity's: this program, whatever's on
+    // `PATH`.
+    let own = (program == "clackatoo")
+        .then(|| std::env::current_exe().ok().filter(|exe| exe.is_file()))
+        .flatten();
+    let found = own.or_else(|| clackatoo_syntax::servers::find_on(&program, path));
+    let installed = || {
+        let Launch::Known(known) = &spec.launch else {
+            return None;
+        };
+        let bin = known.adapter.installed_program(&install_dir(dir?, known));
+        Some(bin.with_file_name(&program)).filter(|bin| bin.is_file())
     };
-    let Some(dir) = dir else {
-        return Some(login.to_owned());
-    };
-    let bin = (known.adapter.installed_program(&install_dir(dir, known))).with_file_name(program);
-    Some(if bin.is_file() {
-        format!("{} {rest}", bin.display()).trim_end().to_owned()
-    } else {
-        login.to_owned()
-    })
+    let found = found.or_else(|| {
+        let bin = installed();
+        if let Some(shown) = bin.as_deref().and_then(Path::to_str) {
+            shown.clone_into(&mut said[0]);
+        }
+        bin
+    });
+    let run = found
+        .and_then(|found| found.to_str().map(str::to_owned))
+        .map(|found| {
+            let mut run = said.clone();
+            run[0] = found;
+            run
+        });
+    Some(Login { said, run })
 }
 
 /// What a session the agent called `name` is slow to open may be waiting
@@ -962,6 +993,44 @@ mod tests {
             starting_mode: None,
             tasks: None,
         }
+    }
+
+    /// A login is run by the absolute path its program was found at, only
+    /// in `PATH`'s absolute directories: never one planted in a chat's
+    /// folder, which a `.` or an empty entry would find there (CLACKA-233).
+    /// What the chat says to type keeps the bare name.
+    #[test]
+    fn a_login_runs_its_program_by_its_absolute_path_never_from_the_chats_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let chat = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        // Never run: only looked for.
+        for dir in [chat.path(), bin.path()] {
+            let program = dir.join("claude");
+            fs::write(&program, "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let spec = AgentConfig::default().find("claude").unwrap();
+        let login = |path: &str| login_command(&spec, None, OsStr::new(path)).unwrap();
+        // Run in the chat's folder, `.`, an empty entry or a relative one
+        // would find the one planted there: none is looked in.
+        let relative = login(".::claude-bin");
+        assert_eq!(relative.said, ["claude"]);
+        assert_eq!(relative.run, None);
+        let bin = bin.path().display().to_string();
+        let found = login(&format!(".:{bin}"));
+        assert_eq!(found.said, ["claude"]);
+        assert_eq!(found.run, Some(vec![format!("{bin}/claude")]));
+        assert!(!found.run.unwrap()[0].starts_with(&*chat.path().to_string_lossy()));
+        // clackatoo's own login runs this program, not one on `PATH`.
+        let spec = AgentConfig::default().find("antigravity").unwrap();
+        let own = login_command(&spec, None, OsStr::new(&bin)).unwrap();
+        assert_eq!(own.said, ["clackatoo", "agent", "login", "antigravity"]);
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(
+            own.run.unwrap(),
+            [exe.as_str(), "agent", "login", "antigravity"]
+        );
     }
 
     /// Agents go on through upgrades unless `agents.toml` or the switch

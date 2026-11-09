@@ -60,4 +60,4 @@ pub use size::{InvalidSize, Size};
 pub use snapshot::{AskedSnapshot, BlocksSnapshot, LinksSnapshot, RestoreError, Snapshot};
 pub use style::{Attributes, Color, Style, Underline};
 pub use terminal::{Config, Cursor, CursorShape, InputModes, Terminal};
-pub use width::{invisible, of as char_width};
+pub use width::{Joiners, MOST_JOINERS, invisible, joiner, of as char_width, visible};

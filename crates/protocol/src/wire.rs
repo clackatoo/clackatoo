@@ -396,6 +396,11 @@ gates! {
     /// (CLACKA-118): `Workspaces::homes`. Empty to an older peer, whose
     /// folders are shortened by the daemon's own home.
     HOMES = 141,
+    /// What clackatoo can do about a turn that failed, for a client to
+    /// offer as a button (CLACKA-233): `TurnEnd`'s `remedy` (`Remedy`),
+    /// signing in again or starting a new chat, and doing it,
+    /// `ChatAction::Remedy`.
+    FAILURE_REMEDY = 142,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1189,6 +1194,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::Remedy { .. } => FAILURE_REMEDY,
         ChatAction::Fork { .. } => CHAT_FORK,
         ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => CHAT_BRANCHES,
         ChatAction::Draft { .. } | ChatAction::TakeBack { .. } => PROMPT_BOX,

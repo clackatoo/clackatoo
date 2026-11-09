@@ -825,6 +825,9 @@ impl Daemon {
             ChatAction::Stop => format!("stopped chat {chat}"),
             ChatAction::Set { setting, value } => format!("set chat {chat}'s {setting} to {value}"),
             ChatAction::Switch { agent, .. } => format!("moved chat {chat} to {agent}"),
+            ChatAction::Remedy { turn } => {
+                format!("asked chat {chat}'s failed turn {turn} to be signed in for or begun anew")
+            }
             _ => return,
         };
         log::info!("device {} {what}", link.device);

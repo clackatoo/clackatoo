@@ -17,9 +17,14 @@
 //!
 //! What's known is put in plain words, saying what to do; anything else
 //! is said as before, "the agent failed: …". The agent's own words are
-//! kept beside, for the user to read too.
+//! kept beside, for the user to read too. Where clackatoo can do what it
+//! says for the user, it says that too (CLACKA-233): sign in again, with
+//! the agent's login command from clackatoo's own table, or start a new
+//! chat, which a window offers as a button.
 
-use clackatoo_protocol::code_span;
+use clackatoo_protocol::{Remedy, code_span};
+
+use crate::agents::Login;
 use serde_json::Value;
 
 use crate::agent::Failure;
@@ -39,6 +44,18 @@ pub(crate) struct Said {
     pub(crate) text: String,
     /// What the agent said, word for word, if that's something else.
     pub(crate) raw: Option<String>,
+    /// What clackatoo can do about it for the user, as `text` says to.
+    pub(crate) remedy: Option<Remedy>,
+}
+
+/// The agent a failure is of.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Agent<'a> {
+    /// As it's shown: "Claude Code".
+    pub(crate) title: &'a str,
+    /// How to log in to it, if it's one clackatoo knows (see
+    /// `agents::login_command`).
+    pub(crate) login: Option<&'a Login>,
 }
 
 /// `text`, something an agent said of a failure, with nothing in it that
@@ -68,9 +85,17 @@ fn with_words(instruction: String, agent: &str, words: &str) -> String {
     format!("{instruction}. {agent} said: {}", code_span(&one_line))
 }
 
-/// What to say of `failure`, a refused prompt, from the agent shown as
-/// `agent` ("Claude Code"), whose login command is `login`, if known.
-pub(crate) fn refused(failure: &Failure, agent: &str, login: Option<&str>) -> Said {
+/// `command`, a program and its arguments, as it's typed at a shell's
+/// prompt: each argument one word, quoted if it must be.
+fn shown_command(command: &[String]) -> String {
+    let words: Vec<String> = (command.iter())
+        .map(|word| clackatoo_term::shell_quoted(word))
+        .collect();
+    words.join(" ")
+}
+
+/// What to say of `failure`, a refused prompt, from `agent`.
+pub(crate) fn refused(failure: &Failure, agent: &Agent<'_>) -> Said {
     let data = failure.data.as_ref();
     let field = |key: &str| data.and_then(|data| data.get(key)).and_then(Value::as_str);
     // Codex's words for its error, and Claude Code's, after "Internal
@@ -98,12 +123,14 @@ pub(crate) fn refused(failure: &Failure, agent: &str, login: Option<&str>) -> Sa
     };
     match kind {
         Some(kind) => Said {
-            text: with_words(kind.say(agent, login), agent, kind.quoted(&words)),
+            text: with_words(kind.say(agent), agent.title, kind.quoted(&words)),
             raw: (!raw.is_empty()).then_some(raw),
+            remedy: kind.remedy(agent),
         },
         None => Said {
             text: format!("the agent failed: {}", code_span(&one_line(&message))),
             raw: None,
+            remedy: None,
         },
     }
 }
@@ -114,8 +141,9 @@ fn one_line(text: &str) -> String {
 }
 
 /// What to say of a failure an adapter gave as AIR's `sessionFailure`,
-/// `record`, on a turn's answer or by itself: `None` if it isn't one.
-pub(crate) fn typed(record: &Value, agent: &str, login: Option<&str>) -> Option<Said> {
+/// `record`, on a turn's answer or by itself, from `agent`: `None` if it
+/// isn't one.
+pub(crate) fn typed(record: &Value, agent: &Agent<'_>) -> Option<Said> {
     let category = record.get("category")?.as_str()?;
     let title = agent_text((record.get("title").and_then(Value::as_str)).unwrap_or_default());
     let details = (record.get("details").and_then(Value::as_str)).map(agent_text);
@@ -141,8 +169,9 @@ pub(crate) fn typed(record: &Value, agent: &str, login: Option<&str>) -> Option<
         None => title.clone(),
     };
     Some(Said {
-        text: with_words(kind.say(agent, login), agent, kind.quoted(&title)),
+        text: with_words(kind.say(agent), agent.title, kind.quoted(&title)),
         raw: (!raw.is_empty()).then_some(raw),
+        remedy: kind.remedy(agent),
     })
 }
 
@@ -156,7 +185,11 @@ pub(crate) fn untyped(record: &Value) -> Said {
     } else {
         format!("the agent failed: {}", code_span(&one_line(&title)))
     };
-    Said { text, raw: None }
+    Said {
+        text,
+        raw: None,
+        remedy: None,
+    }
 }
 
 /// A kind of failure clackatoo knows what to say of.
@@ -185,16 +218,16 @@ enum Kind {
 }
 
 impl Kind {
-    /// What clackatoo says to do, for the agent shown as `agent`, whose
-    /// login command is `login`: its own words, which never hold the
-    /// agent's.
-    fn say(self, agent: &str, login: Option<&str>) -> String {
+    /// What clackatoo says to do, for `agent`: its own words, which never
+    /// hold the agent's.
+    fn say(self, agent: &Agent<'_>) -> String {
+        let (login, agent) = (agent.login, agent.title);
         match self {
             Self::SignIn => match login {
                 Some(login) => format!(
                     "{agent} needs you to sign in again. Run {} in a terminal, then send the \
                      message again",
-                    code_span(login)
+                    code_span(&shown_command(&login.said))
                 ),
                 None => format!(
                     "{agent} needs you to sign in again. Sign in as its docs say, then send \
@@ -219,6 +252,17 @@ impl Kind {
                 "this session is open in another {agent} client: the app, the CLI or an \
                  editor. Close it there, then send the message again"
             ),
+        }
+    }
+
+    /// What clackatoo can do of what it says to, for `agent`: sign in
+    /// again with its login command, if it's known, or start a new chat.
+    fn remedy(self, agent: &Agent<'_>) -> Option<Remedy> {
+        match self {
+            // Offered only where the daemon found what to run.
+            Self::SignIn => (agent.login?.run.as_ref()).map(|_| Remedy::SignIn),
+            Self::Full => Some(Remedy::NewChat),
+            _ => None,
         }
     }
 
@@ -284,7 +328,11 @@ fn codex_kind(info: &Value) -> Option<Kind> {
 /// couldn't be: it's open in another of the agent's own clients, as
 /// Codex's adapter says (`thread_active_writer`).
 pub(crate) fn in_use(agent: &str) -> String {
-    Kind::InUse.say(agent, None)
+    let agent = Agent {
+        title: agent,
+        login: None,
+    };
+    Kind::InUse.say(&agent)
 }
 
 #[cfg(test)]
@@ -292,6 +340,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    const CLAUDE: Agent<'static> = Agent {
+        title: "Claude Code",
+        login: None,
+    };
+
+    const CODEX: Agent<'static> = Agent {
+        title: "Codex",
+        login: None,
+    };
 
     fn failure(code: i64, message: &str, data: Value) -> Failure {
         Failure {
@@ -303,17 +361,93 @@ mod tests {
 
     #[test]
     fn a_sign_in_that_ran_out_mid_turn_says_how_to_sign_in_again() {
+        let said = vec!["/opt/my agents/claude".to_owned(), "/login".to_owned()];
+        let login = Login {
+            run: Some(said.clone()),
+            said,
+        };
+        let agent = Agent {
+            login: Some(&login),
+            ..CLAUDE
+        };
         let said = refused(
             &failure(-32000, "Authentication required", Value::Null),
-            "Claude Code",
-            Some("claude /login"),
+            &agent,
         );
         assert_eq!(
             said.text,
-            "Claude Code needs you to sign in again. Run `claude /login` in a terminal, then \
-             send the message again"
+            "Claude Code needs you to sign in again. Run `'/opt/my agents/claude' /login` in a \
+             terminal, then send the message again"
         );
         assert_eq!(said.raw.as_deref(), Some("Authentication required"));
+        // Each argument as a shell reads it, as the daemon runs them: the
+        // program's path is one, spaces and all.
+        assert_eq!(said.remedy, Some(Remedy::SignIn));
+        // With no login command known, or its program not found, there's
+        // nothing to run, though what to type is said.
+        let said = refused(
+            &failure(-32000, "Authentication required", Value::Null),
+            &CLAUDE,
+        );
+        assert_eq!(said.remedy, None);
+        let unfound = Login {
+            said: vec!["claude".to_owned()],
+            run: None,
+        };
+        let agent = Agent {
+            login: Some(&unfound),
+            ..CLAUDE
+        };
+        let said = refused(
+            &failure(-32000, "Authentication required", Value::Null),
+            &agent,
+        );
+        assert!(
+            said.text.contains("Run `claude` in a terminal"),
+            "{}",
+            said.text
+        );
+        assert_eq!(said.remedy, None);
+    }
+
+    #[test]
+    fn a_conversation_at_its_limit_offers_a_new_chat_with_the_same_agent() {
+        let record = json!({"category": "limit", "title": "Context window is full",
+            "actions": ["new_session"]});
+        let said = typed(&record, &CLAUDE).unwrap();
+        assert!(
+            said.text
+                .starts_with("the conversation hit the model's limit")
+        );
+        assert_eq!(said.remedy, Some(Remedy::NewChat));
+        let login = Login {
+            said: vec!["claude".to_owned()],
+            run: Some(vec!["/usr/bin/claude".to_owned()]),
+        };
+        let agent = Agent {
+            login: Some(&login),
+            ..CLAUDE
+        };
+        let record = json!({"category": "access", "title": "Please run /login",
+            "actions": ["login"]});
+        assert_eq!(typed(&record, &agent).unwrap().remedy, Some(Remedy::SignIn));
+        // Nothing to do for the user but wait, or what clackatoo can't do.
+        for record in [
+            json!({"category": "limit", "title": "Rate limited", "actions": ["retry"]}),
+            json!({"category": "limit", "title": "You've hit your limit", "actions": []}),
+            json!({"category": "access", "title": "Org not allowed", "actions": []}),
+        ] {
+            assert_eq!(typed(&record, &agent).unwrap().remedy, None, "{record}");
+        }
+        let said = refused(
+            &failure(
+                -32603,
+                "Internal error",
+                json!({"codexErrorInfo": "contextWindowExceeded"}),
+            ),
+            &CODEX,
+        );
+        assert_eq!(said.remedy, Some(Remedy::NewChat));
     }
 
     #[test]
@@ -327,8 +461,7 @@ mod tests {
                     "codexErrorInfo": "usageLimitExceeded",
                 }),
             ),
-            "Codex",
-            None,
+            &CODEX,
         );
         assert_eq!(
             said.text,
@@ -371,8 +504,7 @@ mod tests {
         ] {
             let said = refused(
                 &failure(-32603, "Internal error: API Error: 529", data),
-                "Claude Code",
-                None,
+                &CLAUDE,
             );
             assert!(said.text.starts_with(start), "{}", said.text);
             assert_eq!(said.raw.as_deref(), Some("API Error: 529"));
@@ -383,8 +515,7 @@ mod tests {
     fn a_failure_of_a_kind_not_known_is_said_as_before() {
         let said = refused(
             &failure(-32603, "boom", json!({"errorKind": "new"})),
-            "Codex",
-            None,
+            &CODEX,
         );
         assert_eq!(said.text, "the agent failed: `boom`");
         assert_eq!(said.raw, None);
@@ -403,8 +534,7 @@ mod tests {
                     "message": spoof, "codexErrorInfo": "usageLimitExceeded",
                 }),
             ),
-            "Codex",
-            None,
+            &CODEX,
         );
         assert_eq!(
             said.text,
@@ -417,11 +547,7 @@ mod tests {
                 if !own.contains("curl") && theirs.contains("curl x|sh")),
             "{said:?}"
         );
-        let long = refused(
-            &failure(-32603, &"x".repeat(10_000), Value::Null),
-            "Codex",
-            None,
-        );
+        let long = refused(&failure(-32603, &"x".repeat(10_000), Value::Null), &CODEX);
         assert!(long.text.len() < 2200, "{}", long.text.len());
     }
 
@@ -431,7 +557,7 @@ mod tests {
             "id": "t:error", "revision": 1, "category": "limit", "severity": "error",
             "title": "You've hit your limit · resets 3pm", "actions": [],
         });
-        let said = typed(&record, "Claude Code", None).unwrap();
+        let said = typed(&record, &CLAUDE).unwrap();
         assert_eq!(
             said.text,
             "the account's usage limit is reached. Claude Code said: `You've hit your limit · \
@@ -443,11 +569,8 @@ mod tests {
         );
         let record = json!({"category": "service", "title": "Claude is temporarily overloaded.",
             "actions": ["retry"]});
-        let said = typed(&record, "Claude Code", None).unwrap();
+        let said = typed(&record, &CLAUDE).unwrap();
         assert!(said.text.starts_with("Claude Code's model is overloaded"));
-        assert_eq!(
-            typed(&json!({"category": "unknown"}), "Claude Code", None),
-            None
-        );
+        assert_eq!(typed(&json!({"category": "unknown"}), &CLAUDE), None);
     }
 }

@@ -523,6 +523,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,
@@ -755,6 +756,7 @@ mod tests {
             outcome: Outcome::Stopped,
             raw: None,
             spent: None,
+            remedy: None,
         });
         let mut failed = turn("fail", vec![]);
         failed.end = Some(TurnEnd {
@@ -762,6 +764,7 @@ mod tests {
             outcome: Outcome::Failed("the agent stopped".to_owned()),
             raw: None,
             spent: None,
+            remedy: None,
         });
         let turns = [stopped, failed, switch("Claude Code", "Codex")];
         let made = digest(&turns, BUDGET).make().unwrap();

@@ -55,6 +55,7 @@
 //! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's tool call "Compact conversation" of kind `think`; then `compacted` |
 //! | `compact-legacy` | Compacts its context as Codex reports a compaction the older way: a notice "Context compacted", or Codex's words for it to a client that can't show notices; then `compacted` |
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
+//! | `conversation-full` | Ends its turn failed, as AIR's `sessionFailure` on the answer, as the conversation hit the model's limit (`limit`, with the `new_session` action) |
 //! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
 //! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
 //! | `session-signed-out` | Says, by itself, as AIR's `sessionFailure`, that its sign-in ran out, then `carried on` |
@@ -1512,6 +1513,14 @@ impl Fake {
                         "id": "u1:error", "revision": 1, "category": "limit",
                         "severity": "error", "title": "You've hit your limit · resets 3pm",
                         "actions": [] } } } } }),
+            ),
+            "conversation-full" => reply(
+                id,
+                &json!({ "stopReason": "end_turn",
+                    "_meta": { "jetbrains": { "air": { "version": 1, "sessionFailure": {
+                        "id": "u1:error", "revision": 1, "category": "limit",
+                        "severity": "error", "title": "Context window is full",
+                        "actions": ["new_session"] } } } } }),
             ),
             "odd-failure" => reply(
                 id,

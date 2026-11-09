@@ -222,6 +222,9 @@ enum Hit {
     /// The button under the last turn, which failed, that sends its
     /// message again.
     Resend,
+    /// The button under the last turn, which failed, that does what
+    /// clackatoo can about it: signs in again, or starts a new chat.
+    Remedy,
     /// The meter of how much context the chat fills, which shows its
     /// detail.
     Usage,
@@ -506,6 +509,10 @@ pub(crate) struct ChatView {
     /// chat, as their card's button or `go` asked, by their tool calls'
     /// IDs, for the window to take.
     pub(crate) outputs: Vec<String>,
+    /// The failed turns whose remedy was asked for, by the last turn's
+    /// button or key, by their index on the branch shown, for the window to
+    /// ask the daemon for (`ChatAction::Remedy`).
+    pub(crate) remedies: Vec<u32>,
     /// The plan the question shows, laid out, for the question, width and
     /// size it was laid out for.
     proposal_laid: Option<((u64, u32, u32), crate::markdown::layout::Laid)>,
@@ -700,6 +707,7 @@ impl ChatView {
             opened: Vec::new(),
             follows: Vec::new(),
             outputs: Vec::new(),
+            remedies: Vec::new(),
             proposal_laid: None,
             proposal_scroll: 0.0,
             proposal_rect: None,
@@ -2586,6 +2594,11 @@ impl ChatView {
                     settled.actions.push(ChatAction::Resend);
                 }
             }
+            Some(Hit::Remedy) => {
+                if let Some((_, turn)) = self.remedy() {
+                    self.remedies.push(turn);
+                }
+            }
             Some(Hit::RemoveImage(index)) => self.remove_image(index),
             Some(Hit::CancelHandoff) => {
                 if self.handoff_sent.is_none() {
@@ -2950,6 +2963,61 @@ impl ChatView {
 /// How long after the bar says a turn already did something that asking
 /// to send it again sends it anyway, in milliseconds.
 const RESEND_AGAIN: u64 = 5_000;
+
+impl ChatView {
+    /// What clackatoo can do about the last turn's failure, as the daemon
+    /// says (see [`remedy_of`]), while the chat waits for a message or
+    /// couldn't start, and that turn's index on the branch shown, to ask
+    /// for it by.
+    pub(crate) fn remedy(&self) -> Option<(clackatoo_protocol::Remedy, u32)> {
+        if !matches!(self.node.state, ChatState::Ready | ChatState::Failed(_)) {
+            return None;
+        }
+        let remedy = *remedy_of(self.node.turns.last()?, true)?;
+        let last = u32::try_from(self.node.turns.len() - 1).ok()?;
+        Some((remedy, self.node.first_turn.checked_add(last)?))
+    }
+
+    /// Asks the daemon to do what the last turn's failure asks, as `gl` or
+    /// `gC` or its button does, if it's `wanted`: sign in again, or start a
+    /// new chat, in a new tab. Returns whether it asks: if not, the bar says
+    /// why.
+    pub(crate) fn take_remedy(&mut self, wanted: clackatoo_protocol::Remedy) -> bool {
+        use clackatoo_protocol::Remedy;
+        match self.remedy() {
+            Some((remedy, turn)) if remedy == wanted => {
+                self.remedies.push(turn);
+                true
+            }
+            _ => {
+                self.say(
+                    match wanted {
+                        Remedy::SignIn => {
+                            "the last turn didn't fail for want of signing in, as far as clackatoo \
+                         knows"
+                        }
+                        Remedy::NewChat => "the last turn didn't fail for the model's limit",
+                    }
+                    .to_owned(),
+                );
+                false
+            }
+        }
+    }
+}
+
+/// What clackatoo can do about `turn`'s failure, if it's the chat's
+/// `last`, as its button offers it: none on an earlier turn, which is
+/// over and done with.
+pub(crate) fn remedy_of(
+    turn: &clackatoo_protocol::Turn,
+    last: bool,
+) -> Option<&clackatoo_protocol::Remedy> {
+    let end = turn.end.as_ref().filter(|_| last)?;
+    matches!(end.outcome, clackatoo_protocol::Outcome::Failed(_))
+        .then_some(end.remedy.as_ref())
+        .flatten()
+}
 
 /// Whether `turn` is one whose message can be sent again: the chat's
 /// `last`, which failed, with a message of the user's own.
@@ -4642,6 +4710,7 @@ mod tests {
                     outcome: Outcome::Done,
                     raw: None,
                     spent: None,
+                    remedy: None,
                 }),
                 files: Some(TurnFiles { count: 2, state }),
                 switch: None,
@@ -4696,6 +4765,7 @@ mod tests {
                 outcome: Outcome::Failed(why.into()),
                 raw: raw.map(Into::into),
                 spent: None,
+                remedy: None,
             }),
             files: None,
             switch: None,
@@ -4724,6 +4794,54 @@ mod tests {
         let mut view = with_files(&[clackatoo_protocol::TurnFilesState::Made]);
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
+    }
+
+    #[test]
+    fn a_failed_turn_has_a_button_and_a_key_that_do_what_clackatoo_can_about_it() {
+        use clackatoo_protocol::Remedy;
+        let mut fonts = fonts();
+        let with = |remedy: Remedy| {
+            let mut view = failed("Codex needs you to sign in again", None);
+            if let Some(end) = view.node.turns[0].end.as_mut() {
+                end.remedy = Some(remedy);
+            }
+            view
+        };
+        let mut view = with(Remedy::SignIn);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        let at = drawn_at(&view, &Hit::Remedy).expect("the button is drawn");
+        assert_eq!(view.pointer(at), Pointer::Hand);
+        // Beside Send again, not over it.
+        let resend = drawn_at(&view, &Hit::Resend).expect("Send again is drawn");
+        assert!(at[0] > resend[0], "{at:?} {resend:?}");
+        // The turn is asked for by its index on the branch, older turns
+        // not loaded counted.
+        view.node.first_turn = 4;
+        view.press(at, 1, false);
+        view.settle(&mut fonts);
+        assert_eq!(std::mem::take(&mut view.remedies), [4]);
+        // `gl` in normal mode does the same, and `gC` doesn't, as it isn't
+        // what's offered.
+        assert_eq!(fixtures::read(&mut view, "gl"), (true, false));
+        assert_eq!(std::mem::take(&mut view.remedies), [4]);
+        assert_eq!(fixtures::read(&mut view, "gC"), (false, false));
+        assert!(view.remedies.is_empty());
+
+        let mut view = with(Remedy::NewChat);
+        assert_eq!(fixtures::read(&mut view, "gC"), (true, false));
+        assert_eq!(std::mem::take(&mut view.remedies), [0]);
+        assert_eq!(fixtures::read(&mut view, "gl"), (false, false));
+
+        // Nothing's offered where the daemon says nothing, nor while the
+        // agent's at work again.
+        let mut view = failed("the agent failed", None);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        assert_eq!(drawn_at(&view, &Hit::Remedy), None);
+        assert_eq!(fixtures::read(&mut view, "gl"), (false, false));
+        let mut view = with(Remedy::NewChat);
+        view.node.state = ChatState::Answering;
+        assert_eq!(fixtures::read(&mut view, "gC"), (false, false));
+        assert!(view.remedies.is_empty());
     }
 
     #[test]

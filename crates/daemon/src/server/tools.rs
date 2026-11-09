@@ -2661,7 +2661,8 @@ pub(super) fn visible(text: &str) -> String {
 /// show as `<U+E0069>`. A supplementary variation selector stays only as
 /// the one after an ideograph. Characters of no width (see [`zero_width`])
 /// show as `<U+200B>`, but for a joiner or non-joiner between two
-/// characters past ASCII, as emoji and many scripts need them; the other
+/// characters past ASCII that show, as emoji and many scripts need them,
+/// by the rule names follow too ([`clackatoo_term::Joiners`]); the other
 /// variation selectors and the like stay. `\r\n` becomes `\n`.
 pub(crate) fn unhidden(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
@@ -2669,30 +2670,19 @@ pub(crate) fn unhidden(text: &str) -> String {
     // Whether the last character may take a supplementary variation
     // selector: it's an ideograph, and none has followed it yet.
     let mut selectable = false;
-    // Whether the last character shows as itself, and is past ASCII, so a
-    // joiner after it may join it to the next; and how many joiners have
-    // come in a row.
-    let (mut joinable, mut joiners) = (false, 0);
+    let mut joiners = clackatoo_term::Joiners::default();
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         let was_selectable = std::mem::replace(&mut selectable, false);
-        if matches!(ch, '\u{200C}' | '\u{200D}') {
-            joiners += 1;
-            // What follows the joiners must show as itself too.
-            let joins = joinable
-                && joiners <= MOST_JOINERS
-                && (chars.clone())
-                    .find(|&next| !matches!(next, '\u{200C}' | '\u{200D}'))
-                    .is_some_and(|next| !next.is_ascii() && shows_itself(next));
-            if joins {
+        if clackatoo_term::joiner(ch) {
+            if joiners.keeps(chars.clone(), shows_itself) {
                 shown.push(ch);
             } else {
                 push_shown(&mut shown, ch);
             }
             continue;
         }
-        joiners = 0;
-        joinable = !ch.is_ascii() && shows_itself(ch);
+        joiners.passed(ch, shows_itself(ch));
         match ch {
             '\n' | '\t' => shown.push(ch),
             '\u{1F3F4}' => {
@@ -2719,10 +2709,6 @@ pub(crate) fn unhidden(text: &str) -> String {
     }
     shown
 }
-
-/// The most joiners in a row that [`unhidden`] leaves be: emoji and
-/// scripts need one at a time.
-const MOST_JOINERS: usize = 3;
 
 /// Whether [`unhidden`] shows `ch` as itself, where it doesn't keep it
 /// for what's around it, as a joiner or a flag's tags.

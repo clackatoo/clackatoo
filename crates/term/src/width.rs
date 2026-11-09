@@ -37,6 +37,100 @@ pub fn invisible(ch: char) -> bool {
     )
 }
 
+/// Whether `ch` is the zero-width joiner or non-joiner, which emoji
+/// sequences (👩‍👩‍👧) and scripts such as Persian need between two
+/// characters, and which could hide what's around them anywhere else.
+#[must_use]
+pub fn joiner(ch: char) -> bool {
+    matches!(ch, '\u{200C}' | '\u{200D}')
+}
+
+/// The most joiners in a row [`Joiners`] keeps: emoji and scripts need
+/// one at a time.
+pub const MOST_JOINERS: usize = 3;
+
+/// Which joiners (see [`joiner`]) in a text to keep, the one rule for
+/// everything clackatoo shows of others' text: one stays only between
+/// two characters past ASCII that show as themselves, past any joiners
+/// beside it, and only as one of at most [`MOST_JOINERS`] in a row. What
+/// "shows as itself" means is the caller's: what it shows as a code, or
+/// leaves out, can't be joined to.
+///
+/// Every character of the text goes through it in order: a joiner to
+/// [`keeps`](Self::keeps), any other to [`passed`](Self::passed).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Joiners {
+    /// Whether the last character that isn't a joiner shows as itself and
+    /// is past ASCII, so a joiner after it may join it to the next.
+    joinable: bool,
+    /// How many joiners have come in a row since.
+    run: usize,
+}
+
+impl Joiners {
+    /// Takes in `ch`, the next character, which isn't a joiner, and
+    /// whether it `shows` as itself.
+    pub fn passed(&mut self, ch: char, shows: bool) {
+        self.run = 0;
+        self.joinable = shows && !ch.is_ascii();
+    }
+
+    /// Takes in the next character, a joiner, with `rest`, what follows
+    /// it: whether to keep it, as what's before it and the first of
+    /// `rest` that isn't a joiner are past ASCII and show as themselves,
+    /// as `shows` says, and it's one of at most [`MOST_JOINERS`] in a row.
+    pub fn keeps(
+        &mut self,
+        rest: impl IntoIterator<Item = char>,
+        shows: impl Fn(char) -> bool,
+    ) -> bool {
+        self.run += 1;
+        self.joinable
+            && self.run <= MOST_JOINERS
+            && (rest.into_iter())
+                .find(|&next| !joiner(next))
+                .is_some_and(|next| !next.is_ascii() && shows(next))
+    }
+}
+
+/// `text`, a name of others' choosing, as a tab's name or a title, as
+/// it's shown: without what [`invisible`] says goes unseen or turns text
+/// round, but for the joiners that join two characters that show (see
+/// [`Joiners`]); at most `most` characters of it, joiners not counted.
+/// Control characters are the caller's, to leave out or put as spaces
+/// first: they're kept, but never joined to.
+#[must_use]
+pub fn visible(text: impl IntoIterator<Item = char>, most: usize) -> String {
+    // What shows, up to `most`, and the joiners between: no more of those
+    // in a row than could be kept, so a run of them costs nothing.
+    let (mut kept, mut count, mut run) = (Vec::new(), 0, 0);
+    for ch in (text.into_iter()).filter(|&ch| joiner(ch) || !invisible(ch)) {
+        if joiner(ch) {
+            run += 1;
+            if run > MOST_JOINERS {
+                continue;
+            }
+        } else if count == most {
+            break;
+        } else {
+            (count, run) = (count + 1, 0);
+        }
+        kept.push(ch);
+    }
+    let seen = |ch: char| !ch.is_control();
+    let mut joiners = Joiners::default();
+    let mut shown = String::with_capacity(kept.len());
+    for (at, &ch) in kept.iter().enumerate() {
+        if !joiner(ch) {
+            joiners.passed(ch, seen(ch));
+            shown.push(ch);
+        } else if joiners.keeps(kept[at + 1..].iter().copied(), seen) {
+            shown.push(ch);
+        }
+    }
+    shown
+}
+
 /// The columns `ch` takes: 0 for combining characters, 2 for wide ones, and
 /// `None` for controls.
 ///
@@ -86,5 +180,50 @@ mod tests {
         }
         assert_eq!('\u{17D8}'.width(), Some(3), "unicode-width still says 3");
         assert_eq!(of('\u{17D8}'), Some(2));
+    }
+
+    #[test]
+    fn names_keep_joiners_only_between_what_shows() {
+        let all = usize::MAX;
+        // Emoji sequences and Persian's non-joiner stay.
+        let family = "👩\u{200d}👩\u{200d}👧";
+        assert_eq!(visible(family.chars(), all), family);
+        let persian = "می\u{200c}خواهم";
+        assert_eq!(visible(persian.chars(), all), persian);
+        // Next to ASCII, at either end, or too many in a row, they go,
+        // with what turns text round or hides.
+        assert_eq!(
+            visible("a\u{200d}b \u{200d}👩 👩\u{200d}".chars(), all),
+            "ab 👩 👩"
+        );
+        assert_eq!(
+            visible("👩\u{200d}\u{200d}\u{200d}\u{200d}👧".chars(), all),
+            "👩\u{200d}\u{200d}\u{200d}👧"
+        );
+        // What's left out isn't there to hide anything: a joiner either
+        // side of it joins what shows.
+        assert_eq!(
+            visible("👩\u{200d}\u{202e}👩 x\u{200b}y".chars(), all),
+            "👩\u{200d}👩 xy"
+        );
+        // A control character is never joined to.
+        assert_eq!(visible("👩\u{200d}\u{85}".chars(), all), "👩\u{85}");
+        assert_eq!(visible("ab\u{200b}cd".chars(), 3), "abc");
+        // Joiners don't count towards the most shown.
+        assert_eq!(
+            visible("👩\u{200d}👩\u{200d}👧!".chars(), 3),
+            "👩\u{200d}👩\u{200d}👧"
+        );
+    }
+
+    #[test]
+    fn a_joiner_is_kept_by_what_the_caller_says_shows() {
+        // As agent text is: what shows as a code can't be joined to.
+        let mut joiners = Joiners::default();
+        joiners.passed('👩', true);
+        assert!(joiners.keeps("👩".chars(), |_| true));
+        assert!(!joiners.keeps("\u{202e}👩".chars(), |ch| ch != '\u{202e}'));
+        joiners.passed('\u{202e}', false);
+        assert!(!joiners.keeps("👩".chars(), |_| true));
     }
 }

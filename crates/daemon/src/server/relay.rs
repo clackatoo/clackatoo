@@ -46,9 +46,9 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
-    BackgroundAction, BoardId, BufferId, ChatSummary, ClientMessage, Error, Event, FilesId,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId, ServerMessage, TabId,
-    TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
+    BackgroundAction, BoardId, BufferId, ChatAction, ChatSummary, ClientMessage, Error, Event,
+    FilesId, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId, ServerMessage,
+    TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -1221,9 +1221,14 @@ impl Daemon {
             } => terminal(self, *local).map(|(at, terminal)| {
                 // Passed on as it is, `Open`'s chat too: that number comes
                 // from the chat's view, a subagent's card, which comes as
-                // the daemon there sent it, numbered as it numbers them.
+                // the daemon there sent it, numbered as it numbers them. A
+                // failure's remedy opens a tab there, whose pane comes back.
+                let then = match action {
+                    ChatAction::Remedy { .. } => Then::Created,
+                    _ => Then::Pass,
+                };
                 let action = action.clone();
-                (at, Ok((Request::Chat { terminal, action }, Then::Pass)))
+                (at, Ok((Request::Chat { terminal, action }, then)))
             }),
             &Request::ChatChoices { pane, on } => self.route_chat_choices(pane, on).map(flip),
             Request::NewTab {

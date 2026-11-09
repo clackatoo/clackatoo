@@ -44,14 +44,14 @@ use super::Daemon;
 const LONGEST_NAME: usize = 100;
 
 /// `name`, safe to show as a background tab's: one line, with nothing that
-/// goes unseen or turns the text round, of [`LONGEST_NAME`] characters at
-/// most.
+/// goes unseen or turns the text round but the joiners emoji need between
+/// what shows (see [`clackatoo_term::Joiners`]), of [`LONGEST_NAME`]
+/// characters at most.
 pub(super) fn shown_name(name: &str) -> String {
-    let name: String = (name.chars())
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .filter(|&ch| !super::tools::invisible(ch))
-        .take(LONGEST_NAME)
-        .collect();
+    let name = clackatoo_term::visible(
+        (name.chars()).map(|ch| if ch.is_control() { ' ' } else { ch }),
+        LONGEST_NAME,
+    );
     name.trim().to_owned()
 }
 

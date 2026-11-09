@@ -2856,6 +2856,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             from: Some(Sender {
                 chat: TerminalId(4),

@@ -851,6 +851,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                     outcome: Outcome::Done,
                     raw: None,
                     spent: None,
+                    remedy: None,
                 }),
                 files: Some(TurnFiles {
                     count: 2,
@@ -1262,6 +1263,7 @@ fn moved_chat_node() -> clackatoo_protocol::ChatNode {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             files: None,
             from: None,
@@ -1401,6 +1403,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
                         outcome: Outcome::Done,
                         raw: None,
                         spent: None,
+                        remedy: None,
                     }),
                     files,
                     switch: None,

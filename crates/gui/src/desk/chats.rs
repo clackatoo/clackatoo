@@ -14,8 +14,8 @@
 //! [`Content::Terminal`]: clackatoo_protocol::Content::Terminal
 
 use clackatoo_protocol::{
-    Content, NewTerminal, OpenOutput, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate,
-    wire,
+    ChatAction, Content, NewTerminal, OpenOutput, PaneId, PaneTerminal, Request, Side, TerminalId,
+    ViewUpdate, wire,
 };
 
 use super::{Asked, Desk};
@@ -161,11 +161,16 @@ impl Desk {
             SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
             let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
             let (mut wanting, mut opening) = (Vec::new(), Vec::new());
-            let (mut follows, mut outputs) = (Vec::new(), Vec::new());
+            let (mut follows, mut outputs, mut remedies) = (Vec::new(), Vec::new(), Vec::new());
             for (&terminal, chat) in &mut self.chats {
                 redraw |= chat.settle(fonts);
                 follows.extend(chat.take_follows().into_iter().map(|id| (terminal, id)));
                 outputs.extend(chat.take_outputs().into_iter().map(|tool| (terminal, tool)));
+                remedies.extend(
+                    chat.take_remedies()
+                        .into_iter()
+                        .map(|turn| (terminal, turn)),
+                );
                 copied.extend(chat.take_copies());
                 self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
@@ -199,6 +204,11 @@ impl Desk {
             // A command card's button, or `go` on it.
             for (chat, tool) in outputs {
                 self.open_output(chat, tool);
+                redraw = true;
+            }
+            // A failed turn's Sign in or New chat, clicked or keyed.
+            for (chat, turn) in remedies {
+                self.remedy(chat, turn);
                 redraw = true;
             }
             // What a chat's `/clear` or `/diff` is for, as the window
@@ -648,6 +658,19 @@ impl Desk {
             on: None,
         };
         self.request(split, Asked::Pane);
+    }
+
+    /// Asks the daemon to do what chat `chat`'s turn `turn` failed asking
+    /// for: it signs in to the agent in a new tab, or starts a new chat, on
+    /// the chat's machine (see `ChatAction::Remedy`), and the window shows
+    /// what it opens.
+    pub(super) fn remedy(&mut self, chat: TerminalId, turn: u32) {
+        let action = ChatAction::Remedy { turn };
+        let asked = Request::Chat {
+            terminal: chat,
+            action,
+        };
+        self.request(asked, Asked::Pane);
     }
 
     /// Opens the focused chat's plan's shelf, or folds it.

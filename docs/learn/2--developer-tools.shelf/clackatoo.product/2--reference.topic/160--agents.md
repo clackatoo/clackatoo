@@ -283,6 +283,8 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `[b` `]b` | The branch before or after where the conversation's branches part, at the turn under the cursor or the nearest above; with a count, that many. |
 | `K` | Opens Usage & limits. Escape or Ctrl+; closes it. |
 | `R` | Sends the last message again, if its turn failed (see [When a turn fails](#when-a-turn-fails)). |
+| `gl` | Signs in to the agent again in a new tab, if the last turn failed for want of it (see [When a turn fails](#when-a-turn-fails)). |
+| `gC` | Starts a new chat with the same agent in the same folder, in a new tab, if the last turn hit the model's limit. |
 | `q` `@`, `m` `'` and `` ` ``, Ctrl+O Ctrl+I | Macros, marks and jumps, as in every pane (see [Macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes)). |
 | `i`, `a`, `I`, `A`, `o`, Enter | Back to insert mode. |
 
@@ -441,6 +443,13 @@ Where the agent's words say more, they follow clackatoo's, as `Codex said:` and 
 A failure the agent gives by itself, rather than with a turn's answer, isn't lost either: if it took a turn by itself, as Claude Code does when something it ran in the background ends, that turn ends failed, saying why; otherwise a notice above the box says so, as when its connection was lost.
 
 The last turn, if it failed and was a message of yours, has a **Send again** button under it, and `R` in normal mode does the same: the same message, with its images, as a new turn below; and with the role a chat was started with, if its first message failed before the agent did anything with it. If the turn already started commands, changes to files or other tools, such as an MCP server's, however they went, which may have done something that would be done again, the bar says how many first, and it's sent only if you ask again within 5 seconds, with no turn since. A failure the agent also said by itself as it answered shows once, under the turn, not again as a notice. Images can be sent again only until the daemon is upgraded; after that, its words go alone and the chat says so. Nothing is sent again while the chat waits for a session to load.
+
+Where clackatoo can do what the turn says to, the button beside **Send again** asks the daemon running the chat to do it, in a new tab of the chat's workspace, on the chat's machine, which the window then shows:
+
+- **→ Sign in**, and `gl`, when no one's signed in to the agent and clackatoo knows its login command: the new tab runs that command in the chat's folder, as `codex login`. The command is clackatoo's own, from the agents it knows, never anything the agent said, and the daemon finds it again as it runs it; it's run as it is, with no shell to read it, with the path to the agent's own program where clackatoo installed it, as for Codex. What the turn says to run is the same command, each word quoted as a shell would need it. Sign in there, close the tab, and send the message again. An agent of your own from `agents.toml`, under a name clackatoo doesn't know, has no login command it knows, so no button. A failure the agent gives by itself, on a turn it took by itself, offers it too.
+- **+ New chat**, and `gC`, when the conversation, or the answer, hit the model's limit: a new chat with the same agent, in the same folder, with the chat's own tools, Task tool and browser settings.
+
+Only the last turn has them, while the agent waits for a message: the daemon refuses any other, and a busy chat. They need a daemon that says what it can do (protocol 142); a failed turn kept through an upgrade says what to do but has no button. The [web app](~clackatoo/reference/phone) shows the same buttons, **Sign in** and **New chat**, under the turn.
 
 ### What else a turn says
 

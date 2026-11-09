@@ -133,7 +133,7 @@ option relativenumber
 
 ## Open a tab
 
-Type `:Terminal` and press Enter, for a terminal in a new tab. Tabs run along the bottom bar, numbered, and named after their focused pane's program.
+Type `:Terminal` and press Enter, for a terminal in a new tab. Tabs run along the bottom bar, numbered, and named after their focused pane's program. A name shows nothing that could hide what's beside it, but keeps what emoji need, so a title of 👩‍👩‍👧 shows whole.
 
 ```check
 shown elsewhere

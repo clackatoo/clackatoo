@@ -3633,6 +3633,8 @@ impl Daemon {
                 } else if let ChatAction::Fork { keep, place } = action {
                     let keep = usize::try_from(keep).unwrap_or(usize::MAX);
                     (self.fork_chat(terminal, keep, place)).map(Response::TerminalCreated)
+                } else if let ChatAction::Remedy { turn } = action {
+                    self.remedy_chat(terminal, turn)
                 } else {
                     self.chat_action(terminal, action).map(|()| Response::Done)
                 }

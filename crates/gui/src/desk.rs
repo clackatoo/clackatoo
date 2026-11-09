@@ -938,7 +938,7 @@ impl Desk {
         // A program's title, and a folder's name, are its own to choose:
         // what would move the cursor or turn the text round is left out.
         let title: Option<String> = (tab.name.as_deref().or_else(|| self.tab_title(tab)))
-            .map(|title| title.chars().filter(|&ch| shown_in_names(ch)).collect())
+            .map(|title| shown_name(title, usize::MAX))
             .filter(|title: &String| !title.trim().is_empty());
         // Its focused pane on another machine than its workspace says
         // which, unless `showhost` says never: `@local` for this machine's
@@ -1021,12 +1021,12 @@ impl Desk {
     pub(crate) fn rename_tab(&mut self, tab: TabId) {
         if let Some((_, found)) = self.workspaces.find_tab(tab) {
             // What a name can't show isn't put in one.
-            let text: String = (found.name.as_deref())
-                .or_else(|| self.tab_title(found))
-                .unwrap_or_default()
-                .chars()
-                .filter(|&ch| shown_in_names(ch))
-                .collect();
+            let text = shown_name(
+                (found.name.as_deref())
+                    .or_else(|| self.tab_title(found))
+                    .unwrap_or_default(),
+                usize::MAX,
+            );
             self.input = Some(Input::renaming(Purpose::RenameTab(tab), text));
         }
     }
@@ -3008,12 +3008,24 @@ fn mode_name(mode: Mode) -> ModeName {
     }
 }
 
-/// Whether `ch` may show in a tab's name: not a control character, nor
-/// one that shows nothing itself but changes how what's around it shows,
-/// as one that turns text round does (see [`clackatoo_term::invisible`]),
-/// which a title or a folder's name could hold.
+/// Whether `ch` shows as itself: not a control character, nor one that
+/// shows nothing itself but changes how what's around it shows, as one
+/// that turns text round does (see [`clackatoo_term::invisible`]). A
+/// folder named in a question about trusting it shows any other by its
+/// number, joiners too, so nothing in it can pass for another.
 pub(crate) fn shown_in_names(ch: char) -> bool {
     !ch.is_control() && !clackatoo_term::invisible(ch)
+}
+
+/// `name`, a tab's or a title, as it's shown: without control characters,
+/// or those that show nothing themselves but change how what's around
+/// them shows, as one that turns text round does (see
+/// [`clackatoo_term::invisible`]), which a title or a folder's name could
+/// hold; but for the joiners between two characters past ASCII that emoji
+/// and many scripts need (see [`clackatoo_term::Joiners`]). At most `most`
+/// characters.
+pub(crate) fn shown_name(name: &str, most: usize) -> String {
+    clackatoo_term::visible(name.chars().filter(|ch| !ch.is_control()), most)
 }
 
 #[cfg(test)]
@@ -3031,6 +3043,7 @@ mod tests {
     mod notices;
     mod pasting;
     mod places;
+    mod remedies;
     mod restored;
     mod scrolling;
     mod shared;
@@ -3667,6 +3680,7 @@ mod tests {
                 outcome: Outcome::Done,
                 raw: None,
                 spent: None,
+                remedy: None,
             }),
             ..turn
         };
@@ -9637,6 +9651,7 @@ mod tests {
                     outcome: Outcome::Done,
                     raw: None,
                     spent: None,
+                    remedy: None,
                 }),
                 files: None,
                 switch: None,

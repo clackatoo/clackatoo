@@ -2077,19 +2077,7 @@ impl App {
                     self.state.type_key(&typed, modifiers);
                 }
             }
-            Action::Answer { question, choice } => {
-                let option = (self.state.open.as_ref())
-                    .and_then(|open| open.view.as_ref()?.chat()?.question.clone())
-                    .filter(|asked| asked.id == question)
-                    .and_then(|asked| asked.choices.get(choice).map(|choice| choice.id.clone()));
-                if let Some(option) = option {
-                    let answer = ChatAction::Answer {
-                        question,
-                        option: Some(option),
-                    };
-                    self.state.chat(answer, "answering");
-                }
-            }
+            Action::Answer { question, choice } => self.answer(question, choice),
             Action::Fill(question) => self.fill(question),
             Action::Decline(question) => self.answer_form(question, FormReply::Decline),
             // The link opens by itself, as links do.
@@ -2124,6 +2112,10 @@ impl App {
                 "delivering queued message",
             ),
             Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
+            Action::Remedy(turn) => self.state.chat(
+                ChatAction::Remedy { turn },
+                "doing what the failed turn asked",
+            ),
             Action::Command(name) => self.put_command(&name),
             Action::AttachPhotos => self.attach_photos(),
             Action::RemovePhoto(id) => self.remove_photo(id),
@@ -2160,6 +2152,22 @@ impl App {
         }
         self.send();
         self.draw_soon();
+    }
+
+    /// Answers the question numbered `question` with its choice at
+    /// `choice`, if it's still asked.
+    fn answer(&mut self, question: u64, choice: usize) {
+        let option = (self.state.open.as_ref())
+            .and_then(|open| open.view.as_ref()?.chat()?.question.clone())
+            .filter(|asked| asked.id == question)
+            .and_then(|asked| asked.choices.get(choice).map(|choice| choice.id.clone()));
+        if let Some(option) = option {
+            let answer = ChatAction::Answer {
+                question,
+                option: Some(option),
+            };
+            self.state.chat(answer, "answering");
+        }
     }
 
     fn toggle_sheet(&mut self, action: &Action) {

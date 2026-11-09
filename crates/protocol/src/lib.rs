@@ -99,11 +99,11 @@ pub use chat::{
     ChatChoices, ChatDelivery, ChatImage, ChatNode, ChatPatch, ChatPaths, ChatPreview, ChatState,
     ChatSummary, ChatTarget, Choice, ChoiceKind, Code, Cost, DECLINE, Diff, Effect, Fullness,
     INTERFACE_COMMANDS, Item, KNOWN_COMMANDS, Limit, Location, NestedWork, Outcome, PlanState,
-    PlanStep, Provider, ProviderModels, ProviderUsage, Question, QueuedMessage, RED, ResumeSession,
-    Said, Sender, Setting, SettingChoice, SettingKind, Spent, Subagent, SubagentStatus, Switch,
-    Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
-    UsageLimit, UsageLine, agent_command, code_span, interface_command, said, slash_command,
-    tokens, turn_number, turn_numbered, without_image_labels,
+    PlanStep, Provider, ProviderModels, ProviderUsage, Question, QueuedMessage, RED, Remedy,
+    ResumeSession, Said, Sender, Setting, SettingChoice, SettingKind, Spent, Subagent,
+    SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles,
+    TurnFilesState, Usage, UsageLimit, UsageLine, agent_command, code_span, interface_command,
+    said, slash_command, tokens, turn_number, turn_numbered, without_image_labels,
 };
 pub use chat::{BranchSummary, Divergence, ForkFiles, ForkPlace, TURN_NOT_SHOWN};
 pub use chat::{
@@ -149,7 +149,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 141;
+pub const PROTOCOL_VERSION: u32 = 142;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

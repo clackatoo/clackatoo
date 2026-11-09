@@ -1375,6 +1375,30 @@ pub struct TurnEnd {
         deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
     )]
     pub spent: Option<Spent>,
+    /// What clackatoo can do about a failure, which a client offers as a
+    /// button under the chat's last turn: `None` for any other end, or a
+    /// failure with nothing to offer. Not kept through an upgrade.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::FAILURE_REMEDY }, _>",
+        deserialize_with = "wire::since::<{ wire::FAILURE_REMEDY }, _, _>"
+    )]
+    pub remedy: Option<Remedy>,
+}
+
+/// What clackatoo can do about a turn that failed, as [`TurnEnd::remedy`]
+/// says, for the client to offer, and to ask of the daemon with
+/// [`ChatAction::Remedy`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Remedy {
+    /// No one's signed in to the agent: the daemon runs its login command,
+    /// from clackatoo's own table of the agents it knows (never anything
+    /// the agent said), as its program and arguments with no shell, in a
+    /// new terminal tab on the chat's machine.
+    SignIn,
+    /// The conversation hit the model's limit: the daemon starts a new chat
+    /// with the same agent, in the same folder, in a new tab.
+    NewChat,
 }
 
 /// What a turn spent, as its agent says.
@@ -2357,6 +2381,16 @@ pub enum ChatAction {
         keep: u32,
         /// Where the copy goes.
         place: ForkPlace,
+    },
+    /// Do what clackatoo can about turn `turn`'s failure, an index on the
+    /// branch shown, as its [`TurnEnd::remedy`] says, in a new tab of the
+    /// chat's workspace. Refused unless it's the chat's last turn, it
+    /// failed with a remedy, and the chat waits for a message or couldn't
+    /// start. Answered with `Response::PaneCreated`, the new tab's pane.
+    /// Requires `wire::FAILURE_REMEDY`.
+    Remedy {
+        /// The turn that failed.
+        turn: u32,
     },
 }
 
@@ -3628,6 +3662,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         chat.state = ChatState::Ready;
         assert!(!chat.working() && chat.doing().is_none());
@@ -3696,6 +3731,7 @@ mod tests {
             outcome: Outcome::Failed("couldn't start".into()),
             raw: None,
             spent: None,
+            remedy: None,
         });
         assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         assert_eq!(chat.counted_from(), Some(1_000));
@@ -3705,6 +3741,7 @@ mod tests {
             outcome: Outcome::Stopped,
             raw: None,
             spent: None,
+            remedy: None,
         });
         assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         assert_eq!(chat.counted_from(), None, "no seconds while it loads");

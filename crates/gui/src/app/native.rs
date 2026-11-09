@@ -56,6 +56,8 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
             | ChatAction::Fork { .. }
+            // Opens a terminal running a login, or a new chat.
+            | ChatAction::Remedy { .. }
             | ChatAction::Submit {
                 target: Some(_), ..
             } => true,

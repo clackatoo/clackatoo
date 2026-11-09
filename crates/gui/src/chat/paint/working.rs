@@ -400,6 +400,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         node.turns.insert(0, earlier);
         let mut chat = ChatView::new(String::new(), node);
@@ -458,6 +459,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![
             Patch::Chat(ChatPatch::Turn {
@@ -603,6 +605,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
             index: 0,

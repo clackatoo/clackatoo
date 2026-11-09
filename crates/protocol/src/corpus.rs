@@ -1056,6 +1056,40 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::HOMES,
         Server(ServerMessage::Event(Event::Workspaces(homes))),
     ));
+    // Turns that failed with something to do about it: signing in again,
+    // and starting a new chat.
+    let failed = |at: u32, remedy: crate::Remedy| {
+        (
+            crate::wire::FAILURE_REMEDY,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                    index: at,
+                    turn: Box::new(Turn {
+                        end: Some(TurnEnd {
+                            outcome: Outcome::Failed("sign in again".into()),
+                            raw: Some("Authentication required".into()),
+                            remedy: Some(remedy),
+                            ..turn().end.expect("the sample turn ended")
+                        }),
+                        ..turn()
+                    }),
+                })]),
+            })),
+        )
+    };
+    samples.extend([
+        failed(2, crate::Remedy::SignIn),
+        failed(3, crate::Remedy::NewChat),
+        // And asked to be done.
+        (
+            crate::wire::FAILURE_REMEDY,
+            Client(ClientMessage::Request(Request::Chat {
+                terminal,
+                action: ChatAction::Remedy { turn: 3 },
+            })),
+        ),
+    ]);
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
@@ -2004,6 +2038,7 @@ fn chat_facts() -> Vec<Sample> {
             outcome: Outcome::Failed("Claude is overloaded: send it again in a moment".into()),
             raw: Some("Internal error: API Error: 529 overloaded".into()),
             spent: Some(spent),
+            remedy: None,
         }),
         ..turn()
     };
@@ -3245,6 +3280,7 @@ fn more() -> Vec<Sample> {
                             outcome: Outcome::Done,
                             raw: None,
                             spent: None,
+                            remedy: None,
                         }),
                         files: Some(TurnFiles {
                             count: 1,
@@ -3998,6 +4034,7 @@ fn turn() -> Turn {
             outcome: Outcome::Failed("stopped".into()),
             raw: None,
             spent: None,
+            remedy: None,
         }),
         files: Some(files()),
         from: Some(Sender {

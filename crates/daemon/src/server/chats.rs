@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{Meta, SessionUpdate, StopReason};
 use clackatoo_protocol::{
-    AgentSession, ChatChoices, Error, Event, NewAgent, PaneId, Provider, ProviderModels, Setting,
-    SettingKind, TerminalId,
+    AgentSession, ChatChoices, Error, Event, NewAgent, NewTerminal, PaneId, PaneTerminal, Provider,
+    ProviderModels, Remedy, Response, Setting, SettingKind, TerminalId,
 };
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
@@ -1189,7 +1189,7 @@ impl Daemon {
             .then(|| self.login_of(name))
             .flatten();
         let chat = self.chat(id)?;
-        if let Some(wrote) = chat.update_as(update, login.as_deref()) {
+        if let Some(wrote) = chat.update_as(update, login.as_ref()) {
             self.take_written(id, &wrote);
         }
         let chat = self.chat(id)?;
@@ -1248,7 +1248,7 @@ impl Daemon {
         let Some(chat) = self.chat(terminal) else {
             return false;
         };
-        chat.answered_by(result, login.as_deref());
+        chat.answered_by(result, login.as_ref());
         if self
             .agents
             .usage
@@ -1643,21 +1643,103 @@ impl Daemon {
         self.flush_agent(agent);
     }
 
-    /// The command that logs in to the agent called `name`, if it's
-    /// running and one clackatoo knows how to log in to.
-    fn login_of(&self, name: &str) -> Option<String> {
-        let slot = (self.agents.running.values()).find(|slot| slot.spec.name == name)?;
-        agents::login_command(&slot.spec, self.config.agents.dir.as_deref())
+    /// How to log in to the agent called `name`, if it's one clackatoo
+    /// knows how to log in to: as it runs, or else as it's set up now.
+    fn login_of(&self, name: &str) -> Option<agents::Login> {
+        let running = (self.agents.running.values()).find(|slot| slot.spec.name == name);
+        let spec = running.map_or_else(|| self.agent_spec(name), |slot| slot.spec.clone());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        agents::login_command(&spec, self.config.agents.dir.as_deref(), &path)
+    }
+
+    /// Answers [`ChatAction::Remedy`](clackatoo_protocol::ChatAction::Remedy):
+    /// does what chat `id`'s turn `turn` failed asking for, as its end's
+    /// `remedy` says, in a new tab of the chat's workspace, in the chat's
+    /// folder. Signing in runs the agent's login command, from clackatoo's
+    /// own table of agents, never anything the agent said, as its program
+    /// and arguments with no shell; a new chat has the same agent, tools,
+    /// Task tool and browser. Refused unless the turn is the chat's last,
+    /// failed with a remedy, and the chat waits for a message or couldn't
+    /// start.
+    pub(super) fn remedy_chat(&mut self, id: TerminalId, turn: u32) -> Result<Response, Error> {
+        let chat = self.chat_ref(id).ok_or(Error::NotAChat(id))?;
+        let remedy = chat.remedy(turn).map_err(Error::Other)?;
+        let (agent, title, cwd, tools, task, browser, size) = (
+            chat.agent().to_owned(),
+            chat.agent_title().to_owned(),
+            chat.working_directory().to_owned(),
+            chat.tools(),
+            chat.task(),
+            chat.browser(),
+            chat.size(),
+        );
+        let workspaces = self.workspaces.get();
+        let workspace = (workspaces.pane_showing(id))
+            .and_then(|pane| Some(workspaces.find_pane(pane)?.0.id))
+            .ok_or_else(|| Error::Other("The chat isn't in a pane to open a tab beside.".into()))?;
+        let mut new_chat = false;
+        let terminal = match remedy {
+            Remedy::SignIn => {
+                let command = (self.login_of(&agent))
+                    .ok_or_else(|| format!("clackatoo doesn't know how to sign in to {title}."))
+                    .and_then(|login| {
+                        let program = login.said.first().cloned().unwrap_or_default();
+                        login
+                            .run
+                            .ok_or_else(|| format!("{program} isn't installed here."))
+                    })
+                    .map_err(Error::Other)?;
+                log::info!("chat {id}: signing in to {agent} in a new tab");
+                PaneTerminal::New(NewTerminal {
+                    size,
+                    command: Some(command),
+                    cwd: Some(cwd),
+                    record_to: None,
+                })
+            }
+            Remedy::NewChat => {
+                log::info!("chat {id}: a new chat with {agent}, as its last turn hit the limit");
+                new_chat = true;
+                PaneTerminal::Agent(NewAgent {
+                    size,
+                    cwd: Some(cwd),
+                    agent: Some(agent),
+                    tools,
+                    task,
+                    browser,
+                    model: None,
+                    resume: None,
+                })
+            }
+        };
+        // As many may work under the new chat as under this one, not more,
+        // as for a copy (see `fork_chat`).
+        let subagents = self.subagents_cap(id);
+        let made = self.new_tab(workspace, terminal)?;
+        let new = match &made {
+            Response::PaneCreated(pane) if new_chat => (self.workspaces.get().find_pane(*pane))
+                .and_then(|(.., found)| found.content.terminal()),
+            _ => None,
+        };
+        if let Some(new) = new
+            && let Some(chat) = self.chat(new)
+        {
+            chat.set_subagents(subagents);
+            self.collect_damage(new);
+        }
+        Ok(made)
     }
 
     /// What to tell a chat whose agent `agent` needs logging in to, if
     /// the agent is one clackatoo knows how to log in to.
     fn login_hint(&self, agent: AgentId) -> Option<String> {
         let slot = self.agents.running.get(&agent)?;
-        let login = agents::login_command(&slot.spec, self.config.agents.dir.as_deref())?;
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let login = agents::login_command(&slot.spec, self.config.agents.dir.as_deref(), &path)?;
         Some(format!(
-            "no one's logged in to it. Log in with `{login}` in a terminal, then send a \
-             message."
+            "no one's signed in to it. Sign in with `{}` in a terminal, then send a \
+             message.",
+            login.said.join(" ")
         ))
     }
 

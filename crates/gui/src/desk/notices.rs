@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use clackatoo_protocol::{ChatState, TerminalId};
 
-use super::{Desk, shown_in_names};
+use super::{Desk, shown_name};
 use crate::notify::{Notice, Notifier};
 use crate::options::Notify;
 
@@ -180,21 +180,13 @@ impl Desk {
 /// the spec lets a server read markup in it; the title isn't, as it's
 /// plain text by the spec, and GNOME escapes it itself.
 fn notice(title: &str, agent: &str, chat: TerminalId, why: Why) -> Notice {
-    let title: String = title
-        .chars()
-        .filter(|&c| shown_in_names(c))
-        .take(100)
-        .collect();
+    let title = shown_name(title, 100);
     let title = if title.trim().is_empty() {
         format!("Chat {chat}")
     } else {
         title
     };
-    let agent: String = agent
-        .chars()
-        .filter(|&c| shown_in_names(c))
-        .take(60)
-        .collect();
+    let agent = shown_name(agent, 60);
     let body = match why {
         Why::Finished => format!("{agent} finished"),
         Why::Failed => format!("{agent} stopped: something went wrong"),

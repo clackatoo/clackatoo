@@ -3384,6 +3384,14 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     let (why, raw) = last_failure(&node);
     assert!(why.contains("needs you to sign in again"), "{why}");
     assert_eq!(raw.as_deref(), Some("Authentication required"));
+    // And offers to sign in, as clackatoo knows the agent's login command
+    // (CLACKA-233).
+    let end = node.turns.last().and_then(|turn| turn.end.as_ref());
+    assert_eq!(
+        end.and_then(|end| end.remedy),
+        Some(clackatoo_protocol::Remedy::SignIn),
+        "{end:?}"
+    );
     // Codex's usage limit, in its words.
     let pane = focused_pane(&mut client);
     client
@@ -3396,6 +3404,54 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
         last_failure(&node).0,
         "the account's usage limit is reached. Codex said: `You've hit your usage limit. Try again at 3:05 PM.`"
     );
+}
+
+#[test]
+fn a_full_conversations_new_chat_opens_in_a_tab_and_only_for_its_last_failed_turn() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (claude, _) = start_chat_with(&mut client, "claude");
+    let remedy = |client: &mut Client, turn: usize| {
+        let turn = u32::try_from(turn).unwrap();
+        let action = ChatAction::Remedy { turn };
+        let asked = Request::Chat {
+            terminal: claude,
+            action,
+        };
+        client.request(&asked).unwrap()
+    };
+    // A turn that failed with nothing clackatoo can do about it.
+    let node = ask(&mut client, claude, "odd-failure");
+    let first = node.turns.len() - 1;
+    assert_eq!(node.turns[first].end.as_ref().unwrap().remedy, None);
+    assert!(matches!(remedy(&mut client, first), Response::Error(_)));
+    // One that hit the model's limit offers a new chat.
+    let node = ask(&mut client, claude, "conversation-full");
+    let last = node.turns.len() - 1;
+    assert_eq!(
+        node.turns[last].end.as_ref().and_then(|end| end.remedy),
+        Some(clackatoo_protocol::Remedy::NewChat),
+        "{:?}",
+        node.turns[last].end
+    );
+    // Never for an earlier turn, nor one past the last.
+    assert!(matches!(remedy(&mut client, first), Response::Error(_)));
+    assert!(matches!(remedy(&mut client, last + 1), Response::Error(_)));
+    let tabs = client.watch_workspaces().unwrap().list[0].tabs.len();
+    let Response::PaneCreated(pane) = remedy(&mut client, last) else {
+        panic!("a new tab");
+    };
+    let workspaces = client.watch_workspaces().unwrap();
+    assert_eq!(workspaces.list[0].tabs.len(), tabs + 1);
+    let new = (workspaces.list[0].tabs.iter())
+        .flat_map(|tab| tab.layout.panes())
+        .find(|found| found.id == pane)
+        .expect("the new tab's pane");
+    let chat = new.content.terminal().expect("a chat");
+    assert_ne!(chat, claude);
+    // With the same agent.
+    let node = wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    assert_eq!(node.agent, "Claude Code");
 }
 
 /// The pane focused in the first workspace's first tab.
@@ -4641,7 +4697,7 @@ fn an_agent_no_one_is_logged_in_to_says_how_to_log_in() {
     assert_eq!(
         node.state,
         ChatState::Failed(
-            "no one's logged in to it. Log in with `codex login` in a terminal, then send a \
+            "no one's signed in to it. Sign in with `codex login` in a terminal, then send a \
              message."
                 .into()
         )

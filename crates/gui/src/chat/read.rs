@@ -39,10 +39,11 @@
 //! | `cc`, `S` | Edit your message: rewind to before it, with it in the box to send again |
 //! | `[b` `]b` | The branch before or after, where the conversation's branches part |
 //! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
+//! | `R`, `gl`, `gC` | When the last turn failed: send it again; sign in again in a new tab; start a new chat with the agent |
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 //! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
 
-use clackatoo_protocol::{ChatAction, ChatNode, Item, Tool, ToolKind};
+use clackatoo_protocol::{ChatAction, ChatNode, Item, Remedy, Tool, ToolKind};
 use winit::keyboard::{Key, NamedKey};
 
 use super::card::Card;
@@ -93,6 +94,9 @@ pub(crate) enum ChatKey {
     },
     /// `R`: the last message, which failed, sent again.
     Resend,
+    /// `gl`, or `gC` for a new chat: what clackatoo can do about the last
+    /// turn's failure, asked of the daemon.
+    Remedy(Remedy),
     /// `gf` and `gx`: the file a message mentions under the cursor, or the
     /// link there, opened.
     OpenLink,
@@ -158,6 +162,8 @@ impl Dialect for ChatKeys {
                 half: true,
             } => "Scroll table left half a view",
             ChatKey::Resend => "Send the failed message again",
+            ChatKey::Remedy(Remedy::SignIn) => "Sign in to the agent again, in a new tab",
+            ChatKey::Remedy(Remedy::NewChat) => "Start a new chat with the agent, in a new tab",
             ChatKey::OpenLink => "Open file, link or subagent under cursor",
             ChatKey::Output => "Show command's output in a terminal",
             ChatKey::Branch { back: true } => "Previous branch of the conversation",
@@ -209,13 +215,18 @@ impl Dialect for ChatKeys {
         &self,
         stroke: Stroke,
         _keys: &mut Reader<'_>,
-        _visual: bool,
+        visual: bool,
     ) -> Option<Read<ChatKey>> {
-        match stroke.plain()? {
-            'f' | 'x' => Some(Read::Yes(ChatKey::OpenLink)),
-            'o' => Some(Read::Yes(ChatKey::Output)),
-            _ => None,
-        }
+        let key = match stroke.plain()? {
+            'f' | 'x' => ChatKey::OpenLink,
+            'o' => ChatKey::Output,
+            // Not `gn`, Vim's selecting the next match, nor `gc`,
+            // Neovim's comment: `l` to sign in, `C` for a chat.
+            'l' if !visual => ChatKey::Remedy(Remedy::SignIn),
+            'C' if !visual => ChatKey::Remedy(Remedy::NewChat),
+            _ => return None,
+        };
+        Some(Read::Yes(key))
     }
 
     fn after_z(
@@ -752,6 +763,11 @@ impl ChatView {
                     self.say(
                         "the last message didn't fail, so there's nothing to send again".into(),
                     );
+                    return (false, false);
+                }
+            }
+            ChatKey::Remedy(kind) => {
+                if !self.take_remedy(kind) {
                     return (false, false);
                 }
             }

@@ -688,6 +688,7 @@ mod tests {
             outcome: Outcome::Done,
             raw: None,
             spent: None,
+            remedy: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![
             Patch::Chat(ChatPatch::Turn {

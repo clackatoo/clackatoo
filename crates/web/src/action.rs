@@ -79,6 +79,9 @@ pub enum Action {
     /// Puts the agent's slash command of this name in the message being
     /// typed.
     Command(String),
+    /// Asks the daemon to do what clackatoo can about this turn's failure,
+    /// by its index: sign in again, or start a new chat.
+    Remedy(u32),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -234,6 +237,7 @@ impl Action {
             Self::Decline(question) => format!("decline:{question}"),
             Self::OpenLink(question) => format!("open-link:{question}"),
             Self::Command(name) => format!("command:{name}"),
+            Self::Remedy(turn) => format!("remedy:{turn}"),
         }
     }
 
@@ -291,6 +295,7 @@ impl Action {
             ("decline", question) => Self::Decline(question.parse().ok()?),
             ("open-link", question) => Self::OpenLink(question.parse().ok()?),
             ("command", name) if !name.is_empty() => Self::Command(name.to_owned()),
+            ("remedy", turn) => Self::Remedy(turn.parse().ok()?),
             _ => return None,
         })
     }
@@ -366,6 +371,7 @@ mod tests {
             Action::Bring(TabId(4)),
             Action::Dismiss(TabId(5)),
             Action::Command("mcp:fs:list".into()),
+            Action::Remedy(3),
             Action::Fit,
             Action::Unfit,
             Action::Type,

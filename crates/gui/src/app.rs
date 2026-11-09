@@ -4271,12 +4271,10 @@ const MOST_TITLE: usize = 256;
 
 /// `title`, a program's, a page's or a chat's, as the window's title shows
 /// it: as tab names are, without control characters or those that turn
-/// text round, and at most [`MOST_TITLE`] characters of it.
+/// text round, but for joiners emoji need, and at most [`MOST_TITLE`]
+/// characters of it.
 fn shown_title(title: &str) -> String {
-    (title.chars())
-        .filter(|&ch| crate::desk::shown_in_names(ch))
-        .take(MOST_TITLE)
-        .collect()
+    crate::desk::shown_name(title, MOST_TITLE)
 }
 
 /// The window's title: the focused pane's, `title`, as [`shown_title`]
@@ -4309,6 +4307,14 @@ mod tests {
         assert_eq!(shown_title("\u{2066}\x1b"), "");
         // Nor with the Arabic letter mark, or separators that break a line.
         assert_eq!(shown_title("a\u{061C}b\u{2028}c\u{2029}d\u{200B}"), "abcd");
+        // An emoji's joiners stay, but none next to ASCII; what's left out
+        // isn't there to be joined to.
+        let family = "👩\u{200D}👩\u{200D}👧 notes";
+        assert_eq!(shown_title(family), family);
+        assert_eq!(
+            shown_title("a\u{200D}b 👩\u{200D}\x1b👧 \u{200D}"),
+            "ab 👩\u{200D}👧 "
+        );
     }
 
     #[test]

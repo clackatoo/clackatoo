@@ -307,9 +307,11 @@ If you have a chat open, ask it to ask you, with its question tool, which of two
 
 When the model is overloaded or the connection drops, the agent tries again by itself: the line above the box says so while it waits, as `Retrying Claude, attempt 2 of 10.` If a turn fails anyway, it says why in plain words and what to do, such as signing in again with the command it names, or that the account's usage limit is reached; what the agent itself said follows underneath. The last turn, if it failed, has a **Send again** button, and `R` in normal mode does the same: the same message, images and all, as a new turn. If that turn already started commands, changes to files or other tools, the bar says so first: ask again within 5 seconds to send it anyway.
 
+Where clackatoo can do what the failure says to, a button beside it does. **→ Sign in**, or `gl`, when no one's signed in: a new tab runs the agent's own login command, such as `codex login`, from clackatoo's list of agents, never from what the agent said. Sign in there, then send the message again. **+ New chat**, or `gC`, when the conversation hit the model's limit: a new chat with the same agent in the same folder, in a new tab.
+
 A line across a turn shows where the agent compacted its context to make room, with how many tokens before and after. A command that failed says its exit code on its card, as `$ cargo test · exit 101`. Under each turn, on the right, is what it spent, its tokens and, where the agent says, its cost; `K` shows the session's cost with its context and limits. `:set nochatcost` hides both.
 
-If a turn in a chat of yours has failed, press `Esc`, then `R` to send it again.
+If a turn in a chat of yours has failed, press `Esc`, then `R` to send it again, or `gl` or `gC` if its button offers to sign in or start a new chat. Ctrl+? lists the keys.
 
 ## Going on through upgrades
 
