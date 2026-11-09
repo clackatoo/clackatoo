@@ -130,7 +130,7 @@ pub use form::{
 pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use image::{
     ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, ImageNews, Picture, PictureId,
-    PictureState, dropped_words, image_words,
+    PictureState, dropped_words, image_words, plain_path,
 };
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
 pub use mention::{

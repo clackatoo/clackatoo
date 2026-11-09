@@ -217,6 +217,27 @@ pub enum ImageNews {
     },
 }
 
+/// `path`, a relative path as a Markdown file names an image, written
+/// plainly: `.` parts left out, and each `..` taking off the part before
+/// it. `None` if it's absolute, empty, or goes up out of where it starts.
+#[must_use]
+pub fn plain_path(path: &str) -> Option<String> {
+    if path.starts_with('/') || path.contains('\0') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// The words in place of an image let go to keep within `limit` bytes.
 #[must_use]
 pub fn dropped_words(limit: u64) -> String {
@@ -231,4 +252,23 @@ pub fn dropped_words(limit: u64) -> String {
 #[must_use]
 pub fn image_words(width: u32, height: u32) -> String {
     format!("[image {width}×{height}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_are_written_plainly_and_never_go_up_out_of_where_they_start() {
+        assert_eq!(plain_path("img/plan.png").as_deref(), Some("img/plan.png"));
+        assert_eq!(
+            plain_path("./img//../img/plan.png").as_deref(),
+            Some("img/plan.png")
+        );
+        assert_eq!(plain_path("a/../b.png").as_deref(), Some("b.png"));
+        assert_eq!(plain_path("../b.png"), None);
+        assert_eq!(plain_path("a/../../b.png"), None);
+        assert_eq!(plain_path("/etc/passwd"), None);
+        assert_eq!(plain_path("."), None);
+    }
 }

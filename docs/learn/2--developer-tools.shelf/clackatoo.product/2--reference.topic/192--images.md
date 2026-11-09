@@ -53,11 +53,15 @@ shows each image a file names, as `![the plan](img/plan.png)`, below the block
 that names it, as wide as it is or as the column. Its description stays in its
 place, after `▣`.
 
-Only a relative path, from the folder the Markdown file is in, is shown. It may
-climb out of that folder with `..`, but the daemon never reads one through a
-link at its path, and never reads a pipe or a device. An absolute path, a
-path starting `~`, or an image from the web shows only its description:
-clackatoo doesn't fetch anything from the web for Markdown.
+Only a relative path, from the folder the Markdown file is in, is shown. In a
+folder you [trust](~clackatoo/reference/languages) it may climb out of that
+folder with `..`, as far as the root of the repository it's in, but no
+further; in a folder not trusted, only a path down from the file's own folder
+is shown. The daemon never reads one through a link, at any part of its path,
+and never reads a pipe or a device. A Markdown file shows at most 64 images,
+each asked for as it comes near the view. An absolute path, a path starting
+`~`, or an image from the web shows only its description: clackatoo doesn't
+fetch anything from the web for Markdown.
 
 ## Images in chats
 

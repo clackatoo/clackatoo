@@ -135,14 +135,18 @@ pub(crate) fn dir_below(root: &Path, below: &Path, make: bool) -> io::Result<Own
     Ok(at)
 }
 
-/// Opens the directory at `path` to open files from with [`open_at`],
-/// following links to it, as the folder a file the user opened is in.
-pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
-    Ok(rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?)
+/// Opens the file at `below`, a plain relative path (no `..`), from the
+/// directory at `root`, to read, if it's a regular file: never through a
+/// link, at any part of the path, nor out of `root`, as [`dir_below`]
+/// opens its folder.
+pub(crate) fn open_below(root: &Path, below: &Path) -> io::Result<File> {
+    let refuse = |why: &str| io::Error::new(io::ErrorKind::InvalidInput, why.to_owned());
+    let name = below
+        .file_name()
+        .ok_or_else(|| refuse("it isn't a file's path"))?;
+    let folder = below.parent().unwrap_or_else(|| Path::new(""));
+    let dir = dir_below(root, folder, false)?;
+    open_at(&dir, Path::new(name), Links::Refuse)
 }
 
 /// The text of the small file at `path`, if it's a regular file, not a

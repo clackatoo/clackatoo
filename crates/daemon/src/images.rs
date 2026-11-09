@@ -131,13 +131,13 @@ pub(crate) enum Source {
     /// A file the user opened, read whole as [`regular::open`] opens one,
     /// following a link at its path.
     File(PathBuf),
-    /// A file at a relative `path` from the folder `dir`, as a Markdown
-    /// file names its images: never through a link at its path, nor at an
-    /// absolute one.
+    /// A file at `path` below the folder `root`, as a Markdown file names
+    /// its images: never through a link, at any part of the path, nor out
+    /// of `root` (see [`regular::open_below`]).
     Below {
         /// The folder.
-        dir: PathBuf,
-        /// The path from it.
+        root: PathBuf,
+        /// The path below it, written plainly, with no `..`.
         path: PathBuf,
     },
     /// Pixels, four bytes each (red, green, blue, alpha), row by row:
@@ -1146,13 +1146,7 @@ fn read_source(source: Source, most: u64) -> Result<Vec<u8>, String> {
             .decode(data)
             .map_err(|_| "it isn't base64".to_owned())?,
         Source::File(path) => whole(opened(regular::open(&path, Links::Follow))?)?,
-        Source::Below { dir, path } => {
-            if !below(&path) {
-                return Err("only a path from the file's folder is read".into());
-            }
-            let dir = opened(regular::open_dir(&dir))?;
-            whole(opened(regular::open_at(&dir, &path, Links::Refuse))?)?
-        }
+        Source::Below { root, path } => whole(opened(regular::open_below(&root, &path))?)?,
         Source::Pixels {
             width,
             height,
@@ -1194,20 +1188,6 @@ fn opened<F>(result: std::io::Result<F>) -> Result<F, String> {
         std::io::ErrorKind::IsADirectory => "it's a folder".to_owned(),
         _ => err.to_string(),
     })
-}
-
-/// Whether `path` stays a relative path, as a Markdown file's images are
-/// read by: not absolute, and naming no root or prefix.
-pub(crate) fn below(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && path.components().all(|part| {
-            matches!(
-                part,
-                std::path::Component::Normal(_)
-                    | std::path::Component::CurDir
-                    | std::path::Component::ParentDir
-            )
-        })
 }
 
 /// `rgba`, `width` by `height` pixels, as a PNG, quickly compressed.
@@ -1588,7 +1568,7 @@ mod tests {
         let mut store = Images::<u32>::new(limits, None);
         let owner = ImageFrom::Buffer(BufferId(1));
         let below = |path: &str| Source::Below {
-            dir: dir.path().to_owned(),
+            root: dir.path().to_owned(),
             path: path.into(),
         };
         for (n, source) in [
@@ -1747,14 +1727,5 @@ mod tests {
         );
         assert_eq!(Limits::from_env(Some(OsStr::new("64"))), Limits::default());
         assert_eq!(Limits::from_env(Some(OsStr::new("9,8"))), Limits::default());
-    }
-
-    #[test]
-    fn markdown_paths_stay_relative() {
-        assert!(below(Path::new("a.png")));
-        assert!(below(Path::new("../docs/a.png")));
-        assert!(below(Path::new("./a.png")));
-        assert!(!below(Path::new("/etc/a.png")));
-        assert!(!below(Path::new("")));
     }
 }

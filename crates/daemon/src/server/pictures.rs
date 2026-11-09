@@ -286,13 +286,28 @@ impl Daemon {
         if path.contains("://") || path.starts_with("data:") {
             return refused("images from the web aren't shown");
         }
-        if !crate::images::below(Path::new(&path)) {
-            return refused("only a path from the file's folder is shown");
-        }
         let Some(dir) = slot.buffer.path().parent().map(Path::to_owned) else {
             return refused("the file has no folder");
         };
-        let key = (buffer, path);
+        // From the project's root, if the folder's trusted, and else only
+        // from the file's own folder down.
+        let (root, from_root) = self.markdown_root(&dir);
+        let trusted = from_root.is_some();
+        let from_root = from_root.unwrap_or_default();
+        if !trusted && path.split('/').any(|part| part == "..") {
+            return refused(
+                "in a folder not trusted, only a path down from the file's folder is shown",
+            );
+        }
+        let joined = if from_root.as_os_str().is_empty() {
+            path.clone()
+        } else {
+            format!("{}/{path}", from_root.display())
+        };
+        let Some(plain) = clackatoo_protocol::plain_path(&joined) else {
+            return refused("only a path within the file's project is shown");
+        };
+        let key = (buffer, plain);
         match self.pictures.markdown.get_mut(&key) {
             Some(Markdown::Loading(waiting)) => {
                 if !waiting.contains(&token) {
@@ -310,7 +325,7 @@ impl Daemon {
             Some(Markdown::Read(Ok(_))) | None => {}
         }
         let source = Source::Below {
-            dir,
+            root,
             path: PathBuf::from(&key.1),
         };
         let why = Why::Markdown {
@@ -324,6 +339,23 @@ impl Daemon {
             .markdown
             .insert(key, Markdown::Loading(vec![token]));
         Response::Image(ImageAnswer::Loading)
+    }
+
+    /// The folder Markdown in the folder `dir` may name images from, and
+    /// where `dir` is in it: its project's, the repository it's in, or
+    /// else `dir` itself, if it's trusted (see `trust.rs`); else `dir`
+    /// alone, and `None`.
+    fn markdown_root(&self, dir: &Path) -> (PathBuf, Option<PathBuf>) {
+        if self.trust.folders.trusts(dir) != Some(true) {
+            return (dir.to_owned(), None);
+        }
+        // Stats, as opening a file does: up to the repository's root.
+        let repository = (dir.ancestors().take(64))
+            .find(|folder| folder.join(".git").symlink_metadata().is_ok())
+            .filter(|root| self.trust.folders.trusts(root) == Some(true));
+        let root = repository.unwrap_or(dir);
+        let from_root = dir.strip_prefix(root).unwrap_or(Path::new("")).to_owned();
+        (root.to_owned(), Some(from_root))
     }
 
     /// Takes in what the images' thread has done: pictures read, Markdown's
@@ -785,63 +817,96 @@ mod tests {
         assert_eq!(shown(&mut daemon, picture), PictureState::Shown(read));
     }
 
-    #[test]
-    fn markdowns_images_are_read_only_from_below_its_folder_never_through_a_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut daemon, _) = daemon_with_chat(dir.path());
-        let docs = dir.path().join("docs");
-        std::fs::create_dir(&docs).unwrap();
-        std::fs::write(docs.join("notes.md"), "![plan](img/plan.png)").unwrap();
-        std::fs::create_dir(docs.join("img")).unwrap();
-        std::fs::write(docs.join("img/plan.png"), png(4, 4, 1)).unwrap();
-        std::fs::write(dir.path().join("up.png"), png(2, 2, 2)).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("up.png"), docs.join("link.png")).unwrap();
+    /// The answer to asking for each of `paths`, read, from Markdown in
+    /// `docs/notes.md` in a project at `dir`: a repository, its folder
+    /// trusted if `trusted`.
+    fn markdown_answers(
+        dir: &Path,
+        trusted: bool,
+        paths: &[&str],
+    ) -> Vec<Result<ImageInfo, String>> {
+        let (mut daemon, _) = daemon_with_chat(dir);
+        if !trusted {
+            daemon.trust.folders = crate::trust::Trust::load(&crate::Trusting::ThisRun);
+        }
         let file = OpenFile {
-            path: docs.join("notes.md").display().to_string(),
+            path: dir.join("docs/notes.md").display().to_string(),
             cwd: None,
         };
         let buffer = daemon.open_buffer(file, None).unwrap();
-        let asked = |daemon: &mut Daemon, path: &str| daemon.image_at(ASKER, buffer, path.into());
-        assert_eq!(
-            asked(&mut daemon, "img/plan.png"),
-            Response::Image(ImageAnswer::Loading)
-        );
-        assert_eq!(
-            asked(&mut daemon, "../up.png"),
-            Response::Image(ImageAnswer::Loading)
-        );
-        assert_eq!(
-            asked(&mut daemon, "link.png"),
-            Response::Image(ImageAnswer::Loading)
-        );
-        for refused in [
+        for path in paths {
+            daemon.image_at(ASKER, buffer, (*path).into());
+        }
+        daemon.take_images(Some(WAIT));
+        (paths.iter())
+            .map(
+                |path| match daemon.image_at(ASKER, buffer, (*path).into()) {
+                    Response::Image(ImageAnswer::Found(info)) => {
+                        assert_eq!(
+                            fetch(&mut daemon, ImageFrom::Buffer(buffer), info.id).len() as u64,
+                            info.bytes
+                        );
+                        Ok(info)
+                    }
+                    Response::Image(ImageAnswer::Failed(why)) => Err(why),
+                    other => panic!("{path}: {other:?}"),
+                },
+            )
+            .collect()
+    }
+
+    /// Markdown's images are read from below its project's root, in a
+    /// folder trusted, `..` taking them up only as far as that; in one not
+    /// trusted, only from the file's own folder down; never through a link
+    /// at any part of the path; and never from the web.
+    #[test]
+    fn markdowns_images_are_read_only_from_within_its_project_never_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("docs/img")).unwrap();
+        std::fs::write(root.join("docs/notes.md"), "![plan](img/plan.png)").unwrap();
+        std::fs::write(root.join("docs/img/plan.png"), png(4, 4, 1)).unwrap();
+        std::fs::write(root.join("up.png"), png(2, 2, 2)).unwrap();
+        std::os::unix::fs::symlink(root.join("up.png"), root.join("docs/link.png")).unwrap();
+        std::fs::create_dir(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join("elsewhere/x.png"), png(3, 3, 3)).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("docs/linked")).unwrap();
+        let paths = [
+            "img/plan.png",
+            "./img/../img/plan.png",
+            "../up.png",
+            "../../up.png",
+            "link.png",
+            "linked/x.png",
             "/etc/passwd",
             "https://example.com/x.png",
             "data:image/png;base64,AA",
-        ] {
-            assert!(
-                matches!(
-                    asked(&mut daemon, refused),
-                    Response::Image(ImageAnswer::Failed(_))
-                ),
-                "{refused}"
-            );
+        ];
+        let trusted = markdown_answers(root, true, &paths);
+        assert_eq!(trusted[0].as_ref().map(|info| info.width), Ok(4));
+        assert_eq!(trusted[1], trusted[0], "the same image, read once");
+        assert_eq!(
+            trusted[2].as_ref().map(|info| info.width),
+            Ok(2),
+            "within the project"
+        );
+        for (path, answer) in paths.iter().zip(&trusted).skip(3) {
+            assert!(answer.is_err(), "{path} was read");
         }
-        daemon.take_images(Some(WAIT));
-        let Response::Image(ImageAnswer::Found(plan)) = asked(&mut daemon, "img/plan.png") else {
-            panic!("not read");
-        };
-        assert_eq!((plan.width, plan.height), (4, 4));
-        let from = ImageFrom::Buffer(buffer);
-        assert_eq!(fetch(&mut daemon, from, plan.id), png(4, 4, 1));
-        assert!(matches!(
-            asked(&mut daemon, "../up.png"),
-            Response::Image(ImageAnswer::Found(_))
-        ));
-        let Response::Image(ImageAnswer::Failed(why)) = asked(&mut daemon, "link.png") else {
-            panic!("read through a link");
-        };
-        assert!(why.contains("link"), "{why}");
+        assert!(
+            trusted[4].as_ref().unwrap_err().contains("link"),
+            "{trusted:?}"
+        );
+        let untrusted = markdown_answers(root, false, &paths);
+        assert_eq!(untrusted[0].as_ref().map(|info| info.width), Ok(4));
+        assert!(
+            untrusted[2].as_ref().unwrap_err().contains("not trusted"),
+            "{untrusted:?}"
+        );
+        for (path, answer) in paths.iter().zip(&untrusted).skip(3) {
+            assert!(answer.is_err(), "{path} was read");
+        }
     }
 
     #[test]
