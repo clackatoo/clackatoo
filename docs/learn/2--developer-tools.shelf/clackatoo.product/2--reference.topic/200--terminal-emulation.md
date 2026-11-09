@@ -7,7 +7,7 @@ related:
   - clackatoo/getting-started/what-is-clackatoo
 ---
 
-clackatoo emulates enough of xterm for shells, ncurses programs such as htop, and vim, under `TERM=xterm-256color`. Sequences it doesn't support are ignored, as xterm ignores ones it doesn't know.
+clackatoo emulates enough of xterm for shells, ncurses programs such as htop, and vim, under `TERM=xterm-256color`, with the extensions modern terminals such as kitty, foot, WezTerm and Ghostty share: the kitty keyboard protocol, synchronized output, styled and coloured underlines, and a program's progress shown on its tab. Sequences it doesn't support are ignored, as xterm ignores ones it doesn't know.
 
 ## The environment
 
@@ -67,12 +67,12 @@ A program you started from a shell is no different from one the daemon started: 
 | `ESC` | `7` `8` (save/restore cursor), `D` (index), `E` (next line), `H` (set tab stop), `M` (reverse index), `c` (full reset), `#8` (screen alignment test), `(` and `)` with `B` (ASCII) or `0` (DEC line drawing) |
 | `CSI` cursor | `A` `B` `C` `D` `E` `F` `G` `H` `I` `Z` `` ` `` `a` `d` `e` `f`, and `s` `u` without parameters |
 | `CSI` editing | `@` `J` (including `3J` to clear scrollback) `K` `L` `M` `P` `S` `T` `X` `b` (repeat) |
-| `CSI` other | `g` (clear tab stops), `r` (scroll region), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn) |
+| `CSI` other | `g` (clear tab stops), `r` (scroll region), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn), `t` (window operations: `22` and `23` push and pop the title, with a second parameter of 0 or 2, ten titles deep, each kept to 4096 bytes; see [queries](#queries-answered) for `18`), `>u` `<u` `=u` (the [kitty keyboard protocol](#keyboard)) |
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
-| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events) |
+| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colours for text, background and underline (`58`), in both the `;` and `:` spellings. |
-| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/window#commands); the marks also say whether a [background tab](~clackatoo/reference/window#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/window#keeping-a-terminal-running) runs again) |
+| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/window#commands); the marks also say whether a [background tab](~clackatoo/reference/window#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/window#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)) |
 
 ## Queries answered
 
@@ -83,13 +83,49 @@ A program you started from a shell is no different from one the daemon started: 
 | `OSC 52 ; c ; ?` (clipboard) | `OSC 52 ; c ; <base64> ST`, empty if refused or unanswered within 2 s, ended with BEL if the query was |
 | `CSI 6 n` and `CSI ? 6 n` (cursor position) | `CSI <line> ; <col> R`, with `?` for the second form. Relative to the scroll region in origin mode. |
 | `CSI > q` (terminal version) | `DCS > \| clackatoo <version> ST` |
+| `CSI > c` (secondary device attributes) | `CSI > 1 ; <version> ; 0 c`: a VT220, its version clackatoo's year and month, as `202611`, as foot answers with its own. vim reads a number this high as a modern terminal's, not an old xterm's. |
+| `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 included. 2027 (grapheme clustering) is answered 0: not every character's width is as Unicode's segmentation would have it. |
+| `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
+| `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels (`14t`, `16t`) aren't answered: the daemon knows the terminal's size in cells alone. Nor is the title read back (`21t`), which would let a program type what it set. |
+| `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say. It says `xterm-256color`'s name (`TN`) and colours (`Co`), 24-bit colour (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and coloured underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
+| `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own) and the scroll region (`r`); `DCS 0 $ r ST` for any other. |
 
 A program that asks faster than it reads the answers, as one at the far end of an ssh connection that has stopped reading can, gets no more once 64 KiB of answers and input wait for it. Answers are dropped whole, never cut, and what you type still goes in. The clipboard's answers go the same way, and so do answers to a program still reading a long paste: it gets none until it has read most of it.
+
+## Keyboard
+
+Keys are sent as xterm sends them, which nearly every program understands, until a program asks for the kitty keyboard protocol (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>), as fish 4, Neovim, Helix and Kakoune do. xterm's encoding can't tell some keys apart: Esc from the start of a sequence, Ctrl+I from Tab, Shift+Enter from Enter. The protocol sends those as sequences of their own.
+
+A program asks a flag at a time:
+
+| Flag | What changes |
+|---|---|
+| 1 (disambiguate) | Esc, and keys with Ctrl or Alt, are sent as `CSI <key> ; <modifiers> u`. Enter, Tab and Backspace with no modifiers are sent as before, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without Shift is text. |
+| 4 (alternate keys) | Those sequences also say the key Shift made, and the key in a US layout, as `CSI 97:65;2u`. |
+| 8 (all keys) | Every key is a sequence, text and all. |
+| 16 (text) | With 8, each sequence also says the text its key types. |
+
+Flag 2, key repeats and releases, isn't kept, so a program asking for it sees from `CSI ? u` that it isn't there: windows send presses alone. Nor are Super, Hyper, Meta, Caps Lock and Num Lock sent as modifiers, or modifier keys pressed alone. The keypad's keys have numbers of their own, but type their text without Ctrl or Alt.
+
+A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets (1), adds (2) or takes away (3) flags in effect. Each screen keeps a stack of its own, sixteen deep, so a full-screen program leaves the shell's alone, and a full reset (`ESC c`) ends them all. The window encodes keys this way; the web app on your phone sends xterm's encoding still. A window older than protocol 137 does too, which programs that ask still understand.
+
+## Synchronized output
+
+A program that draws its screen in pieces can say it's drawing a frame (`CSI ? 2026 h`) and that it's done (`CSI ? 2026 l`), as Neovim, Helix, tmux and programs built on crossterm do. Meanwhile, the daemon sends windows nothing of that terminal, and what changed goes out whole once the frame is drawn, so you never see half a redraw. A frame that takes longer than 150 ms is shown as far as it got, and nothing more is held back until the program starts another, so a program that never says it's done only looks slow.
+
+## Progress
+
+A program can say how far a long task has got with `OSC 9 ; 4 ; <state> ; <percent> ST`, as ConEmu began it and Windows Terminal, Ghostty, kitty and WezTerm show it: state 1 is under way at a percent, 2 failed, 3 busy with no telling how far, 4 paused, and 0 done. The tab it's in ends its name with ` 42%`, ` ✗` (and the percent, if given) failed, ` …` busy, or ` ‖` paused: the focused pane's, or else the first of the tab's panes to say, in a tab shown or not. It goes once the program says it's done (state 0), or once the shell's next prompt shows the program has ended (OSC 133 `A`). Any other `OSC 9`, iTerm2's notification, is ignored.
 
 ## Not supported yet
 
 These are ignored:
 
-- Secondary device attributes (`CSI > c`) and the kitty keyboard protocol.
-- Left and right margins (`CSI s` with parameters).
+- The kitty graphics protocol (`APC G`), sixels and other images.
+- Questions about colours: `OSC 10`, `11` and `12` (foreground, background, cursor) and `OSC 4` (a palette entry), and setting them (`OSC 4`, `104` and the others). Programs that ask, as Neovim and vim do to choose a light or dark background, get no answer and keep their default.
+- Desktop notifications from programs: `OSC 99`, `OSC 777` and iTerm2's `OSC 9`.
+- Key repeats and releases (the kitty keyboard protocol's flag 2), and Super, Hyper and Meta as modifiers.
+- Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).
+- Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).
 - Variation selector 16 does not widen the character before it.
+- An upgrade in place doesn't carry the kitty keyboard flags, the titles pushed, or a program's progress: keys go in xterm's encoding until the program asks again, as it does when it next starts.
