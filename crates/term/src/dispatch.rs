@@ -198,6 +198,9 @@ impl Perform for Emulator {
                 }
             }
             [b"133", kind, options @ ..] => self.shell_mark(kind, options),
+            // ConEmu's progress; any other OSC 9 is iTerm2's notification,
+            // which isn't shown.
+            [b"9", b"4", progress @ ..] => self.set_progress(progress),
             _ => log::trace!(
                 "unhandled OSC {:?}",
                 params.first().map(|p| String::from_utf8_lossy(p))

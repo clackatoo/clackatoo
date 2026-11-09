@@ -1113,6 +1113,27 @@ mod other_sequences {
     }
 
     #[test]
+    fn programs_say_how_far_a_task_has_got_until_the_next_prompt() {
+        use crate::TaskProgress;
+        let mut t = after(5, 1, "\x1b]9;4;1;42\x07");
+        assert_eq!(t.progress(), Some(TaskProgress::Running(42)));
+        t.advance(b"\x1b]9;4;3\x1b\\");
+        assert_eq!(t.progress(), Some(TaskProgress::Busy));
+        // Anything else after OSC 9 is a notification, and a state this
+        // terminal doesn't know changes nothing.
+        t.advance(b"\x1b]9;done\x07\x1b]9;4;7;1\x07");
+        assert_eq!(t.progress(), Some(TaskProgress::Busy));
+        t.advance(b"\x1b]9;4;0\x07");
+        assert_eq!(t.progress(), None);
+        // A program that never says it's done is, once the shell prompts
+        // again.
+        t.advance(b"\x1b]9;4;2;50\x07");
+        assert_eq!(t.progress(), Some(TaskProgress::Failed(Some(50))));
+        t.advance(b"\x1b]133;A\x07");
+        assert_eq!(t.progress(), None);
+    }
+
+    #[test]
     fn each_screen_keeps_its_own_keyboard_flags() {
         let mut t = after(5, 2, "\x1b[>1u");
         assert_eq!(t.keyboard(), 1);
@@ -1219,6 +1240,8 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         b"\x1b]8;;https://a.example/\x1b\\".to_vec(),
         b"\x1b]8;id=x;file://host/tmp/b\x07".to_vec(),
         b"\x1b]8;;\x1b\\".to_vec(),
+        b"\x1b]9;4;1;50\x07".to_vec(),
+        b"\x1b]9;4;0\x07".to_vec(),
     ]);
     prop_oneof![4 => printable, 2 => control, 3 => csi, 1 => modes, 1 => esc, 1 => any::<u8>().prop_map(|b| vec![b])]
 }

@@ -16,6 +16,7 @@ use crate::keyboard;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::parser::Parser;
+use crate::progress::TaskProgress;
 use crate::requests::{self, Request};
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
@@ -260,6 +261,13 @@ impl Terminal {
         &self.emulator.title
     }
 
+    /// How far the program's task has got, as it last said (OSC 9;4),
+    /// until it says it's done or the shell shows its next prompt.
+    #[must_use]
+    pub fn progress(&self) -> Option<TaskProgress> {
+        self.emulator.progress
+    }
+
     /// The working directory the shell last reported (OSC 7), as a path.
     #[must_use]
     pub fn cwd(&self) -> Option<&str> {
@@ -479,6 +487,7 @@ impl Terminal {
         AskedSnapshot::capture(
             [&emulator.keyboard_primary, &emulator.keyboard_alternate],
             &emulator.titles,
+            emulator.progress,
         )
     }
 
@@ -486,8 +495,9 @@ impl Terminal {
     /// [`asked_snapshot`](Self::asked_snapshot) taken with the
     /// [`snapshot`](Self::snapshot) this terminal was restored from.
     pub fn restore_asked(&mut self, snapshot: &AskedSnapshot) {
-        let ([primary, alternate], titles) = snapshot.restore();
+        let ([primary, alternate], titles, progress) = snapshot.restore();
         let emulator = &mut self.emulator;
+        emulator.progress = progress;
         emulator.keyboard_primary = primary;
         emulator.keyboard_alternate = alternate;
         let newest = titles.len().saturating_sub(MOST_TITLES);
@@ -819,6 +829,8 @@ pub(crate) struct Emulator {
     /// screen (see [`crate::keyboard`]).
     keyboard_primary: keyboard::Stack,
     keyboard_alternate: keyboard::Stack,
+    /// How far the program's task has got, as it last said.
+    progress: Option<TaskProgress>,
     /// The device control string being collected, if it's a request this
     /// terminal answers (see [`crate::requests`]).
     pub(crate) request: Option<Request>,
@@ -877,6 +889,7 @@ impl Emulator {
             titles: Vec::new(),
             keyboard_primary: keyboard::Stack::default(),
             keyboard_alternate: keyboard::Stack::default(),
+            progress: None,
             request: None,
             cwd: None,
             blocks: Blocks::default(),
@@ -1866,6 +1879,8 @@ impl Emulator {
                 self.shell_mark(kind, options);
             }
             b"A" => {
+                // The program that said how far it had got has ended.
+                self.progress = None;
                 let block = self.blocks.prompt();
                 self.mark_cursor_row(block, false);
                 // Forget the blocks no row is marked with any more.
@@ -1975,6 +1990,13 @@ impl Emulator {
     #[cfg(test)]
     pub(crate) fn link_count(&self) -> usize {
         self.links.len()
+    }
+
+    /// OSC 9;4: how far the program's task has got, as `params` say.
+    pub(crate) fn set_progress(&mut self, params: &[&[u8]]) {
+        if let Some(progress) = TaskProgress::parse(params) {
+            self.progress = progress;
+        }
     }
 
     /// OSC 7: the shell's working directory, as a `file://` URL. A path

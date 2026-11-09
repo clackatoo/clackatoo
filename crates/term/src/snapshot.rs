@@ -33,6 +33,7 @@ use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
 use crate::keyboard;
 use crate::links::{Hyperlink, LinkId, Links};
 use crate::mouse::{MouseEncoding, MouseTracking};
+use crate::progress::TaskProgress;
 use crate::row::{Row, RowBuilder};
 use crate::style::{
     Attributes, Color as LiveColor, Style as LiveStyle, Underline as LiveUnderline,
@@ -128,6 +129,18 @@ pub struct AskedSnapshot {
     pub(crate) keyboard: [KeyboardFlags; 2],
     /// The titles pushed to be popped again, oldest first.
     pub(crate) titles: Vec<String>,
+    /// How far the program's task had got, as it last said.
+    pub(crate) progress: Option<Task>,
+}
+
+/// How far a program's task had got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) enum Task {
+    Running(u8),
+    Busy,
+    Failed(Option<u8>),
+    Paused(Option<u8>),
 }
 
 /// One screen's kitty keyboard flags.
@@ -141,7 +154,11 @@ pub(crate) struct KeyboardFlags {
 }
 
 impl AskedSnapshot {
-    pub(crate) fn capture(keyboard: [&keyboard::Stack; 2], titles: &[String]) -> Self {
+    pub(crate) fn capture(
+        keyboard: [&keyboard::Stack; 2],
+        titles: &[String],
+        progress: Option<TaskProgress>,
+    ) -> Self {
         Self {
             keyboard: keyboard.map(|stack| {
                 let (base, pushed) = stack.parts();
@@ -151,15 +168,28 @@ impl AskedSnapshot {
                 }
             }),
             titles: titles.to_vec(),
+            progress: progress.map(|progress| match progress {
+                TaskProgress::Running(percent) => Task::Running(percent),
+                TaskProgress::Busy => Task::Busy,
+                TaskProgress::Failed(percent) => Task::Failed(percent),
+                TaskProgress::Paused(percent) => Task::Paused(percent),
+            }),
         }
     }
 
-    /// Each screen's keyboard flags, and the titles, as a live terminal
-    /// keeps them. The titles aren't bounded yet.
-    pub(crate) fn restore(&self) -> ([keyboard::Stack; 2], &[String]) {
+    /// Each screen's keyboard flags, the titles and the progress, as a
+    /// live terminal keeps them. The titles aren't bounded yet.
+    pub(crate) fn restore(&self) -> ([keyboard::Stack; 2], &[String], Option<TaskProgress>) {
         let keyboard = (self.keyboard.each_ref())
             .map(|flags| keyboard::Stack::from_parts(flags.base, &flags.pushed));
-        (keyboard, &self.titles)
+        let percent = |percent: u8| percent.min(100);
+        let progress = self.progress.map(|task| match task {
+            Task::Running(at) => TaskProgress::Running(percent(at)),
+            Task::Busy => TaskProgress::Busy,
+            Task::Failed(at) => TaskProgress::Failed(at.map(percent)),
+            Task::Paused(at) => TaskProgress::Paused(at.map(percent)),
+        });
+        (keyboard, &self.titles, progress)
     }
 }
 
