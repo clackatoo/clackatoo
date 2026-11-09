@@ -356,9 +356,14 @@ mod tests {
     /// write a file: beside it, then renamed over it. What's being checked
     /// was opened before, and is read as it was.
     fn write_over(world: &World, text: &str) {
-        let new = world.path("big.txt.new");
+        write_over_named(world, "big.txt", text);
+    }
+
+    /// As [`write_over`], over the file `name`.
+    fn write_over_named(world: &World, name: &str, text: &str) {
+        let new = world.path(&format!("{name}.new"));
         std::fs::write(&new, text).unwrap();
-        std::fs::rename(new, world.path("big.txt")).unwrap();
+        std::fs::rename(new, world.path(name)).unwrap();
     }
 
     /// The buffer's text saved.
@@ -819,6 +824,43 @@ mod tests {
         world.daemon.check_disk();
         assert_eq!(world.text(id), first);
         assert!(world.daemon.buffers[&id].stale());
+    }
+
+    /// A small file open, which the agent's tool makes big, is read and
+    /// checked off the loop: what counts is the file as it is now.
+    #[test]
+    fn a_small_file_made_big_is_checked_off_the_loop() {
+        let mut world = World::new();
+        std::fs::write(world.path("small.txt"), "small\n").unwrap();
+        let id = world.open("small.txt");
+        let chat = world.chat;
+        let path = world.path("small.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, "t1");
+        let mut big = String::new();
+        for n in 1..=100_000 {
+            use std::fmt::Write as _;
+            writeln!(big, "line {n}").unwrap();
+        }
+        write_over_named(&world, "small.txt", &big);
+        let said = Wrote {
+            done: true,
+            turn: world.first(),
+            tool: "t1".into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs: vec![RawDiff {
+                path,
+                old: Some("small\n".into()),
+                new: big.as_str().into(),
+            }],
+        };
+        world.daemon.take_written(chat, &said);
+        assert!(
+            world.daemon.agent_files.diffing(chat),
+            "checked off the loop"
+        );
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), big);
     }
 
     #[test]

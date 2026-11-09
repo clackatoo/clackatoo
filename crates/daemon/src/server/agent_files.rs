@@ -376,10 +376,12 @@ pub(super) enum Checked {
 impl Checking {
     /// The text it holds, in bytes, once the file's is read: the buffer's
     /// text saved and its text, which share most of what they hold, so
-    /// counted as the bigger, and the file's, about as big. The tools'
-    /// changes share theirs with the chat.
+    /// counted as the bigger, and the file's, as long as it was opened, so
+    /// a small file made big is read off the loop too. The tools' changes
+    /// share theirs with the chat.
     pub(super) fn bytes(&self) -> usize {
-        self.saved.len_bytes().max(self.text.len_bytes()) * 2
+        let file = usize::try_from(self.stamp.len()).unwrap_or(usize::MAX);
+        (self.saved.len_bytes().max(self.text.len_bytes())).saturating_add(file)
     }
 
     /// Who made each step it takes to have made the change.
