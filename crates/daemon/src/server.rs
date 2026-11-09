@@ -887,6 +887,9 @@ impl Subscription {
         if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS_2 {
             state.phone = false;
             state.widths = clackatoo_term::Widths::LEGACY;
+            if state.modes.mouse_encoding == clackatoo_term::mouse::MouseEncoding::SgrPixels {
+                state.modes.mouse_encoding = clackatoo_term::mouse::MouseEncoding::Sgr;
+            }
         }
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {

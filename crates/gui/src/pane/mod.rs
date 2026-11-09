@@ -743,12 +743,20 @@ impl Pane {
             } else {
                 clackatoo_term::mouse::MouseButton::WheelDown
             };
+            // In pixels, the cell's top left: where in it, the wheel
+            // doesn't say.
+            let [width, height] = self.cell.unwrap_or_default();
+            #[allow(clippy::cast_precision_loss, reason = "a pixel's place")]
+            let pixel = [
+                (at[1] * i64::from(width)) as f32,
+                (at[0] * i64::from(height)) as f32,
+            ];
             for _ in 0..lines.unsigned_abs() {
                 self.mouse(&PaneMouse {
                     action: clackatoo_term::mouse::MouseAction::Press(button),
                     line: at[0],
                     col: at[1],
-                    pixel: [0.0; 2],
+                    pixel,
                     clicks: 1,
                     modifiers,
                     block: false,
@@ -3961,6 +3969,37 @@ mod mouse_tests {
         };
         mouse_with(&mut pane, MouseAction::Press(LEFT), [0, 0], 1, shift);
         assert_eq!(input(&mut pane), "");
+    }
+
+    #[test]
+    fn a_program_that_asks_gets_the_mouse_in_pixels() {
+        let terminal = terminal("\x1b[?1002h\x1b[?1016h");
+        let mut pane = pane(&terminal);
+        pane.resize(terminal.size(), Some([8, 16]));
+        let mut at = |action, pixel: [f32; 2]| {
+            pane.mouse(&PaneMouse {
+                pixel,
+                action,
+                line: 0,
+                col: 0,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+                block: false,
+            });
+        };
+        at(MouseAction::Press(LEFT), [17.5, 3.0]);
+        // Dragged off the pane, it stays on the text area's edge.
+        at(MouseAction::Motion(Some(LEFT)), [-5.0, 9999.0]);
+        at(MouseAction::Release(LEFT), [20.0, 30.0]);
+        let bottom = terminal.size().rows() * 16;
+        assert_eq!(
+            input(&mut pane),
+            format!("\x1b[<0;18;4M\x1b[<32;1;{bottom}M\x1b[<0;21;31m")
+        );
+        assert!(pane.reports_pixels(false));
+        // The wheel, at a cell's top left.
+        pane.wheel(1, [1, 2], Modifiers::default());
+        assert_eq!(input(&mut pane), "\x1b[<64;17;17M");
     }
 
     /// Presses `text`'s key, with no modifiers.

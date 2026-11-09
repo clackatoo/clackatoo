@@ -662,6 +662,16 @@ mod queries {
             "\x1b[?1006;1$y\x1b[?1015;2$y\x1b[?1000;2$y"
         );
         assert_eq!(replies("\x1b[?1049h\x1b[?1049$p"), "\x1b[?1049;1$y");
+        // The mouse in pixels, one encoding among the others.
+        assert_eq!(
+            replies("\x1b[?1016h\x1b[?1016$p\x1b[?1006$p"),
+            "\x1b[?1016;1$y\x1b[?1006;2$y"
+        );
+        let t = after(4, 2, "\x1b[?1016h");
+        assert_eq!(
+            t.input_modes().mouse_encoding,
+            crate::mouse::MouseEncoding::SgrPixels
+        );
         assert_eq!(replies("\x1b[4h\x1b[4$p\x1b[20$p"), "\x1b[4;1$y\x1b[20;2$y");
         // Grapheme clustering (2027) is known, and off until asked for.
         assert_eq!(

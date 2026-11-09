@@ -439,7 +439,9 @@ gates! {
     /// lines as the rules before would rebuild them in the same columns
     /// (`Line::from_row_for`). And `Request::Resize`'s `cell`, the size a
     /// window draws a cell in pixels, for programs asking a terminal's
-    /// size in pixels (mode 2048, `CSI 14 t`).
+    /// size in pixels (mode 2048, `CSI 14 t`). And mouse reports in pixels
+    /// (mode 1016), `MouseEncoding::SgrPixels`, which an older peer is
+    /// sent as `Sgr`.
     TERMINAL_STANDARDS_2 = 147,
 }
 
@@ -795,6 +797,15 @@ impl Since for Event {
     }
 }
 
+impl Since for clackatoo_term::mouse::MouseEncoding {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Default | Self::Utf8 | Self::Sgr | Self::Urxvt => EARLIER,
+            Self::SgrPixels => TERMINAL_STANDARDS_2,
+        }
+    }
+}
+
 impl Since for Error {
     fn since(&self) -> u32 {
         match self {
@@ -857,7 +868,8 @@ pub fn newest(message: &ServerMessage) -> u32 {
                     ViewUpdate::Patch(patches) => (patches.iter())
                         .map(|patch| match patch {
                             Patch::Chat(patch) => newest_in_patch(patch),
-                            Patch::Title(_) | Patch::Cwd(_) | Patch::Grid { .. } => EARLIER,
+                            Patch::Grid { state, .. } => state.modes.mouse_encoding.since(),
+                            Patch::Title(_) | Patch::Cwd(_) => EARLIER,
                         })
                         .max()
                         .unwrap_or(EARLIER),
@@ -1134,7 +1146,8 @@ fn newest_in_node(node: &Node) -> u32 {
             .chain([newest_in_question(chat.question.as_ref())])
             .max()
             .unwrap_or(EARLIER),
-        Node::Grid(_) | Node::Other => node.since(),
+        Node::Grid(grid) => node.since().max(grid.state.modes.mouse_encoding.since()),
+        Node::Other => node.since(),
     }
 }
 
@@ -1486,6 +1499,45 @@ fn each_item(message: &mut ServerMessage, change: &mut impl FnMut(&mut Item)) {
     }
 }
 
+/// `message` with mouse reports in pixels (mode 1016) as reports in cells,
+/// as a peer from before `TERMINAL_STANDARDS_2` reads them, if it has any:
+/// a window that sends the program cells where it asked for pixels has
+/// it read the mouse as near the top left, but reads the view.
+fn with_mouse_in_cells(message: &ServerMessage) -> Option<ServerMessage> {
+    use clackatoo_term::mouse::MouseEncoding;
+    fn state(state: &mut crate::GridState, changed: &mut bool) {
+        if state.modes.mouse_encoding == MouseEncoding::SgrPixels {
+            state.modes.mouse_encoding = MouseEncoding::Sgr;
+            *changed = true;
+        }
+    }
+    let mut message = message.clone();
+    let mut changed = false;
+    match &mut message {
+        ServerMessage::Response(Response::View(view))
+        | ServerMessage::Event(Event::View {
+            update: ViewUpdate::Snapshot(view),
+            ..
+        }) => {
+            if let Node::Grid(grid) = &mut view.root {
+                state(&mut grid.state, &mut changed);
+            }
+        }
+        ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        }) => {
+            for patch in patches {
+                if let Patch::Grid { state: grid, .. } = patch {
+                    state(grid, &mut changed);
+                }
+            }
+        }
+        _ => {}
+    }
+    changed.then_some(message)
+}
+
 /// `message` as a peer from before `CHAT_FACTS` reads it: a line across a
 /// turn where the agent compacted its context as words saying so, and
 /// answers of a kind the daemon doesn't know left out of a question, so
@@ -1718,6 +1770,14 @@ impl Downgrade for ServerMessage {
                 other => other,
             };
         }
+        if wire < TERMINAL_STANDARDS_2
+            && let Some(older) = with_mouse_in_cells(self)
+        {
+            return match older.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
+        }
         if wire < TOOL_IMAGES && newest(self) == TOOL_IMAGES {
             let older = without_tool_images(self);
             return match older.downgrade(wire) {
@@ -1938,6 +1998,41 @@ mod tests {
             panic!("not one grid patch: {read:?}");
         };
         assert_eq!((older.keyboard, older.progress), (0, None));
+    }
+
+    #[test]
+    fn a_peer_before_terminal_standards_2_reads_the_mouse_in_cells_and_no_more() {
+        use clackatoo_term::mouse::MouseEncoding;
+        let state = crate::GridState {
+            modes: crate::InputModes {
+                mouse_encoding: MouseEncoding::SgrPixels,
+                ..crate::InputModes::default()
+            },
+            phone: true,
+            widths: clackatoo_term::Widths {
+                vs16: true,
+                graphemes: true,
+            },
+            ..crate::GridState::default()
+        };
+        let patch = Patch::Grid {
+            node: crate::NodeId::ROOT,
+            state,
+            lines: Vec::new(),
+            links: Vec::new(),
+            marks: crate::BlockMarks::default(),
+        };
+        assert_eq!(
+            patches_at(NEW, vec![patch.clone()]),
+            std::slice::from_ref(&patch)
+        );
+        let read = patches_at(TERMINAL_STANDARDS_2 - 1, vec![patch]);
+        let [Patch::Grid { state: older, .. }] = read.as_slice() else {
+            panic!("not one grid patch: {read:?}");
+        };
+        assert_eq!(older.modes.mouse_encoding, MouseEncoding::Sgr);
+        assert!(!older.phone);
+        assert_eq!(older.widths, clackatoo_term::Widths::LEGACY);
     }
 
     #[test]

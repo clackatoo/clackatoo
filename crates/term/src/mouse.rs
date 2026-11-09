@@ -59,6 +59,10 @@ pub enum MouseEncoding {
     Sgr,
     /// Mode 1015: `ESC [` and decimal numbers.
     Urxvt,
+    /// Mode 1016: as [`Sgr`](Self::Sgr), but where the mouse is in pixels
+    /// from the text area's top left, not cells: the [`MouseEvent`]'s
+    /// column and line are pixels.
+    SgrPixels,
 }
 
 impl MouseEncoding {
@@ -70,13 +74,14 @@ impl MouseEncoding {
             Self::Utf8 => Some(1005),
             Self::Sgr => Some(1006),
             Self::Urxvt => Some(1015),
+            Self::SgrPixels => Some(1016),
         }
     }
 
     /// The encoding DEC private mode `mode` turns on, if it is one.
     #[must_use]
     pub fn from_mode(mode: u16) -> Option<Self> {
-        [Self::Utf8, Self::Sgr, Self::Urxvt]
+        [Self::Utf8, Self::Sgr, Self::Urxvt, Self::SgrPixels]
             .into_iter()
             .find(|encoding| encoding.mode() == Some(mode))
     }
@@ -190,7 +195,8 @@ pub fn encode(
         MouseAction::Motion(held) => (held.map_or(3, MouseButton::code) + 32, false),
     };
     // Modes other than SGR can't say which button came up.
-    if release && encoding != MouseEncoding::Sgr {
+    let sgr = matches!(encoding, MouseEncoding::Sgr | MouseEncoding::SgrPixels);
+    if release && !sgr {
         code = 3;
     }
     // X10 mode reports no modifiers.
@@ -200,7 +206,7 @@ pub fn encode(
     let (col, line) = (u32::from(event.col) + 1, u32::from(event.line) + 1);
 
     match encoding {
-        MouseEncoding::Sgr => {
+        MouseEncoding::Sgr | MouseEncoding::SgrPixels => {
             let end = if release { 'm' } else { 'M' };
             Some(format!("\x1b[<{code};{col};{line}{end}").into_bytes())
         }
@@ -329,6 +335,7 @@ mod tests {
             MouseEncoding::Utf8,
             MouseEncoding::Sgr,
             MouseEncoding::Urxvt,
+            MouseEncoding::SgrPixels,
         ] {
             assert_eq!(
                 MouseEncoding::from_mode(encoding.mode().unwrap()),

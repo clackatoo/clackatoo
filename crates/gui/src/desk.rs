@@ -2524,10 +2524,13 @@ impl Desk {
                 action
             }
             // Motion is passed on once per cell, with the button held.
-            // A chat follows the mouse by the pixel.
+            // A chat follows the mouse by the pixel, and so does a program
+            // that asked for it in pixels.
             MouseAction::Motion(_) => {
                 let chat = self.chats.contains_key(&terminal);
-                if self.mouse_cell == Some((terminal, cell)) && !chat {
+                let pixels = (self.panes.get(&terminal))
+                    .is_some_and(|pane| pane.reports_pixels(modifiers.shift));
+                if self.mouse_cell == Some((terminal, cell)) && !chat && !pixels {
                     return outcome;
                 }
                 MouseAction::Motion(self.dragging.map(|(_, button)| button))

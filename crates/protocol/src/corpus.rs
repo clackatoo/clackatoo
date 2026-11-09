@@ -1742,6 +1742,24 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 terminal: TerminalId(5),
                 on: true,
             })),
+            // A view whose program asks for the mouse in pixels.
+            Server(ServerMessage::Event(Event::View {
+                terminal: TerminalId(5),
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: GridState {
+                        modes: InputModes {
+                            mouse_tracking: MouseTracking::Drags,
+                            mouse_encoding: MouseEncoding::SgrPixels,
+                            ..InputModes::default()
+                        },
+                        ..grid_state()
+                    },
+                    lines: Vec::new(),
+                    links: Vec::new(),
+                    marks: BlockMarks::default(),
+                }]),
+            })),
             // A resize saying how big a cell is drawn.
             Client(ClientMessage::Request(Request::Resize {
                 terminal: TerminalId(5),

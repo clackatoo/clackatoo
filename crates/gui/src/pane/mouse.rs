@@ -21,7 +21,9 @@
 //! opens it instead (see [`super::links`]), but not with Alt too.
 
 use clackatoo_term::Row;
-use clackatoo_term::mouse::{self, MouseAction, MouseButton, MouseEvent, MouseTracking};
+use clackatoo_term::mouse::{
+    self, MouseAction, MouseButton, MouseEncoding, MouseEvent, MouseTracking,
+};
 
 use super::{CopyTo, Document, Mode, Pane, Selection};
 use crate::input::Modifiers;
@@ -88,6 +90,14 @@ impl Pane {
                 .is_some_and(|screen| screen.state.modes.mouse_tracking != MouseTracking::Off)
     }
 
+    /// Whether the program gets the mouse in pixels (mode 1016), so
+    /// moving it within a cell is news to it.
+    pub(crate) fn reports_pixels(&self, shift: bool) -> bool {
+        self.reports_mouse(shift)
+            && (self.screen.as_ref())
+                .is_some_and(|screen| screen.state.modes.mouse_encoding == MouseEncoding::SgrPixels)
+    }
+
     /// Handles a mouse event. Returns whether the pane must be redrawn.
     pub(crate) fn mouse(&mut self, event: &PaneMouse) -> bool {
         let relit = self.hover(Some((event.line, event.col, event.modifiers)));
@@ -119,15 +129,33 @@ impl Pane {
         let clamp = |value: i64, size: u16| {
             u16::try_from(value.clamp(0, i64::from(size) - 1)).expect("within the screen")
         };
+        let modes = screen.state.modes;
+        // In pixels (mode 1016), from the text area's top left, within it
+        // as far as its size in pixels is known.
+        let (col, line) = if modes.mouse_encoding == MouseEncoding::SgrPixels {
+            let [width, height] = self.cell.map_or([u16::MAX; 2], |[width, height]| {
+                [
+                    width.saturating_mul(screen.size.cols()),
+                    height.saturating_mul(screen.size.rows()),
+                ]
+            });
+            #[allow(clippy::cast_possible_truncation, reason = "clamped to u16's range")]
+            let pixel = |value: f32, size: u16| clamp(value.floor() as i64, size);
+            (pixel(event.pixel[0], width), pixel(event.pixel[1], height))
+        } else {
+            (
+                clamp(event.col, screen.size.cols()),
+                clamp(event.line, screen.size.rows()),
+            )
+        };
         let report = MouseEvent {
             action: event.action,
-            col: clamp(event.col, screen.size.cols()),
-            line: clamp(event.line, screen.size.rows()),
+            col,
+            line,
             shift: event.modifiers.shift,
             alt: event.modifiers.alt,
             ctrl: event.modifiers.ctrl,
         };
-        let modes = screen.state.modes;
         if let Some(bytes) = mouse::encode(&report, modes.mouse_tracking, modes.mouse_encoding) {
             self.send_input(bytes);
         }

@@ -1278,6 +1278,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs can be told each resize in-band (mode 2048), and the size in pixels (CSI 14t, 16t, TIOCGWINSZ)",
     },
     News {
+        id: "mouse-pixels",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs that ask (mode 1016) get the mouse in pixels, for smooth drags and finer clicks",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",
