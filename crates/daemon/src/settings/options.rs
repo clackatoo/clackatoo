@@ -156,19 +156,22 @@ mod tests {
             number("subagents.working"),
             Value::Number(limits.working.into())
         );
-        assert_eq!(number("subagents.open"), Value::Number(limits.open as u32));
+        assert_eq!(
+            number("subagents.open"),
+            Value::Number(u32::try_from(limits.open).unwrap())
+        );
         assert_eq!(
             number("history.lines"),
-            Value::Number(crate::DEFAULT_HISTORY_LINES as u32)
+            Value::Number(u32::try_from(crate::DEFAULT_HISTORY_LINES).unwrap())
         );
         assert_eq!(
             number("history.every"),
-            Value::Number(crate::DEFAULT_HISTORY_EVERY.as_secs() as u32)
+            Value::Number(u32::try_from(crate::DEFAULT_HISTORY_EVERY.as_secs()).unwrap())
         );
         let images = crate::images::Limits::default();
         assert_eq!(
             number("images.total_mb"),
-            Value::Number((images.total >> 20) as u32)
+            Value::Number(u32::try_from(images.total >> 20).unwrap())
         );
         assert_eq!(
             groups().collect::<Vec<_>>(),

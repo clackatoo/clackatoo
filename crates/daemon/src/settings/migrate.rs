@@ -13,6 +13,7 @@
 //! Once `settings.lua` is there, a TOML file that's there too is passed
 //! over, and said so.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::literal::{self, Literal};
@@ -284,7 +285,7 @@ fn render(
     let mut text = head.to_owned();
     let mut lines = Vec::new();
     for (index, (name, statements)) in sections.iter().enumerate() {
-        text.push_str(&format!("\n-- From {name}:\n"));
+        let _ = write!(text, "\n-- From {name}:\n");
         for (at, statement) in statements.iter().enumerate() {
             for comment in &statement.comments {
                 text.push_str(comment);
@@ -300,9 +301,9 @@ fn render(
                     lines.push(((index, at), first..=line_of(&text) - 1));
                 }
                 Some(why) => {
-                    text.push_str(&format!("-- Left out: {why}\n"));
+                    let _ = writeln!(text, "-- Left out: {why}");
                     for line in statement.code.lines() {
-                        text.push_str(&format!("-- {line}\n"));
+                        let _ = writeln!(text, "-- {line}");
                     }
                 }
             }
@@ -335,7 +336,7 @@ fn statements(
         Err(err) => {
             let mut why = format!("{name} isn't TOML, so nothing in it was moved");
             if let Some(first) = err.to_string().lines().next() {
-                why.push_str(&format!(" ({first})"));
+                let _ = write!(why, " ({first})");
             }
             return vec![unread(&why)];
         }
@@ -357,7 +358,7 @@ fn statements(
                 ));
             }
             (Some(group), key) => {
-                statements.push(set(comments, &format!("daemon.{group}"), key, item))
+                statements.push(set(comments, &format!("daemon.{group}"), key, item));
             }
             (None, "agents" | "profiles" | "subagents" | "upgrade") => {
                 let Some(inner) = item.as_table_like() else {
@@ -420,7 +421,7 @@ fn set(mut comments: Vec<String>, table: &str, key: &str, item: &toml_edit::Item
             let before = path.len() + 3;
             let mut code = format!("{path} = {}", value.written(before));
             if let Some(after) = item.as_value().and_then(|value| suffix(value.decor())) {
-                code.push_str(&format!(" {after}"));
+                let _ = write!(code, " {after}");
             }
             Statement::new(comments, code)
         }

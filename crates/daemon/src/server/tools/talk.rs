@@ -36,10 +36,10 @@
 //! working with the chats they started for as long as they need: a PM
 //! sends its builder fixes, round after round.
 //!
-//! Each is set in the `[subagents]` table of `agents.toml` (see
-//! [`SubagentLimits`]), read as the daemon starts and again as each chat
-//! starts, `start_chat`'s among them, never on an agent's other tool
-//! calls:
+//! Each is set as `daemon.subagents` in the daemon's config (see
+//! [`SubagentLimits`]), read as the daemon starts or upgrades, and taken
+//! as each chat starts, `start_chat`'s among them, never on an agent's
+//! other tool calls:
 //!
 //! - under one of the user's chats, at most as many chats agents started
 //!   work at once as the Subagents setting of the chat starting one, and

@@ -917,7 +917,7 @@ mod tests {
         let none = env(&[]);
         if let Some(history) = history_from(&settings, &none) {
             assert_eq!(history.lines, 500);
-            assert_eq!(history.every, std::time::Duration::from_secs(60));
+            assert_eq!(history.every, std::time::Duration::from_mins(1));
         }
         let images = images_from(&settings, &none);
         assert_eq!((images.per_owner, images.total), (8 << 20, 16 << 20));
@@ -931,7 +931,7 @@ mod tests {
         assert_eq!(history.lines, 7);
         assert_eq!(
             history.every,
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
             "the config's"
         );
         let images = images_from(&settings, &over);

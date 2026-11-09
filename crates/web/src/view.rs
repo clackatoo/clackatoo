@@ -1925,7 +1925,7 @@ pub mod pairing {
         if !ways.password && !ways.ask {
             page = page.child(el("p").text(
                 "This daemon lets no device pair: set a password with `clackatoo web password`, \
-                 or allow asking in daemon/web.toml.",
+                 or allow asking with daemon.web.ask in the daemon's config.",
             ));
         }
         page

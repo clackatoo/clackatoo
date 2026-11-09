@@ -94,7 +94,8 @@ pub(super) const COOKIE: &str = "__Host-clackatoo";
 /// daemon expires an unused device sooner, itself.
 const COOKIE_AGE: Duration = Duration::from_hours(400 * 24);
 
-/// The hash of `password` to keep in `web.toml`: Argon2id, with OWASP's
+/// The hash of `password` to keep in the state directory (see
+/// [`crate::settings::PASSWORD`]): Argon2id, with OWASP's
 /// recommended costs (19 MiB, two passes) and a random salt, in PHC form.
 ///
 /// # Panics

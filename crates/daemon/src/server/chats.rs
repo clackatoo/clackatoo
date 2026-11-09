@@ -450,8 +450,8 @@ impl Daemon {
     /// and gets it a session.
     pub(super) fn start_hosted_chat(&mut self, chat: HostedChat) {
         let id = chat.info().id;
-        // As `agents.toml` is read for the chat's agent, so are the limits
-        // on chats agents start: never as an agent calls a tool.
+        // The limits on chats agents start, as the daemon's config set
+        // them, are taken as a chat starts: never as an agent calls a tool.
         self.refresh_subagent_limits();
         self.add_chat(chat);
         // Its own value was worked out before the limits were read again.
@@ -645,8 +645,8 @@ impl Daemon {
                         let dir = self.config.agents.dir.clone().unwrap_or_default();
                         self.chat(id)?.suggest_install(&format!(
                             "Install {}'s adapter for faster starts ({}, in {})? It runs \
-                             without it, more slowly. agents.toml can give it a command of \
-                             your own.",
+                             without it, more slowly. The daemon's config, daemon/init.lua, \
+                             can give it a command of your own.",
                             known.title,
                             known.size,
                             dir.display()
@@ -670,7 +670,7 @@ impl Daemon {
                     let dir = dir.map(|dir| agents::install_dir(dir, known));
                     self.chat(id)?.offer_install(&format!(
                         "{} isn't installed. Install its ACP runtime ({})? It \
-                         takes about {}, in {}. Or give it a command in agents.toml.",
+                         takes about {}, in {}. Or give it a command in daemon/init.lua.",
                         known.title,
                         if known.package().is_empty() {
                             "Google's official release, checked by SHA-256"
@@ -2599,7 +2599,7 @@ impl Daemon {
         log::info!("installing {name}");
         self.agents.installing.insert(name.clone(), vec![id]);
         // What running agents were started from stays, as does what
-        // agents.toml names.
+        // the daemon's config names.
         let keep: Vec<PathBuf> = (self.agents.running.values())
             .filter_map(|slot| slot.command.first().map(PathBuf::from))
             .chain(self.config.agents.named_dirs())

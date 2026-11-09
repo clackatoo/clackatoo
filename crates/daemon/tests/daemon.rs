@@ -5159,7 +5159,7 @@ fn a_known_agent_on_path_or_through_npx_runs_and_suggests_its_install_once() {
             .title
             .starts_with("Install Codex's adapter for faster starts")
     );
-    assert!(question.title.contains("agents.toml"), "{question:?}");
+    assert!(question.title.contains("daemon/init.lua"), "{question:?}");
     assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
     assert!(
         client
@@ -5210,7 +5210,7 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
     assert!(
         question
             .title
-            .ends_with("Or give it a command in agents.toml.")
+            .ends_with("Or give it a command in daemon/init.lua.")
     );
     assert_eq!(question.choices[0].id, "install");
     // A message waits for the answer.

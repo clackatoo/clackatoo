@@ -1665,8 +1665,8 @@ fn kept_standings<'a>(
 /// parent by the saved file's IDs: `None` if they go round, or further up
 /// than chats go deep.
 fn above(parents: &HashMap<u32, u32>, id: u32) -> Option<u8> {
-    /// Further than chats may be set to go deep (`depth` in the
-    /// `[subagents]` table of `agents.toml`), and than chats taken on by
+    /// Further than chats may be set to go deep
+    /// (`daemon.subagents.depth` in the daemon's config), and than chats taken on by
     /// those above as their parents close can be.
     const MOST: u8 = crate::agents::DEEPEST_SUBAGENTS;
     let mut at = id;

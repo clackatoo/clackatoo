@@ -42,12 +42,14 @@ impl Decimal {
     }
 
     /// The whole number `number`.
+    #[must_use]
     pub const fn whole(number: u32) -> Self {
         Self(number.saturating_mul(100))
     }
 
     /// `number`, if it's one: not negative, and to two decimal places at
     /// most. A float only near one, as 10.1 is, counts.
+    #[must_use]
     pub fn exact(number: f64) -> Option<Self> {
         let hundredths = (number * 100.0).round();
         let exact = (number * 100.0 - hundredths).abs() < 1e-6;
@@ -59,6 +61,7 @@ impl Decimal {
     /// The nearest to `number` from `min` to `max`, to two decimal places,
     /// for a number from elsewhere, as the command line, that the option
     /// must still be able to hold.
+    #[must_use]
     pub fn nearest(number: f32, min: u32, max: u32) -> Self {
         if number.is_nan() {
             return Self::whole(min);
@@ -70,12 +73,14 @@ impl Decimal {
     }
 
     /// The number, as Lua has it.
+    #[must_use]
     pub fn as_f64(self) -> f64 {
         f64::from(self.0) / 100.0
     }
 
     /// The number, as fonts are sized in.
     #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn as_f32(self) -> f32 {
         self.as_f64() as f32
     }
@@ -197,6 +202,7 @@ pub enum Category {
 
 impl Category {
     /// Its name, as a heading.
+    #[must_use]
     pub fn title(self) -> &'static str {
         match self {
             Self::Font => "Font",
@@ -218,7 +224,11 @@ impl Category {
 }
 
 impl Info {
-    /// Checks `value` is one this option can hold, saying why not.
+    /// Checks `value` is one this option can hold.
+    ///
+    /// # Errors
+    ///
+    /// Why it can't: what it holds.
     pub fn check(&self, value: &Value) -> Result<(), String> {
         match (self.kind, value) {
             (Kind::Bool, Value::Bool(_)) => Ok(()),
@@ -246,6 +256,10 @@ impl Info {
     /// Reads `text` as a value for this option, as `:set` gives one after
     /// `=`: a number, one with a fraction for a decimal, or for a list,
     /// numbers with commas between them, or for text, the text.
+    ///
+    /// # Errors
+    ///
+    /// What it holds, if `text` isn't that.
     pub fn parse(&self, text: &str) -> Result<Value, String> {
         let number = |text: &str| text.parse::<u32>().map_err(|_| self.wants());
         let value = match self.kind {
@@ -268,6 +282,7 @@ impl Info {
     }
 
     /// What values the option holds, for messages.
+    #[must_use]
     pub fn wants(&self) -> String {
         match self.kind {
             Kind::Bool => format!("{} is true or false", self.name),

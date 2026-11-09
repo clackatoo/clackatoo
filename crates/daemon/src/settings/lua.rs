@@ -242,7 +242,7 @@ fn sandbox(state: &Rc<State>, dirs: &[PathBuf]) -> mlua::Result<(Lua, Table)> {
     lua.set_interrupt(move |_| {
         let step = steps.get() + 1;
         steps.set(step);
-        if step > MOST_STEPS || (step % 1024 == 0 && started.elapsed() > TIME) {
+        if step > MOST_STEPS || (step.is_multiple_of(1024) && started.elapsed() > TIME) {
             return Err(mlua::Error::runtime("it ran too long, so it was stopped"));
         }
         Ok(VmState::Continue)

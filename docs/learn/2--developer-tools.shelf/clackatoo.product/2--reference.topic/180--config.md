@@ -692,9 +692,10 @@ A setting reads back what it is, the default until something sets it, so
 `print(daemon.history.lines)` prints `10000`, and `nil` puts it back as it
 starts. `daemon.agents` and `daemon.profiles` are tables by name, so
 `daemon.agents.mine.tasks = false` changes one set above, `= nil` takes one
-out, and `for name, agent in daemon.agents do … end` goes through them. A
-name that isn't a word is written `daemon.agents["my agent"]`. What an agent
-and a profile can have is in
+out, and `for name, agent in daemon.agents do … end` goes through them
+(`pairs` finds none, as the table only stands for them). A name that isn't a
+word is written `daemon.agents["my agent"]`. What an agent and a profile can
+have is in
 [Which agent](~clackatoo/reference/agent-settings#which-agent) and
 [Profiles](~clackatoo/reference/chats-together#profiles).
 

@@ -28,6 +28,7 @@ mod migrate;
 pub mod options;
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -379,7 +380,7 @@ impl Settings {
                 Value::Choice(word) => Literal::Text((*word).to_owned()),
                 Value::Text(text) => Literal::Text(text.clone()),
             };
-            text.push_str(&format!("daemon.{name} = {}\n", literal.written(0)));
+            let _ = writeln!(text, "daemon.{name} = {}", literal.written(0));
         }
         for (agent, _) in &self.agents {
             text.push_str(&statement(

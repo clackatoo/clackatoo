@@ -1,5 +1,6 @@
 //! The web app: what a phone, or any browser, uses to reach the daemon,
-//! served by the daemon itself, as `web.toml` says (see [`config`]).
+//! served by the daemon itself, as `daemon.web` in its config says (see
+//! [`config`]).
 //!
 //! It's an HTTP server on the event loop, serving the app's files, which
 //! are built into the `clackatoo` program, and a WebSocket carrying the

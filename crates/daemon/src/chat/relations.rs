@@ -100,7 +100,7 @@ impl Message {
     }
 
     /// Whether it's a notice that can wait for the user, past the turns
-    /// notices may start (`notice_turns`, see `agents.toml`): that chats
+    /// notices may start (`daemon.subagents.notice_turns`): that chats
     /// finished, still
     /// to say what, or what an upgrade stopped.
     pub(crate) fn is_held_kind(&self) -> bool {

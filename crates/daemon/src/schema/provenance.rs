@@ -37,6 +37,7 @@ pub struct Place {
 impl Place {
     /// As the bar says it: `client/init.lua:3`, the file's path from the
     /// config directory `dir` if it's in it.
+    #[must_use]
     pub fn said(&self, dir: Option<&Path>) -> String {
         let path = Path::new(&*self.file);
         let path = dir
@@ -94,12 +95,14 @@ impl SetBy {
 
     /// Whether it's the user's own config as it loaded, which outdoes what
     /// `:setpersist` would save: `settings.lua` runs first.
+    #[must_use]
     pub fn config_loading(&self) -> bool {
         self.source == Source::Config && self.loading
     }
 
     /// Where the user's code set it, as the bar says it: `client/init.lua:3`,
     /// or `client/init.lua:3 (in lua/keys.lua:8)`.
+    #[must_use]
     pub fn place(&self, dir: Option<&Path>) -> Option<String> {
         let at = self.at.as_ref()?.said(dir);
         Some(match &self.inner {
@@ -110,6 +113,7 @@ impl SetBy {
 
     /// What set it, as `:verbose set` says it, files' paths from the config
     /// directory `dir`.
+    #[must_use]
     pub fn said(&self, dir: Option<&Path>) -> String {
         let place = self.place(dir).unwrap_or_else(|| "its config".into());
         match (self.source, self.loading) {
