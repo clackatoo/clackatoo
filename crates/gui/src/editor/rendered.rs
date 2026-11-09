@@ -403,6 +403,9 @@ impl Rendered {
         };
         draw_laid(&mut canvas, m, &page.laid, top, column);
         page_images::draw(&mut canvas, m, images, &page.placed, top);
+        // The images named near the view, a view either way, asked for.
+        let near = [self.scroll - size[1], self.scroll + 2.0 * size[1]];
+        self.images.ask_near(near[0], near[1]);
         // What has links, and is in view, for clicks.
         let (from, to) = (
             self.scroll - self.margin,

@@ -571,3 +571,23 @@ fn images_from_the_files_folder_are_asked_for_and_shown_below_their_block() {
     paint(&mut setup, &mut fonts);
     assert_eq!(height(&setup), before);
 }
+
+/// Images far down a long page aren't asked for until the view comes near
+/// them, and the same image named two ways is asked for once.
+#[test]
+fn images_are_asked_for_only_near_the_view_and_named_plainly() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut text = "![a](./img/a.png) ![a again](img/../img/a.png)\n\n".to_owned();
+    text.push_str(&document(80));
+    text.push_str("![far](img/far.png)\n");
+    let mut setup = markdown(&text);
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    assert_eq!(setup.editor.take_image_asks(), vec!["img/a.png".to_owned()]);
+    setup.keys("G");
+    paint(&mut setup, &mut fonts);
+    assert_eq!(
+        setup.editor.take_image_asks(),
+        vec!["img/far.png".to_owned()]
+    );
+}

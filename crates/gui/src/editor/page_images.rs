@@ -18,6 +18,9 @@ use crate::render::{Fill, Paint, PaintedImage};
 /// The most a path of an image is, in bytes, that's asked for.
 const LONGEST_PATH: usize = 1024;
 
+/// The most images a page asks for, as the daemon reads at most so many.
+const MOST_IMAGES: usize = 64;
+
 /// How an image the page names is going.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PageImage {
@@ -32,7 +35,11 @@ pub(super) enum PageImage {
 /// The images a page shows, by their paths as its Markdown gives them.
 #[derive(Debug, Default)]
 pub(super) struct PageImages {
+    /// By their paths written plainly, as they're asked for.
     known: HashMap<String, PageImage>,
+    /// Paths not asked for yet, each with the top of the block naming it:
+    /// asked for as they come near the view.
+    unasked: Vec<(String, f32)>,
     /// Paths to ask the daemon for.
     asks: Vec<String>,
     /// What's known of one changed since the page was laid out.
@@ -62,10 +69,12 @@ impl PageImages {
 
     /// Makes room for the images on `laid`, a page `column` wide, below the
     /// blocks naming them, moving what's after each down: those known to
-    /// be read. Notes those not known yet, to ask for. Returns where each
-    /// goes. Images in tables' cells stay their descriptions.
+    /// be read. Notes those not known yet, to ask for as they come near the
+    /// view. Returns where each goes. Images in tables' cells stay their
+    /// descriptions.
     pub(super) fn make_room(&mut self, laid: &mut Laid, m: Measures, column: f32) -> Vec<Placed> {
         let mut placed = Vec::new();
+        self.unasked.clear();
         let mut shift = 0.0;
         let gap = m.em(0.5);
         let mut table_shift = vec![0.0; laid.tables.len()];
@@ -81,16 +90,19 @@ impl PageImages {
             let block = &laid.blocks[index];
             let mut below = block.top + block.layout.height();
             for link in block.links.iter().filter(|link| link.image) {
-                let path = link.to.as_str();
-                if !Self::asked_for(path) {
+                let Some(path) = (Self::asked_for(&link.to))
+                    .then(|| clackatoo_protocol::plain_path(&link.to))
+                    .flatten()
+                else {
                     continue;
-                }
-                let info = match self.known.get(path) {
+                };
+                let info = match self.known.get(&path) {
                     Some(PageImage::Found(info)) => *info,
                     Some(PageImage::Asked | PageImage::Failed) => continue,
                     None => {
-                        self.known.insert(path.to_owned(), PageImage::Asked);
-                        self.asks.push(path.to_owned());
+                        if !self.unasked.iter().any(|(unasked, _)| *unasked == path) {
+                            self.unasked.push((path, block.top));
+                        }
                         continue;
                     }
                 };
@@ -112,7 +124,22 @@ impl PageImages {
         placed
     }
 
-    /// The paths to ask the daemon for, as found laying out.
+    /// Asks for the images named by blocks from `top` to `bottom` down the
+    /// page, near the view, that aren't asked for yet: so many at most.
+    pub(super) fn ask_near(&mut self, top: f32, bottom: f32) {
+        let known = &mut self.known;
+        let asks = &mut self.asks;
+        self.unasked.retain(|(path, at)| {
+            if !(top..=bottom).contains(at) || known.len() >= MOST_IMAGES {
+                return true;
+            }
+            known.insert(path.clone(), PageImage::Asked);
+            asks.push(path.clone());
+            false
+        });
+    }
+
+    /// The paths to ask the daemon for, as found near the view.
     pub(super) fn take_asks(&mut self) -> Vec<String> {
         std::mem::take(&mut self.asks)
     }

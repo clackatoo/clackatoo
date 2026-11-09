@@ -43,11 +43,14 @@ struct Shown {
     pinned: Option<ImageId>,
 }
 
+/// The most images a buffer's Markdown is read for.
+const MARKDOWN_IMAGES: usize = 64;
+
 /// An image a buffer's Markdown asked for.
 #[derive(Debug)]
 enum Markdown {
-    /// Being read, with who's to be told.
-    Loading(Vec<Token>),
+    /// Being read, with who's to be told, each by the path it asked with.
+    Loading(Vec<(Token, String)>),
     /// Read: the image, or why not.
     Read(Result<ImageInfo, String>),
 }
@@ -241,7 +244,7 @@ impl Daemon {
         }
         for asked in self.pictures.markdown.values_mut() {
             if let Markdown::Loading(waiting) = asked {
-                waiting.retain(|waiter| *waiter != token);
+                waiting.retain(|(waiter, _)| *waiter != token);
             }
         }
     }
@@ -310,8 +313,9 @@ impl Daemon {
         let key = (buffer, plain);
         match self.pictures.markdown.get_mut(&key) {
             Some(Markdown::Loading(waiting)) => {
-                if !waiting.contains(&token) {
-                    waiting.push(token);
+                let asker = (token, path);
+                if !waiting.contains(&asker) {
+                    waiting.push(asker);
                 }
                 return Response::Image(ImageAnswer::Loading);
             }
@@ -322,7 +326,15 @@ impl Daemon {
             }
             Some(Markdown::Read(Err(why))) => return refused(why),
             // Let go since: read again.
-            Some(Markdown::Read(Ok(_))) | None => {}
+            Some(Markdown::Read(Ok(_))) => {}
+            None => {
+                let asked = (self.pictures.markdown.keys())
+                    .filter(|(asked, _)| *asked == buffer)
+                    .count();
+                if asked >= MARKDOWN_IMAGES {
+                    return refused(&format!("a file shows at most {MARKDOWN_IMAGES} images"));
+                }
+            }
         }
         let source = Source::Below {
             root,
@@ -335,9 +347,7 @@ impl Daemon {
         if let Err(why) = self.images.keep(ImageFrom::Buffer(buffer), why, source) {
             return refused(&why);
         }
-        self.pictures
-            .markdown
-            .insert(key, Markdown::Loading(vec![token]));
+        (self.pictures.markdown).insert(key, Markdown::Loading(vec![(token, path)]));
         Response::Image(ImageAnswer::Loading)
     }
 
@@ -377,10 +387,10 @@ impl Daemon {
                         Some(Markdown::Loading(waiting)) => waiting,
                         _ => Vec::new(),
                     };
-                    for token in waiting {
+                    for (token, path) in waiting {
                         let news = ImageNews::Found {
                             buffer,
-                            path: path.clone(),
+                            path,
                             found: found.clone(),
                         };
                         self.send_event(token, Event::Image(news));
@@ -907,6 +917,34 @@ mod tests {
         for (path, answer) in paths.iter().zip(&untrusted).skip(3) {
             assert!(answer.is_err(), "{path} was read");
         }
+    }
+
+    /// A buffer's Markdown is read so many images at most, each kept by its
+    /// path written plainly, so one named two ways is read once.
+    #[test]
+    fn a_files_markdown_is_read_so_many_images_at_most() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        std::fs::write(dir.path().join("notes.md"), "").unwrap();
+        let file = OpenFile {
+            path: dir.path().join("notes.md").display().to_string(),
+            cwd: None,
+        };
+        let buffer = daemon.open_buffer(file, None).unwrap();
+        for n in 0..MARKDOWN_IMAGES {
+            let path = format!("img/{n}.png");
+            let loading = Response::Image(ImageAnswer::Loading);
+            assert_eq!(daemon.image_at(ASKER, buffer, path), loading);
+        }
+        // The same again, named otherwise, is no more.
+        let again = daemon.image_at(ASKER, buffer, "./img/../img/0.png".into());
+        assert_eq!(again, Response::Image(ImageAnswer::Loading));
+        let Response::Image(ImageAnswer::Failed(why)) =
+            daemon.image_at(ASKER, buffer, "one/more.png".into())
+        else {
+            panic!("read past the most");
+        };
+        assert!(why.contains("at most"), "{why}");
     }
 
     #[test]
