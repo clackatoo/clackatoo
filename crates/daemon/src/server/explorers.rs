@@ -188,6 +188,9 @@ pub(super) struct Explorers {
     /// tests.
     #[cfg(test)]
     pub(super) refuse_instance: bool,
+    /// How many times making the instance has been tried, for tests.
+    #[cfg(test)]
+    pub(super) instance_tries: usize,
     /// What each watch is on: directories expanded, repositories' git
     /// directories, the directories of buffers' files, those watched for
     /// language servers, git directories for signs, and the display's. One
@@ -258,6 +261,8 @@ impl Default for Explorers {
             display_retry: None,
             #[cfg(test)]
             refuse_instance: false,
+            #[cfg(test)]
+            instance_tries: 0,
             watches: HashMap::new(),
             full: false,
             server_watches: 0,
@@ -952,8 +957,10 @@ impl Daemon {
                 watched.index.push(git_dir.to_owned());
                 true
             }
-            Err(err) => {
-                log::warn!("{} won't be watched: {err}", git_dir.display());
+            // Said once already, as inotify ran out.
+            Err(Unwatched::NoInstance | Unwatched::Full) => false,
+            Err(Unwatched::Failed(err)) => {
+                log::debug!("{} won't be watched: {err}", git_dir.display());
                 false
             }
         }
@@ -1070,6 +1077,14 @@ impl Daemon {
     fn make_instance(&mut self) -> bool {
         if self.explorers.inotify.is_some() {
             return true;
+        }
+        // Not tried again before it's time, however many ask meanwhile.
+        if (self.explorers.instance_retry).is_some_and(|(due, _)| due > Instant::now()) {
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.explorers.instance_tries += 1;
         }
         let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
         let made = inotify::init(flags).map_err(std::io::Error::from);

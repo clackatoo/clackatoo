@@ -568,9 +568,11 @@ pub(in crate::server) mod tests {
 
     /// The buffers whose files the watches are for.
     fn watched(daemon: &Daemon) -> Vec<BufferId> {
-        (daemon.watches())
+        let mut watched: Vec<BufferId> = (daemon.watches())
             .flat_map(|watched| watched.buffers.iter().copied())
-            .collect()
+            .collect();
+        watched.sort();
+        watched
     }
 
     /// Has the agent in `chat` say `update`, as the event loop hears it.
@@ -663,6 +665,13 @@ pub(in crate::server) mod tests {
         let id = open(&mut daemon, &path);
         assert!(!daemon.buffers[&id].watched);
         assert!(daemon.next_watch_retry().is_some());
+        // Not tried again for another buffer before it's time.
+        let tries = daemon.explorers.instance_tries;
+        let sub = dir.path().canonicalize().unwrap().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("b.txt"), "b\n").unwrap();
+        let other = open(&mut daemon, &sub.join("b.txt"));
+        assert_eq!(daemon.explorers.instance_tries, tries);
         // Said, with the limit to raise.
         let why = daemon.out_of_inotify().unwrap_or_default();
         assert!(why.contains("fs.inotify.max_user_instances"), "{why}");
@@ -681,7 +690,7 @@ pub(in crate::server) mod tests {
         assert_eq!(daemon.out_of_inotify(), None);
         daemon.check_disk();
         assert!(daemon.buffers[&id].watched);
-        assert_eq!(watched(&daemon), [id]);
+        assert_eq!(watched(&daemon), [id, other]);
         assert!(daemon.buffers[&id].stale(), "looked at again");
     }
 
