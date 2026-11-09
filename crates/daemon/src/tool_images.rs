@@ -444,7 +444,7 @@ impl Originals {
     }
 
     /// The handles handed over in `record`, with the images `handles`
-    /// says the store keeps for them, from a build of version 47 or later;
+    /// says the store keeps for them, from a build of version 49 or later;
     /// or, from an earlier one, the originals `record` holds, to be kept.
     pub(crate) fn resume(
         record: &mut crate::handover::ImageOriginals,

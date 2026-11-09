@@ -1732,7 +1732,7 @@ pub enum Request {
     /// Stops sending what the picture pane `picture` shows, as the client
     /// no longer shows it: an image no client shows may be let go, and is
     /// read again once one attaches. Answered with [`Response::Done`].
-    /// Only to a daemon of protocol 144 or later ([`wire::IMAGES`]).
+    /// Only to a daemon of protocol 145 or later ([`wire::IMAGES`]).
     DetachPicture {
         /// The picture pane.
         picture: PictureId,

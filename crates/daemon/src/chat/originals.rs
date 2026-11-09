@@ -41,7 +41,7 @@ impl HostedChat {
     }
 
     /// Takes back the thumbnails' handles handed over, and with `images`,
-    /// from a build of version 47 or later, the images in the store each
+    /// from a build of version 49 or later, the images in the store each
     /// handle is: from an earlier build, the originals handed over are kept
     /// in the store again.
     pub(crate) fn resume_originals(
