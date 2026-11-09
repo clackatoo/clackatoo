@@ -53,6 +53,7 @@ use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clackatoo_protocol::{Author, BufferId, BufferUpdate, TerminalId};
 use clackatoo_text::Rope;
@@ -62,7 +63,7 @@ use super::Daemon;
 use super::buffers::resolve;
 use super::chats::AgentId;
 use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
-use super::settling::{Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
+use super::settling::{self, Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, DiskStamp, Made, Prepared, PreparedStep, Refused, Unprepared};
 use crate::chat::{HostedChat, RawDiff, TurnUid, Wrote};
@@ -132,11 +133,11 @@ impl AgentFiles {
         (self.settler.panic).store(how, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// What keeps the worker from working anything out while a test holds
-    /// it, as [`Settler::held`] says.
+    /// What the worker waits on before each change, as [`Settler::gate`]
+    /// says.
     #[cfg(test)]
-    pub(super) fn held(&self) -> std::sync::Arc<std::sync::Mutex<()>> {
-        std::sync::Arc::clone(&self.settler.held)
+    pub(super) fn gate(&self) -> Arc<super::settling::Gate> {
+        Arc::clone(&self.settler.gate)
     }
 
     /// Whether a change the agent in `chat` made to a file is still being
@@ -189,11 +190,17 @@ pub(super) struct Capture {
     pub(super) text: Seen,
 }
 
+/// A file's text, shared: the changes a settlement holds for each of its
+/// turns share each text with the next, which goes from it, and the text
+/// a file not open was found to hold is shared with what's checked
+/// against it.
+pub(super) type Text = Arc<String>;
+
 /// What a file not open was found to hold.
 #[derive(Clone, Debug)]
 pub(super) enum Seen {
     /// This text.
-    Text(String),
+    Text(Text),
     /// Nothing: there was no file.
     Absent,
     /// It couldn't be read: it isn't a regular file, or is too big, or
@@ -260,7 +267,7 @@ impl AgentFiles {
         let read = (regular::open(path, Links::Follow))
             .and_then(|file| buffer::read_file_within(&file, room));
         let text = match read {
-            Ok(Ok((text, _))) => Seen::Text(buffer::lf(text)),
+            Ok(Ok((text, _))) => Seen::Text(Arc::new(buffer::lf(text))),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Seen::Absent,
             Ok(Err(_)) => Seen::Unreadable,
             Err(err) => {
@@ -284,10 +291,17 @@ pub(super) struct Settled {
     path: PathBuf,
     maker: Maker,
     /// Its text before the tools, or `None` if there was no file.
-    pub(super) before: Option<String>,
+    pub(super) before: Option<Text>,
     /// Its text on disk now, or `None` if there's no file.
-    pub(super) disk: Option<String>,
+    pub(super) disk: Option<Text>,
     read_as: Option<DiskStamp>,
+}
+
+impl Settled {
+    /// Its text before and after, as empty where there's no file.
+    pub(super) fn texts(&self) -> (&str, &str) {
+        (text(self.before.as_ref()), text(self.disk.as_ref()))
+    }
 }
 
 /// A file not open that an agent's tools say they changed, to be read and
@@ -297,9 +311,8 @@ pub(super) struct Settled {
 pub(super) struct Reading {
     chat: TerminalId,
     pub(super) path: PathBuf,
-    maker: Maker,
     /// Its text before the tools, or `None` if there was no file.
-    before: Option<String>,
+    before: Option<Text>,
     /// The tools' reports taken in, by serial, with who made their changes
     /// and the changes, in the order they were made.
     reports: Vec<(u64, Maker, Vec<RawDiff>)>,
@@ -955,7 +968,7 @@ impl Daemon {
             && reported
         {
             let text = if open.existed {
-                Seen::Text(open.saved.to_string())
+                Seen::Text(Arc::new(open.saved.to_string()))
             } else {
                 Seen::Absent
             };
@@ -975,15 +988,18 @@ impl Daemon {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => (None, None),
             Err(err) => {
                 log::warn!("{}: {err}", path.display());
-                return self.unknown(&diffing.maker, &diffing.path);
+                return self.unknown_turns(&diffing.path, diffing.makers.iter().cloned());
             }
+        };
+        let Some(maker) = diffing.makers.first().cloned() else {
+            return;
         };
         let settled = Settled {
             chat,
             path,
-            maker: diffing.maker.clone(),
-            before: open.existed.then(|| open.saved.to_string()),
-            disk,
+            maker,
+            before: open.existed.then(|| Arc::new(open.saved.to_string())),
+            disk: disk.map(Arc::new),
             read_as,
         };
         self.settle_turns(vec![settled]);
@@ -1025,9 +1041,9 @@ impl Daemon {
         let turns = by_turn(
             makers
                 .into_iter()
-                .zip(steps.into_iter().map(|(text, _)| Some(text))),
+                .zip(steps.into_iter().map(|(text, _)| Some(Arc::new(text)))),
         );
-        let before = existed.then(|| saved.to_string());
+        let before = existed.then(|| Arc::new(saved.to_string()));
         self.settle_turns(settled_by_turn(chat, &path, before, turns, Some(stamp)));
     }
 
@@ -1043,7 +1059,7 @@ impl Daemon {
             if let Some(open) = diffing.open.take() {
                 self.merge_again(diffing, &open, MERGES);
             } else {
-                self.unknown(&diffing.maker, &diffing.path);
+                self.unknown_turns(&diffing.path, diffing.makers.iter().cloned());
                 self.after_diffing(diffing);
             }
         }
@@ -1061,7 +1077,7 @@ impl Daemon {
     /// As [`unknown`](Self::unknown), for what each turn of `makers`, in
     /// the order they made their changes to `path`, did to it.
     fn unknown_turns(&mut self, path: &Path, makers: impl IntoIterator<Item = Maker>) {
-        for (maker, ()) in by_turn(makers.into_iter().map(|maker| (maker, ()))) {
+        for maker in by_turn_alone(makers) {
             self.unknown(&maker, path);
         }
     }
@@ -1212,11 +1228,7 @@ impl Daemon {
         let checking = if checking.bytes() > ON_LOOP && tries < MERGES {
             let (path, id) = (checking.path.clone(), checking.id);
             let (saved, existed) = (checking.saved.clone(), checking.existed);
-            let maker = checking.makers().into_iter().next().unwrap_or(Maker {
-                chat: checking.chat,
-                turn: TurnUid::default(),
-                tool: None,
-            });
+            let (chat, makers) = (checking.chat, by_turn_alone(checking.makers()));
             match self
                 .agent_files
                 .settler
@@ -1224,8 +1236,9 @@ impl Daemon {
             {
                 None => {
                     self.agent_files.diffing.push(Diffing {
+                        chat,
                         path,
-                        maker,
+                        makers,
                         again: false,
                         last: false,
                         open: Some(Open {
@@ -1400,14 +1413,9 @@ impl Daemon {
         // Another chat's change to it is taken in first.
         self.settle_pending(path);
         let reports = self.reports_of(chat, path);
-        let Some(first) = reports.first() else {
+        if reports.is_empty() {
             return;
-        };
-        let maker = Maker {
-            chat,
-            turn: first.turn,
-            tool: reports.last().map(|report| report.tool.clone()),
-        };
+        }
         let before = (self.agent_files.captures.iter())
             .find(|capture| capture.chat == chat && capture.path == path)
             .and_then(|capture| match &capture.text {
@@ -1438,7 +1446,6 @@ impl Daemon {
         let mut reading = Reading {
             chat,
             path: path.to_owned(),
-            maker,
             before,
             reports,
             last,
@@ -1462,12 +1469,13 @@ impl Daemon {
         reading.size = usize::try_from(size).unwrap_or(usize::MAX);
         reading.file = Some(file);
         {
-            let maker = reading.maker.clone();
+            let makers = by_turn_alone(reading.reports.iter().map(|(_, by, _)| by.clone()));
             match (self.agent_files.settler).submit(Job::Read(reading), &self.waker) {
                 None => {
                     self.agent_files.diffing.push(Diffing {
+                        chat,
                         path: path.to_owned(),
-                        maker,
+                        makers,
                         again: false,
                         last: false,
                         open: None,
@@ -1496,12 +1504,15 @@ impl Daemon {
         let Reading {
             chat,
             path,
-            maker,
             before,
             reports,
             last,
             ..
         } = reading;
+        // The turn it was read for may have ended since, and the chat's
+        // next begun, whose tools' changes are still to be said, and
+        // checked with these.
+        let last = self.still_last(chat, last);
         let path = path.as_path();
         let serials: Vec<u64> = reports.iter().map(|&(serial, ..)| serial).collect();
         let makers = || reports.iter().map(|(_, by, _)| by.clone());
@@ -1509,7 +1520,7 @@ impl Daemon {
         let disk = match read {
             Ok((text, stamp)) => {
                 read_as = Some(stamp);
-                Some(buffer::lf(text))
+                Some(Arc::new(buffer::lf(text)))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
             // Not to be taken for gone: if it can't be read by the turn's
@@ -1523,16 +1534,12 @@ impl Daemon {
                 return;
             }
         };
-        // What the tools' changes make of the text before, by the end of
-        // each turn: a file deleted by tools that show no changes is gone.
-        let made = if disk.is_none()
-            && before.is_some()
-            && reports.iter().all(|(.., diffs)| diffs.is_empty())
-        {
-            Some(vec![(maker, None)])
-        } else {
-            made_by_turn(before.as_deref().unwrap_or_default(), &reports)
-        };
+        let deleted = disk.is_none() && before.is_some();
+        let made = made_by_turn(
+            before.as_deref().map_or("", String::as_str),
+            &reports,
+            deleted,
+        );
         match made {
             // Each turn's part is its own, as its own changes make it,
             // though the file was read only after a later turn's, when it
@@ -1558,10 +1565,8 @@ impl Daemon {
             return;
         };
         for settled in turns {
-            let diffed = Diffed::between(
-                settled.before.as_deref().unwrap_or_default(),
-                settled.disk.as_deref().unwrap_or_default(),
-            );
+            let (before, disk) = settled.texts();
+            let diffed = Diffed::between(before, disk);
             self.settled_closed(settled, &diffed);
         }
     }
@@ -1570,17 +1575,12 @@ impl Daemon {
     /// enough to be worked out off the loop and the worker takes them; or
     /// else gives them back, to be worked out now.
     fn settle_off_loop(&mut self, turns: Vec<Settled>) -> Option<Vec<Settled>> {
-        let bytes: usize = (turns.iter())
-            .map(|settled| {
-                (settled.before.as_ref().map_or(0, String::len))
-                    + (settled.disk.as_ref().map_or(0, String::len))
-            })
-            .sum();
         let first = turns.first()?;
-        if bytes <= ON_LOOP {
+        if settling::bytes(&turns) <= ON_LOOP {
             return Some(turns);
         }
-        let (path, maker) = (first.path.clone(), first.maker.clone());
+        let (chat, path) = (first.chat, first.path.clone());
+        let makers = turns.iter().map(|settled| settled.maker.clone()).collect();
         match self
             .agent_files
             .settler
@@ -1588,8 +1588,9 @@ impl Daemon {
         {
             None => {
                 self.agent_files.diffing.push(Diffing {
+                    chat,
                     path,
-                    maker,
+                    makers,
                     again: false,
                     last: false,
                     open: None,
@@ -1631,11 +1632,8 @@ impl Daemon {
                 diffed,
             )
         };
-        let texts = (
-            before.as_deref().unwrap_or_default(),
-            disk.as_deref().unwrap_or_default(),
-        );
         let turn = maker.turn;
+        let texts = (text(before.as_ref()), text(disk.as_ref()));
         self.agent_changed_diffed(&path, texts, (maker.hunks(), read_as), diffed);
         if let Some(capture) = (self.agent_files.captures.iter_mut())
             .find(|capture| capture.chat == chat && capture.path == path)
@@ -1856,30 +1854,63 @@ fn by_turn<T>(steps: impl IntoIterator<Item = (Maker, T)>) -> Vec<(Maker, T)> {
     turns
 }
 
+/// `makers`, in the order they made their changes, as one for each turn,
+/// by its last tool.
+fn by_turn_alone(makers: impl IntoIterator<Item = Maker>) -> Vec<Maker> {
+    let turns = by_turn(makers.into_iter().map(|maker| (maker, ())));
+    turns.into_iter().map(|(maker, ())| maker).collect()
+}
+
+/// The text `text` holds, empty if there's no file.
+fn text(text: Option<&Text>) -> &str {
+    text.map_or("", |text| text.as_str())
+}
+
 /// What the changes in `reports`, each with who made it, in the order
 /// made, make in turn of `before`, as [`apply`] makes them, by the end of
 /// each turn, by its last tool: each turn's text only from its own
 /// changes. `None` if a change doesn't fit.
+///
+/// The file `deleted` by the last reports, which show no changes, all one
+/// turn's, is gone by that turn's end: what else could they have done to
+/// it? Reports with no changes that span turns can't be told apart, and
+/// are `None`.
 fn made_by_turn(
     before: &str,
     reports: &[(u64, Maker, Vec<RawDiff>)],
-) -> Option<Vec<(Maker, Option<String>)>> {
-    let mut turns: Vec<(Maker, Option<String>)> = Vec::new();
+    deleted: bool,
+) -> Option<Vec<(Maker, Option<Text>)>> {
+    let empty = (reports.iter().rev())
+        .take_while(|(.., diffs)| diffs.is_empty())
+        .count();
+    let (said, deleting) = reports.split_at(reports.len() - empty);
+    let deleting = match (deleting.first(), deleting.last()) {
+        (Some((_, first, _)), Some((_, by, _))) if deleted && first.turn == by.turn => Some(by),
+        _ => None,
+    };
+    let said = if deleting.is_some() { said } else { reports };
+    let mut turns: Vec<(Maker, Option<Text>)> = Vec::new();
     // The text the turn under way has made so far, until it ends.
     let mut text: Option<String> = None;
-    for (at, (_, by, diffs)) in reports.iter().enumerate() {
+    for (at, (_, by, diffs)) in said.iter().enumerate() {
         let from = match (&text, turns.last()) {
             (Some(text), _) => text.as_str(),
             (None, Some((_, Some(made)))) => made.as_str(),
             (None, _) => before,
         };
         let next = apply(from, diffs)?;
-        let ends = (reports.get(at + 1)).is_none_or(|(_, after, _)| after.turn != by.turn);
+        let ends = (said.get(at + 1)).is_none_or(|(_, after, _)| after.turn != by.turn);
         if ends {
-            turns.push((by.clone(), Some(next)));
+            turns.push((by.clone(), Some(Arc::new(next))));
             text = None;
         } else {
             text = Some(next);
+        }
+    }
+    if let Some(by) = deleting {
+        match turns.last_mut() {
+            Some(turn) if turn.0.turn == by.turn => *turn = (by.clone(), None),
+            _ => turns.push((by.clone(), None)),
         }
     }
     Some(turns)
@@ -1887,26 +1918,24 @@ fn made_by_turn(
 
 /// What `turns`, each turn of the agent in `chat` with the text it left
 /// `path`, a file not open, made of it, in turn, from `before`: one change
-/// for each, from what the turn before left, the last leaving what was
-/// read as `read_as`.
+/// for each, from what the turn before left, which they share, the last
+/// leaving what was read as `read_as`.
 fn settled_by_turn(
     chat: TerminalId,
     path: &Path,
-    mut before: Option<String>,
-    turns: Vec<(Maker, Option<String>)>,
+    mut before: Option<Text>,
+    turns: Vec<(Maker, Option<Text>)>,
     read_as: Option<DiskStamp>,
 ) -> Vec<Settled> {
     let count = turns.len();
     let mut settled = Vec::with_capacity(count);
     for (at, (maker, disk)) in turns.into_iter().enumerate() {
         let last = at + 1 == count;
-        // Shared with the next, which goes from it.
-        let next = if last { None } else { disk.clone() };
         settled.push(Settled {
             chat,
             path: path.to_owned(),
             maker,
-            before: std::mem::replace(&mut before, next),
+            before: std::mem::replace(&mut before, disk.clone()),
             disk,
             read_as: read_as.filter(|_| last),
         });
@@ -2085,6 +2114,41 @@ pub(super) mod tests {
         }))
         .unwrap();
         daemon.chat(chat).unwrap().update(update);
+    }
+
+    /// A file to read off the loop, `size` bytes long as far as the worker
+    /// is told, with no file opened for it: reading it fails at once.
+    pub(in crate::server) fn reading_of(size: usize) -> Reading {
+        Reading {
+            chat: TerminalId(1),
+            path: PathBuf::new(),
+            before: None,
+            reports: Vec::new(),
+            last: false,
+            size,
+            file: None,
+        }
+    }
+
+    /// A change for each of two turns shares the text the first leaves
+    /// with the second, which goes from it, and counts it once, so it's no
+    /// likelier to be worked out on the loop than a change of one turn.
+    #[test]
+    fn a_change_for_each_turn_shares_and_counts_each_text_once() {
+        let text = |len| Some(Arc::new("x".repeat(len)));
+        let maker = |turn| Maker {
+            chat: TerminalId(1),
+            turn: TurnUid(turn),
+            tool: None,
+        };
+        let turns = vec![(maker(0), text(10)), (maker(1), text(100))];
+        let turns = settled_by_turn(TerminalId(1), Path::new("/a"), text(1), turns, None);
+        let (first, second) = (&turns[0], &turns[1]);
+        assert!(Arc::ptr_eq(
+            first.disk.as_ref().unwrap(),
+            second.before.as_ref().unwrap()
+        ));
+        assert_eq!(settling::bytes(&turns), 111);
     }
 
     #[test]

@@ -60,16 +60,21 @@ pub(super) const ON_LOOP: usize = 256 * 1024;
 /// The most bytes of text given the worker at once, before and after
 /// together. Past it, a change is worked out on the loop, rather than
 /// holding more in memory, or making whatever waits for the worker wait
-/// long: about a second's work for it in a debug build.
+/// long: about a second's work for it in a debug build. A change past it
+/// alone, with nothing else in flight, is still the worker's: the loop
+/// never takes one for its size.
 const IN_FLIGHT: usize = 32 * 1024 * 1024;
 
 /// A change to a file not open being worked out off the loop, and what
 /// waits for it.
 #[derive(Debug)]
 pub(super) struct Diffing {
+    pub(super) chat: TerminalId,
     pub(super) path: PathBuf,
-    /// Who made it, to note it unknown if it can't be worked out.
-    pub(super) maker: Maker,
+    /// Who made it, one for each turn whose change it holds, in order, by
+    /// the turn's last tool, to note each unknown if it can't be worked
+    /// out.
+    pub(super) makers: Vec<Maker>,
     /// The chat's tools said more of the file meanwhile: it's settled
     /// again once this is taken in.
     pub(super) again: bool,
@@ -106,7 +111,7 @@ pub(super) enum Source {
 
 impl Diffing {
     pub(super) fn chat(&self) -> TerminalId {
-        self.maker.chat
+        self.chat
     }
 }
 
@@ -136,7 +141,7 @@ impl Job {
     /// The text it holds, or will, in bytes.
     fn bytes(&self) -> usize {
         match self {
-            Self::Closed(turns) => turns.iter().map(bytes).sum(),
+            Self::Closed(turns) => bytes(turns),
             Self::Open(checking) => checking.bytes(),
             Self::Read(reading) => reading.size,
         }
@@ -153,10 +158,8 @@ impl Job {
                     .map(|settled| {
                         let diffed = catch_unwind(AssertUnwindSafe(|| {
                             first();
-                            Diffed::between(
-                                settled.before.as_deref().unwrap_or_default(),
-                                settled.disk.as_deref().unwrap_or_default(),
-                            )
+                            let (before, disk) = settled.texts();
+                            Diffed::between(before, disk)
                         }));
                         if let Err(panic) = &diffed {
                             log::warn!("settling: working out a change panicked: {panic:?}");
@@ -192,7 +195,10 @@ impl Worked {
     /// The text the change given the worker held, in bytes.
     fn bytes(&self) -> usize {
         match self {
-            Self::Closed(turns) => turns.iter().map(|(settled, _)| bytes(settled)).sum(),
+            Self::Closed(turns) => {
+                let turns: Vec<&Settled> = turns.iter().map(|(settled, _)| settled).collect();
+                bytes(&turns)
+            }
             Self::Open(checking, _) => checking.bytes(),
             Self::Read(reading, _) => reading.size,
         }
@@ -213,13 +219,67 @@ pub(super) struct Settler {
     gone: bool,
     /// Makes the worker panic as it works out the next change, if set, as
     /// a test's way of seeing what a panic does: [`CAUGHT`] in its guard,
-    /// or [`GONE`], outside it, so the worker is lost.
+    /// [`LATER`] in the guard after, or [`GONE`], outside it, so the
+    /// worker is lost.
     #[cfg(test)]
     pub(super) panic: Arc<std::sync::atomic::AtomicU8>,
-    /// Held by a test, keeps the worker from working out anything until
-    /// let go: its way of having it read a file late.
+    /// What the worker waits on before each change it's given, as a test
+    /// says: its way of having it read a file late.
     #[cfg(test)]
-    pub(super) held: Arc<std::sync::Mutex<()>>,
+    pub(super) gate: Arc<Gate>,
+}
+
+/// Lets the worker take on its changes freely, or, while a test holds it,
+/// only as many as it lets through.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct Gate {
+    /// How many more it may take on, while held.
+    left: std::sync::Mutex<Option<usize>>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl Gate {
+    /// Lets nothing more through.
+    pub(super) fn hold(&self) {
+        *self.left.lock().unwrap() = Some(0);
+    }
+
+    /// Lets `count` more changes through, while held.
+    pub(super) fn let_through(&self, count: usize) {
+        if let Some(left) = self.left.lock().unwrap().as_mut() {
+            *left += count;
+        }
+        self.changed.notify_all();
+    }
+
+    /// Lets everything through.
+    pub(super) fn open(&self) {
+        *self.left.lock().unwrap() = None;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the next change may be taken on.
+    fn pass(&self) {
+        let mut left = self
+            .left
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match left.as_mut() {
+                None => return,
+                Some(0) => {
+                    left = (self.changed.wait(left))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                Some(count) => {
+                    *count -= 1;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// What the worker has given back since last asked.
@@ -235,19 +295,42 @@ pub(super) struct Taken {
 pub(super) const CAUGHT: u8 = 1;
 #[cfg(test)]
 pub(super) const GONE: u8 = 2;
+#[cfg(test)]
+pub(super) const LATER: u8 = 3;
 
-/// The text `settled` holds, in bytes.
-fn bytes(settled: &Settled) -> usize {
-    settled.before.as_ref().map_or(0, String::len) + settled.disk.as_ref().map_or(0, String::len)
+/// Panics as `panic` asks of the change being worked out, as
+/// [`Settler::panic`] says.
+#[cfg(test)]
+fn panic_as_asked(panic: &std::sync::atomic::AtomicU8) {
+    match panic.swap(0, std::sync::atomic::Ordering::SeqCst) {
+        CAUGHT => panic!("working out a change failed, as a test asked"),
+        LATER => panic.store(CAUGHT, std::sync::atomic::Ordering::SeqCst),
+        _ => {}
+    }
+}
+
+/// The text `turns`, each turn's change to a file in order, hold, in
+/// bytes: each text once, as each turn's goes from the text the one
+/// before left, which they share.
+pub(super) fn bytes(turns: &[impl std::borrow::Borrow<Settled>]) -> usize {
+    let len = |text: &Option<Arc<String>>| text.as_ref().map_or(0, |text| text.len());
+    let before = turns.first().map_or(0, |first| len(&first.borrow().before));
+    before
+        + turns
+            .iter()
+            .map(|settled| len(&settled.borrow().disk))
+            .sum::<usize>()
 }
 
 impl Settler {
     /// Works out `job` on the worker, waking the loop with `waker` once
     /// it's done. Gives `job` back if the worker can't take it, as when
-    /// too much is in flight already, for the loop to work it out itself.
+    /// too much is in flight already, for the loop to work it out itself;
+    /// never for its size alone, with nothing else in flight, as the loop
+    /// would then take the biggest changes.
     pub(super) fn submit(&mut self, job: Job, waker: &Arc<mio::Waker>) -> Option<Job> {
         let size = job.bytes();
-        if self.in_flight + size > IN_FLIGHT {
+        if self.in_flight > 0 && self.in_flight + size > IN_FLIGHT {
             return Some(job);
         }
         if self.worker.is_none() {
@@ -257,13 +340,13 @@ impl Settler {
             #[cfg(test)]
             let panic = Arc::clone(&self.panic);
             #[cfg(test)]
-            let held = Arc::clone(&self.held);
+            let gate = Arc::clone(&self.gate);
             let spawned = std::thread::Builder::new()
                 .name("settling".into())
                 .spawn(move || {
                     while let Ok(job) = jobs.recv() {
                         #[cfg(test)]
-                        drop(held.lock());
+                        gate.pass();
                         #[cfg(test)]
                         if panic.load(std::sync::atomic::Ordering::SeqCst) == GONE {
                             panic.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -271,11 +354,7 @@ impl Settler {
                         }
                         let worked = job.work(&|| {
                             #[cfg(test)]
-                            assert_ne!(
-                                panic.swap(0, std::sync::atomic::Ordering::SeqCst),
-                                CAUGHT,
-                                "working out a change failed, as a test asked"
-                            );
+                            panic_as_asked(&panic);
                         });
                         if done.send(worked).is_err() {
                             break;
@@ -402,6 +481,30 @@ mod tests {
     /// The buffer's text saved.
     fn saved(world: &World, id: BufferId) -> String {
         world.daemon.buffers[&id].buffer.saved().to_string()
+    }
+
+    /// A change past the cap of what's in flight is still the worker's
+    /// with nothing else in flight, as the loop would take the biggest
+    /// changes; with something in flight, one past the cap is given back
+    /// for the loop to work out, until that's done.
+    #[test]
+    fn a_change_past_the_cap_is_given_back_only_with_another_in_flight() {
+        use std::sync::Arc;
+
+        use super::{IN_FLIGHT, Job, Settler, Worked};
+        use crate::server::agent_files::tests::reading_of;
+
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(mio::Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let mut settler = Settler::default();
+        settler.gate.hold();
+        let past = settler.submit(Job::Read(reading_of(IN_FLIGHT + 1)), &waker);
+        assert!(past.is_none(), "taken, with nothing else in flight");
+        let small = settler.submit(Job::Read(reading_of(1)), &waker);
+        assert!(matches!(small, Some(Job::Read(_))), "given back");
+        settler.gate.open();
+        assert!(matches!(settler.wait(), Some(Worked::Read(_, Err(_)))));
+        assert!(settler.submit(Job::Read(reading_of(1)), &waker).is_none());
     }
 
     #[test]

@@ -1331,9 +1331,22 @@ pub(in crate::server) mod tests {
     /// As [`change_big_file`], to the file `name`, in the turn `uid`.
     fn change_big(
         world: &mut World,
-        (name, uid): (&str, TurnUid),
+        at: (&str, TurnUid),
         (tool, line): (&str, u32),
         before: &str,
+    ) -> String {
+        let (old, new) = (format!("line {line}\n"), format!("line #{line}\n"));
+        change_big_with(world, at, tool, before, (&old, &new))
+    }
+
+    /// As [`change_big`], the tool's change being to put `new` for the
+    /// first `old`.
+    fn change_big_with(
+        world: &mut World,
+        (name, uid): (&str, TurnUid),
+        tool: &str,
+        before: &str,
+        (old, new): (&str, &str),
     ) -> String {
         let chat = world.chat;
         let path = world.path(name).display().to_string();
@@ -1348,8 +1361,7 @@ pub(in crate::server) mod tests {
         };
         // About to change it: its text before is kept.
         world.daemon.take_written(chat, &said(false, vec![]));
-        let (old, new) = (format!("line {line}\n"), format!("line #{line}\n"));
-        let after = before.replacen(&old, &new, 1);
+        let after = before.replacen(old, new, 1);
         std::fs::write(world.path(name), &after).unwrap();
         let diff = RawDiff {
             path: path.clone(),
@@ -1501,45 +1513,78 @@ pub(in crate::server) mod tests {
         assert_eq!(world.disk("big.txt"), Some(first));
     }
 
-    /// Has the chat's agent change line 1 of `big.txt` in its first turn,
-    /// and line 5 in its next, writing the file in place each time, the
-    /// file `open` in a buffer or not, with the worker held until both
-    /// have, then left as `meanwhile` leaves it: the
-    /// first turn's change is read or checked off the loop only after the
-    /// second's write, so the file holds the second's text, which both
-    /// turns' changes together make. Returns the file's text before, after
-    /// the first turn, and after the second.
+    /// A change a tool says it made in [`turns_in_place`]: the tool, and
+    /// the text it puts for the first of another.
+    type Said<'a> = (&'a str, &'a str, &'a str);
+
+    /// The two turns most tests here have the agent make: line 1 changed
+    /// in the first, line 5 in the next.
+    const TWO: [&[Said]; 2] = [
+        &[("t1", "line 1\n", "line #1\n")],
+        &[("t2", "line 5\n", "line #5\n")],
+    ];
+
+    /// Has the chat's agent make `turns` of changes to `big.txt`, each
+    /// turn's tools in order, writing the file in place each time, the
+    /// file `open` in a buffer or not, with the worker held until all
+    /// have, then left as `meanwhile` leaves it: the first turn's change is
+    /// read or checked off the loop only after the later turns' writes, so
+    /// the file holds the last turn's text, which all their changes
+    /// together make. Returns the file's text before, and after each turn.
+    fn turns_in_place(
+        world: &mut World,
+        open: bool,
+        turns: &[&[Said]],
+        meanwhile: impl FnOnce(&mut World),
+    ) -> Vec<String> {
+        let mut texts = vec![big_file(world)];
+        if open {
+            world.open("big.txt");
+        }
+        let gate = world.daemon.agent_files.gate();
+        gate.hold();
+        for (n, tools) in turns.iter().enumerate() {
+            if n > 0 {
+                world.end_turn();
+                world.next_turn();
+            }
+            let uid = world
+                .daemon
+                .chat_ref(world.chat)
+                .unwrap()
+                .turn_uid(n)
+                .unwrap();
+            let mut text = texts.last().unwrap().clone();
+            for &(tool, old, new) in *tools {
+                text = change_big_with(world, ("big.txt", uid), tool, &text, (old, new));
+            }
+            texts.push(text);
+        }
+        meanwhile(world);
+        gate.open();
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        world.daemon.settle_all_pending();
+        texts
+    }
+
+    /// As [`turns_in_place`], for the [`TWO`] turns most tests make:
+    /// returns the file's text before, after the first turn, and after the
+    /// second.
     fn two_turns_in_place(
         world: &mut World,
         open: bool,
         meanwhile: impl FnOnce(&mut World),
     ) -> (String, String, String) {
-        let first = big_file(world);
-        if open {
-            world.open("big.txt");
-        }
-        let worker = world.daemon.agent_files.held();
-        let hold = worker.lock().unwrap();
-        let second = change_big_file(world, ("t1", 1), &first);
-        world.end_turn();
-        world.next_turn();
-        let uid = world
-            .daemon
-            .chat_ref(world.chat)
-            .unwrap()
-            .turn_uid(1)
-            .unwrap();
-        let third = change_big(world, ("big.txt", uid), ("t2", 5), &second);
-        drop(hold);
-        meanwhile(world);
-        world.daemon.settle_all_pending();
-        world.end_turn();
-        (first, second, third)
+        let mut texts = turns_in_place(world, open, &TWO, meanwhile).into_iter();
+        let mut next = || texts.next().unwrap();
+        (next(), next(), next())
     }
 
     /// Each of two turns that changed `big.txt`, as [`two_turns_in_place`]
-    /// has them, with `open` and `meanwhile`, is undone and redone on its own, the
-    /// other's change kept, whichever is undone first (CLACKA-235).
+    /// has them, with `open` and `meanwhile`, is undone and redone on its
+    /// own, the other's change kept, whichever is undone first
+    /// (CLACKA-235).
     fn each_turn_undone_alone(open: bool, meanwhile: impl Fn(&mut World)) {
         for later_first in [true, false] {
             let mut world = World::new();
@@ -1563,6 +1608,13 @@ pub(in crate::server) mod tests {
             world.undo(0, false, false);
             assert_eq!(world.disk("big.txt"), Some(first));
         }
+    }
+
+    /// Whether undoing turn `turn` is refused, as what it did to `big.txt`
+    /// isn't known.
+    fn unknown_in(world: &mut World, turn: usize) -> bool {
+        let said = world.undo(turn, false, false);
+        said.contains("in big.txt, what the file held before wasn't seen")
     }
 
     /// The first turn's change to a big file not open is read off the
@@ -1595,12 +1647,281 @@ pub(in crate::server) mod tests {
         each_turn_undone_alone(true, |world| {
             // The check of the first turn's change alone fails, and both
             // turns' are checked and merged together.
+            world.daemon.agent_files.gate().let_through(1);
             world.daemon.take_one_settled();
             assert!(world.daemon.agent_files.diffing(world.chat));
             let id = world.daemon.buffer_of(&world.path("big.txt")).unwrap();
             world.daemon.close_if_unwanted(id);
             assert!(!world.daemon.buffers.contains_key(&id));
         });
+    }
+
+    /// Two turns change the same line: the later can be undone alone, the
+    /// earlier only once the later is, and both are made again in order.
+    #[test]
+    fn two_turns_read_late_changing_the_same_line_are_undone_later_first() {
+        let mut world = World::new();
+        let turns: [&[Said]; 2] = [
+            &[("t1", "line 1\n", "line #1\n")],
+            &[("t2", "line #1\n", "line ##1\n")],
+        ];
+        let texts = turns_in_place(&mut world, false, &turns, |_| {});
+        let refused = world.undo(0, false, false);
+        assert!(refused.contains("line 1 has changed since"), "{refused}");
+        assert_eq!(world.disk("big.txt").as_ref(), Some(&texts[2]));
+        for (turn, kept) in [(1, 1), (0, 0)] {
+            let n = turn + 1;
+            assert_eq!(
+                world.undo(turn, false, false),
+                format!("Undid turn {n}: big.txt.")
+            );
+            assert_eq!(world.disk("big.txt").as_ref(), Some(&texts[kept]));
+        }
+        for (turn, made) in [(0, 1), (1, 2)] {
+            let n = turn + 1;
+            assert_eq!(
+                world.undo(turn, true, false),
+                format!("Redid turn {n}: big.txt.")
+            );
+            assert_eq!(world.disk("big.txt").as_ref(), Some(&texts[made]));
+        }
+    }
+
+    /// A turn's several tools, read late with the next turn's: the turn's
+    /// change is what all its tools made, by its last.
+    #[test]
+    fn a_turns_several_tools_read_late_with_the_next_turns_are_one_change_of_its() {
+        let mut world = World::new();
+        let turns: [&[Said]; 2] = [
+            &[
+                ("t1", "line 1\n", "line #1\n"),
+                ("t1b", "line 2\n", "line #2\n"),
+            ],
+            &[("t2", "line 5\n", "line #5\n")],
+        ];
+        let texts = turns_in_place(&mut world, false, &turns, |_| {});
+        let log = &world.daemon.agent_files.log;
+        let file = &log.turn(world.chat, world.first()).unwrap().files[0];
+        assert_eq!(file.tool.as_deref(), Some("t1b"));
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        let without_first =
+            (texts[2].replacen("line #1\n", "line 1\n", 1)).replacen("line #2\n", "line 2\n", 1);
+        assert_eq!(world.disk("big.txt"), Some(without_first));
+        assert_eq!(world.undo(0, true, false), "Redid turn 1: big.txt.");
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt").as_ref(), Some(&texts[1]));
+    }
+
+    /// What a tool of the chat's agent says it did to `big.txt` in turn
+    /// `uid`: that it's about to, or, `done`, that it has, with `diffs`.
+    fn said_of_big(
+        world: &World,
+        uid: TurnUid,
+        tool: &str,
+        done: bool,
+        diffs: Vec<RawDiff>,
+    ) -> Wrote {
+        Wrote {
+            done,
+            turn: uid,
+            tool: tool.into(),
+            order: 0,
+            paths: vec![world.path("big.txt").display().to_string()],
+            diffs,
+        }
+    }
+
+    /// A change of `old` to `new` in `big.txt`, as a tool says it.
+    fn big_diff(world: &World, old: Option<&str>, new: &str) -> RawDiff {
+        RawDiff {
+            path: world.path("big.txt").display().to_string(),
+            old: old.map(Into::into),
+            new: new.into(),
+        }
+    }
+
+    /// A turn that made a big file, read late with the next turn's change
+    /// to it: each is its own. The file goes once both are undone, and the
+    /// first can't be undone alone, as the file has changed since.
+    #[test]
+    fn a_turn_that_made_a_big_file_read_late_with_the_next_turns_is_its_own() {
+        let mut world = World::new();
+        let made = big_file(&world);
+        std::fs::remove_file(world.path("big.txt")).unwrap();
+        let gate = world.daemon.agent_files.gate();
+        gate.hold();
+        let (chat, uid) = (world.chat, world.first());
+        start_tool(&mut world.daemon, chat, "t1");
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t1", false, vec![]));
+        std::fs::write(world.path("big.txt"), &made).unwrap();
+        let diffs = vec![big_diff(&world, None, &made)];
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t1", true, diffs));
+        assert!(world.daemon.agent_files.diffing(chat));
+        world.end_turn();
+        world.next_turn();
+        let uid = world.daemon.chat_ref(chat).unwrap().turn_uid(1).unwrap();
+        let changed = change_big(&mut world, ("big.txt", uid), ("t2", 5), &made);
+        gate.open();
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        world.daemon.settle_all_pending();
+        let refused = world.undo(0, false, false);
+        assert!(refused.starts_with("Couldn't undo turn 1"), "{refused}");
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt").as_ref(), Some(&made));
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt"), None);
+        assert_eq!(world.undo(0, true, false), "Redid turn 1: big.txt.");
+        assert_eq!(world.undo(1, true, false), "Redid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(changed));
+    }
+
+    /// A turn whose last tool deletes a big file, saying no change, read
+    /// late with the turn before's change to it: each turn is its own.
+    #[test]
+    fn a_turn_that_deleted_a_big_file_read_late_with_the_last_turns_is_its_own() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let gate = world.daemon.agent_files.gate();
+        gate.hold();
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        world.end_turn();
+        // The next turn changes the file in place, then deletes it.
+        world.next_turn();
+        let chat = world.chat;
+        let uid = world.daemon.chat_ref(chat).unwrap().turn_uid(1).unwrap();
+        change_big(&mut world, ("big.txt", uid), ("t2", 5), &second);
+        start_tool(&mut world.daemon, chat, "t2b");
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t2b", false, vec![]));
+        std::fs::remove_file(world.path("big.txt")).unwrap();
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t2b", true, vec![]));
+        gate.open();
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        world.daemon.settle_all_pending();
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt").as_ref(), Some(&second));
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt").as_ref(), Some(&first));
+        assert_eq!(world.undo(0, true, false), "Redid turn 1: big.txt.");
+        assert_eq!(world.undo(1, true, false), "Redid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt"), None);
+    }
+
+    /// Two turns' changes read late together, with a change from outside
+    /// too: as the last turn ends, what each did is noted unknown.
+    #[test]
+    fn two_turns_read_late_with_another_change_are_each_noted_unknown() {
+        let mut world = World::new();
+        two_turns_in_place(&mut world, false, |world| {
+            let disk = world.disk("big.txt").unwrap();
+            let theirs = disk.replacen("line 9\n", "line #9\n", 1);
+            std::fs::write(world.path("big.txt"), theirs).unwrap();
+        });
+        assert!(unknown_in(&mut world, 0));
+        assert!(unknown_in(&mut world, 1));
+    }
+
+    /// Working out one turn's part of a change for two fails: that turn's
+    /// is noted unknown, and the other's is still known.
+    #[test]
+    fn a_turns_part_the_worker_fails_at_leaves_the_other_turns_known() {
+        use crate::server::settling::{CAUGHT, LATER};
+        for (how, failed) in [(CAUGHT, 0), (LATER, 1)] {
+            let mut world = World::new();
+            let (_, second, third) = two_turns_in_place(&mut world, false, |world| {
+                world.daemon.agent_files.panic_next(how);
+            });
+            assert!(unknown_in(&mut world, failed), "{failed}");
+            let other = 1 - failed;
+            let n = other + 1;
+            assert_eq!(
+                world.undo(other, false, false),
+                format!("Undid turn {n}: big.txt.")
+            );
+            let kept = if other == 0 {
+                third.replacen("line #1\n", "line 1\n", 1)
+            } else {
+                second
+            };
+            assert_eq!(world.disk("big.txt"), Some(kept));
+        }
+    }
+
+    /// The worker's lost with two turns' changes, once they're read and
+    /// being worked out, or while they're being read: each turn's change is
+    /// noted unknown.
+    #[test]
+    fn a_worker_lost_with_two_turns_changes_notes_each_unknown() {
+        use crate::server::settling::GONE;
+        for read in [2, 1] {
+            let mut world = World::new();
+            two_turns_in_place(&mut world, false, |world| {
+                world.daemon.agent_files.gate().let_through(read);
+                for _ in 0..read {
+                    world.daemon.take_one_settled();
+                }
+                world.daemon.agent_files.panic_next(GONE);
+            });
+            assert!(unknown_in(&mut world, 0), "{read}");
+            assert!(unknown_in(&mut world, 1), "{read}");
+        }
+    }
+
+    /// A big file read again as its turn's last, its tool having said what
+    /// it changed only after the first read, is read only after the next
+    /// turn's tool has written it in place: that turn's change is still to
+    /// be said, so the read isn't the last, and each turn is its own.
+    #[test]
+    fn a_read_as_a_turns_last_after_the_next_turn_began_waits_for_its_changes() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let gate = world.daemon.agent_files.gate();
+        gate.hold();
+        let (chat, uid) = (world.chat, world.first());
+        start_tool(&mut world.daemon, chat, "t1");
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t1", false, vec![]));
+        let second = first.replacen("line 1\n", "line #1\n", 1);
+        std::fs::write(world.path("big.txt"), &second).unwrap();
+        // Done, as Claude Code's adapter says before what it changed, then
+        // what it changed.
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t1", true, vec![]));
+        let diffs = vec![big_diff(&world, Some("line 1\n"), "line #1\n")];
+        world
+            .daemon
+            .take_written(chat, &said_of_big(&world, uid, "t1", true, diffs));
+        world.end_turn();
+        // The first read can't be what the tool made, having no changes;
+        // the turn over, it's read again as its last.
+        gate.let_through(1);
+        world.daemon.take_one_settled();
+        assert!(world.daemon.agent_files.diffing(chat));
+        world.next_turn();
+        let uid = world.daemon.chat_ref(chat).unwrap().turn_uid(1).unwrap();
+        let third = change_big(&mut world, ("big.txt", uid), ("t2", 5), &second);
+        gate.open();
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        world.daemon.settle_all_pending();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(
+            world.disk("big.txt"),
+            Some(third.replacen("line #1\n", "line 1\n", 1))
+        );
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(first));
     }
     #[test]
     fn a_big_change_the_worker_fails_at_is_noted_unknown() {
