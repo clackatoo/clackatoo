@@ -1240,6 +1240,8 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-11-09",
         lesson: "agents",
         what: "A chat's access to the window shows as a teal badge in the top bar: click to go to the chat, × to revoke",
+    },
+    News {
         id: "kitty-keys",
         date: "2026-11-09",
         lesson: "shell",

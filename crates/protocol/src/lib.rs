@@ -412,7 +412,7 @@ pub enum ClientMessage {
     /// ask (OSC 10, 11, 12 and 4), said as it connects: the daemon answers
     /// them itself, at once, with the colours the window that said last
     /// said, and tells the daemons it's connected to. Not answered. Only
-    /// sent to a daemon of protocol 137 or later
+    /// sent to a daemon of protocol 133 or later
     /// ([`wire::TERMINAL_STANDARDS`]).
     Colours {
         /// The colours.

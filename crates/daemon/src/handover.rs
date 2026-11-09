@@ -8604,8 +8604,8 @@ mod v45 {
         AgentCommand, Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches,
         ChatContinuation, ChatDraft, ChatForks, ChatPreviews, ChatQueue, ChatUids, Connection,
         Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known, Lender, Lent,
-        LentBackground, Live, NestedItem, Process, Restored, Reviews, Sharing, Shell, Talk,
-        Terminal, ToolPreviews, Trusted, Mcp, Undelivered, Workspaces, relay,
+        LentBackground, Live, Mcp, NestedItem, Process, Restored, Reviews, Sharing, Shell, Talk,
+        Terminal, ToolPreviews, Trusted, Undelivered, Workspaces, relay,
     };
     #[derive(Debug, Deserialize)]
     pub(super) struct State {

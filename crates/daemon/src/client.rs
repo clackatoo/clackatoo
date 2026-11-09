@@ -731,6 +731,16 @@ impl Client {
         self.send(&ClientMessage::Present { here })
     }
 
+    /// Says what colours the client draws terminals in, which programs
+    /// that ask are told (see [`ClientMessage::Colours`]).
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn colours(&mut self, palette: clackatoo_protocol::Palette) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Colours { palette })
+    }
+
     /// Limits how long [`next_event`](Self::next_event) and requests wait.
     /// A wait that runs out fails with an I/O error of kind `WouldBlock`.
     ///

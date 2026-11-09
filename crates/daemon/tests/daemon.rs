@@ -1227,9 +1227,7 @@ fn programs_are_told_the_colours_the_window_said() {
         cursor: [0xff; 3],
         named,
     };
-    client
-        .send(&ClientMessage::Colours { palette })
-        .expect("send");
+    client.colours(palette).expect("send");
     // Asked with BEL, answered with it, as Neovim asks for the background.
     let script = r"stty raw -echo; printf '\033]11;?\007'; head -c 24 | od -An -tx1; sleep 5";
     let terminal = spawn(&mut client, &["sh", "-c", script]);

@@ -4,7 +4,7 @@
 //!
 //! A key is sent as `CSI code[:shifted[:base]] [; modifiers [; text]] u`,
 //! or for the keys xterm already sends as `CSI … ~` or `CSI 1 ; m A`, in
-//! those forms. With [`DISAMBIGUATE`] alone, only what xterm's encoding
+//! those forms. With [`DISAMBIGUATE`](clackatoo_term::keyboard::DISAMBIGUATE) alone, only what xterm's encoding
 //! can't tell apart changes: Esc, and keys with Ctrl or Alt. Enter, Tab
 //! and Backspace with no modifiers stay as they were, so a shell left with
 //! the flags on by a program that died can still be typed `reset` into.
@@ -17,7 +17,7 @@
 //! makes, and the key in the base layout, are as the keyboard's own
 //! layout has them for letters, and as a US layout has them otherwise.
 
-use clackatoo_term::keyboard::{ALL_KEYS, ALTERNATE_KEYS, DISAMBIGUATE, TEXT};
+use clackatoo_term::keyboard::{ALL_KEYS, ALTERNATE_KEYS, TEXT};
 use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
 use super::{KeyPress, Modifiers};
@@ -34,7 +34,7 @@ enum Code {
 }
 
 /// Appends what `press` sends to a program that asked for the kitty
-/// keyboard protocol's `flags`, which include [`DISAMBIGUATE`] or
+/// keyboard protocol's `flags`, which include [`DISAMBIGUATE`](clackatoo_term::keyboard::DISAMBIGUATE) or
 /// [`ALL_KEYS`].
 pub(super) fn encode(press: &KeyPress<'_>, flags: u8, out: &mut Vec<u8>) {
     let modifiers = press.modifiers;
@@ -347,6 +347,8 @@ fn base_layout(code: KeyCode) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
+    use clackatoo_term::keyboard::DISAMBIGUATE;
+
     use super::*;
 
     const NONE: Modifiers = Modifiers {

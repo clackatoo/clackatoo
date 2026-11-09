@@ -301,7 +301,7 @@ pub struct GridState {
     /// The kitty keyboard protocol's flags the program asked for (see
     /// [`clackatoo_term::keyboard`]): how it wants keys encoded, beyond
     /// `modes`. 0, xterm's encoding, from a daemon older than protocol
-    /// 137.
+    /// 133.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS }, _, _>"
