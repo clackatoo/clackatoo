@@ -99,7 +99,7 @@ The daemon keeps each buffer, as it keeps terminals:
 - **Undo undoes your edits, not anyone else's.** `u` takes back your last
   change, from whichever window you made it in, and leaves an agent's edits
   made since in place. See
-  [the files an agent changes](~clackatoo/reference/agents#the-files-it-changes).
+  [the files an agent changes](~clackatoo/reference/agent-changes#the-files-it-changes).
 - **Nothing is lost when the window closes, or the daemon
   [upgrades](~clackatoo/reference/cli#upgrade).** Buffers come through an
   upgrade with their undo history. Changes not written outlive a crash or a
@@ -540,8 +540,8 @@ register's name before a command keeps text in it, or puts it from it: `"ayy`,
 
 A terminal's normal mode yanks into the same registers, `"a` before `y` too,
 so `p` puts a line copied from a terminal as a line, and so does a chat's (see
-[Yanking](~clackatoo/reference/agents#yanking)). Text selected with the mouse
-there goes only to `"*`, as in Vim.
+[Yanking](~clackatoo/reference/chat-view#yanking)). Text selected with the
+mouse there goes only to `"*`, as in Vim.
 
 A block is kept as one, its rows a line each, and `p` and `P` put it back as
 one: a row on each line from the cursor's, padded with spaces where text
@@ -692,7 +692,7 @@ it.
 | `<Space>ga` | Keeps the agent's change at the cursor |
 | `<Space>gx` | Rejects it: takes it out, unless you've changed its lines since |
 | `<Space>c` | Comments on the line, for the agent |
-| `<Space>gr` | Opens a review of the chat's changes (see [Agents](~clackatoo/reference/agents#reviewing-its-changes)) |
+| `<Space>gr` | Opens a review of the chat's changes (see [Agents](~clackatoo/reference/agent-changes#reviewing-its-changes)) |
 
 `:blame` writes after each line an agent changed which chat and turn changed
 it, and `:blame` again stops.

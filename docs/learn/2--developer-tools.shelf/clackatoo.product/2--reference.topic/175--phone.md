@@ -336,7 +336,7 @@ counts as in use while it has the focus and has been used in the last five
 minutes. A notification carries only the chat's title and a few words, sealed
 for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's
 push services. A window on a desktop shows its own
-[desktop notifications](~clackatoo/reference/agents#desktop-notifications)
+[desktop notifications](~clackatoo/reference/chat-view#desktop-notifications)
 besides, on the computer it runs on; one without the focus says nothing of a
 turn you watched end on the phone.
 

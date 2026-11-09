@@ -91,7 +91,7 @@ one back, dismissing one and `:bg CMD` all happen on HOST. Not shown here: the
 offer of a pane HOST lends one of your own workspaces. Chats in HOST's
 workspaces come back after HOST restarts, and go on with an interrupted turn
 after HOST upgrades, as they do there; in one of HOST's panes, the
-[start page](~clackatoo/reference/agents#the-start-page) lists the sessions
+[start page](~clackatoo/reference/chatting#the-start-page) lists the sessions
 HOST's agent kept, to go on with one on HOST.
 
 Your daemon keeps the connection. It makes it again whenever it drops, and

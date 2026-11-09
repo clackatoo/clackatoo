@@ -141,8 +141,8 @@ The window draws its own frame, in place of the desktop's:
   are more workspaces than fit, the bar shows those around the one shown, with
   a quiet count at either end of how many are hidden that way, such as `‹3` or
   `5›`; select a count to scroll that way. While a chat has
-  [access to the window](~clackatoo/reference/agents#native-window-access), a
-  teal badge before the buttons names the chat and the access, as
+  [access to the window](~clackatoo/reference/agent-tools#native-window-access),
+  a teal badge before the buttons names the chat and the access, as
   `Agent Control · chat 3`: select it to go to the chat, or its gold `×` to
   revoke the access. Only the top bar shows it, never the window's title,
   which a program could set to look the same.
@@ -345,8 +345,8 @@ The window shows your work at three levels:
   [file being edited](~clackatoo/reference/editor), or one of the other kinds:
   an [explorer](~clackatoo/reference/explorer), a
   [board](~clackatoo/reference/boards), a
-  [review](~clackatoo/reference/agents#reviewing-its-changes), or a chat's
-  browser page. A split shares its space equally until you
+  [review](~clackatoo/reference/agent-changes#reviewing-its-changes), or a
+  chat's browser page. A split shares its space equally until you
   [resize it](#resizing-panes).
 
 Workspace names are unique on each machine, so one from another machine can
@@ -369,8 +369,8 @@ shown in a focused window, and a chat finished while no window or phone was
 looking is unseen to a window that comes to it later. A chat that starts again
 loses its `•`. While the daemon is out of reach, no chat is said to work or
 ask. A window also shows a
-[desktop notification](~clackatoo/reference/agents#desktop-notifications) for
-a chat it marks, as it finishes or asks.
+[desktop notification](~clackatoo/reference/chat-view#desktop-notifications)
+for a chat it marks, as it finishes or asks.
 
 The daemon keeps all of them, as it keeps terminals. Closing the window closes
 nothing, and the next window opens on the workspace, tab and pane last used.
@@ -387,9 +387,9 @@ its file with its cursor and view where they were, still in the directory its
 file was opened from (or its file's own folder if that's gone), and with its
 changes not saved if it had any, as `[No Name]` files do; explorers and
 folders keep their root; boards and reviews come back too, and chats on their
-sessions, a [subagent](~clackatoo/reference/agents#what-lasts) still its
-chat's. Scrollback and running programs don't. An editor whose file has been
-deleted is left out.
+sessions, a [subagent](~clackatoo/reference/agents-lasting#what-lasts) still
+its chat's. Scrollback and running programs don't. An editor whose file has
+been deleted is left out.
 
 A terminal whose shell was running a command shows "was running: cargo watch"
 at its bottom right. In normal mode, `R` puts the command at the new shell's
@@ -479,11 +479,11 @@ paused, and ` ↻✗` once it has given up; so does a
 [background tab](#background-tabs) in the list. Only you set the mark, from a
 window or with [`clackatoo keep`](~clackatoo/reference/cli#keep), and a device
 on the [web app](~clackatoo/reference/phone) can't.
-[Agents' tools](~clackatoo/reference/agents#what-the-agent-can-show-you) don't
-set it, and refuse a command line that runs `clackatoo keep` or
+[Agents' tools](~clackatoo/reference/agent-tools#what-the-agent-can-show-you)
+don't set it, and refuse a command line that runs `clackatoo keep` or
 `clackatoo bg`; but that's a guard against mistakes, not a boundary: a command
 an agent types into a terminal follows the
-[ask-before-running rules](~clackatoo/reference/agents#what-the-agent-can-show-you),
+[ask-before-running rules](~clackatoo/reference/agent-tools#what-the-agent-can-show-you),
 and a script it runs could do anything you could. `clackatoo keep` run in the
 terminal itself keeps the command before it, never itself. The mark is kept
 with the workspaces, and handed over as the daemon upgrades, which keeps
@@ -511,7 +511,7 @@ before protocol 96 doesn't show them, and leaves them be.
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> `b` `t` | `:bg` | Sends the tab shown to the background. The workspace's only tab can go too: a shell in its folder takes its place. |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> `b` `p` | `:bgpane` | Sends the focused pane to the background, in a tab of its own. A tab's last pane takes the tab with it. |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> `b` `l` | `:Background` | Lists the background tabs. Selecting the icon after the tabs does too. |
-| | `:bg CMD` | Starts `CMD` in a new background tab of the workspace shown, typed at a new shell's prompt in the focused pane's folder, as you would type it, so its shell's marks say when it runs and how it ends. Nothing is shown. [`clackatoo bg`](~clackatoo/reference/cli#bg) does the same from a shell, and an agent can too, with [`run_in_background`](~clackatoo/reference/agents#what-the-agent-can-show-you). |
+| | `:bg CMD` | Starts `CMD` in a new background tab of the workspace shown, typed at a new shell's prompt in the focused pane's folder, as you would type it, so its shell's marks say when it runs and how it ends. Nothing is shown. [`clackatoo bg`](~clackatoo/reference/cli#bg) does the same from a shell, and an agent can too, with [`run_in_background`](~clackatoo/reference/agent-tools#what-the-agent-can-show-you). |
 
 After the tabs, an icon says how many of the workspace's background tabs are
 running: `⚙ 2`. A tab counts as running while a command runs in one of its
@@ -640,7 +640,7 @@ other pane, `5:` opens the command line as `:` does. From a selection it's
 | `:workspace NAME`, `:ws NAME` | Switches to the workspace called NAME, making it if there's none. Without a name, makes a new workspace, named with the lowest number no workspace has. `:ws new@desk NAME` makes one on desk, as does `:ws NAME@desk` if desk has none of that name. |
 | `:rename NAME` | Renames the workspace shown. |
 | `:bg`, `:bgpane`, `:Background` | Sends the tab shown, or the focused pane, to the [background](#background-tabs), or lists the background tabs. |
-| `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/agents#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
+| `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/chats-together#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
 | `:bd`, `:bdelete` | Closes the focused chat for good, pane and all: a subagent's too, which `:q` and `:close` only send back to the background. |
 | `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor#writing). |
@@ -795,7 +795,7 @@ program, are bindings like any you make, so
 | `\|` `-` | Splits the pane, with the new one to the right or below. |
 | `a` | Opens a [chat with an agent](~clackatoo/reference/agents) to the right. |
 | `x` | Closes the pane; a subagent's goes back to the background. |
-| `u` | From a [subagent's](~clackatoo/reference/agents#subagents) pane, goes to the chat that started it. |
+| `u` | From a [subagent's](~clackatoo/reference/chats-together#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
 | `r` | Opens the [machine picker](~clackatoo/reference/remote#picking-a-machine), to open a window on another machine, as `:connect` does. |
 | `o` `i` | Back and forward through the tab's places, as <kbd>Ctrl</kbd>+<kbd>O</kbd> and <kbd>Ctrl</kbd>+<kbd>I</kbd> do in normal mode. |
@@ -823,7 +823,7 @@ a project is searched, never a bare directory.
 | `<Space>bs` | The symbols in the focused editor's file: its functions, types and their fields, in the order of the file's outline, each indented inside what it's in, with what it is; past 5000, the count ends `+` |
 | `<Space>ps` | The symbols in the whole project whose names match what you type, as the file's language server finds them, asked again each time typing pauses, with the letters you typed picked out in their names |
 | `<Space>e` | Opens the tab's [file explorer](~clackatoo/reference/explorer), goes to it, or closes it |
-| `<Space>a` | Mentions the focused editor's selection, or its file, in the chat beside it, as `:Ask` does (see [Mentioning files](~clackatoo/reference/agents#mentioning-files)) |
+| `<Space>a` | Mentions the focused editor's selection, or its file, in the chat beside it, as `:Ask` does (see [Mentioning files](~clackatoo/reference/chatting#mentioning-files)) |
 | `<Space>pgf` | A grep of them, as you type |
 | `<Space>?` | The files open, `[+]` after those with changes |
 | `<Space>ds` | What's wrong in the project's files, as their language servers say, the worst first: the files open, and those not open that a server has checked, as rust-analyzer checks a whole crate, each `error`, `warning`, `info` or `hint` in the editor's color for it |
@@ -850,7 +850,7 @@ looking.
 A click picks one, a double click opens it, and the wheel moves through them.
 A paste is typed on one line, its line breaks as spaces. The
 [machine picker](~clackatoo/reference/remote#picking-a-machine) and the
-[start page](~clackatoo/reference/agents#the-start-page) take the same keys
+[start page](~clackatoo/reference/chatting#the-start-page) take the same keys
 for what's typed, for moving, and for the mouse. Beside the list, if the
 window is wide enough, is the file round the line picked, colored as an editor
 colors it, with a grep's match picked out in its line. A file that's open is
@@ -1243,8 +1243,8 @@ you typed for the program is lost, and the bar says so.
 
 An [explorer](~clackatoo/reference/explorer), a
 [board](~clackatoo/reference/boards) and a
-[review](~clackatoo/reference/agents#reviewing-its-changes) read keys as
-terminals and editors do, with the cursor on an item, a file, an entry or a
+[review](~clackatoo/reference/agent-changes#reviewing-its-changes) read keys
+as terminals and editors do, with the cursor on an item, a file, an entry or a
 line, rather than a character. They share these, and add their own:
 
 | Keys | Does |
