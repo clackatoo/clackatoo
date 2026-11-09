@@ -134,6 +134,12 @@ const RETRY_LEAST: Duration = Duration::from_secs(1);
 /// The longest wait between tries.
 const RETRY_MOST: Duration = Duration::from_mins(1);
 
+/// The most of what inotify says read in one turn of the loop, in events,
+/// taken whole buffers at a time: a flood of changes, as a build writing
+/// thousands of files makes, is read a little each turn, as terminals'
+/// floods are, and never holds keys up.
+const MOST_EVENTS: usize = 1024;
+
 /// The least time between two listings of a directory.
 const LIST_GAP: Duration = Duration::from_millis(100);
 
@@ -163,6 +169,10 @@ pub(super) struct Explorers {
     repos: HashMap<PathBuf, Repo>,
     /// The daemon's inotify instance, once one is made, and its token.
     inotify: Option<(OwnedFd, Token)>,
+    /// More of what inotify says may be left to read, as the last read
+    /// stopped at [`MOST_EVENTS`]: read in the loop's next turn, which
+    /// doesn't wait, as no new event may come to say so.
+    unread: bool,
     /// When to try again to make the instance, as it couldn't be, and how
     /// long the wait was.
     instance_retry: Option<(Instant, Duration)>,
@@ -241,6 +251,7 @@ impl Default for Explorers {
             failed: HashMap::new(),
             repos: HashMap::new(),
             inotify: None,
+            unread: false,
             instance_retry: None,
             out_of_instances: None,
             out_of_watches: None,
@@ -1243,13 +1254,34 @@ impl Daemon {
         self.watches_gone();
     }
 
-    /// Reads what inotify says has changed in the directories watched,
-    /// and has those listed again, and git asked again, in good time; and
-    /// tells signs of indexes changed, and the display of sockets.
+    /// Whether more of what inotify says may be left to read, for the loop
+    /// not to wait before it is (see [`MOST_EVENTS`]).
+    pub(super) fn files_unread(&self) -> bool {
+        self.explorers.unread
+    }
+
+    /// Reads what inotify says has changed in the directories watched, up
+    /// to [`MOST_EVENTS`], as the loop does.
     pub(super) fn read_files_changes(&mut self) {
+        self.read_files_changes_up_to(MOST_EVENTS);
+    }
+
+    /// Reads everything inotify has to say now, as before the agent's
+    /// finish is taken (see `disk::writing_ended`).
+    pub(super) fn drain_files_changes(&mut self) {
+        self.read_files_changes_up_to(usize::MAX);
+    }
+
+    /// Reads what inotify says has changed in the directories watched, up
+    /// to about `most` events, and has those listed again, and git asked
+    /// again, in good time; and tells signs of indexes changed, and the
+    /// display of sockets.
+    fn read_files_changes_up_to(&mut self, most: usize) {
         let Some((inotify, _)) = &self.explorers.inotify else {
             return;
         };
+        let mut read = 0;
+        let mut unread = false;
         let mut relist: Vec<i32> = Vec::new();
         // What changed that git, buffers or servers may make something of.
         let mut touched: Vec<Touched> = Vec::new();
@@ -1262,9 +1294,15 @@ impl Daemon {
         let mut sockets = false;
         let mut buffer = [MaybeUninit::uninit(); 4096];
         let mut reader = inotify::Reader::new(inotify, &mut buffer);
-        // Read until there's nothing left: the loop hears of more only
-        // once something new comes.
+        // Read until there's nothing left, or until `most` have been and
+        // the buffer is taken whole: the loop hears of more only once
+        // something new comes, so what's left is read next turn.
         loop {
+            if read >= most && reader.is_buffer_empty() {
+                unread = true;
+                break;
+            }
+            read += 1;
             let event = match reader.next() {
                 Ok(event) => event,
                 Err(Errno::INTR) => continue,
@@ -1299,8 +1337,22 @@ impl Daemon {
                 touched.push((wd, name.map(<[u8]>::to_vec), flags));
             }
         }
+        self.explorers.unread = unread;
         self.tell_others(indexes, sockets, everything);
         self.files_touched(&touched, everything);
+        self.due_again((relist, &touched, index), everything);
+        self.forget_watches(&gone);
+    }
+
+    /// Has the directories watched that `relist` and `touched` say
+    /// changed listed again, and the repositories they and `index`, the
+    /// watches on git directories whose index changed, are in asked about
+    /// again, in good time; with `everything`, as changes were lost, all.
+    fn due_again(
+        &mut self,
+        (mut relist, touched, index): (Vec<i32>, &[Touched], Vec<i32>),
+        everything: bool,
+    ) {
         let now = Instant::now();
         let explorers = &mut self.explorers;
         if everything {
@@ -1311,7 +1363,7 @@ impl Daemon {
             }
         }
         let mut repos: Vec<PathBuf> = Vec::new();
-        for (wd, name, _) in &touched {
+        for (wd, name, _) in touched {
             let Some(watched) = explorers.watches.get(wd) else {
                 continue;
             };
@@ -1354,7 +1406,6 @@ impl Daemon {
                 repo.due.get_or_insert(now);
             }
         }
-        self.forget_watches(&gone);
     }
 
     /// Tells signs that the indexes in the git directories `indexes` have
@@ -2203,6 +2254,29 @@ mod tests {
         assert_eq!(of_index(&daemon), [(watch, vec![link.clone()])]);
         daemon.remove_index_watch(&link);
         assert!(!daemon.explorers.watches.contains_key(&watch));
+    }
+
+    /// A flood of changes is read a little at a time, the loop told to go
+    /// round again without waiting while some may be left.
+    #[test]
+    fn a_flood_of_changes_is_read_a_little_each_turn() {
+        needs_inotify();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(&root);
+        assert!(daemon.add_index_watch(&root));
+        for n in 0..MOST_EVENTS * 3 {
+            std::fs::write(root.join(format!("f{n}")), "").unwrap();
+        }
+        daemon.read_files_changes();
+        assert!(daemon.files_unread(), "read whole");
+        let mut turns = 1;
+        while daemon.files_unread() {
+            daemon.read_files_changes();
+            turns += 1;
+            assert!(turns < 100, "never read to the end");
+        }
+        assert!(turns > 2, "{turns}");
     }
 
     #[test]

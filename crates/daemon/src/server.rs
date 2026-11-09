@@ -1855,6 +1855,7 @@ impl Daemon {
             let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
             let tools_unread = self.tools_unread();
+            let files_unread = self.files_unread();
             // Queued as floods, which the poll doesn't wait for.
             self.relays_unpacked();
             let web_unread = !self.web_unread.is_empty()
@@ -1868,6 +1869,7 @@ impl Daemon {
                 && !agent_unread
                 && !servers_unread
                 && !tools_unread
+                && !files_unread
                 && !web_unread
             {
                 let compaction = self.compactions.values().min().copied();
@@ -1939,6 +1941,9 @@ impl Daemon {
             }
             if tools_unread {
                 self.read_tools_unread();
+            }
+            if files_unread {
+                self.read_files_changes();
             }
             self.take_highlights();
             self.take_signs();

@@ -270,7 +270,7 @@ impl Daemon {
     /// longer running, and taken for one from outside. Nothing changed
     /// after the finish is heard of here: nobody has been told of it yet.
     pub(super) fn writing_ended(&mut self, chat: TerminalId) {
-        self.read_files_changes();
+        self.drain_files_changes();
         if !self.disk.ran.contains(&chat) {
             self.disk.ran.push(chat);
         }
