@@ -149,7 +149,7 @@ impl Runtime {
                 // Logged, so it reaches the window's log as well as
                 // stderr: a window in the process of windows has no
                 // stderr to see.
-                log::warn!(target: "clackatoo::init.lua", "{}", words.join("\t"));
+                log::info!(target: "clackatoo::init.lua", "{}", words.join("\t"));
                 Ok(())
             })?,
         )?;

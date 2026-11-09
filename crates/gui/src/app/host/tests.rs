@@ -15,7 +15,7 @@ fn host(share: bool) -> (Host, mpsc::Receiver<Wake>) {
         runtime: RuntimeDir::at(PathBuf::from("/unused-host-test")),
         config: None,
         graphics_api: GraphicsApi::Vulkan,
-        listen: false,
+        listen: None,
         share,
     };
     (Host::new(process, Waker::Channel(sender)), woken)
@@ -157,4 +157,40 @@ fn with_windows_kept_apart_a_window_opens_others_in_processes_of_their_own() {
     // Once the GPU is lost, they open elsewhere too.
     sharing.link.0.lost.set(true);
     assert!(!sharing.windows[&key].link.hosting());
+}
+
+#[test]
+fn a_gpu_lost_is_counted_once_however_many_processes_lose_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gpu-lost");
+    let second = |seconds: u64| Duration::from_secs(1_000_000 + seconds);
+    // The first process to note it leads; another noting the same loss
+    // a moment later follows, and it's counted once.
+    assert_eq!(
+        note_loss(&path, second(0)),
+        Noted {
+            leader: true,
+            losses: 1
+        }
+    );
+    assert_eq!(
+        note_loss(&path, second(1)),
+        Noted {
+            leader: false,
+            losses: 1
+        }
+    );
+    assert_eq!(note_loss(&path, second(20)).losses, 2);
+    // The third within a minute is the one that closes the windows.
+    let third = note_loss(&path, second(40));
+    assert!(third.leader && third.losses >= MOST_LOSSES);
+    // Those over a minute old are forgotten.
+    assert_eq!(note_loss(&path, second(130)).losses, 1);
+    // Replaced whole, with nothing left beside it but the lock.
+    let mut left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["gpu-lost", "gpu-lost.lock"]);
 }

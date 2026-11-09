@@ -64,7 +64,11 @@ fn ask_from_thread(
             runtime: &runtime,
             waits: short(),
         };
-        ask(&request, launched(), started).map_err(|not| (not.why, not.then))
+        let to = match started {
+            Some(stream) => To::Started(stream),
+            None => To::Socket(shared_socket(&runtime)),
+        };
+        ask(&request, launched(), to).map_err(|not| (not.why, not.then))
     })
 }
 
@@ -75,15 +79,43 @@ fn ask_shared(
     ask_from_thread(runtime, spec, GraphicsApi::Vulkan, None)
 }
 
-/// Listens on the shared socket, handing what's asked for to a channel.
-fn listening(runtime: &RuntimeDir) -> (Listening, mpsc::Receiver<Asked>) {
+/// Listens on the shared socket, handing what's asked for to a channel,
+/// the process `starting` or not.
+fn listening_while(runtime: &RuntimeDir, starting: bool) -> (Listening, mpsc::Receiver<Asked>) {
     let (sender, delivered) = mpsc::channel();
     let sender = std::sync::Mutex::new(sender);
-    let listening = listen(runtime, GraphicsApi::Vulkan, move |asked| {
-        sender.lock().unwrap().send(asked).unwrap();
-    })
+    let starting = Arc::new(std::sync::atomic::AtomicBool::new(starting));
+    let listening = listen(
+        runtime,
+        shared_socket(runtime),
+        GraphicsApi::Vulkan,
+        starting,
+        move |asked| sender.lock().unwrap().send(asked).unwrap(),
+    )
     .unwrap();
     (listening, delivered)
+}
+
+fn listening(runtime: &RuntimeDir) -> (Listening, mpsc::Receiver<Asked>) {
+    listening_while(runtime, false)
+}
+
+/// Listens on the shared socket as a process started, drawing with
+/// `graphics_api`, with `deliver`.
+fn listen_with(
+    runtime: &RuntimeDir,
+    graphics_api: GraphicsApi,
+    deliver: impl Fn(Asked) + Send + Sync + 'static,
+) -> Listening {
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    listen(
+        runtime,
+        shared_socket(runtime),
+        graphics_api,
+        started,
+        deliver,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -114,10 +146,9 @@ fn a_window_asked_for_arrives_whole_and_the_asker_hears_it_opened() {
 fn a_window_asked_of_the_process_just_forked_goes_to_it_and_not_to_the_socket() {
     let (_dir, runtime) = runtime();
     // An older process on the socket, which would refuse it.
-    let _listening = listen(&runtime, GraphicsApi::OpenGl, |_| {
+    let _listening = listen_with(&runtime, GraphicsApi::OpenGl, |_| {
         panic!("the window went to the process on the socket");
-    })
-    .unwrap();
+    });
     let (ours, theirs) = UnixStream::pair().unwrap();
     let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::Vulkan, Some(ours));
     // As the process forked reads it, first thing.
@@ -139,7 +170,7 @@ fn a_window_that_failed_to_open_is_opened_by_the_asker_instead() {
     asked.opened(Err("no display".into()));
     let (why, then) = waiting.join().unwrap().unwrap_err();
     assert!(why.contains("no display"), "{why}");
-    assert_eq!(then, Then::Host);
+    assert_eq!(then, Then::Host(Some(shared_socket(&runtime))));
 }
 
 #[test]
@@ -159,16 +190,15 @@ fn a_window_taken_on_but_not_opened_in_time_is_the_askers_and_closes_there() {
 #[test]
 fn a_window_drawn_with_another_renderer_is_refused_before_it_reaches_the_windows() {
     let (_dir, runtime) = runtime();
-    let _listening = listen(&runtime, GraphicsApi::Vulkan, |_| {
+    let _listening = listen_with(&runtime, GraphicsApi::Vulkan, |_| {
         panic!("a refused window was delivered");
-    })
-    .unwrap();
+    });
     let waiting = ask_from_thread(&runtime, remote(), GraphicsApi::OpenGl, None);
     let (why, then) = waiting.join().unwrap().unwrap_err();
     assert!(why.contains("another renderer"), "{why}");
     // The asker is the odd one out: the process asked keeps taking
-    // windows.
-    assert_eq!(then, Then::Alone);
+    // windows, and the asker goes to its group's.
+    assert_eq!(then, Then::Group);
 }
 
 #[test]
@@ -180,7 +210,7 @@ fn a_window_taken_on_too_late_is_left_to_the_asker() {
     // The event loop is busy for longer than the asker waits.
     let (why, then) = waiting.join().unwrap().unwrap_err();
     assert!(why.contains("in time"), "{why}");
-    assert_eq!(then, Then::Host);
+    assert_eq!(then, Then::Host(Some(shared_socket(&runtime))));
     assert!(!asked.take());
 }
 
@@ -223,14 +253,14 @@ fn with_no_process_listening_or_one_gone_a_process_is_forked() {
     let waiting = ask_shared(&runtime, remote());
     let (why, then) = waiting.join().unwrap().unwrap_err();
     assert!(why.contains("no process of windows"), "{why}");
-    assert_eq!(then, Then::Host);
+    assert_eq!(then, Then::Host(Some(shared_socket(&runtime))));
     // A socket left by a process that ended without taking it away.
     std::fs::create_dir_all(runtime.path()).unwrap();
     drop(UnixListener::bind(runtime.path().join(SOCKET)).unwrap());
     let waiting = ask_shared(&runtime, remote());
     let (why, then) = waiting.join().unwrap().unwrap_err();
     assert!(why.contains("no process of windows"), "{why}");
-    assert_eq!(then, Then::Host);
+    assert_eq!(then, Then::Host(Some(shared_socket(&runtime))));
 }
 
 #[test]
@@ -331,8 +361,8 @@ fn a_build_is_its_file_and_one_put_in_its_place_is_another() {
 #[test]
 fn a_process_that_stops_listening_leaves_a_newer_ones_socket_alone() {
     let (_dir, runtime) = runtime();
-    let older = listen(&runtime, GraphicsApi::Vulkan, |_| {}).unwrap();
-    let newer = listen(&runtime, GraphicsApi::Vulkan, |_| {}).unwrap();
+    let older = listen_with(&runtime, GraphicsApi::Vulkan, |_| {});
+    let newer = listen_with(&runtime, GraphicsApi::Vulkan, |_| {});
     let socket = runtime.path().join(SOCKET);
     drop(older);
     assert!(socket.exists());
@@ -362,4 +392,63 @@ fn deadlines_are_on_the_clock_every_process_shares() {
         waited.abs_diff(elapsed) < Duration::from_millis(5),
         "{waited:?} {elapsed:?}"
     );
+}
+
+#[test]
+fn a_window_asked_of_a_process_still_starting_is_taken_at_once_and_opens_after() {
+    let (_dir, runtime) = runtime();
+    let (_listening, delivered) = listening_while(&runtime, true);
+    let waiting = ask_shared(&runtime, remote());
+    let mut asked = delivered.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The event loop is busy setting up the GPU for longer than the asker
+    // waits to hear it's taken: it heard already.
+    std::thread::sleep(short().take + SLACK);
+    assert!(asked.take());
+    asked.opened(Ok(()));
+    assert_eq!(waiting.join().unwrap(), Ok(()));
+}
+
+#[test]
+fn windows_alike_share_a_group_socket_named_after_what_they_share() {
+    let (_dir, runtime) = runtime();
+    let group = group_socket(&runtime, GraphicsApi::Vulkan);
+    assert_eq!(group, group_socket(&runtime, GraphicsApi::Vulkan));
+    assert_ne!(group, group_socket(&runtime, GraphicsApi::OpenGl));
+    assert_ne!(group, shared_socket(&runtime));
+    let name = group.file_stem().unwrap().to_str().unwrap();
+    assert!(name.starts_with("window-"), "{name}");
+    assert_eq!(group.extension().unwrap(), "sock");
+    // Refused by its group's process for what it sees, a window gets a
+    // process of its own, taking no others.
+    let _listening = listen(
+        &runtime,
+        group.clone(),
+        GraphicsApi::Vulkan,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        |_| panic!("a refused window was delivered"),
+    )
+    .unwrap();
+    let runtime_for = runtime.clone();
+    let waiting = std::thread::spawn(move || {
+        let spec = remote();
+        let request = Request {
+            spec: &spec,
+            graphics_api: GraphicsApi::OpenGl,
+            runtime: &runtime_for,
+            waits: short(),
+        };
+        ask(&request, launched(), To::Socket(group)).map_err(|not| not.then)
+    });
+    assert_eq!(waiting.join().unwrap(), Err(Then::Host(None)));
+}
+
+#[test]
+fn only_the_locale_variables_that_change_a_window_are_matched() {
+    for name in window_match().keys() {
+        assert!(
+            !name.starts_with("LC_") || MATCH_ENV.contains(&name.as_str()),
+            "{name} is matched"
+        );
+    }
+    assert!(MATCH_ENV.contains(&"LC_CTYPE") && !MATCH_ENV.contains(&"LC_TERMINAL"));
 }

@@ -67,10 +67,14 @@ const TOKEN_WAIT: Duration = Duration::from_millis(500);
 const FIRST_WAIT: Duration = Duration::from_secs(10);
 
 /// How many times within [`LOSSES_WITHIN`] the GPU may be lost before the
-/// windows close rather than open again: a GPU that can't be kept is
-/// lost again by every process opened on it.
+/// windows close rather than open again (the third loss closes them): a
+/// GPU that can't be kept is lost again by every process opened on it.
 const MOST_LOSSES: usize = 3;
 const LOSSES_WITHIN: Duration = Duration::from_mins(1);
+
+/// Losses noted this close together, by processes of windows each losing
+/// the same device, are one.
+const ONE_LOSS: Duration = Duration::from_secs(2);
 
 /// How long, after the GPU is lost, the windows wait for the process the
 /// first window opens again in to listen, to open again in it too.
@@ -142,8 +146,9 @@ pub(crate) struct Process {
     pub(crate) config: Option<PathBuf>,
     /// The graphics API the process draws with.
     pub(crate) graphics_api: GraphicsApi,
-    /// Whether other processes ask this one for windows on `window.sock`.
-    pub(crate) listen: bool,
+    /// The socket other processes ask this one for windows on, if they do:
+    /// `window.sock`, or its group's (see [`handoff::group_socket`]).
+    pub(crate) listen: Option<PathBuf>,
     /// Whether the windows its windows open, as the picker's new window,
     /// open in this process: not if every window is to have a process of
     /// its own (see [`handoff::OFF_VAR`]).
@@ -259,6 +264,9 @@ pub(crate) struct Host {
     wakes: HashMap<WindowKey, Instant>,
     next: u64,
     starting: Option<Starting>,
+    /// Whether its first window is still opening: windows asked for
+    /// meanwhile are taken on at once, to open once it can.
+    starting_up: std::sync::Arc<std::sync::atomic::AtomicBool>,
     shared: Option<Shared>,
     listening: Option<Listening>,
     /// Whether the event loop can make windows yet.
@@ -294,6 +302,7 @@ impl Host {
             wakes: HashMap::new(),
             next: 0,
             starting: None,
+            starting_up: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             shared: None,
             listening: None,
             resumed: false,
@@ -384,6 +393,8 @@ impl Host {
             self.ids.insert(id, key);
         }
         self.opened_any = true;
+        self.starting_up
+            .store(false, std::sync::atomic::Ordering::Release);
         if self.shared.is_none()
             && let Some(frame) = &app.frame
         {
@@ -508,7 +519,10 @@ impl Host {
     /// the process starts, before its event loop runs, so they wait for it
     /// rather than start processes of their own.
     pub(crate) fn listen(&mut self) {
-        if !self.process.listen || self.listening.is_some() || self.link.0.lost.get() {
+        let Some(at) = self.process.listen.clone() else {
+            return;
+        };
+        if self.listening.is_some() || self.link.0.lost.get() {
             return;
         }
         let waker = self.waker.clone();
@@ -516,7 +530,8 @@ impl Host {
             let _ = waker.wake(Wake::Asked(asked));
         };
         let graphics_api = self.process.graphics_api;
-        match handoff::listen(&self.process.runtime, graphics_api, deliver) {
+        let starting = std::sync::Arc::clone(&self.starting_up);
+        match handoff::listen(&self.process.runtime, at, graphics_api, starting, deliver) {
             Ok(listening) => self.listening = Some(listening),
             Err(err) => log::warn!("windows asked for get processes of their own: {err:#}"),
         }
@@ -526,9 +541,11 @@ impl Host {
     /// windows asked for go elsewhere from now on, and each window opens
     /// again in a process started afresh, and closes here.
     ///
-    /// One window opens again first, and the others once its new process
-    /// listens, so they share it rather than race to start one each. The
-    /// loop is held meanwhile: nothing can be drawn anyway.
+    /// The process that notes the loss first leads: its first window opens
+    /// again at once. Its other windows, and every window of other
+    /// processes of windows losing the same device, wait for a process of
+    /// windows to listen, and open again in it, rather than race to start
+    /// one each. The loop is held meanwhile: nothing can be drawn anyway.
     fn gpu_lost(&mut self) {
         if self.link.0.lost.replace(true) {
             return;
@@ -538,10 +555,11 @@ impl Host {
         self.starting = None;
         let mut keys: Vec<WindowKey> = self.windows.keys().copied().collect();
         keys.sort_by_key(|key| key.0);
-        let losses = gpu_losses(&self.process.runtime);
-        if losses > MOST_LOSSES {
+        let noted = note_gpu_loss(&self.process.runtime);
+        if noted.losses >= MOST_LOSSES {
             log::error!(
-                "the GPU was lost {losses} times within {LOSSES_WITHIN:?}: the windows close"
+                "the GPU was lost {} times within {LOSSES_WITHIN:?}: the windows close",
+                noted.losses
             );
             for key in keys {
                 self.on_window(key, |app| app.closing = true);
@@ -549,14 +567,16 @@ impl Host {
             return;
         }
         log::error!("the GPU was lost: the windows open again in a new process");
-        // A moment more each time it's lost again.
-        let exponent = u32::try_from(losses.saturating_sub(1))
-            .unwrap_or(u32::MAX)
-            .min(4);
-        std::thread::sleep(Duration::from_millis(250) * 2_u32.pow(exponent));
         let mut keys = keys.into_iter();
-        if let Some(first) = keys.next() {
-            self.on_window(first, App::open_elsewhere);
+        if noted.leader {
+            // A moment more each time it's lost again.
+            let exponent = u32::try_from(noted.losses.saturating_sub(1))
+                .unwrap_or(u32::MAX)
+                .min(4);
+            std::thread::sleep(Duration::from_millis(250) * 2_u32.pow(exponent));
+            if let Some(first) = keys.next() {
+                self.on_window(first, App::open_elsewhere);
+            }
         }
         if keys.len() > 0 && !another_listens(&self.process.runtime, NEW_PROCESS_WAIT) {
             log::warn!("no new process of windows listens: each window starts its own");
@@ -656,32 +676,75 @@ impl Host {
     }
 }
 
-/// Notes the GPU lost now, in `runtime`, where every process of windows
-/// notes it, and returns how many times it has been lost within
-/// [`LOSSES_WITHIN`], now included.
-fn gpu_losses(runtime: &RuntimeDir) -> usize {
-    let path = runtime.path().join("gpu-lost");
+/// A GPU loss, as noted.
+#[derive(Debug, PartialEq, Eq)]
+struct Noted {
+    /// Whether this process noted it first, and leads.
+    leader: bool,
+    /// How many times the GPU has been lost within [`LOSSES_WITHIN`], this
+    /// time included.
+    losses: usize,
+}
+
+/// Notes the GPU lost now, in `gpu-lost` in `runtime`, where every process
+/// of windows notes it, holding the lock on `gpu-lost.lock` meanwhile,
+/// unless another process of windows has just noted it, losing the same
+/// device. The file is a time in milliseconds a line, replaced whole.
+fn note_gpu_loss(runtime: &RuntimeDir) -> Noted {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let recent: Vec<u64> = (std::fs::read_to_string(&path).unwrap_or_default().lines())
+    note_loss(&runtime.path().join("gpu-lost"), now)
+}
+
+/// [`note_gpu_loss`], in the file at `path`, at `now` since the epoch.
+fn note_loss(path: &Path, now: Duration) -> Noted {
+    let now = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+    let lock = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .and_then(|lock| lock.lock().map(|()| lock));
+    if let Err(err) = &lock {
+        log::warn!("the GPU's losses are counted without a lock: {err}");
+    }
+    let within = u64::try_from(LOSSES_WITHIN.as_millis()).unwrap_or(u64::MAX);
+    let mut losses: Vec<u64> = (std::fs::read_to_string(path).unwrap_or_default().lines())
         .filter_map(|line| line.parse::<u64>().ok())
-        .filter(|&lost| now.as_secs().saturating_sub(lost) < LOSSES_WITHIN.as_secs())
-        .chain([now.as_secs()])
+        .filter(|&lost| now.saturating_sub(lost) < within)
         .collect();
-    let text = (recent.iter().map(u64::to_string))
+    let one = u64::try_from(ONE_LOSS.as_millis()).unwrap_or(u64::MAX);
+    if losses
+        .last()
+        .is_some_and(|&last| now.saturating_sub(last) < one)
+    {
+        return Noted {
+            leader: false,
+            losses: losses.len(),
+        };
+    }
+    losses.push(now);
+    let text = (losses.iter().map(|lost| format!("{lost}\n")))
         .collect::<Vec<_>>()
-        .join("\n");
-    if let Err(err) = std::fs::write(&path, text) {
+        .concat();
+    let written = path.with_extension(format!("{}", std::process::id()));
+    let replaced = std::fs::write(&written, text).and_then(|()| std::fs::rename(&written, path));
+    if let Err(err) = replaced {
+        let _ = std::fs::remove_file(&written);
         log::warn!("couldn't note the GPU lost: {err}");
     }
-    recent.len()
+    drop(lock);
+    Noted {
+        leader: true,
+        losses: losses.len(),
+    }
 }
 
 /// Waits up to `wait` for a process of windows other than this one to
 /// listen in `runtime`, and says whether one does.
 fn another_listens(runtime: &RuntimeDir, wait: Duration) -> bool {
-    let socket = runtime.path().join("window.sock");
+    let socket = handoff::shared_socket(runtime);
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
         if let Ok(stream) = std::os::unix::net::UnixStream::connect(&socket)

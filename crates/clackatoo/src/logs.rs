@@ -13,12 +13,12 @@ use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-/// What a window logs unless `RUST_LOG` says otherwise: warnings, and how
-/// a connection to another machine is going, which is what's needed to
-/// find out why one dropped. Quiet while it goes well: a few lines an
-/// hour.
+/// What a window logs unless `RUST_LOG` says otherwise: warnings, how a
+/// connection to another machine is going, which is what's needed to find
+/// out why one dropped, and what `init.lua` prints. Quiet while it goes
+/// well: a few lines an hour.
 const WINDOW: &str = "warn,clackatoo_daemon::quic=info,clackatoo_daemon::remote=info,\
-                      clackatoo_gui::session=info";
+                      clackatoo_gui::session=info,clackatoo::init.lua=info";
 
 /// How big a window's log may grow before it's moved aside, to
 /// `window.log.old`, and another begun.

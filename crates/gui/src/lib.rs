@@ -214,19 +214,32 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let opened = |how: &str| {
         log::info!("window opened by {how}, after {:.1?}", started.elapsed());
     };
-    let not = match handoff::ask(&request, launch, None) {
+    let shared = handoff::shared_socket(&options.runtime);
+    let mut not = match handoff::ask(&request, launch, handoff::To::Socket(shared)) {
         Ok(()) => {
             opened("the process of windows");
             return Ok(());
         }
         Err(not) => not,
     };
+    // The process of windows keeps the windows it takes, and this one is
+    // the odd one out: its group's takes it, as others like it.
+    if not.then == handoff::Then::Group {
+        let group = handoff::group_socket(&options.runtime, options.graphics_api);
+        not = match handoff::ask(&request, not.launch, handoff::To::Socket(group)) {
+            Ok(()) => {
+                opened("its group's process of windows");
+                return Ok(());
+            }
+            Err(not) => not,
+        };
+    }
     let mut launch = not.launch;
-    if not.then != handoff::Then::Here {
+    if let handoff::Then::Host(listen) = not.then {
         log::debug!("forking a process of windows: {}", not.why);
-        let listen = not.then == handoff::Then::Host;
         match fork_host(&options, listen) {
-            Ok(forked) => match handoff::ask(&request, launch, Some(forked)) {
+            Ok((pid, forked)) => match handoff::ask(&request, launch, handoff::To::Started(forked))
+            {
                 Ok(()) => {
                     opened("a process of windows forked for it");
                     return Ok(());
@@ -237,6 +250,19 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                         not.why
                     );
                     launch = not.launch;
+                    // This process goes on: it waits for that one, so it
+                    // doesn't linger once it ends.
+                    let reaped = std::thread::Builder::new()
+                        .name("reap".into())
+                        .spawn(move || {
+                            let _ = rustix::process::waitpid(
+                                Some(pid),
+                                rustix::process::WaitOptions::empty(),
+                            );
+                        });
+                    if let Err(err) = reaped {
+                        log::warn!("nothing waits for the process of windows forked: {err}");
+                    }
                 }
             },
             Err(err) => log::warn!("couldn't fork a process of windows: {err:#}"),
@@ -256,12 +282,13 @@ fn open_here(
     share: bool,
 ) -> anyhow::Result<()> {
     let start = options::Options::drawing_with(&spec.font);
-    let (event_loop, fonts, gpu) = starting(&start.font_options(), options.graphics_api)?;
+    let fonts = find_fonts(&start.font_options())?;
+    let (event_loop, gpu) = gpu_and_loop(options.graphics_api, None)?;
     let process = app::host::Process {
         runtime: options.runtime,
         config: options.config,
         graphics_api: options.graphics_api,
-        listen: false,
+        listen: None,
         share,
     };
     let waker = app::host::Waker::EventLoop(event_loop.create_proxy());
@@ -274,55 +301,68 @@ fn open_here(
 
 /// Forks a process of windows, apart from this one (see
 /// [`clackatoo_daemon::launch::fork_apart`]), taking the windows asked for
-/// on `window.sock` too, with `listen`. Returns this end of the socket pair
-/// its first window is to be asked for on. The process forked never
-/// returns: it runs until its last window closes, then exits.
-fn fork_host(options: &Options, listen: bool) -> anyhow::Result<std::os::unix::net::UnixStream> {
+/// on the socket at `listen` too, if there's one. Returns it, and this end
+/// of the socket pair its first window is to be asked for on. The process
+/// forked never returns, nor ends as this one would: it runs until its
+/// last window closes, then exits at once.
+fn fork_host(
+    options: &Options,
+    listen: Option<PathBuf>,
+) -> anyhow::Result<(rustix::process::Pid, std::os::unix::net::UnixStream)> {
+    use clackatoo_daemon::launch::{Forked, exit_now, fork_apart};
     let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
-    match clackatoo_daemon::launch::fork_apart()? {
-        clackatoo_daemon::launch::Forked::Parent(_) => Ok(ours),
-        clackatoo_daemon::launch::Forked::Child => {
+    let forked = Instant::now();
+    match fork_apart()? {
+        Forked::Parent(pid) => Ok((pid, ours)),
+        Forked::Child => {
             drop(ours);
-            let hosted = host(
-                options.runtime.clone(),
-                options.config.clone(),
-                options.graphics_api,
-                listen,
-                theirs,
-            );
-            let code = match hosted {
-                Ok(()) => 0,
-                Err(err) => {
-                    log::error!("the process of windows failed: {err:#}");
-                    1
-                }
-            };
-            std::process::exit(code);
+            log::debug!("forked a process of windows in {:.1?}", forked.elapsed());
+            let hosted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                host(
+                    options.runtime.clone(),
+                    options.config.clone(),
+                    options.graphics_api,
+                    listen,
+                    theirs,
+                )
+            }));
+            match hosted {
+                Ok(Ok(())) => exit_now(0),
+                Ok(Err(err)) => log::error!("the process of windows failed: {err:#}"),
+                Err(_) => log::error!("the process of windows panicked"),
+            }
+            exit_now(1)
         }
     }
 }
 
 /// Runs the process of windows, forked by `clackatoo` (see [`run`]), with
-/// the config in `config` and drawing with `graphics_api`: it reads the
-/// first window asked for on `first`, sets up the GPU and finds that
-/// window's fonts at once, takes the windows asked for on `window.sock`
-/// in `runtime` too, with `listen`, and ends with its last window.
+/// the config in `config` and drawing with `graphics_api`: it sets up the
+/// GPU at once, reads the first window asked for on `first` and finds its
+/// fonts, takes the windows asked for on the socket at `listen` too, if
+/// there's one, and ends with its last window.
 fn host(
     runtime: RuntimeDir,
     config: Option<PathBuf>,
     graphics_api: GraphicsApi,
-    listen: bool,
+    listen: Option<PathBuf>,
     first: std::os::unix::net::UnixStream,
 ) -> anyhow::Result<()> {
+    let born = Instant::now();
+    clackatoo_daemon::launch::name_this_process(c"clackatoo-win");
     // Panics are logged, as it has no stderr to say them on.
     let said = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         log::error!("{panic}");
         said(panic);
     }));
+    // The GPU first, as it takes longest; only the fonts wait for what's
+    // asked.
+    let (event_loop, gpu) = gpu_and_loop(graphics_api, Some(born))?;
     let first = handoff::first(first, graphics_api)?;
+    log::debug!("first window asked for after {:.1?}", born.elapsed());
     let start = options::Options::drawing_with(&first.spec.font);
-    let (event_loop, fonts, gpu) = starting(&start.font_options(), graphics_api)?;
+    let fonts = find_fonts(&start.font_options())?;
     let process = app::host::Process {
         runtime,
         config,
@@ -340,44 +380,47 @@ fn host(
     host.result
 }
 
-/// The event loop, and the fonts and GPU being made for the first window.
-type Starting = (
-    EventLoop<app::host::Wake>,
-    app::Pending<(fonts::Fonts, desktop::Desktop)>,
-    app::Pending<app::Gpu>,
-);
+/// Starts finding the fonts in `font` on a thread of its own.
+fn find_fonts(
+    font: &FontOptions,
+) -> anyhow::Result<app::Pending<(fonts::Fonts, desktop::Desktop)>> {
+    let font = font.clone();
+    let fonts = std::thread::Builder::new()
+        .name("fonts".into())
+        .spawn(move || {
+            // Asking the desktop takes a few milliseconds, which the GPU
+            // takes longer than anyway.
+            let desktop = desktop::Desktop::read();
+            let fonts = fonts::Fonts::for_window(&font, &desktop)?;
+            // The chat's fonts are found from now, alongside the GPU, so a
+            // chat on screen as the window opens doesn't wait.
+            chat::warm_fonts(&fonts);
+            Ok((fonts, desktop))
+        })?;
+    Ok(app::Pending::Thread(fonts))
+}
 
-/// Starts finding the fonts in `font`, and setting up the GPU with
-/// `graphics_api`, on threads of their own, and makes the event loop
-/// meanwhile.
-fn starting(font: &FontOptions, graphics_api: GraphicsApi) -> anyhow::Result<Starting> {
-    let fonts = {
-        let font = font.clone();
-        std::thread::Builder::new()
-            .name("fonts".into())
-            .spawn(move || {
-                // Asking the desktop takes a few milliseconds, which the
-                // GPU takes longer than anyway.
-                let desktop = desktop::Desktop::read();
-                let fonts = fonts::Fonts::for_window(&font, &desktop)?;
-                // The chat's fonts are found from now, alongside the GPU,
-                // so a chat on screen as the window opens doesn't wait.
-                chat::warm_fonts(&fonts);
-                Ok((fonts, desktop))
-            })?
-    };
+/// Starts setting up the GPU with `graphics_api` on a thread of its own,
+/// and makes the event loop meanwhile. With `born`, says when the GPU's
+/// ready, counted from then.
+fn gpu_and_loop(
+    graphics_api: GraphicsApi,
+    born: Option<Instant>,
+) -> anyhow::Result<(EventLoop<app::host::Wake>, app::Pending<app::Gpu>)> {
     let (display, display_received) = std::sync::mpsc::channel();
     let gpu = std::thread::Builder::new()
         .name("gpu".into())
-        .spawn(move || app::Gpu::new(graphics_api, &display_received))?;
+        .spawn(move || {
+            let gpu = app::Gpu::new(graphics_api, &display_received);
+            if let Some(born) = born {
+                log::debug!("GPU ready {:.1?} after the process started", born.elapsed());
+            }
+            gpu
+        })?;
     let event_loop = EventLoop::<app::host::Wake>::with_user_event()
         .build()
         .context("could not open a window")?;
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
-    Ok((
-        event_loop,
-        app::Pending::Thread(fonts),
-        app::Pending::Thread(gpu),
-    ))
+    Ok((event_loop, app::Pending::Thread(gpu)))
 }

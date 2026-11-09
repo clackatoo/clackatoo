@@ -246,7 +246,7 @@ A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane th
 
 `init.lua` may run for 2 seconds before it's stopped where it is. A handler or binding that runs for more than a quarter of a second at a time, as a loop that never ends would, is stopped there, and its key is decided as if it had done nothing more.
 
-`print` writes to the window's log, `window.log` in clackatoo's state directory, as a warning, which the log keeps unless `RUST_LOG` says otherwise (and to stderr, for a window opened in a process of its own).
+`print` writes to the window's log, `window.log` in clackatoo's state directory, which keeps what it prints unless `RUST_LOG` says otherwise (and to stderr, for a window opened in a process of its own).
 
 ## Not yet
 

@@ -25,9 +25,16 @@
 //! another build or seeing another display, config or locale, answers
 //! `{"refused":WHY}`. The asker then forks a process of windows of its
 //! own, for the windows after it too, unless the answer says `"keep":true`:
-//! the asker is the odd one out, or an older build than the process asked,
-//! and its process takes no others. Only if that fails does the asker open
-//! the window itself.
+//! the asker is the odd one out, or an older build than the process asked.
+//! Then it asks, or forks, the process for its group instead: the windows
+//! with what it must match, which listens on a socket named after that
+//! (see [`group_socket`]). Only if that fails does the asker open the
+//! window itself.
+//!
+//! A process still starting, setting up the GPU for its first window,
+//! takes on what's asked of it meanwhile at once: those windows open once
+//! it can, rather than their askers giving up and forking processes of
+//! their own.
 //!
 //! A build is the program's file, so a build put in place by `clackatoo
 //! update` or a deploy is never asked to open a window by an older one, or
@@ -76,7 +83,7 @@ const SLACK: Duration = Duration::from_millis(200);
 /// notifications go to, and where config, state and caches are, which the
 /// process reads as it is. Each window's own environment goes with it, for
 /// what it starts; these are the ones that would change the window itself.
-const MATCH_ENV: [&str; 16] = [
+const MATCH_ENV: [&str; 25] = [
     "WAYLAND_DISPLAY",
     "DISPLAY",
     "HOME",
@@ -93,11 +100,21 @@ const MATCH_ENV: [&str; 16] = [
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_COLLATE",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_MONETARY",
+    "LC_IDENTIFICATION",
 ];
 
 /// Families of variables that must match as [`MATCH_ENV`]'s do: Mesa's
-/// settings, the locale's parts, the cursor theme and fontconfig's.
-const MATCH_PREFIXES: [&str; 4] = ["MESA_", "LC_", "XCURSOR_", "FONTCONFIG_"];
+/// settings, the cursor theme and fontconfig's. (Not every `LC_`: a
+/// terminal's `LC_TERMINAL` says nothing of the locale.)
+const MATCH_PREFIXES: [&str; 3] = ["MESA_", "XCURSOR_", "FONTCONFIG_"];
 
 /// Set to `off`, windows neither ask a process of windows for themselves
 /// nor take others: every window has a process of its own, as before there
@@ -211,16 +228,45 @@ pub(crate) struct NotTaken {
 }
 
 /// Where a window not taken is to open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Then {
     /// In a process of windows forked for it, which takes the windows
-    /// asked for after it too.
-    Host,
-    /// In a process of windows forked for it alone, and those it opens:
-    /// the process asked keeps the others.
-    Alone,
+    /// asked for on this socket after it too, if there's one.
+    Host(Option<PathBuf>),
+    /// In the process for its group (see [`group_socket`]): the process
+    /// asked keeps the windows it takes.
+    Group,
     /// In this process: no process of windows could use what's asked.
     Here,
+}
+
+/// Where a window is asked for.
+#[derive(Debug)]
+pub(crate) enum To {
+    /// Of the process of windows listening on this socket.
+    Socket(PathBuf),
+    /// Of the process just forked for it, at the other end of this socket
+    /// pair.
+    Started(UnixStream),
+}
+
+/// The socket of the process of windows for every window: `window.sock`.
+pub(crate) fn shared_socket(runtime: &RuntimeDir) -> PathBuf {
+    runtime.path().join(SOCKET)
+}
+
+/// The socket of the process of windows for the windows that must match
+/// what this process has, drawing with `graphics_api`: `window-` and a
+/// hash of that, and of the build. Windows refused by the process on
+/// `window.sock` for what they see share one here.
+pub(crate) fn group_socket(runtime: &RuntimeDir, graphics_api: GraphicsApi) -> PathBuf {
+    let build = Build::running().map(|build| build.0).unwrap_or_default();
+    let what = json!([build, window_match(), renderer_name(graphics_api)]).to_string();
+    // FNV-1a: the same in every process of a build, as std's hasher isn't.
+    let hash = what.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    runtime.path().join(format!("window-{hash:016x}.sock"))
 }
 
 /// The process asked refused the window, and keeps the socket.
@@ -253,15 +299,9 @@ pub(crate) fn here() -> Origin {
 }
 
 /// Asks for the window `request` describes, with the desktop's `launch`
-/// tokens: of the process of windows listening on `window.sock`, or with
-/// `started`, of the one just forked for it, on a socket pair to it alone.
-/// Returns once the window is open, or if it wasn't, why, and where it's
-/// to open instead.
-pub(crate) fn ask(
-    request: &Request<'_>,
-    launch: LaunchToken,
-    started: Option<UnixStream>,
-) -> Result<(), NotTaken> {
+/// tokens, of the process of windows `to` says. Returns once the window is
+/// open, or if it wasn't, why, and where it's to open instead.
+pub(crate) fn ask(request: &Request<'_>, launch: LaunchToken, to: To) -> Result<(), NotTaken> {
     let not = |launch, why: String, then| Err(NotTaken { launch, why, then });
     if !on() {
         return not(launch, format!("{OFF_VAR} is off"), Then::Here);
@@ -270,11 +310,8 @@ pub(crate) fn ask(
         return not(launch, "this program can't be found".into(), Then::Here);
     };
     let waits = request.waits;
-    let take_by = after(if started.is_some() {
-        waits.start
-    } else {
-        waits.take
-    });
+    let started = matches!(to, To::Started(_));
+    let take_by = after(if started { waits.start } else { waits.take });
     let open_by = take_by.saturating_add(nanos(waits.open));
     let line = request_line(request, &build, &launch, take_by, open_by);
     if line.len() > MOST {
@@ -285,20 +322,27 @@ pub(crate) fn ask(
         );
         return not(launch, "too big to ask for".into(), Then::Here);
     }
-    let stream = match started {
-        Some(stream) => stream,
-        None => match UnixStream::connect(request.runtime.path().join(SOCKET)) {
-            Ok(stream) => stream,
-            Err(err) => return not(launch, format!("no process of windows: {err}"), Then::Host),
+    let (stream, at) = match to {
+        To::Started(stream) => (stream, None),
+        To::Socket(path) => match UnixStream::connect(&path) {
+            Ok(stream) => (stream, Some(path)),
+            Err(err) => {
+                let why = format!("no process of windows: {err}");
+                return not(launch, why, Then::Host(Some(path)));
+            }
         },
     };
     match asked(&stream, &line, take_by, open_by) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let then = if err.downcast_ref::<Kept>().is_some() {
-                Then::Alone
-            } else {
-                Then::Host
+            let kept = err.downcast_ref::<Kept>().is_some();
+            let shared = at.as_ref() == Some(&shared_socket(request.runtime));
+            let then = match at {
+                // Its group's process, which the next of the group asks.
+                _ if kept && shared => Then::Group,
+                // Refused by its own group's: a process of its own.
+                _ if kept => Then::Host(None),
+                at => Then::Host(at),
             };
             not(launch, format!("{err:#}"), then)
         }
@@ -306,7 +350,9 @@ pub(crate) fn ask(
 }
 
 /// Reads the first window asked for of a process of windows just forked,
-/// on its socket pair, as [`listen`] reads one on the socket.
+/// on its socket pair, as [`listen`] reads one on the socket, waiting as
+/// long as its asker waits for it to start, and takes it on at once: the
+/// process is the window's.
 ///
 /// # Errors
 ///
@@ -314,7 +360,10 @@ pub(crate) fn ask(
 /// open.
 pub(crate) fn first(stream: UnixStream, graphics_api: GraphicsApi) -> anyhow::Result<Asked> {
     let expected = Expected::here(graphics_api)?;
-    read(stream, &expected, Instant::now())?.context("the first window asked for was refused")
+    let starting = std::sync::atomic::AtomicBool::new(true);
+    let wait = Waits::default().start;
+    read(stream, &expected, Instant::now(), wait, &starting)?
+        .context("the first window asked for was refused")
 }
 
 /// Sends `line` on `stream`, and waits for the window to be taken on by
@@ -470,9 +519,12 @@ fn window_match() -> Map<String, Value> {
         }
         matched.insert(name.to_owned(), value.map_or(Value::Null, Value::String));
     }
-    for (name, value) in std::env::vars() {
+    for (name, value) in std::env::vars_os() {
+        let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else {
+            continue;
+        };
         if MATCH_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
-            matched.insert(name, value.into());
+            matched.insert(name.to_owned(), value.into());
         }
     }
     let dir = |dir: Option<PathBuf>| {
@@ -495,12 +547,16 @@ pub(crate) struct Asked {
     take_by: u64,
     open_by: u64,
     stream: UnixStream,
+    /// Whether it was taken on as it was asked for, while the process was
+    /// starting.
+    taken: bool,
 }
 
 impl Asked {
-    /// Takes the window on, saying so, if the asker still waits.
+    /// Takes the window on, saying so, if the asker still waits, or if it
+    /// was taken on already.
     pub(crate) fn take(&mut self) -> bool {
-        now() < self.take_by && self.say(&json!({ "took": true })).is_ok()
+        self.taken || (now() < self.take_by && self.say(&json!({ "took": true })).is_ok())
     }
 
     /// Whether the asker has stopped waiting for the window to open, and
@@ -544,22 +600,25 @@ impl Drop for Listening {
     }
 }
 
-/// Starts listening on `window.sock` in `runtime` for windows asked for, on
-/// a thread of its own, in place of any process listening there before.
-/// Each asked for by this build of the program, matching this process and
-/// drawn with `graphics_api`, is handed to `deliver`; any other is refused.
+/// Starts listening on the socket at `path`, in `runtime`, for windows
+/// asked for, on a thread of its own, in place of any process listening
+/// there before. Each asked for by this build of the program, matching
+/// this process and drawn with `graphics_api`, is handed to `deliver`;
+/// any other is refused. While `starting` says so, each is taken on as
+/// it's asked for, to open once the process can.
 ///
 /// # Errors
 ///
 /// If the runtime directory or the socket can't be made.
 pub(crate) fn listen(
     runtime: &RuntimeDir,
+    path: PathBuf,
     graphics_api: GraphicsApi,
+    starting: Arc<std::sync::atomic::AtomicBool>,
     deliver: impl Fn(Asked) + Send + Sync + 'static,
 ) -> anyhow::Result<Listening> {
     runtime.create_private()?;
     let ours = Arc::new(Expected::here(graphics_api)?);
-    let path = runtime.path().join(SOCKET);
     // Made under a name of its own, then put in place in one step, so
     // whoever connects meanwhile finds the last process's socket or this
     // one, never none; one left by a process gone is replaced.
@@ -579,15 +638,18 @@ pub(crate) fn listen(
                 let at = Instant::now();
                 let ours = Arc::clone(&ours);
                 let deliver = Arc::clone(&deliver);
+                let starting = Arc::clone(&starting);
                 // Each on a thread of its own: a slow asker holds up no
                 // other.
                 let read = std::thread::Builder::new()
                     .name("window-asked".into())
-                    .spawn(move || match read(stream, &ours, at) {
-                        Ok(Some(asked)) => deliver(asked),
-                        Ok(None) => {}
-                        Err(err) => log::info!("a window asked for wasn't taken on: {err:#}"),
-                    });
+                    .spawn(
+                        move || match read(stream, &ours, at, READ_WAIT, &starting) {
+                            Ok(Some(asked)) => deliver(asked),
+                            Ok(None) => {}
+                            Err(err) => log::info!("a window asked for wasn't taken on: {err:#}"),
+                        },
+                    );
                 if let Err(err) = read {
                     log::warn!("no thread to read a window asked for: {err}");
                 }
@@ -634,13 +696,19 @@ impl Expected {
     }
 }
 
-/// Reads what's asked for on `stream`, at `at`, all of it within
-/// [`READ_WAIT`]. Refuses it, returning `None`, if a window opened here
-/// wouldn't be the one asked for.
-fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<Option<Asked>> {
+/// Reads what's asked for on `stream`, at `at`, all of it within `wait`.
+/// Refuses it, returning `None`, if a window opened here wouldn't be the
+/// one asked for; while `starting` says so, takes it on at once.
+fn read(
+    stream: UnixStream,
+    expected: &Expected,
+    at: Instant,
+    wait: Duration,
+    starting: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<Option<Asked>> {
     ours(&stream).context("asked by another user's program")?;
     stream.set_write_timeout(Some(READ_WAIT))?;
-    let line = read_line(&stream, &mut Vec::new(), at + READ_WAIT)?;
+    let line = read_line(&stream, &mut Vec::new(), at + wait)?;
     let Value::Object(request) = serde_json::from_slice(&line)? else {
         anyhow::bail!("a request that isn't an object");
     };
@@ -695,14 +763,19 @@ fn read(stream: UnixStream, expected: &Expected, at: Instant) -> anyhow::Result<
             dir: text("dir").map(PathBuf::from),
         },
     };
-    Ok(Some(Asked {
+    let mut asked = Asked {
         spec,
         launch: LaunchToken::from_raw(text("wayland_token"), text("x11_token")),
         at,
         take_by: number("take_by"),
         open_by: number("open_by"),
         stream,
-    }))
+        taken: false,
+    };
+    if starting.load(std::sync::atomic::Ordering::Acquire) {
+        asked.taken = asked.say(&json!({ "took": true })).is_ok();
+    }
+    Ok(Some(asked))
 }
 
 /// Why a window is refused, and whether the process refusing it keeps
