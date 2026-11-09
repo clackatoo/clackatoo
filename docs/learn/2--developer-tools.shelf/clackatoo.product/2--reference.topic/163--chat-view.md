@@ -550,7 +550,7 @@ workspace, on the chat's machine, which the window then shows:
   turn says to run is the same command, each word quoted as a shell would need
   it. Sign in there, close the tab, and send the message again. An agent of
   your own from `agents.toml`, under a name clackatoo doesn't know, has no
-  login command it knows, so no button. A failure the agent gives by itself,
+  sign-in command it knows, so no button. A failure the agent gives by itself,
   on a turn it took by itself, offers it too.
 - **+ New chat**, and `gC`, when the conversation, or the answer, hit the
   model's limit: a new chat with the same agent, in the same folder, with the

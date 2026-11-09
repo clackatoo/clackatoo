@@ -189,8 +189,8 @@ Claude Code
 after a command it ran ends; what waits for you goes on waiting through that
 turn. Your message goes first, then what waited. The chat says how many wait,
 and stopping it again, with no turn begun since you last did, drops them; a
-Stop & continue that sends your message never does. An agent messaging it is
-told the user stopped it, and one waiting for it with `wait_for_chat` isn't
+**Stop & continue** that sends your message never does. An agent messaging it
+is told the user stopped it, and one waiting for it with `wait_for_chat` isn't
 kept waiting: it's told why. A chat held so stays held through an upgrade; if
 the upgrade stopped what its agent ran, the notice that says so waits for you
 too, then goes after your message.
