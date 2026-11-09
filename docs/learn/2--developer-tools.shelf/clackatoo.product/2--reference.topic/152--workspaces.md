@@ -85,6 +85,9 @@ with the daemon. Before the machine shuts down, systemd's login manager,
 logind, tells the daemon and waits for it. The daemon writes the workspaces as
 they are, lets the shutdown go on, and then writes nothing more, so shells
 that end with everything else don't take their panes or workspaces with them.
+If the shutdown is called off, logind goes away, or the daemon is still
+running a minute later, it writes them again at once and carries on keeping
+them.
 It also writes them before the machine sleeps. If logind can't be asked, as on
 a system without systemd, the daemon's log says why in one line;
 `CLACKATOO_LOGIND=off` in the daemon's environment stops it asking, as

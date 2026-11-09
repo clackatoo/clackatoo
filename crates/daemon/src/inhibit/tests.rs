@@ -213,20 +213,59 @@ fn next(inhibitor: &Inhibitor) -> News {
     }
 }
 
-/// A fake bus, at a socket in a directory of its own, and the inhibitor
-/// connected to it.
-fn connected() -> (tempfile::TempDir, FakeBus, Inhibitor) {
+/// The body of the bus's `NameOwnerChanged`: `name` has gone from `old`
+/// to `new`.
+fn owner_changed(name: &str, old: &str, new: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    for text in [name, old, new] {
+        while !body.len().is_multiple_of(4) {
+            body.push(0);
+        }
+        body.extend_from_slice(&string(text));
+    }
+    body
+}
+
+impl FakeBus {
+    /// Says, as the bus, that logind's name has gone from `old` to `new`.
+    fn logind_moved(&mut self, old: &str, new: &str) {
+        let body = owner_changed(LOGIN, old, new);
+        self.send(BUS, Sent::Bus("NameOwnerChanged"), ("sss", &body), None);
+    }
+}
+
+/// A fake bus, listening at a socket in a directory of its own, and the
+/// inhibitor connected to it. The directory goes when `dir` is dropped,
+/// so a test binds it.
+struct Connected {
+    dir: tempfile::TempDir,
+    listener: UnixListener,
+    bus: FakeBus,
+    inhibitor: Inhibitor,
+}
+
+fn connected() -> Connected {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("bus");
     let listener = UnixListener::bind(&socket).unwrap();
     let inhibitor = Inhibitor::start(format!("unix:path={}", socket.display()), || {});
     let bus = FakeBus::accept(&listener);
-    (dir, bus, inhibitor)
+    Connected {
+        dir,
+        listener,
+        bus,
+        inhibitor,
+    }
 }
 
 #[test]
 fn the_lock_is_handed_over_as_logind_says_shutdown_comes_and_taken_again_if_it_doesnt() {
-    let (_dir, mut bus, inhibitor) = connected();
+    let Connected {
+        dir: _dir,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
     let inhibit = bus.up_to_the_lock();
     let held = bus.lock(&inhibit);
     // Anyone else's signal is passed over.
@@ -264,7 +303,12 @@ fn the_lock_is_handed_over_as_logind_says_shutdown_comes_and_taken_again_if_it_d
 
 #[test]
 fn letting_the_thread_go_lets_the_lock_go() {
-    let (_dir, mut bus, inhibitor) = connected();
+    let Connected {
+        dir: _dir,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
     let inhibit = bus.up_to_the_lock();
     let held = bus.lock(&inhibit);
     assert!(!ended(&held));
@@ -276,45 +320,67 @@ fn letting_the_thread_go_lets_the_lock_go() {
     }
 }
 
+/// logind refusing the lock, or the bus going away, as when either
+/// starts again, has the thread say the lock is lost, then ask again a
+/// moment later, on a new connection.
 #[test]
-fn logind_refusing_the_lock_ends_the_thread_with_nothing_said_to_the_loop() {
-    let (_dir, mut bus, inhibitor) = connected();
+fn a_refusal_or_the_bus_going_has_the_thread_ask_again_later() {
+    let Connected {
+        dir: _dir,
+        listener,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
     let inhibit = bus.up_to_the_lock();
     let refused = Sent::Error(inhibit.serial, "org.freedesktop.DBus.Error.AccessDenied");
     bus.send(LOGIND, refused, ("s", &string("Permission denied")), None);
-    // The thread ends, closing its connection.
-    bus.stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    let mut byte = [0];
-    assert_eq!(bus.stream.read(&mut byte).unwrap(), 0);
-    assert!(inhibitor.news().is_empty());
+    assert!(matches!(next(&inhibitor), News::Lost));
+    let asked = Instant::now();
+    let mut bus = FakeBus::accept(&listener);
+    assert!(
+        asked.elapsed() >= Duration::from_millis(500),
+        "asked again at once"
+    );
+    let inhibit = bus.up_to_the_lock();
+    let held = bus.lock(&inhibit);
+
+    // The bus goes, the lock with it.
+    drop(bus);
+    assert!(matches!(next(&inhibitor), News::Lost));
+    let mut bus = FakeBus::accept(&listener);
+    let inhibit = bus.up_to_the_lock();
+    drop(held);
+    let held = bus.lock(&inhibit);
+    bus.signal(LOGIND, "PrepareForShutdown", true);
+    let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
+        panic!("not the shutdown, with the new lock");
+    };
+    drop(lock);
+    assert!(ended(&held));
 }
 
 /// logind started again has a new name on the bus: its signals count from
-/// then on, and the old name's don't; and with no lock held, it's asked
-/// for one.
+/// then on, and the old name's don't, and it's asked for a lock of its
+/// own. One that goes while it's asked is asked again once it's back, and
+/// the bus's answer for it passed over.
 #[test]
 fn logind_starting_again_is_heard_under_its_new_name() {
-    let (_dir, mut bus, inhibitor) = connected();
+    let Connected {
+        dir: _dir,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
     let inhibit = bus.up_to_the_lock();
     let held = bus.lock(&inhibit);
-    let changed = |name: &str, old: &str, new: &str| {
-        let mut body = Vec::new();
-        for text in [name, old, new] {
-            while !body.len().is_multiple_of(4) {
-                body.push(0);
-            }
-            body.extend_from_slice(&string(text));
-        }
-        body
-    };
     let restarted = ":1.7";
     // Only the bus says who has a name.
-    let forged = changed(LOGIN, LOGIND, OTHER);
+    let forged = owner_changed(LOGIN, LOGIND, OTHER);
     bus.send(OTHER, Sent::Bus("NameOwnerChanged"), ("sss", &forged), None);
-    let body = changed(LOGIN, LOGIND, restarted);
-    bus.send(BUS, Sent::Bus("NameOwnerChanged"), ("sss", &body), None);
+    bus.logind_moved(LOGIND, restarted);
+    let asked = bus.call();
+    assert_eq!(asked.member.as_deref(), Some("Inhibit"));
     bus.signal(LOGIND, "PrepareForShutdown", true);
     bus.signal(OTHER, "PrepareForShutdown", true);
     bus.signal(restarted, "PrepareForShutdown", true);
@@ -325,18 +391,20 @@ fn logind_starting_again_is_heard_under_its_new_name() {
     assert!(ended(&held));
     assert!(inhibitor.news().is_empty());
 
-    // Gone, then back with no lock held: asked for one.
-    bus.send(
-        BUS,
-        Sent::Bus("NameOwnerChanged"),
-        ("sss", &changed(LOGIN, restarted, "")),
-        None,
-    );
-    bus.send(
-        BUS,
-        Sent::Bus("NameOwnerChanged"),
-        ("sss", &changed(LOGIN, "", LOGIND)),
-        None,
-    );
-    assert_eq!(bus.call().member.as_deref(), Some("Inhibit"));
+    // Gone while asked: what the bus answers for it is passed over, and
+    // logind back is asked again.
+    bus.logind_moved(restarted, "");
+    let no_reply = Sent::Error(asked.serial, "org.freedesktop.DBus.Error.NoReply");
+    bus.send(BUS, no_reply, ("s", &string("gone")), None);
+    bus.logind_moved("", LOGIND);
+    let again = bus.call();
+    assert_eq!(again.member.as_deref(), Some("Inhibit"));
+    let held = bus.lock(&again);
+    bus.signal(LOGIND, "PrepareForShutdown", true);
+    let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
+        panic!("not the shutdown, with the lock");
+    };
+    drop(lock);
+    assert!(ended(&held));
+    assert!(inhibitor.news().is_empty());
 }

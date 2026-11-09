@@ -1969,6 +1969,7 @@ impl Daemon {
                     .chain(self.next_restate_due())
                     .chain(self.next_paste_due())
                     .chain(self.next_grace_due())
+                    .chain(self.held_until())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {

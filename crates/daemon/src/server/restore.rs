@@ -59,6 +59,11 @@ pub(super) const KEEP_AFTER: Duration = Duration::from_secs(1);
 /// or not.
 const KEEP_AGAIN: Duration = Duration::from_secs(10);
 
+/// The longest the workspaces are held as the machine shuts down: well
+/// past the most logind waits for anyone (`InhibitDelayMaxSec`, 5 s as
+/// systemd comes), so a daemon still running then wasn't stopped after all.
+const HOLD_AT_MOST: Duration = Duration::from_mins(1);
+
 /// How long the daemon waits, as it stops or upgrades, for the workspaces
 /// to be written.
 const KEEP_WAIT: Duration = Duration::from_secs(1);
@@ -103,10 +108,10 @@ pub(super) struct Keeping {
     places: HashMap<PaneId, (BufferId, Place)>,
     /// What each terminal's shell last said.
     shells: HashMap<TerminalId, Shell>,
-    /// Whether the machine is shutting down, as logind said: the
-    /// workspaces were written as they were, and nothing more is, as what
+    /// Until when nothing more is written, as logind said the machine is
+    /// shutting down: the workspaces were written as they were, and what
     /// follows is everything ending (see `server/shutdown.rs`).
-    held: bool,
+    held: Option<Instant>,
 }
 
 /// What a shell last said: its directory, and its latest block's number
@@ -235,15 +240,25 @@ impl Daemon {
     /// anywhere to keep them, the lock is let go at once.
     pub(super) fn keep_now(&mut self, lock: Option<std::os::fd::OwnedFd>, hold: bool) {
         self.keep_with(lock, true);
-        self.keeping.held |= hold;
+        if hold && self.keeping.held.is_none() {
+            self.keeping.held = Some(Instant::now() + HOLD_AT_MOST);
+        }
     }
 
-    /// Keeps the workspaces again as they change, the shutdown that held
-    /// them called off.
+    /// Keeps the workspaces again as they change, and writes them at once,
+    /// if they were held: as the shutdown that held them was called off,
+    /// logind can no longer say so, or the daemon is still running long
+    /// after it should have stopped.
     pub(super) fn keep_on(&mut self) {
-        if std::mem::take(&mut self.keeping.held) {
-            self.keep_soon();
+        if self.keeping.held.take().is_some() {
+            self.keep();
         }
+    }
+
+    /// When the workspaces, held as the machine shuts down, are written
+    /// again, the daemon still running.
+    pub(super) fn held_until(&self) -> Option<Instant> {
+        self.keeping.held
     }
 
     /// Has the writer's thread write the workspaces as they are now, if
@@ -254,7 +269,7 @@ impl Daemon {
         let Some(path) = self.keeping.path.clone() else {
             return;
         };
-        if self.keeping.held {
+        if self.keeping.held.is_some() {
             return;
         }
         self.write_failed();
@@ -1707,6 +1722,42 @@ mod tests {
         daemon.kept_last();
         let kept = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(kept.contains("\"written\""), "{kept}");
+    }
+
+    /// Workspaces held as logind said the machine was shutting down are
+    /// written again, at once, once the daemon has outlived any shutdown,
+    /// as they would be were the shutdown called off, or logind lost.
+    #[test]
+    fn workspaces_held_for_a_shutdown_that_never_came_are_kept_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("state/workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        daemon.workspaces.new_workspace("kept".to_owned(), terminal);
+        daemon.keep_now(None, true);
+        let until = daemon.keeping.held.expect("held");
+        assert!(until >= Instant::now() + Duration::from_secs(50));
+        let other = daemon.new_terminal(&request).unwrap();
+        daemon.workspaces.new_workspace("after".to_owned(), other);
+        daemon.keep();
+        daemon.take_logind_news();
+        assert!(daemon.keeping.held.is_some());
+        daemon.keeping.held = Some(Instant::now());
+        daemon.take_logind_news();
+        assert!(daemon.keeping.held.is_none());
+        // Written already: this only waits for it.
+        daemon.kept_last();
+        let kept = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(kept.contains("\"after\""), "{kept}");
     }
 
     /// A chat pane as the saved workspaces keep it: chat `id`, called

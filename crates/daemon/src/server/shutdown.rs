@@ -110,8 +110,17 @@ impl Daemon {
         }
     }
 
-    /// Takes in what logind has said is coming (see [`crate::inhibit`]).
+    /// Takes in what logind has said is coming (see [`crate::inhibit`]),
+    /// and writes the workspaces again if they've been held for longer
+    /// than any shutdown takes.
     pub(super) fn take_logind_news(&mut self) {
+        if self
+            .held_until()
+            .is_some_and(|until| until <= Instant::now())
+        {
+            log::warn!("the machine didn't shut down after all: the workspaces are kept again");
+            self.keep_on();
+        }
         let Some(inhibitor) = &self.inhibitor else {
             return;
         };
@@ -126,6 +135,9 @@ impl Daemon {
                     self.keep_on();
                 }
                 News::Sleeping(lock) => self.keep_now(lock, false),
+                // What it said is coming may never come, nor its being
+                // called off.
+                News::Lost => self.keep_on(),
             }
         }
     }
