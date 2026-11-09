@@ -159,7 +159,7 @@ impl Daemon {
                 self.send_event(token, Event::Found { id, found });
             }
             Unpacked::Decoded(_) => {}
-            unpacked @ Unpacked::PassedOn(_) => {
+            unpacked @ Unpacked::PassedOn(..) => {
                 if let Some(frame) = self.frame_for(at, token, &unpacked, &[(2, id)]) {
                     self.send_out(token, Out::Frame(frame));
                 }

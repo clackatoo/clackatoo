@@ -582,6 +582,49 @@ impl View {
     }
 }
 
+impl ViewUpdate {
+    /// The update, from a daemon of protocol 147 or later, its lines as a
+    /// peer from before 147 is to be sent them (see [`Line::as_before`]).
+    pub fn lay_out_as_before(&mut self) {
+        match self {
+            Self::Snapshot(view) => view.lay_out_as_before(),
+            Self::Patch(patches) => {
+                for patch in patches {
+                    if let Patch::Grid { state, lines, .. } = patch {
+                        for (_, line) in lines {
+                            *line = line.as_before(None, state.widths);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl View {
+    /// The view, from a daemon of protocol 147 or later, its lines as a
+    /// peer from before 147 is to be sent them (see [`Line::as_before`]).
+    pub fn lay_out_as_before(&mut self) {
+        if let Node::Grid(grid) = &mut self.root {
+            let width = Some(usize::from(grid.size.cols()));
+            for line in &mut grid.lines {
+                *line = line.as_before(width, grid.state.widths);
+            }
+        }
+    }
+}
+
+impl HistoryLines {
+    /// The lines, of a terminal laid out by `widths` on a daemon of
+    /// protocol 147 or later, as a peer from before 147 is to be sent them
+    /// (see [`Line::as_before`]).
+    pub fn lay_out_as_before(&mut self, widths: Widths) {
+        for line in &mut self.lines {
+            line.line = line.line.as_before(Some(usize::from(line.width)), widths);
+        }
+    }
+}
+
 impl GridNode {
     /// What `terminal`'s screen shows.
     #[must_use]
@@ -719,6 +762,24 @@ impl Line {
             runs,
             wrapped: row.is_wrapped(),
         }
+    }
+
+    /// The line, from a terminal laid out by `widths`, as a peer from
+    /// before protocol 147 is to be sent it (see
+    /// [`from_row_for`](Self::from_row_for)): its row rebuilt, and made a
+    /// line again for that peer. For a daemon passing on what another
+    /// daemon sent. A row is rebuilt the same however wide it's taken to
+    /// be, past its text (what didn't fit was left out as it was printed),
+    /// so `width` may be any at least as wide as its row was, or `None`,
+    /// for as wide as its text could be.
+    #[must_use]
+    pub fn as_before(&self, width: Option<usize>, widths: Widths) -> Self {
+        let width = width.unwrap_or_else(|| {
+            let chars: usize = self.runs.iter().map(|run| run.text.chars().count()).sum();
+            (2 * chars).max(1)
+        });
+        let row = self.to_row(width, widths);
+        Self::from_row_for(&row, wire::TERMINAL_STANDARDS_2 - 1, widths)
     }
 
     /// The line as a row `width` cells wide, filled by the emulator's
@@ -868,11 +929,16 @@ mod tests {
                 proptest::prop_assert_eq!(cells(&rebuilt), cells(row));
                 // A peer from before the rules gets each character in the
                 // same column.
-                let before = Line::from_row_for(row, wire::TERMINAL_STANDARDS_2 - 1, t.widths())
-                    .to_row(row.width(), Widths::LEGACY);
+                let before = Line::from_row_for(row, wire::TERMINAL_STANDARDS_2 - 1, t.widths());
+                let rebuilt_before = before.to_row(row.width(), Widths::LEGACY);
                 for col in (0..row.width()).filter(|&col| !row.cells()[col].is_wide_spacer()) {
-                    proptest::prop_assert_eq!(before.cells()[col].ch(), row.cells()[col].ch());
+                    proptest::prop_assert_eq!(rebuilt_before.cells()[col].ch(), row.cells()[col].ch());
                 }
+                // And a daemon passing on what another sent makes the
+                // same of its line, knowing its row's width or not.
+                let line = Line::from_row(row, t.widths());
+                proptest::prop_assert_eq!(&line.as_before(Some(row.width()), t.widths()), &before);
+                proptest::prop_assert_eq!(&line.as_before(None, t.widths()), &before);
             }
         }
     }

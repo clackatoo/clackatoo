@@ -184,7 +184,9 @@ desktop; nothing about it passes between machines.
   it started with, through upgrades too, and one carried over from a build
   before the rule keeps the old one. A window older than protocol 147 gets
   each widened emoji's second column as a space, so what follows it stays in
-  its column.
+  its column, whether the terminal is this machine's or one another
+  machine's daemon passes on: a daemon makes the lines it passes on again
+  for such a window, its history's too.
 
 ## Supported sequences
 

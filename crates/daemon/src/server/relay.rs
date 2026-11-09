@@ -50,6 +50,7 @@ use clackatoo_protocol::{
     FilesId, ImageFrom, Notice, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response,
     ReviewId, ServerMessage, TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
 };
+use clackatoo_term::Widths;
 use mio::Token;
 
 use super::links::Reached;
@@ -261,6 +262,10 @@ struct Followed {
     /// The client whose fit of it was passed on (see
     /// [`fit_not_passed`](Daemon::fit_not_passed)).
     fitter: Option<Token>,
+    /// The rules it lays its cells out by, as its view said when it was
+    /// last decoded: for its history, for a client from before protocol
+    /// 147.
+    widths: Option<Widths>,
 }
 
 /// A client following one of another daemon's terminals.
@@ -399,6 +404,10 @@ enum Then {
     /// A pane lent this daemon, as the number it gave it, to go in one of
     /// its own workspaces.
     Lent(u64),
+    /// A terminal's history, from a daemon of protocol 147 or later, for
+    /// a client from before it: its lines made again as that client lays
+    /// cells out, from a terminal laid out by these rules.
+    HistoryAsBefore(Widths),
     /// A new pane in its layout showing the pane of this machine's
     /// numbered so here.
     Placed(u64),
@@ -1145,6 +1154,17 @@ impl Daemon {
                 end,
                 count,
             } => terminal(self, local).map(|(at, terminal)| {
+                let linked = &self.links.list[at];
+                let then = if self.client_wire(token).unwrap_or(0) < wire::TERMINAL_STANDARDS_2
+                    && linked.wire.unwrap_or(0) >= wire::TERMINAL_STANDARDS_2
+                {
+                    let widths = (linked.relayed.followed.get(&local))
+                        .and_then(|followed| followed.widths)
+                        .unwrap_or_default();
+                    Then::HistoryAsBefore(widths)
+                } else {
+                    Then::Pass
+                };
                 (
                     at,
                     Ok((
@@ -1153,7 +1173,7 @@ impl Daemon {
                             end,
                             count,
                         },
-                        Then::Pass,
+                        then,
                     )),
                 )
             }),
@@ -2769,18 +2789,19 @@ impl Daemon {
             (Route::View { local, snapshot }, unpacked) => {
                 self.pass_on_view(at, local, snapshot, &unpacked);
             }
-            (Route::Answer(Expect::Client { token, ticket, .. }), Unpacked::PassedOn(frames)) => {
-                match frames.into_iter().next().and_then(|(_, frame)| frame) {
-                    Some(frame) => self.hand_answer(token, ticket, frame),
-                    None => self.hand_answer_with(
-                        token,
-                        ticket,
-                        Response::Error(Error::Other(format!(
-                            "{host}'s answer couldn't be passed on"
-                        ))),
-                    ),
-                }
-            }
+            (
+                Route::Answer(Expect::Client { token, ticket, .. }),
+                Unpacked::PassedOn(frames, _),
+            ) => match frames.into_iter().next().and_then(|(_, frame)| frame) {
+                Some(frame) => self.hand_answer(token, ticket, frame),
+                None => self.hand_answer_with(
+                    token,
+                    ticket,
+                    Response::Error(Error::Other(format!(
+                        "{host}'s answer couldn't be passed on"
+                    ))),
+                ),
+            },
             (Route::Answer(expect), Unpacked::Decoded(decoded)) => {
                 self.relay_answer(at, expect, decoded);
             }
@@ -2791,7 +2812,7 @@ impl Daemon {
                 // From a newer daemon, which knows what this build doesn't.
                 log::debug!("{host} sent what can't be read: {err}");
             }
-            (Route::Buffer { local, kind }, unpacked @ Unpacked::PassedOn(_)) => {
+            (Route::Buffer { local, kind }, unpacked @ Unpacked::PassedOn(..)) => {
                 self.relay_buffer_frame(at, local, kind, &unpacked);
             }
             (
@@ -2851,6 +2872,8 @@ impl Daemon {
             } else {
                 unpacked
             };
+        let newer =
+            (self.links.list[at].wire).is_some_and(|wire| wire >= wire::TERMINAL_STANDARDS_2);
         let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
             // Followed by no one, as they all went: it waits for nothing.
             if let Some(remote) = self.links.list[at]
@@ -2867,6 +2890,14 @@ impl Daemon {
             return;
         };
         followed.owed = true;
+        let widths = match unpacked {
+            Unpacked::Decoded(Ok(message)) => unpack::widths_of(message),
+            Unpacked::PassedOn(_, widths) => *widths,
+            Unpacked::Decoded(Err(_)) => None,
+        };
+        if widths.is_some() {
+            followed.widths = widths;
+        }
         let now = Instant::now();
         let mut sends = Vec::new();
         let mut again = false;
@@ -2883,7 +2914,10 @@ impl Daemon {
             // which following it again brings.
             let frame = match unpacked {
                 Unpacked::Decoded(Ok(ServerMessage::Event(Event::View { update, .. }))) => {
-                    let update = viewer.history_update(update);
+                    let mut update = viewer.history_update(update);
+                    if newer && wire < wire::TERMINAL_STANDARDS_2 {
+                        update.lay_out_as_before();
+                    }
                     frame::encode(
                         wire,
                         &ServerMessage::Event(Event::View {
@@ -3053,6 +3087,10 @@ impl Daemon {
             | (Then::Recovered, response @ (Response::Done | Response::Text(_)))
             | (Then::Reviewed, response @ Response::Reviewed(_))
             | (Then::Attached(_), response @ Response::Done) => response,
+            (Then::HistoryAsBefore(widths), Response::History(mut lines)) => {
+                lines.lay_out_as_before(widths);
+                Response::History(lines)
+            }
             (Then::Created | Then::Recovered, Response::PaneCreated(pane)) if room => {
                 let local = (mirror.pane_numbers).local_or_fresh(pane.0, || fresh.pane());
                 Response::PaneCreated(PaneId(local))

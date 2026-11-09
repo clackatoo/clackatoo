@@ -375,7 +375,7 @@ impl Daemon {
                 self.send_browser_frames();
             }
             Unpacked::Decoded(_) => {}
-            unpacked @ Unpacked::PassedOn(_) => {
+            unpacked @ Unpacked::PassedOn(..) => {
                 for token in viewers {
                     if let Some(frame) =
                         self.frame_for(at, token, &unpacked, &[(2, u64::from(local.0))])

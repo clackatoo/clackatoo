@@ -8,7 +8,11 @@
 //! another protocol version than the connection's needs it decoded and
 //! encoded again, as a build of its version would read it; and only what
 //! this daemon takes in itself is decoded for it: the workspaces, the
-//! chats, and small events naming a terminal or a pane.
+//! chats, and small events naming a terminal or a pane. A view from a
+//! daemon of protocol 147 or later, for a client from before it, has its
+//! lines made again by the rules that client lays cells out by
+//! ([`ViewUpdate::lay_out_as_before`]), as this daemon's own terminals'
+//! are made for it.
 //!
 //! Decoding and encoding a big message takes milliseconds, which the loop
 //! can't spare, so one past [`BIG`](crate::rpc::BIG) is unpacked on the
@@ -20,7 +24,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
-use clackatoo_protocol::{Event, ServerMessage, TerminalId, wire};
+use clackatoo_protocol::{
+    Event, Node, Patch, Response, ServerMessage, TerminalId, ViewUpdate, wire,
+};
+use clackatoo_term::Widths;
 
 /// What's to be done with a frame from another daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,15 +56,16 @@ pub(crate) enum Unpacked {
     /// Decoded, or why it couldn't be.
     Decoded(Result<ServerMessage, String>),
     /// A whole frame for each wire it's to be passed on at, or `None` for
-    /// a wire it can't be.
-    PassedOn(Vec<(u32, Option<Vec<u8>>)>),
+    /// a wire it can't be; and, if it's a change to a view that was
+    /// decoded, the rules its terminal lays cells out by, as it said.
+    PassedOn(Vec<(u32, Option<Vec<u8>>)>, Option<Widths>),
 }
 
 impl Unpacked {
     /// The frame for clients speaking `wire`, if there's one.
     pub(crate) fn for_wire(&self, wire: u32) -> Option<&[u8]> {
         match self {
-            Self::PassedOn(frames) => (frames.iter())
+            Self::PassedOn(frames, _) => (frames.iter())
                 .find(|&&(at, _)| at == wire)
                 .and_then(|(_, frame)| frame.as_deref()),
             Self::Decoded(_) => None,
@@ -119,9 +127,14 @@ pub(crate) fn unpack(payload: &[u8], wire: u32, need: &Need) -> Unpacked {
                                     (message, _) => message,
                                 })
                         });
+                        let message = message.as_ref();
+                        let laid_out = (to < wire::TERMINAL_STANDARDS_2
+                            && wire >= wire::TERMINAL_STANDARDS_2)
+                            .then(|| message.and_then(as_before))
+                            .flatten();
                         // Thumbnails keep their pixels, for clients
                         // older than the image layer here or beyond.
-                        (message.as_ref())
+                        (laid_out.as_ref().or(message))
                             .and_then(|message| {
                                 wire::keeping_pixels(true, || frame::encode(to, message)).ok()
                             })
@@ -130,8 +143,40 @@ pub(crate) fn unpack(payload: &[u8], wire: u32, need: &Need) -> Unpacked {
                     (to, frame)
                 })
                 .collect();
-            Unpacked::PassedOn(frames)
+            let widths = (decoded.flatten().as_ref()).and_then(widths_of);
+            Unpacked::PassedOn(frames, widths)
         }
+    }
+}
+
+/// `message`, a view or a terminal's history from a daemon of protocol
+/// 147 or later, as a client from before it is to be sent it; `None` if
+/// it's neither, and goes as it is.
+fn as_before(message: &ServerMessage) -> Option<ServerMessage> {
+    let mut message = message.clone();
+    match &mut message {
+        ServerMessage::Event(Event::View { update, .. }) => update.lay_out_as_before(),
+        ServerMessage::Response(Response::View(view)) => view.lay_out_as_before(),
+        _ => return None,
+    }
+    Some(message)
+}
+
+/// The rules the terminal of `message`, a change to its view, lays its
+/// cells out by, if it says.
+pub(super) fn widths_of(message: &ServerMessage) -> Option<Widths> {
+    let ServerMessage::Event(Event::View { update, .. }) = message else {
+        return None;
+    };
+    match update {
+        ViewUpdate::Snapshot(view) => match &view.root {
+            Node::Grid(grid) => Some(grid.state.widths),
+            _ => None,
+        },
+        ViewUpdate::Patch(patches) => patches.iter().rev().find_map(|patch| match patch {
+            Patch::Grid { state, .. } => Some(state.widths),
+            _ => None,
+        }),
     }
 }
 
@@ -260,6 +305,60 @@ mod tests {
             );
         }
         assert_eq!(unpacked.for_wire(1), None);
+    }
+
+    #[test]
+    fn a_newer_daemons_view_is_laid_out_again_for_a_client_from_before_its_rules() {
+        use clackatoo_protocol::{HistoryLine, HistoryLines, Line, View};
+        let config = clackatoo_term::Config {
+            widths: Widths {
+                vs16: true,
+                graphemes: false,
+            },
+            ..clackatoo_term::Config::default()
+        };
+        let mut t =
+            clackatoo_term::Terminal::new(clackatoo_term::Size::new(8, 2).unwrap(), &config);
+        // A heart widened by VS16, and one at the edge that wasn't.
+        t.advance("\u{2764}\u{FE0F}x\x1b[8G\u{2764}\u{FE0F}".as_bytes());
+        let older = wire::TERMINAL_STANDARDS_2 - 1;
+        let snapshot = |wire| {
+            ServerMessage::Event(Event::View {
+                terminal: TerminalId(3),
+                update: ViewUpdate::Snapshot(View::capture_for(&t, wire)),
+            })
+        };
+        let came = payload(&snapshot(PROTOCOL_VERSION), PROTOCOL_VERSION);
+        let need = Need::PassOn {
+            terminal: Some(TerminalId(3)),
+            parent: None,
+            wires: vec![PROTOCOL_VERSION, older],
+        };
+        let unpacked = unpack(&came, PROTOCOL_VERSION, &need);
+        // As this daemon would have made it for that client itself.
+        assert_eq!(
+            unpacked.for_wire(older),
+            Some(&frame::encode(older, &snapshot(older)).unwrap()[..])
+        );
+        assert_ne!(snapshot(older), snapshot(PROTOCOL_VERSION));
+        let Unpacked::PassedOn(_, widths) = &unpacked else {
+            panic!("{unpacked:?}");
+        };
+        assert_eq!(*widths, Some(t.widths()));
+        // Its history, by the rules its view said.
+        let row = t.grid().row(0);
+        let history = |wire| HistoryLines {
+            first: 0,
+            lines: vec![HistoryLine {
+                width: 8,
+                line: Line::from_row_for(row, wire, t.widths()),
+            }],
+            links: Vec::new(),
+            marks: clackatoo_protocol::BlockMarks::default(),
+        };
+        let mut relayed = history(PROTOCOL_VERSION);
+        relayed.lay_out_as_before(t.widths());
+        assert_eq!(relayed, history(older));
     }
 
     #[test]
