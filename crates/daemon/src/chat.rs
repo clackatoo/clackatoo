@@ -557,6 +557,10 @@ pub(crate) struct HostedChat {
     /// last found, by its tool call's ID: the turn it's in. Not handed
     /// over: it's looked for again.
     background_rows: Vec<(String, TurnUid)>,
+    /// The tool calls of commands left running in the background that the
+    /// chat no longer lists, the latest few: what the agent says of them
+    /// later goes nowhere. Not handed over.
+    let_go: VecDeque<String>,
     /// The tool calls the adapter said were of clackatoo's own tools as
     /// they began, the latest few (see [`own_call`]): a question about one
     /// is about our own tool, unless the question says otherwise.
@@ -820,6 +824,7 @@ impl HostedChat {
             tasks_session: None,
             terminals: VecDeque::new(),
             background_rows: Vec::new(),
+            let_go: VecDeque::new(),
             own_tools: VecDeque::new(),
             own_server_lost: false,
             mcp_tokens: VecDeque::new(),
@@ -8661,6 +8666,78 @@ mod tests {
             clackatoo_protocol::AgentTaskState::Lost
         );
         assert_eq!(status(&chat), ToolStatus::Failed);
+        // What the agent says of it later goes nowhere: the row stays as
+        // it ended.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed",
+                "_meta":{"terminal_exit":{"exit_code":0,"signal":null,"terminal_id":"e"}}}"#,
+        );
+        output(&mut chat, "late\n");
+        let row = chat.node.turns[0].items[0].tool().unwrap();
+        assert_eq!((row.status, row.exit), (ToolStatus::Failed, None));
+        assert_eq!(row.content, []);
+    }
+
+    /// A command started before an upgrade the agent went on through is
+    /// still known to run in a terminal of its own, by what it printed,
+    /// so it goes on on the shelf as the turn ends (CLACKA-232).
+    #[test]
+    fn a_command_running_through_an_upgrade_still_goes_on_on_the_shelf() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "serve it");
+        start_command(&mut chat);
+        output(&mut chat, "listening\n");
+        let agent = crate::agents::AgentConfig::default().find("codex").unwrap();
+        let (handed, live) = chat.hand_over_live();
+        let mut resumed = HostedChat::resume(handed, &agent);
+        resumed.resume_live(live);
+        resumed.answered(Ok(StopReason::EndTurn));
+        let row = resumed.node.turns[0].items[0].tool().unwrap();
+        assert_eq!(row.status, ToolStatus::Running);
+        assert_eq!(resumed.node.tasks.len(), 1);
+        assert_eq!(resumed.node.tasks[0].id, "tool:e");
+    }
+
+    /// Past what a chat keeps, the command let go first fails, and
+    /// nothing said of it later becomes a row anywhere (CLACKA-232).
+    #[test]
+    fn a_command_let_go_to_keep_to_the_bound_fails_and_is_heard_no_more() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "serve it");
+        start_command(&mut chat);
+        chat.answered(Ok(StopReason::EndTurn));
+        for n in 0..super::tasks::MOST_TASKS {
+            chat.task_said(crate::agent::Task::Spawned {
+                id: format!("t{n}"),
+                kind: "shell".into(),
+                name: "Serve".into(),
+                description: None,
+                can_stop: true,
+                tool: None,
+                output: None,
+            });
+        }
+        assert!(!(chat.node.tasks.iter()).any(|task| task.id == "tool:e"));
+        assert_eq!(
+            chat.node.turns[0].items[0].tool().unwrap().status,
+            ToolStatus::Failed
+        );
+        send(&mut chat, "and now");
+        output(&mut chat, "late\n");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#,
+        );
+        assert!(
+            chat.node.turns[1].items.is_empty(),
+            "{:?}",
+            chat.node.turns[1]
+        );
+        let row = chat.node.turns[0].items[0].tool().unwrap();
+        assert_eq!((row.status, row.content.len()), (ToolStatus::Failed, 0));
     }
 
     #[test]

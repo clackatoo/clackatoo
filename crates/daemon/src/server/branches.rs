@@ -412,6 +412,9 @@ impl Daemon {
             {
                 return;
             }
+            // Its session, if it went whole, stays off the start page, as
+            // its agent's.
+            self.note_branches(oldest);
         }
     }
 

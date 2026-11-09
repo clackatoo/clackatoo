@@ -17,13 +17,16 @@
 //! still running as Codex ends its turn is one Codex left running, as the
 //! tool call that ran it stays open until the command ends, saying so
 //! then, and its output goes on coming as it runs. So a command the
-//! agent said runs in a terminal of its own (`_meta.terminal_info`, or a
-//! `terminal` block in what it shows), still running as a turn ends well,
+//! agent said runs in a terminal of its own (`_meta.terminal_info`, its
+//! output streamed as a terminal's, or a `terminal` block in what it
+//! shows), still running as a turn ends well,
 //! is listed as a task, `tool:` and its tool call's ID, which can't be
 //! stopped from here, and its row goes on running where it is, rather
 //! than failing with the turn: what the agent says of it later goes to
 //! that row, wherever the conversation has got to, and ends the task as
-//! the command ends. Claude Code's adapter finishes the row of a command
+//! the command ends; once the chat lists it no more (it ended and the user
+//! wrote, or it was let go to keep to [`MOST_TASKS`]), nothing more said of
+//! it goes anywhere. Claude Code's adapter finishes the row of a command
 //! it moves to the background, so it never takes this path.
 
 use agent_client_protocol_schema::v1::{StopReason, ToolCallContent, ToolCallUpdate};
@@ -39,7 +42,7 @@ use crate::handover;
 
 /// The most tasks a chat keeps: the oldest that ended go first, then the
 /// oldest going.
-const MOST_TASKS: usize = 16;
+pub(super) const MOST_TASKS: usize = 16;
 
 /// What the ID of a task that stands for a command the agent left running
 /// in the background starts with, before its tool call's ID.
@@ -48,6 +51,10 @@ const FROM_TOOL: &str = "tool:";
 /// The most tool calls of a turn the chat remembers run in a terminal of
 /// their own: far more than a turn leaves running.
 const MOST_TERMINALS: usize = 256;
+
+/// The most commands left running in the background the chat remembers
+/// having let go of.
+const MOST_LET_GO: usize = 64;
 
 impl HostedChat {
     /// Takes what the agent said of a task it runs in the background.
@@ -92,7 +99,10 @@ impl HostedChat {
                     *known = task;
                 } else {
                     tasks.push(task);
-                    bound(&mut tasks);
+                    let gone = bound(&mut tasks);
+                    self.set_tasks(tasks);
+                    self.let_tasks_go(gone);
+                    return None;
                 }
             }
             Task::Progress {
@@ -297,10 +307,31 @@ impl HostedChat {
         if self.node.tasks.iter().all(AgentTask::going) {
             return;
         }
-        let tasks = (self.node.tasks.iter())
+        let (going, ended): (Vec<AgentTask>, Vec<AgentTask>) =
+            (self.node.tasks.iter().cloned()).partition(AgentTask::going);
+        self.set_tasks(going);
+        self.let_tasks_go(ended);
+    }
+
+    /// The chat lists `gone` no more, having let them go to keep to
+    /// [`MOST_TASKS`], or as they ended: the rows of commands among them
+    /// still running fail, as nothing more of them shows, and what the
+    /// agent says of them later goes nowhere.
+    fn let_tasks_go(&mut self, gone: Vec<AgentTask>) {
+        let going: Vec<String> = (gone.iter())
             .filter(|task| task.going())
-            .cloned();
-        self.set_tasks(tasks.collect());
+            .map(|task| task.id.clone())
+            .collect();
+        self.background_rows_ended(&going);
+        for task in gone {
+            let Some(row) = task.id.strip_prefix(FROM_TOOL) else {
+                continue;
+            };
+            if self.let_go.len() >= MOST_LET_GO {
+                self.let_go.pop_front();
+            }
+            self.let_go.push_back(row.to_owned());
+        }
     }
 
     /// Whether the agent runs anything in the background for the chat,
@@ -330,8 +361,10 @@ impl HostedChat {
 impl HostedChat {
     /// Notes that tool call `id` of the turn being answered runs in a
     /// terminal of its own, if the agent says so: in `meta`'s
-    /// `terminal_info`, as Codex's adapter does (and Zed's convention), or
-    /// with a `terminal` block in `content`, what it shows. One told again
+    /// `terminal_info`, or streaming its output there as a terminal's
+    /// (`terminal_output`, `terminal_output_delta`), as Codex's adapter
+    /// does (and Zed's convention), or with a `terminal` block in
+    /// `content`, what it shows. One told again
     /// ran long ago: the last turn a load tells, ending, leaves nothing
     /// running.
     pub(super) fn note_terminal(
@@ -343,8 +376,12 @@ impl HostedChat {
         if self.told_again() {
             return;
         }
-        let says = meta.is_some_and(|meta| meta.contains_key("terminal_info"))
-            || (content.iter()).any(|content| matches!(content, ToolCallContent::Terminal(_)));
+        let says = meta.is_some_and(|meta| {
+            ["terminal_info", "terminal_output", "terminal_output_delta"]
+                .iter()
+                .any(|key| meta.contains_key(*key))
+        }) || (content.iter())
+            .any(|content| matches!(content, ToolCallContent::Terminal(_)));
         if !says || self.terminals.iter().any(|known| known == id) {
             return;
         }
@@ -352,6 +389,34 @@ impl HostedChat {
             self.terminals.pop_front();
         }
         self.terminals.push_back(id.to_owned());
+    }
+
+    /// Notes again, after an upgrade the agent went on through, which
+    /// commands of the turn being answered run in a terminal of their own,
+    /// as far as the turn shows: those running that have shown what they
+    /// printed as a terminal's output (see [`note_terminal`]). One that
+    /// has printed nothing yet is taken for one once it does.
+    ///
+    /// [`note_terminal`]: Self::note_terminal
+    pub(super) fn terminals_again(&mut self) {
+        let Some(index) = self.answering_turn() else {
+            return;
+        };
+        let running: Vec<String> = (self.node.turns[index].items.iter())
+            .filter_map(|item| match item {
+                Item::Tool(tool)
+                    if tool.status == ToolStatus::Running
+                        && tool.kind == ToolKind::Execute
+                        && (tool.content.iter())
+                            .any(|content| matches!(content, ToolContent::Output(_))) =>
+                {
+                    Some(tool.id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let skip = running.len().saturating_sub(MOST_TERMINALS);
+        self.terminals = running.into_iter().skip(skip).collect();
     }
 
     /// The commands of turn `index`, ending as `outcome` says, that the
@@ -387,6 +452,7 @@ impl HostedChat {
         }
         let turn = self.turn_uid(index);
         let mut tasks = self.node.tasks.clone();
+        let mut gone = Vec::new();
         for tool in left {
             log::info!(
                 "chat {}: {} left `{}` running in the background",
@@ -413,11 +479,12 @@ impl HostedChat {
                 *known = task;
             } else {
                 tasks.push(task);
-                bound(&mut tasks);
+                gone.extend(bound(&mut tasks));
             }
         }
         self.tasks_session.clone_from(&self.session);
         self.set_tasks(tasks);
+        self.let_tasks_go(gone);
     }
 
     /// Takes `update`, of tool call `id`, which isn't the turn answering's,
@@ -430,10 +497,18 @@ impl HostedChat {
     /// longer knows what it streamed; so it takes the place of what the row
     /// shows.
     pub(super) fn background_said(&mut self, id: &str, update: &ToolCallUpdate) -> bool {
+        if self.let_go.iter().any(|row| row == id) {
+            return true;
+        }
         let task = format!("{FROM_TOOL}{id}");
         let Some(at_task) = self.node.tasks.iter().position(|known| known.id == task) else {
             return false;
         };
+        // Once it has ended, as it ended: a later word of it changes
+        // nothing.
+        if !self.node.tasks[at_task].going() {
+            return true;
+        }
         let status = update.fields.status.map(super::tool_status);
         let ended = status.filter(|status| *status != ToolStatus::Running);
         let raw = update.fields.raw_output.as_ref();
@@ -467,9 +542,7 @@ impl HostedChat {
                 }
             }
         }
-        if let Some(status) = ended
-            && self.node.tasks[at_task].going()
-        {
+        if let Some(status) = ended {
             let mut tasks = self.node.tasks.clone();
             let task = &mut tasks[at_task];
             task.state = if status == ToolStatus::Done {
@@ -578,9 +651,10 @@ impl HostedChat {
                 _ => task.title.clone(),
             });
         }
-        bound(&mut tasks);
+        let gone = bound(&mut tasks);
         self.set_tasks(tasks);
         self.background_rows_ended(&ids);
+        self.let_tasks_go(gone);
         lost
     }
 }
@@ -684,10 +758,12 @@ fn task_title(name: &str, description: Option<&str>) -> String {
 }
 
 /// Keeps at most [`MOST_TASKS`] of `tasks`, letting the oldest that ended
-/// go first.
-fn bound(tasks: &mut Vec<AgentTask>) {
+/// go first. Returns those let go.
+fn bound(tasks: &mut Vec<AgentTask>) -> Vec<AgentTask> {
+    let mut gone = Vec::new();
     while tasks.len() > MOST_TASKS {
         let at = tasks.iter().position(|task| !task.going()).unwrap_or(0);
-        tasks.remove(at);
+        gone.push(tasks.remove(at));
     }
+    gone
 }

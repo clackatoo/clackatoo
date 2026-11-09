@@ -178,8 +178,11 @@ pub(super) struct Tree {
     /// came off and where.
     dropped: Vec<(usize, usize, u16)>,
     pub(super) plan: Option<ForkPlan>,
-    /// The sessions of branches let go, the latest [`MOST_GONE`].
-    gone: Vec<String>,
+    /// The sessions of branches let go, each with the agent whose it is,
+    /// by its name, the latest [`MOST_GONE`]. Neither the handover nor the
+    /// saved workspaces keep the agent: those they bring back are taken to
+    /// be the chat's agent's.
+    gone: Vec<(String, String)>,
     /// A branch switched to whose turns its session is telling again.
     reload: Option<Reload>,
     /// The tree the saved workspaces kept, waiting for the turns of the
@@ -1338,13 +1341,13 @@ impl HostedChat {
             let seg = self.tree.segs[at].take().expect("a live segment");
             // Its session is still the agent's, and still a branch's: the
             // start page doesn't list it.
-            if let Some(session) =
-                (seg.session.as_ref()).and_then(|session| session.session.clone())
+            if let Some(kept) = seg.session.as_ref()
+                && let Some(session) = kept.session.clone()
             {
                 if self.tree.gone.len() == MOST_GONE {
                     self.tree.gone.remove(0);
                 }
-                self.tree.gone.push(session);
+                self.tree.gone.push((kept.agent.clone(), session));
             }
             let (held, held_cards) = seg
                 .held
@@ -1441,10 +1444,8 @@ impl HostedChat {
     }
 
     /// [`branch_sessions`](Self::branch_sessions), each with the agent
-    /// whose session it is, by its name: a branch let go is taken to be
-    /// the chat's agent's.
+    /// whose session it is, by its name.
     pub(crate) fn branch_sessions_by_agent(&self) -> Vec<(String, String)> {
-        let agent = &self.agent;
         let trees = std::iter::once(&self.tree).chain(self.tree.saved.as_deref());
         trees
             .flat_map(|tree| {
@@ -1453,7 +1454,7 @@ impl HostedChat {
                         let kept = seg.session.as_ref()?;
                         Some((kept.agent.clone(), kept.session.clone()?))
                     })
-                    .chain((tree.gone.iter()).map(move |session| (agent.clone(), session.clone())))
+                    .chain(tree.gone.iter().cloned())
             })
             .filter(|(_, session)| self.session.as_ref() != Some(session))
             .collect()
@@ -1520,7 +1521,9 @@ impl HostedChat {
                     known: plan.known as u64,
                     sent: plan.sent,
                 }),
-            gone: self.tree.gone.clone(),
+            gone: (self.tree.gone.iter())
+                .map(|(_, session)| session.clone())
+                .collect(),
             undone: self.tree.undone.iter().map(|uid| uid.0).collect(),
             lost_cards: self.tree.lost_cards.iter().map(|chat| chat.0).collect(),
         })
@@ -1587,7 +1590,10 @@ impl HostedChat {
                 known: index(plan.known),
                 sent: plan.sent,
             }),
-            gone: record.gone.into_iter().take(MOST_GONE).collect(),
+            gone: (record.gone.into_iter())
+                .take(MOST_GONE)
+                .map(|session| (self.agent.clone(), session))
+                .collect(),
             reload: None,
             saved: None,
             told: None,
@@ -1673,7 +1679,9 @@ impl HostedChat {
                     })
                 })
                 .collect(),
-            gone: tree.gone.clone(),
+            gone: (tree.gone.iter())
+                .map(|(_, session)| session.clone())
+                .collect(),
         })
     }
 
@@ -1715,7 +1723,10 @@ impl HostedChat {
             dropped: (kept.dropped.iter())
                 .map(|dropped| (index(dropped.from), index(dropped.at), dropped.count))
                 .collect(),
-            gone: kept.gone.iter().take(MOST_GONE).cloned().collect(),
+            gone: (kept.gone.iter())
+                .take(MOST_GONE)
+                .map(|session| (self.agent.clone(), session.clone()))
+                .collect(),
             ..Tree::default()
         };
         // Its shape first: every parent there, before the path is walked.
@@ -2211,8 +2222,12 @@ mod tests {
         // The oldest, banana, went, with what was kept of its turn.
         assert!(place.branches.iter().all(|branch| branch.first != "banana"));
         assert_eq!(chat.take_forgotten().len(), 1);
-        // Its session is still kept off the start page.
+        // Its session is still kept off the start page, as its own agent's,
+        // whichever the chat has now.
         assert!(chat.branch_sessions().contains(&"s1".to_owned()));
+        chat.agent = "codex".to_owned();
+        let gone = ("claude".to_owned(), "s1".to_owned());
+        assert!(chat.branch_sessions_by_agent().contains(&gone));
     }
 
     #[test]

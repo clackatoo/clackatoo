@@ -100,6 +100,9 @@ impl HostedChat {
         self.woken_stopping = live.woken_stopping;
         self.wake_held = (live.wake_held).map(|left| now + Duration::from_millis(left));
         self.own_tools = live.own_tools.into();
+        // Which of the turn's commands run in a terminal of their own isn't
+        // handed over: what the turn shows says it again (see `tasks.rs`).
+        self.terminals_again();
         self.diffs = (live.diffs.into_iter())
             .map(|(tool, diffs)| {
                 let diffs = (diffs.into_iter())
