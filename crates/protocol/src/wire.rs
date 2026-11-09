@@ -401,6 +401,11 @@ gates! {
     /// signing in again or starting a new chat, and doing it,
     /// `ChatAction::Remedy`.
     FAILURE_REMEDY = 142,
+    /// A `:Tutor` lesson's files made by the daemon, on its own machine,
+    /// for a window whose daemon is on another (CLACKA-243):
+    /// `Request::Tutor` (`TutorFiles`). An older daemon is never asked:
+    /// the window refuses the lesson.
+    TUTOR_FILES = 146,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1174,6 +1179,9 @@ impl Downgrade for ClientMessage {
             return Downgraded::Refused;
         }
         if wire < PASTE_IMAGE && matches!(self, Self::Request(crate::Request::PasteImage { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < TUTOR_FILES && matches!(self, Self::Request(crate::Request::Tutor(_))) {
             return Downgraded::Refused;
         }
         if wire < TERMINAL_STANDARDS && matches!(self, Self::Colours { .. }) {
@@ -3104,6 +3112,22 @@ mod paste_image_tests {
         });
         assert_eq!(paste.downgrade(PASTE_IMAGE - 1), Downgraded::Refused);
         assert_eq!(paste.downgrade(PASTE_IMAGE), Downgraded::AsIs);
+    }
+}
+
+#[cfg(test)]
+mod tutor_tests {
+    use super::*;
+
+    /// An older daemon makes no lesson's files: it's never asked, so
+    /// nothing reaches it that it would drop.
+    #[test]
+    fn a_lessons_files_are_never_asked_of_an_older_daemon() {
+        let remove = ClientMessage::Request(crate::Request::Tutor(crate::TutorFiles::Remove {
+            dir: "/run/user/1000/clackatoo/tutor/1".into(),
+        }));
+        assert_eq!(remove.downgrade(TUTOR_FILES - 1), Downgraded::Refused);
+        assert_eq!(remove.downgrade(TUTOR_FILES), Downgraded::AsIs);
     }
 }
 

@@ -406,7 +406,13 @@ which goes when the lesson ends; a lesson's explorer can't leave it. A file of
 yours opened in the practice pane is left as it is, unsaved changes and all,
 when the lesson ends. Where each lesson was left is kept in `clackatoo/tutor`
 in `$XDG_STATE_HOME` (or `~/.local/state`), so the next window picks up there.
-With `--remote`, the tutor says it needs the daemon on this machine.
+
+A lesson's panes always run on the machine of the window's own daemon, where
+its files are, even in a workspace of another machine's after `:connect`. With
+`--remote`, the daemon there makes the lesson's files, in `tutor` in its
+runtime folder (`$XDG_RUNTIME_DIR/clackatoo`), and removes them as the lesson
+ends. A daemon there from before protocol 146 can't, and the bar says it needs
+updating.
 
 ### What's new
 

@@ -506,7 +506,7 @@ pub(crate) fn png_of(image: &ChatImage) -> Result<Vec<u8>, String> {
 
 /// The folder at `dir`, made for the user alone if it isn't there, and
 /// refused if it's a link, not a folder, or anyone else's.
-fn open_folder(dir: &Path) -> Result<OwnedFd, String> {
+pub(super) fn open_folder(dir: &Path) -> Result<OwnedFd, String> {
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -531,15 +531,18 @@ fn open_folder(dir: &Path) -> Result<OwnedFd, String> {
 
 /// Whether `name` is one of a pasted image's: `YYYYMMDD-HHMMSS-N.png`.
 fn is_pasted(name: &[u8]) -> bool {
-    let Some(stem) = name.strip_suffix(b".png") else {
-        return false;
-    };
+    name.strip_suffix(b".png").is_some_and(is_stamped)
+}
+
+/// Whether `name` is one named for when it was made, as [`stamped`]
+/// names it: `YYYYMMDD-HHMMSS-N`.
+pub(super) fn is_stamped(name: &[u8]) -> bool {
     let digits = |part: &[u8], exactly: Option<usize>| {
         !part.is_empty()
             && exactly.is_none_or(|length| part.len() == length)
             && part.iter().all(u8::is_ascii_digit)
     };
-    let mut parts = stem.split(|&byte| byte == b'-');
+    let mut parts = name.split(|&byte| byte == b'-');
     matches!(
         (parts.next(), parts.next(), parts.next(), parts.next()),
         (Some(day), Some(time), Some(number), None)
@@ -595,10 +598,10 @@ fn prune(folder: &OwnedFd, now: SystemTime) {
 /// through a link: named for now, the first number free after it.
 /// Returns its name and the file, open to be read again.
 fn make_file(folder: &OwnedFd, png: &[u8]) -> io::Result<(String, File)> {
-    let now = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
+    let now = stamp();
     let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     for number in 1..=1000 {
-        let name = format!("{now}-{number}.png");
+        let name = stamped(&now, number, ".png");
         let made = rustix::fs::openat(folder, name.as_str(), flags, Mode::RUSR | Mode::WUSR);
         match made {
             Ok(fd) => {
@@ -616,6 +619,16 @@ fn make_file(folder: &OwnedFd, png: &[u8]) -> io::Result<(String, File)> {
     Err(io::Error::other(
         "a thousand images were pasted this second",
     ))
+}
+
+/// Now, as names made now start: `YYYYMMDD-HHMMSS`.
+pub(super) fn stamp() -> String {
+    jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string()
+}
+
+/// The `number`th name made at `stamp`, ending in `end`.
+pub(super) fn stamped(stamp: &str, number: u32, end: &str) -> String {
+    format!("{stamp}-{number}{end}")
 }
 
 /// Puts the PNG `file` holds on the clipboard of the desktop `job` says,

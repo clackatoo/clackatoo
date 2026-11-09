@@ -149,7 +149,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 142;
+pub const PROTOCOL_VERSION: u32 = 146;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1626,6 +1626,47 @@ pub enum Request {
     SeenPaired {
         /// The device's number.
         device: u64,
+    },
+    /// Makes, writes again or removes a `:Tutor` lesson's files, in a
+    /// folder of the daemon's own on its machine, for a window whose
+    /// daemon is on another machine than the window: the lesson's panes
+    /// are made there, so its files must be there too. Answered with
+    /// [`Response::Text`], the folder made, for [`TutorFiles::Make`], and
+    /// [`Response::Done`] for the rest. Never from a web device. Only to a
+    /// daemon of protocol 146 or later ([`wire::TUTOR_FILES`]).
+    Tutor(TutorFiles),
+}
+
+/// What [`Request::Tutor`] does. The daemon chooses each lesson's folder,
+/// in a folder of its own only the user may open, and writes nothing
+/// outside it: every name is a plain one, with no `/`, not starting with
+/// `.`, and nothing is written through a link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TutorFiles {
+    /// Makes a new folder for a lesson. Answered with its path, as the
+    /// daemon names it.
+    Make {
+        /// The lesson's name, as `:Tutor` takes it: the folder holds its
+        /// text as `LESSON.txt`, and its practice folder, `LESSON`.
+        lesson: String,
+        /// The lesson's text.
+        text: String,
+        /// The practice folder's files, each a name and its text.
+        files: Vec<(String, String)>,
+    },
+    /// Writes a lesson's text again, as it's put back after a change.
+    Rewrite {
+        /// The folder [`TutorFiles::Make`] made for it.
+        dir: String,
+        /// The lesson's name: its text is `LESSON.txt`.
+        lesson: String,
+        /// Its text.
+        text: String,
+    },
+    /// Removes a lesson's folder, and everything in it, if it's there.
+    Remove {
+        /// The folder [`TutorFiles::Make`] made for it.
+        dir: String,
     },
 }
 

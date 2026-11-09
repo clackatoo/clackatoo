@@ -8,6 +8,7 @@ use clackatoo_protocol::{Answer, Block, BufferUpdate, Construct, Piece, Query, W
 use super::*;
 use crate::editor::Daemon;
 use crate::tutor::{self, Io, Start, State};
+use clackatoo_protocol::TutorFiles;
 
 const SCRATCH: &str = "/scratch/1";
 const STATE: &str = "/state/tutor";
@@ -1062,6 +1063,245 @@ fn the_tutor_says_why_it_cant_open_a_lesson() {
     );
 }
 
+// --- Where the files are made ---------------------------------------------
+
+/// The ID of the window's daemon's machine.
+const OWN: clackatoo_protocol::MachineId = clackatoo_protocol::MachineId([0xa1; 16]);
+
+/// The folder a daemon on another machine made a lesson's files in.
+const MADE: &str = "/run/user/1000/clackatoo/tutor/20261109-101500-1";
+
+/// `list`, from a daemon that says it's on [`OWN`].
+fn on_own(list: Vec<Workspace>) -> Workspaces {
+    let mut workspaces = workspaces(list);
+    workspaces.machine = Some(clackatoo_protocol::Machine {
+        id: OWN,
+        name: "desk".into(),
+        run: 1,
+    });
+    workspaces
+}
+
+/// A desk connected to a daemon on another machine of protocol `wire`,
+/// whose tutor has no scratch directory, as such a window's hasn't, in
+/// one workspace, "w", of one tab with a terminal in normal mode.
+fn remote(wire: u32) -> Desk {
+    let mut desk = Desk::default();
+    desk.start_tutor(Start {
+        state: Some(seen_everything()),
+        state_path: Some(STATE.into()),
+        unavailable: Some("the tutor needs the daemon on this machine, not another".into()),
+        ..Start::default()
+    });
+    desk.daemon_is(wire, None);
+    desk.connected(on_own(vec![workspace(1, "w", vec![tab(1, pane(1))])]), true);
+    answer_all(&mut desk);
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    desk.message = None;
+    take_requests(&mut desk);
+    desk
+}
+
+#[test]
+// jack's laptop's window, on its desktop's daemon: the daemon makes the
+// lesson's files, where its panes are.
+fn a_daemon_on_another_machine_makes_the_lessons_files_and_its_panes_open_on_them() {
+    let mut desk = remote(clackatoo_protocol::PROTOCOL_VERSION);
+    let lesson = tutor::lesson("text-objects").unwrap();
+    let (name, practice) = lesson.practice_file().unwrap();
+    command(&mut desk, "Tutor text-objects");
+    assert_eq!(desk.message, None);
+    let asked = take_requests(&mut desk);
+    assert_eq!(
+        asked,
+        [Request::Tutor(TutorFiles::Make {
+            lesson: "text-objects".into(),
+            text: rendered("text-objects"),
+            files: vec![(name.clone(), practice.clone())],
+        })]
+    );
+    // Nothing written here.
+    assert_eq!(desk.take_tutor_io(), []);
+    desk.answered(Response::Text(MADE.into()));
+    let asked = take_requests(&mut desk);
+    let practice_file = format!("{MADE}/text-objects/{name}");
+    assert!(
+        matches!(
+            &asked[..],
+            [Request::NewTab { terminal: PaneTerminal::File(file), on: Some(OWN), .. }]
+                if file.path == practice_file
+        ),
+        "{asked:?}"
+    );
+    desk.workspaces_changed(on_own(vec![with_lesson(file_pane(2, 7), vec![], 2)]));
+    desk.answered(Response::PaneCreated(PaneId(2)));
+    let asked = take_requests(&mut desk);
+    let lesson_file = format!("{MADE}/text-objects.txt");
+    assert!(
+        asked.iter().any(|request| matches!(
+            request,
+            Request::Split { pane: PaneId(2), terminal: PaneTerminal::File(file), on: Some(OWN), .. }
+                if file.path == lesson_file
+        )),
+        "{asked:?}"
+    );
+    let layout = side_by_side(vec![file_pane(3, 8), file_pane(2, 7)]);
+    desk.workspaces_changed(on_own(vec![with_lesson(layout, vec![], 2)]));
+    for request in asked {
+        desk.answered(match request {
+            Request::Split { .. } => Response::PaneCreated(PaneId(3)),
+            _ => Response::Done,
+        });
+    }
+    answer_all(&mut desk);
+    load(&mut desk, 8, &lesson_file, &rendered("text-objects"));
+    load(&mut desk, 7, &practice_file, practice);
+    take_requests(&mut desk);
+
+    // A change to the lesson is put back: written again there first.
+    desk.show_pane(PaneId(3));
+    type_keys(&mut desk, "dd");
+    let asked = take_requests(&mut desk);
+    let rewrite = Request::Tutor(TutorFiles::Rewrite {
+        dir: MADE.into(),
+        lesson: "text-objects".into(),
+        text: rendered("text-objects"),
+    });
+    let at = |wanted: &Request| asked.iter().position(|request| request == wanted);
+    let discard = Request::Discard {
+        buffer: BufferId(8),
+    };
+    assert!(
+        at(&rewrite).is_some() && at(&rewrite) < at(&discard),
+        "{asked:?}"
+    );
+    assert!(
+        !(desk.take_tutor_io().iter()).any(|io| matches!(io, Io::Write { .. })),
+        "nothing's written here"
+    );
+    answer_all(&mut desk);
+
+    // Ending it removes them there.
+    command(&mut desk, "q");
+    let asked = take_requests(&mut desk);
+    let remove = Request::Tutor(TutorFiles::Remove { dir: MADE.into() });
+    assert!(asked.contains(&remove), "{asked:?}");
+    assert!(
+        asked.contains(&Request::ClosePane { pane: PaneId(2) }),
+        "{asked:?}"
+    );
+    assert!(
+        !(desk.take_tutor_io().iter()).any(|io| matches!(io, Io::Remove(_))),
+        "nothing's removed here"
+    );
+}
+
+#[test]
+fn a_daemon_on_another_machine_makes_a_terminal_lessons_folder_to_start_it_in() {
+    let mut desk = remote(clackatoo_protocol::PROTOCOL_VERSION);
+    command(&mut desk, "Tutor basics");
+    let asked = take_requests(&mut desk);
+    assert!(
+        matches!(
+            &asked[..],
+            [Request::Tutor(TutorFiles::Make { lesson, files, .. })]
+                if lesson == "basics" && files.is_empty()
+        ),
+        "{asked:?}"
+    );
+    desk.answered(Response::Text(MADE.into()));
+    let asked = take_requests(&mut desk);
+    let folder = format!("{MADE}/basics");
+    assert!(
+        matches!(
+            &asked[..],
+            [Request::NewTab { terminal: PaneTerminal::New(new), on: Some(OWN), .. }]
+                if new.cwd.as_deref() == Some(folder.as_str())
+        ),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn a_lesson_ended_before_its_daemon_says_where_its_files_are_has_them_removed() {
+    let mut desk = remote(clackatoo_protocol::PROTOCOL_VERSION);
+    command(&mut desk, "Tutor basics");
+    command(&mut desk, "Tutor wrap");
+    let asked = take_requests(&mut desk);
+    assert!(
+        matches!(asked[..], [Request::Tutor(_), Request::Tutor(_)]),
+        "{asked:?}"
+    );
+    // The first lesson's, which has ended.
+    desk.answered(Response::Text(MADE.into()));
+    let asked = take_requests(&mut desk);
+    assert_eq!(
+        asked,
+        [Request::Tutor(TutorFiles::Remove { dir: MADE.into() })]
+    );
+    // The second's, asked for before that.
+    let second = "/run/user/1000/clackatoo/tutor/20261109-101500-2";
+    desk.answered(Response::Text(second.into()));
+    desk.answered(Response::Done);
+    let asked = take_requests(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::NewTab { terminal: PaneTerminal::File(file), .. }]
+            if file.path.starts_with(&format!("{second}/wrap/"))),
+        "{asked:?}"
+    );
+    assert_eq!(desk.tutor.open.as_ref().unwrap().lesson.id, "wrap");
+}
+
+#[test]
+fn a_daemon_on_another_machine_too_old_to_make_a_lessons_files_is_named_and_asked_nothing() {
+    let mut desk = remote(clackatoo_protocol::wire::TUTOR_FILES - 1);
+    command(&mut desk, "Tutor basics");
+    let said = desk.message.clone().unwrap_or_default();
+    assert!(
+        said.starts_with(":Tutor on another machine needs a newer daemon")
+            && said.ends_with("clackatoo update there updates it"),
+        "{said}"
+    );
+    assert_eq!(take_requests(&mut desk), []);
+    assert_eq!(desk.take_tutor_io(), []);
+    assert!(desk.tutor.open.is_none());
+}
+
+#[test]
+// A workspace of another machine's, or one whose focused pane is another
+// machine's, would have the lesson's panes made there, away from its
+// files: they're made on the window's daemon's own.
+fn a_lessons_panes_are_made_on_the_machine_its_files_are_on() {
+    let elsewhere = clackatoo_protocol::MachineId([0xd5; 16]);
+    let mut theirs = workspace(1, "w", vec![tab(1, pane(1))]);
+    theirs.home = Some(elsewhere);
+    let mut desk = tutored(on_own(vec![theirs]), Some(seen_everything()));
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    take_requests(&mut desk);
+    command(&mut desk, "Tutor explorer");
+    // Written here, by the window.
+    assert!(
+        (desk.take_tutor_io().iter())
+            .any(|io| *io == Io::MakeDir(format!("{SCRATCH}/explorer").into()))
+    );
+    let asked = take_requests(&mut desk);
+    assert!(
+        matches!(asked[..], [Request::NewTab { on: Some(OWN), .. }]),
+        "{asked:?}"
+    );
+    let mut lesson = with_lesson(file_pane(2, 7), vec![], 2);
+    lesson.home = Some(elsewhere);
+    desk.workspaces_changed(on_own(vec![lesson]));
+    desk.answered(Response::PaneCreated(PaneId(2)));
+    let asked = take_requests(&mut desk);
+    assert!(
+        (asked.iter()).any(|request| matches!(request, Request::Split { on: Some(OWN), .. })),
+        "{asked:?}"
+    );
+}
+
 // --- The picker, and what's new -------------------------------------------------
 
 #[test]
@@ -1623,4 +1863,229 @@ fn the_explorer_lessons_search_step_is_done_by_searching_the_names() {
     desk.preview_searches();
     desk.settle_lesson();
     assert_eq!(step(&desk), search + 2);
+}
+
+// --- Against a daemon whose files the window can't see ---------------------
+
+/// A daemon on a thread of its own, with its home and socket in a folder
+/// of its own, as a daemon on another machine has: the window has no
+/// scratch directory there.
+struct Elsewhere {
+    socket: PathBuf,
+    shutdown: clackatoo_daemon::ShutdownHandle,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Elsewhere {
+    fn start(dir: &Path) -> Self {
+        use clackatoo_daemon::{AgentConfig, Daemon, DaemonConfig};
+        let run = dir.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let config = DaemonConfig {
+            shell: "/bin/sh".into(),
+            home: dir.to_owned(),
+            shell_integration: None,
+            agents: AgentConfig::default(),
+            mcp: None,
+            udp_ports: None,
+            languages: None,
+            servers: None,
+            declined: None,
+            trusted: clackatoo_daemon::Trusting::All,
+            lsp_trace: None,
+            boards: None,
+            recovery: None,
+            browser: None,
+            web: None,
+            trash: None,
+            workspaces: None,
+            keep_gate: None,
+            // Never the machine of the user running the tests.
+            machine: None,
+            machine_name: None,
+            display: None,
+            links: None,
+            logind: None,
+            pastes: None,
+            ..DaemonConfig::from_env()
+        };
+        let socket = run.join("daemon.sock");
+        let mut daemon = Daemon::bind(&socket, config).unwrap();
+        let shutdown = daemon.shutdown_handle();
+        let thread = std::thread::spawn(move || drop(daemon.run().unwrap()));
+        Self {
+            socket,
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Elsewhere {
+    fn drop(&mut self) {
+        self.shutdown.shutdown();
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+/// Sends what the desk has for the daemon, and gives it what the daemon
+/// says back, the workspaces and buffers changing and the answers, until
+/// it has nothing more to send.
+fn pump(desk: &mut Desk, client: &mut clackatoo_daemon::client::Client) {
+    use clackatoo_protocol::Event;
+    let heard = |desk: &mut Desk, client: &mut clackatoo_daemon::client::Client| {
+        for event in client.take_events() {
+            match event {
+                Event::Workspaces(workspaces) => desk.workspaces_changed(workspaces),
+                Event::Buffer { buffer, update } => {
+                    desk.buffer_changed(buffer, update);
+                }
+                _ => {}
+            }
+        }
+    };
+    for _ in 0..100 {
+        let outbox = desk.take_outbox();
+        if outbox.is_empty() {
+            return;
+        }
+        for message in outbox {
+            match message {
+                ClientMessage::Request(request) => {
+                    let response = client.request(&request).unwrap();
+                    heard(desk, client);
+                    desk.answered(response);
+                }
+                ClientMessage::Edit {
+                    buffer,
+                    seq,
+                    change,
+                } => client.edit(buffer, seq, change).unwrap(),
+                // Frames drawn, places: nothing a lesson waits on.
+                _ => {}
+            }
+        }
+        heard(desk, client);
+    }
+    panic!("the desk never stopped asking");
+}
+
+/// The text of buffer `buffer`, as the desk has it.
+fn copy_text(desk: &Desk, buffer: Option<BufferId>) -> String {
+    let copy = buffer.and_then(|buffer| desk.buffer_copy(buffer));
+    copy.expect("the buffer").text().to_string()
+}
+
+#[test]
+// jack's laptop's window on his desktop's daemon: the lesson's practice
+// terminal couldn't start, in a folder made on the laptop.
+fn lessons_open_heal_and_end_on_a_daemon_whose_files_the_window_cant_see() {
+    let there = tempfile::tempdir().unwrap();
+    let daemon = Elsewhere::start(there.path());
+    let mut client = clackatoo_daemon::client::Client::connect(&daemon.socket).unwrap();
+    let shell = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 24).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    });
+    client.new_workspace(Some("w".into()), shell).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let terminal = workspaces.list[0].tabs[0].layout.panes()[0]
+        .content
+        .terminal()
+        .unwrap();
+    // A window with no scratch directory, as on another machine.
+    let mut desk = Desk::default();
+    desk.set_area(Some(Area {
+        rect: crate::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1210.0,
+            height: 480.0,
+        },
+        cell: [10.0, 20.0],
+        gap: 10.0,
+        inset: 5.0,
+    }));
+    desk.start_tutor(Start {
+        state: Some(seen_everything()),
+        unavailable: Some("the tutor needs the daemon on this machine, not another".into()),
+        ..Start::default()
+    });
+    desk.daemon_is(client.wire(), None);
+    desk.connected(workspaces, true);
+    pump(&mut desk, &mut client);
+    snapshot(&mut desk, terminal.0);
+    normal_mode(&mut desk);
+    pump(&mut desk, &mut client);
+
+    // A terminal lesson: its shell starts in its folder there.
+    command(&mut desk, "Tutor basics");
+    pump(&mut desk, &mut client);
+    assert_eq!(desk.message, None);
+    let lessons = std::fs::canonicalize(there.path().join("run/tutor")).unwrap();
+    let open = desk.tutor.open.as_ref().expect("the lesson open");
+    assert!(open.dir.starts_with(&lessons), "{}", open.dir.display());
+    assert!(open.dir.is_dir());
+    let text = std::fs::read_to_string(&open.lesson_file).unwrap();
+    assert_eq!(text, rendered("basics"));
+    let practice = open.practice.expect("the practice pane");
+    let (_, _, pane) = desk.workspaces.find_pane(practice).unwrap();
+    let shell = pane.content.terminal().expect("a terminal");
+    let info = client.list_terminals().unwrap();
+    let info = info.iter().find(|info| info.id == shell).unwrap();
+    let pid = info.pid.expect("its shell runs");
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+    assert_eq!(cwd, open.dir);
+    let folder = open.dir.parent().unwrap().to_owned();
+    command(&mut desk, "q");
+    pump(&mut desk, &mut client);
+    assert!(desk.tutor.open.is_none());
+    assert!(!folder.exists(), "removed as it ends");
+
+    // An editor lesson: its practice file is there, and a change to the
+    // lesson is put back there.
+    command(&mut desk, "Tutor text-objects");
+    pump(&mut desk, &mut client);
+    assert_eq!(desk.message, None);
+    let lesson = tutor::lesson("text-objects").unwrap();
+    let (name, practice) = lesson.practice_file().unwrap();
+    let open = desk.tutor.open.as_ref().expect("the lesson open");
+    assert!(open.dir.starts_with(&lessons), "{}", open.dir.display());
+    assert_eq!(
+        std::fs::read_to_string(open.dir.join(name)).unwrap(),
+        *practice
+    );
+    let (lesson_buffer, practice_buffer) = (open.lesson_buffer, open.practice_buffer);
+    let (lesson_file, lesson_pane) = (open.lesson_file.clone(), open.pane.unwrap());
+    pump(&mut desk, &mut client);
+    assert_eq!(copy_text(&desk, practice_buffer), *practice);
+    assert_eq!(copy_text(&desk, lesson_buffer), rendered("text-objects"));
+    std::fs::write(&lesson_file, "written over\n").unwrap();
+    desk.show_pane(lesson_pane);
+    type_keys(&mut desk, "dd");
+    pump(&mut desk, &mut client);
+    assert!(
+        (desk.message.as_deref()).is_some_and(|said| said.contains("can't be changed")),
+        "{:?}",
+        desk.message
+    );
+    assert_eq!(copy_text(&desk, lesson_buffer), rendered("text-objects"));
+    assert_eq!(
+        std::fs::read_to_string(&lesson_file).unwrap(),
+        rendered("text-objects")
+    );
+    let folder = lesson_file.parent().unwrap().to_owned();
+    command(&mut desk, "q");
+    pump(&mut desk, &mut client);
+    assert!(desk.tutor.open.is_none());
+    assert!(!folder.exists(), "removed as it ends");
+    // Nothing was written where the window is.
+    assert!(
+        !(desk.take_tutor_io().iter())
+            .any(|io| matches!(io, Io::Write { .. } | Io::MakeDir(_) | Io::Remove(_))),
+    );
 }

@@ -96,6 +96,7 @@ mod symbols;
 mod tools;
 mod trust;
 mod turn_undo;
+mod tutor;
 mod watched;
 mod web;
 
@@ -3759,6 +3760,7 @@ impl Daemon {
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
             Request::SeenPaired { device } => self.seen_paired(token, device),
+            Request::Tutor(files) => self.tutor_files(token, files),
             Request::Connect {
                 host,
                 command,

@@ -11,8 +11,10 @@
 //! Lessons never touch your files: the scratch directory is
 //! `clackatoo/tutor/<the window's process>` in `$XDG_CACHE_HOME`, made
 //! afresh as a lesson opens, and removed when it ends and when the window
-//! closes. What the tutor remembers is in a file under `$XDG_STATE_HOME`
-//! (see [`state`]).
+//! closes. With the daemon on another machine, the lesson's panes are
+//! there, so the daemon makes its files there instead, in a folder of its
+//! own (see `Request::Tutor`). What the tutor remembers is in a file under
+//! `$XDG_STATE_HOME` (see [`state`]).
 //!
 //! **Every feature adds or extends a lesson,** and adds a line to
 //! [`news::NEWS`].
@@ -149,7 +151,8 @@ pub(crate) struct Start {
     /// Where it remembers it.
     pub(crate) state_path: Option<PathBuf>,
     /// This window's scratch directory, unless the daemon's on another
-    /// machine, where it couldn't see it.
+    /// machine, where it couldn't see it: that daemon makes lessons'
+    /// files itself.
     pub(crate) scratch: Option<PathBuf>,
     /// Why there's no scratch directory, if there isn't one.
     pub(crate) unavailable: Option<String>,

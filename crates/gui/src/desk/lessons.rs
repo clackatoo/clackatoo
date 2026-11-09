@@ -6,7 +6,12 @@
 //! on the left, and the practice pane on the right, an editor on a
 //! scratch file or a terminal in the scratch directory. The window writes
 //! the files first, then asks the daemon for the panes, as it would for
-//! any others, so a lesson needs nothing of the daemon's own.
+//! any others, so a lesson needs nothing of the daemon's own. A daemon on
+//! another machine than the window couldn't see them: it makes the files
+//! itself, in a folder of its own, when asked ([`Request::Tutor`]), and
+//! the window asks for the panes once it says where. Either way, the
+//! panes are made on the machine of the window's own daemon, where the
+//! files are, whatever machine the workspace or its focused pane is on.
 //!
 //! After every key, and everything the daemon says, the step's check is
 //! looked at. Once it holds, having been seen not to since the step
@@ -24,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Block, BufferId, Content, NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal, Request,
-    Response, Side, TabId, Which,
+    Block, BufferId, Content, MachineId, NewTerminal, OpenFile, OpenFiles, PaneId, PaneTerminal,
+    Request, Response, Side, TabId, TutorFiles, Which, WorkspaceId, wire,
 };
 
 use super::{Asked, Desk};
@@ -51,6 +56,8 @@ const WELCOME: &str = "Welcome to clackatoo · :Tutor to start";
 /// What the tutor asked the daemon for, whose answer it waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LessonAsked {
+    /// The lesson's files, made by a daemon on another machine.
+    Files,
     /// The practice pane, in a new tab.
     Practice,
     /// The lesson pane, beside it.
@@ -125,17 +132,21 @@ pub(super) struct Open {
     serial: Serial,
     pub(super) lesson: &'static Lesson,
     rendered: Rendered,
-    /// The scratch directory for its files.
-    dir: PathBuf,
-    /// The lesson's own file, which its pane shows.
-    lesson_file: PathBuf,
+    /// Who made its files, and where.
+    files: Files,
+    /// The scratch directory for its files, once they're made.
+    pub(super) dir: PathBuf,
+    /// The lesson's own file, which its pane shows, once it's made.
+    pub(super) lesson_file: PathBuf,
+    /// The workspace it opens in.
+    workspace: WorkspaceId,
     /// Its tab, and panes, once the daemon has made them.
     tab: Option<TabId>,
-    practice: Option<PaneId>,
-    pane: Option<PaneId>,
+    pub(super) practice: Option<PaneId>,
+    pub(super) pane: Option<PaneId>,
     /// The buffers the panes showed as they opened.
-    practice_buffer: Option<BufferId>,
-    lesson_buffer: Option<BufferId>,
+    pub(super) practice_buffer: Option<BufferId>,
+    pub(super) lesson_buffer: Option<BufferId>,
     /// The step being done, from 0: as many as there are once all are.
     pub(super) step: usize,
     /// Whether the step's check has been seen not to hold since it began,
@@ -165,6 +176,18 @@ pub(super) struct Open {
     asking_exit: bool,
 }
 
+/// Who made a lesson's files, and where.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Files {
+    /// The window, in its scratch directory: its daemon is on this
+    /// machine.
+    Window,
+    /// The daemon, on another machine, which hasn't said where yet.
+    Asked,
+    /// The daemon, on another machine, in this folder of its own.
+    Daemon(String),
+}
+
 /// How the practice terminal's last command went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LastCommand {
@@ -179,6 +202,14 @@ enum LastCommand {
 impl Open {
     fn step(&self) -> Option<&'static tutor::lesson::Step> {
         self.lesson.steps.get(self.step)
+    }
+
+    /// Its files are made in `folder`: its scratch directory, `LESSON`,
+    /// and its text, `LESSON.txt`, beside it.
+    fn files_in(&mut self, folder: &Path) {
+        let id = self.lesson.id;
+        self.dir = folder.join(id);
+        self.lesson_file = folder.join(format!("{id}.txt"));
     }
 }
 
@@ -315,14 +346,24 @@ impl Desk {
             });
             return;
         };
-        let scratch = match &self.tutor.scratch {
-            Ok(scratch) => scratch.clone(),
-            Err(why) => return self.refuse(why.clone()),
-        };
         let Some(shown) = self.shown else { return };
         if !self.connected {
             return self.refuse("the tutor needs the daemon, which is out of reach".into());
         }
+        // Its files are made where its panes are, on the daemon's machine:
+        // by the window, in its scratch directory, if that's this one, or
+        // else by the daemon, if it can.
+        let scratch = if self.remote {
+            if !self.needs_daemon(":Tutor on another machine", wire::TUTOR_FILES) {
+                return;
+            }
+            None
+        } else {
+            match &self.tutor.scratch {
+                Ok(scratch) => Some(scratch.clone()),
+                Err(why) => return self.refuse(why.clone()),
+            }
+        };
         if self.tutor.open.is_some() {
             self.end_lesson();
         }
@@ -330,50 +371,31 @@ impl Desk {
         let step = (state.steps.get(id).copied())
             .filter(|&step| step < lesson.steps.len() && !state.done.contains(id))
             .unwrap_or(0);
-        let dir = scratch.join(id);
-        let lesson_file = scratch.join(format!("{id}.txt"));
         let rendered = lesson.render();
-        let io = &mut self.tutor.io;
-        // Its folder is made afresh, whether or not the lesson has files to
-        // write in it, as its practice terminal starts there.
-        io.push(Io::Remove(dir.clone()));
-        io.push(Io::MakeDir(dir.clone()));
-        for (index, (name, text)) in lesson.files.iter().enumerate() {
-            // The practice file as the step starts.
-            let text = if index == 0 && !lesson.terminal() {
-                lesson.practice_at(step).unwrap_or(text)
-            } else {
-                text
-            };
-            io.push(Io::Write {
-                path: dir.join(name),
-                text: text.to_owned(),
-            });
-        }
-        io.push(Io::Write {
-            path: lesson_file.clone(),
-            text: rendered.text.clone(),
-        });
-        let practice = match lesson.practice_file() {
-            Some((name, _)) => PaneTerminal::File(OpenFile {
-                path: path_text(&dir.join(name)),
-                cwd: None,
-            }),
-            None => PaneTerminal::New(NewTerminal {
-                size: self.new_pane_size(None),
-                // The daemon's own shell, which marks its commands.
-                command: None,
-                cwd: Some(path_text(&dir)),
-                record_to: None,
-            }),
+        let files: Vec<(String, String)> = (lesson.files.iter().enumerate())
+            .map(|(index, (name, text))| {
+                // The practice file as the step starts.
+                let text = if index == 0 && !lesson.terminal() {
+                    lesson.practice_at(step).unwrap_or(text)
+                } else {
+                    text
+                };
+                (name.clone(), text.to_owned())
+            })
+            .collect();
+        let by = match &scratch {
+            Some(_) => Files::Window,
+            None => Files::Asked,
         };
         self.tutor.opened += 1;
         self.tutor.open = Some(Open {
             serial: self.tutor.opened,
             lesson,
             rendered,
-            dir,
-            lesson_file,
+            files: by,
+            dir: PathBuf::new(),
+            lesson_file: PathBuf::new(),
+            workspace: shown.workspace,
             tab: None,
             practice: None,
             pane: None,
@@ -392,14 +414,73 @@ impl Desk {
             exit_stale: true,
             asking_exit: false,
         });
-        self.request(
-            Request::NewTab {
-                workspace: shown.workspace,
-                terminal: practice,
-                on: None,
-            },
-            self.lesson_asked(LessonAsked::Practice),
-        );
+        self.make_lesson_files(scratch, files);
+    }
+
+    /// Has the lesson open's files made, `files` its practice files: by the
+    /// window, in its scratch directory `scratch`, or else by the daemon.
+    /// Its practice pane is asked for once they are.
+    fn make_lesson_files(&mut self, scratch: Option<PathBuf>, files: Vec<(String, String)>) {
+        let Some(open) = &mut self.tutor.open else {
+            return;
+        };
+        let Some(scratch) = scratch else {
+            let make = TutorFiles::Make {
+                lesson: open.lesson.id.to_owned(),
+                text: open.rendered.text.clone(),
+                files,
+            };
+            self.request(Request::Tutor(make), self.lesson_asked(LessonAsked::Files));
+            return;
+        };
+        open.files_in(&scratch);
+        let io = &mut self.tutor.io;
+        // Its folder is made afresh, whether or not the lesson has files to
+        // write in it, as its practice terminal starts there.
+        io.push(Io::Remove(open.dir.clone()));
+        io.push(Io::MakeDir(open.dir.clone()));
+        for (name, text) in files {
+            let path = open.dir.join(name);
+            io.push(Io::Write { path, text });
+        }
+        io.push(Io::Write {
+            path: open.lesson_file.clone(),
+            text: open.rendered.text.clone(),
+        });
+        self.ask_practice();
+    }
+
+    /// Asks for the practice pane of the lesson open, in a new tab, once
+    /// its files are made.
+    fn ask_practice(&mut self) {
+        let size = self.new_pane_size(None);
+        let on = self.own_machine_id();
+        let Some(open) = &self.tutor.open else { return };
+        let practice = match open.lesson.practice_file() {
+            Some((name, _)) => PaneTerminal::File(OpenFile {
+                path: path_text(&open.dir.join(name)),
+                cwd: None,
+            }),
+            None => PaneTerminal::New(NewTerminal {
+                size,
+                // The daemon's own shell, which marks its commands.
+                command: None,
+                cwd: Some(path_text(&open.dir)),
+                record_to: None,
+            }),
+        };
+        let request = Request::NewTab {
+            workspace: open.workspace,
+            terminal: practice,
+            on,
+        };
+        self.request(request, self.lesson_asked(LessonAsked::Practice));
+    }
+
+    /// The machine of the window's own daemon, where a lesson's files are,
+    /// and so its panes go, if the daemon has said.
+    fn own_machine_id(&self) -> Option<MachineId> {
+        self.workspaces.machine.as_ref().map(|machine| machine.id)
     }
 
     /// What a request the tutor makes for the lesson open is noted as.
@@ -423,10 +504,15 @@ impl Desk {
             .as_mut()
             .filter(|open| open.serial == serial)
         else {
-            if let (LessonAsked::Practice | LessonAsked::Lesson, Response::PaneCreated(pane)) =
-                (asked, response)
-            {
-                self.request(Request::ClosePane { pane }, Asked::Quiet);
+            match (asked, response) {
+                (LessonAsked::Practice | LessonAsked::Lesson, Response::PaneCreated(pane)) => {
+                    self.request(Request::ClosePane { pane }, Asked::Quiet);
+                }
+                (LessonAsked::Files, Response::Text(dir)) => {
+                    let remove = Request::Tutor(TutorFiles::Remove { dir });
+                    self.request(remove, Asked::Quiet);
+                }
+                _ => {}
             }
             return false;
         };
@@ -446,6 +532,11 @@ impl Desk {
             (_, Response::Error(err)) => {
                 self.warn(format!("the lesson couldn't open: {err}"));
                 self.end_lesson();
+            }
+            (LessonAsked::Files, Response::Text(dir)) => {
+                open.files_in(Path::new(&dir));
+                open.files = Files::Daemon(dir);
+                self.ask_practice();
             }
             (LessonAsked::Practice, Response::PaneCreated(pane)) => {
                 open.practice = Some(pane);
@@ -482,7 +573,7 @@ impl Desk {
                 pane,
                 side: Side::Left,
                 terminal: lesson,
-                on: None,
+                on: self.own_machine_id(),
             },
             self.lesson_asked(LessonAsked::Lesson),
         );
@@ -538,6 +629,8 @@ impl Desk {
     fn set_up(&mut self, setup: Setup) {
         let has_explorer =
             (self.lesson_tab_panes().iter()).any(|pane| matches!(pane.content, Content::Files(_)));
+        let on = self.own_machine_id();
+        let share = self.explorer_share();
         let Some(open) = &mut self.tutor.open else {
             return;
         };
@@ -554,8 +647,8 @@ impl Desk {
                         tab,
                         side: Side::Left,
                         terminal: PaneTerminal::Files(OpenFiles { dir: Some(dir) }),
-                        share: Some(self.explorer_share()),
-                        on: None,
+                        share: Some(share),
+                        on,
                     };
                     self.request(request, self.lesson_asked(LessonAsked::Setup));
                 }
@@ -759,7 +852,14 @@ impl Desk {
         if changed && !open.healing {
             // Written again first, in case it was written over with `:w`.
             let (path, text) = (open.lesson_file.clone(), open.rendered.text.clone());
-            self.tutor.io.push(Io::Write { path, text });
+            let lesson = open.lesson.id.to_owned();
+            match open.files.clone() {
+                Files::Daemon(dir) => {
+                    let rewrite = TutorFiles::Rewrite { dir, lesson, text };
+                    self.request(Request::Tutor(rewrite), Asked::Quiet);
+                }
+                Files::Window | Files::Asked => self.tutor.io.push(Io::Write { path, text }),
+            }
             if let Some(open) = &mut self.tutor.open {
                 open.healing = true;
             }
@@ -986,8 +1086,18 @@ impl Desk {
                 self.request(Request::ClosePane { pane: pane.id }, Asked::Quiet);
             }
         }
-        self.tutor.io.push(Io::Remove(open.dir));
-        self.tutor.io.push(Io::Remove(open.lesson_file));
+        match open.files {
+            Files::Window => {
+                self.tutor.io.push(Io::Remove(open.dir));
+                self.tutor.io.push(Io::Remove(open.lesson_file));
+            }
+            Files::Daemon(dir) => {
+                let remove = Request::Tutor(TutorFiles::Remove { dir });
+                self.request(remove, Asked::Quiet);
+            }
+            // Removed as the daemon says where, as the lesson has ended.
+            Files::Asked => {}
+        }
     }
 
     /// The window is closing: the lesson open ends, and the scratch

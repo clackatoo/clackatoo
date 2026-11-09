@@ -3020,6 +3020,78 @@ fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from_whatever_its_kind() 
 }
 
 #[test]
+// CLACKA-243: a window on desk opened a lesson in laptop's workspace. Its
+// files are made on desk, the window's daemon's machine, so its panes are
+// made there too, named on it, not on laptop, where the workspace is.
+fn a_lessons_panes_are_made_on_the_window_daemons_machine_in_another_machines_workspace() {
+    let mut pair = Pair::new();
+    let work = pair.work.id;
+    let desk = pair.desk.machine().id;
+    let make = clackatoo_protocol::TutorFiles::Make {
+        lesson: "basics".into(),
+        text: "# Basics\n".into(),
+        files: vec![("notes.txt".into(), "one\n".into())],
+    };
+    let Response::Text(folder) = pair.window.request(&Request::Tutor(make)).unwrap() else {
+        panic!("no folder made");
+    };
+    let practice = format!("{folder}/basics");
+    let terminal = PaneTerminal::New(NewTerminal {
+        size: Size::new(60, 10).unwrap(),
+        command: None,
+        cwd: Some(practice.clone()),
+        record_to: None,
+    });
+    let in_practice = |client: &mut Client| {
+        (client.list_terminals().unwrap().iter())
+            .filter_map(|info| info.pid)
+            .filter_map(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+            .any(|cwd| cwd == Path::new(&practice))
+    };
+    // Named on no machine, it goes to laptop's, where the workspace is,
+    // and a laptop of its own wouldn't have the folder: jack's ENOENT.
+    let anywhere = Request::NewTab {
+        workspace: work,
+        terminal: terminal.clone(),
+        on: None,
+    };
+    let stray = made(&mut pair.window, &anywhere);
+    assert!(in_practice(&mut pair.laptop().client()));
+    let close = Request::ClosePane { pane: stray };
+    assert_eq!(pair.window.request(&close).unwrap(), Response::Done);
+    let deadline = Instant::now() + PATIENCE;
+    while in_practice(&mut pair.laptop().client()) {
+        assert!(Instant::now() < deadline, "laptop's shell never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let new = Request::NewTab {
+        workspace: work,
+        terminal,
+        on: Some(desk),
+    };
+    let pane = made(&mut pair.window, &new);
+    let lesson = Request::Split {
+        pane,
+        side: Side::Left,
+        terminal: PaneTerminal::File(OpenFile {
+            path: format!("{folder}/basics.txt"),
+            cwd: None,
+        }),
+        on: Some(desk),
+    };
+    made(&mut pair.window, &lesson);
+    // The practice shell runs on desk, in the lesson's folder; laptop runs
+    // none there.
+    assert!(in_practice(&mut pair.desk.client()));
+    assert!(!in_practice(&mut pair.laptop().client()));
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        shown.get(work).is_some_and(|work| work.tabs.len() == 2)
+    });
+    let tab = &shown.get(work).unwrap().tabs[1];
+    assert_eq!(tab.layout.panes().len(), 2, "{tab:?}");
+}
+
+#[test]
 fn a_pane_named_on_the_machine_a_workspace_is_on_is_made_there() {
     let mut pair = Pair::new();
     let pane = pair.work.tabs[0].layout.panes()[0].id;

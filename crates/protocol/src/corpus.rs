@@ -1798,6 +1798,32 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             on: None,
         })),
     ));
+    // A lesson's files, made by a daemon on another machine than the
+    // window (CLACKA-243), and the folder it made them in.
+    let dir = "/run/user/1000/clackatoo/tutor/20261109-101500-1";
+    samples.extend(
+        [
+            Client(ClientMessage::Request(Request::Tutor(
+                crate::TutorFiles::Make {
+                    lesson: "basics".into(),
+                    text: "# Basics\n".into(),
+                    files: vec![("notes.txt".into(), "one\ntwo\n".into())],
+                },
+            ))),
+            Server(ServerMessage::Response(Response::Text(dir.into()))),
+            Client(ClientMessage::Request(Request::Tutor(
+                crate::TutorFiles::Rewrite {
+                    dir: dir.into(),
+                    lesson: "basics".into(),
+                    text: "# Basics\n".into(),
+                },
+            ))),
+            Client(ClientMessage::Request(Request::Tutor(
+                crate::TutorFiles::Remove { dir: dir.into() },
+            ))),
+        ]
+        .map(|sample| (crate::wire::TUTOR_FILES, sample)),
+    );
     samples
 }
 
