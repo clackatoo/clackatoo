@@ -30,10 +30,10 @@ pub const ALL_KEYS: u8 = 8;
 /// A key sent as an escape sequence also says the text it types.
 pub const TEXT: u8 = 16;
 
-/// The flags clackatoo's windows act on. A program asking for others gets
-/// these alone, and sees so when it asks: windows don't send key repeats
-/// and releases yet, so [`EVENT_TYPES`] is never set.
-pub const SUPPORTED: u8 = DISAMBIGUATE | ALTERNATE_KEYS | ALL_KEYS | TEXT;
+/// The flags clackatoo's windows act on: every one there is. A window
+/// older than protocol 143 is told [`EVENT_TYPES`] isn't set, as it sends
+/// no repeats or releases.
+pub const SUPPORTED: u8 = DISAMBIGUATE | EVENT_TYPES | ALTERNATE_KEYS | ALL_KEYS | TEXT;
 
 /// How many sets of flags a screen's stack keeps. Pushing past it drops
 /// the oldest, as kitty does.
@@ -150,13 +150,13 @@ mod tests {
     }
 
     #[test]
-    fn only_flags_windows_act_on_are_kept() {
+    fn only_flags_there_are_are_kept() {
         let mut stack = Stack::default();
         stack.push(flags(0xFFFF));
         assert_eq!(stack.flags(), SUPPORTED);
-        assert_eq!(stack.flags() & EVENT_TYPES, 0);
+        assert_eq!(SUPPORTED, 0x1F);
         stack.set(EVENT_TYPES | TEXT, 1);
-        assert_eq!(stack.flags(), TEXT);
+        assert_eq!(stack.flags(), EVENT_TYPES | TEXT);
     }
 
     #[test]

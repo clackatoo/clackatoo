@@ -9,6 +9,7 @@ const CTRL_SHIFT: Modifiers = Modifiers {
     shift: true,
     ctrl: true,
     alt: false,
+    super_key: false,
 };
 
 /// Three terminals side by side, each with a screen, focused on the

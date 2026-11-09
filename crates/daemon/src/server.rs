@@ -885,6 +885,8 @@ impl Subscription {
             state.progress = None;
         }
         if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS_2 {
+            // It sends no repeats or releases.
+            state.keyboard &= !clackatoo_term::keyboard::EVENT_TYPES;
             state.phone = false;
             state.widths = clackatoo_term::Widths::LEGACY;
             if state.modes.mouse_encoding == clackatoo_term::mouse::MouseEncoding::SgrPixels {

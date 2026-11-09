@@ -348,12 +348,14 @@ mod tests {
         shift: false,
         ctrl: true,
         alt: false,
+        super_key: false,
     };
 
     const CTRL_SHIFT: Modifiers = Modifiers {
         shift: true,
         ctrl: true,
         alt: false,
+        super_key: false,
     };
 
     fn terminal(cols: u16, rows: u16, output: &str) -> Terminal {

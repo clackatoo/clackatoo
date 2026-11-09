@@ -1284,6 +1284,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs that ask (mode 1016) get the mouse in pixels, for smooth drags and finer clicks",
     },
     News {
+        id: "key-events",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs on kitty's keyboard protocol can hear keys held and let go, and Super as a modifier",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

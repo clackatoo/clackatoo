@@ -247,16 +247,18 @@ A program asks a flag at a time:
 
 | Flag | What changes |
 |---|---|
-| 1 (disambiguate) | <kbd>Esc</kbd>, and keys with <kbd>Ctrl</kbd> or <kbd>Alt</kbd>, are sent as `CSI <key> ; <modifiers> u`. <kbd>Enter</kbd>, <kbd>Tab</kbd> and <kbd>Backspace</kbd> with no modifiers are sent as they are without the flag, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without <kbd>Shift</kbd> is text. |
+| 1 (disambiguate) | <kbd>Esc</kbd>, and keys with <kbd>Ctrl</kbd>, <kbd>Alt</kbd> or <kbd>Super</kbd>, are sent as `CSI <key> ; <modifiers> u`. <kbd>Enter</kbd>, <kbd>Tab</kbd> and <kbd>Backspace</kbd> with no modifiers are sent as they are without the flag, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without <kbd>Shift</kbd> is text. |
+| 2 (key events) | A key held down is sent again as a repeat, and one let go as a release: `CSI <key> ; <modifiers>:2 u` and `:3`, or in the key's own form, as `CSI 1;1:3A` for Up let go. Only for keys sent as sequences: text typed is sent again as it repeats, and says nothing as it's let go, and so do <kbd>Enter</kbd>, <kbd>Tab</kbd> and <kbd>Backspace</kbd> without flag 8. A key whose press the program heard is told as it comes up, whatever the pane's mode by then, and as the window loses the focus. |
 | 4 (alternate keys) | Those sequences also say the key <kbd>Shift</kbd> made, and the key in a US layout, as `CSI 97:65;2u`. |
 | 8 (all keys) | Every key is a sequence, text and all. |
 | 16 (text) | With 8, each sequence also says the text its key types. |
 
-Flag 2, key repeats and releases, isn't kept, so a program asking for it sees
-from `CSI ? u` that it isn't there: windows send presses alone. Nor are
-<kbd>Super</kbd>, Hyper, Meta, Caps Lock and Num Lock sent as modifiers, or
-modifier keys pressed alone. The keypad's keys have numbers of their own, but
-type their text without <kbd>Ctrl</kbd> or <kbd>Alt</kbd>.
+<kbd>Super</kbd> is a modifier, 8, as the protocol numbers it. Hyper and
+Meta aren't sent: the window can't tell them from the others, nor are Caps
+Lock and Num Lock, or modifier keys pressed alone. The keypad's keys have
+numbers of their own, but type their text without <kbd>Ctrl</kbd>,
+<kbd>Alt</kbd> or <kbd>Super</kbd>. A window older than protocol 143 sends
+no repeats or releases, and the program is told flag 2 isn't set.
 
 A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends
 (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets
@@ -386,6 +388,5 @@ These are ignored:
 - The kitty graphics protocol (`APC G`), sixels and other images.
 - Setting colors: `OSC 4`, `10`, `11`, `12`, `104`, and the others. Asking
   about them is [answered](#queries-answered).
-- Key repeats and releases (the kitty keyboard protocol's flag 2), and
-  <kbd>Super</kbd>, Hyper and Meta as modifiers.
+- Hyper and Meta as modifiers.
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).

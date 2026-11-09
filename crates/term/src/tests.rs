@@ -765,8 +765,10 @@ mod queries {
         assert_eq!(replies("\x1b[>1u\x1b[>13u\x1b[<2u\x1b[?u"), "\x1b[?0u");
         assert_eq!(replies("\x1b[=5u\x1b[=8;2u\x1b[?u"), "\x1b[?13u");
         assert_eq!(replies("\x1b[=13u\x1b[=4;3u\x1b[?u"), "\x1b[?9u");
-        // Key releases aren't sent, so asking for them isn't kept.
-        assert_eq!(replies("\x1b[>3u\x1b[?u"), "\x1b[?1u");
+        // Key repeats and releases are kept too, as windows send them;
+        // flags past those there are aren't.
+        assert_eq!(replies("\x1b[>3u\x1b[?u"), "\x1b[?3u");
+        assert_eq!(replies("\x1b[>255u\x1b[?u"), "\x1b[?31u");
     }
 
     #[test]

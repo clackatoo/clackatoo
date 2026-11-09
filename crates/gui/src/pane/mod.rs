@@ -112,6 +112,12 @@ pub(crate) struct Pane {
     requests: Requests<Pending>,
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
+    /// Whether the key being handed it is held down, repeating.
+    pub(crate) key_repeat: bool,
+    /// The keys its program heard go down as sequences of the kitty
+    /// keyboard protocol with key events asked for, by where they are on
+    /// the keyboard, to be told as they come up.
+    held: Vec<winit::keyboard::KeyCode>,
     /// How big a cell was said to be drawn, in pixels, as it was last
     /// asked.
     cell: Option<[u16; 2]>,
@@ -200,6 +206,8 @@ impl Pane {
         Self {
             requests: Requests::new(terminal),
             requested_size: None,
+            key_repeat: false,
+            held: Vec::new(),
             cell: None,
             screen: None,
             history: History::default(),
@@ -1089,12 +1097,51 @@ impl Pane {
     fn type_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
         let screen = self.screen.as_ref()?;
         let mut bytes = Vec::new();
-        input::encode(press, screen.state.modes, screen.state.keyboard, &mut bytes);
+        let event = if self.key_repeat {
+            input::KeyEvent::Repeat
+        } else {
+            input::KeyEvent::Press
+        };
+        let keyboard = screen.state.keyboard;
+        input::encode_event(press, screen.state.modes, keyboard, event, &mut bytes);
         if bytes.is_empty() {
             return None;
         }
+        // A key sent as a sequence, to a program that asked for key
+        // events, is told as it comes up.
+        if keyboard & clackatoo_term::keyboard::EVENT_TYPES != 0
+            && bytes.starts_with(b"\x1b[")
+            && let Some(code) = press.code
+            && !self.held.contains(&code)
+        {
+            self.held.push(code);
+        }
         self.keyed = Some(Instant::now());
         Some(self.send_typed(bytes, predict::Input::of(press)))
+    }
+
+    /// A key was let go: if its program heard it go down (see
+    /// [`type_key`](Self::type_key)), it hears it come up, whatever the
+    /// pane's mode now, so it never takes it for held. Returns whether
+    /// anything was sent.
+    pub(crate) fn key_released(&mut self, press: &KeyPress<'_>) -> bool {
+        let Some(at) =
+            (press.code).and_then(|code| self.held.iter().position(|&held| held == code))
+        else {
+            return false;
+        };
+        self.held.swap_remove(at);
+        let Some(screen) = &self.screen else {
+            return false;
+        };
+        let mut bytes = Vec::new();
+        let (modes, keyboard) = (screen.state.modes, screen.state.keyboard);
+        input::encode_event(press, modes, keyboard, input::KeyEvent::Release, &mut bytes);
+        if bytes.is_empty() || self.fed() {
+            return false;
+        }
+        self.send_input(bytes);
+        true
     }
 
     /// Sends `bytes`, typed or pasted in this window, to the program.
@@ -2985,6 +3032,7 @@ mod tests {
         ctrl: true,
         shift: false,
         alt: false,
+        super_key: false,
     };
 
     /// What `pane` sent the program.
@@ -4002,6 +4050,41 @@ mod mouse_tests {
         assert_eq!(input(&mut pane), "\x1b[<64;17;17M");
     }
 
+    #[test]
+    fn a_program_that_asks_hears_keys_held_and_let_go() {
+        // Disambiguate, and key events.
+        let terminal = terminal("\x1b[>3u");
+        let mut pane = pane(&terminal);
+        let a = Key::Character("a".into());
+        let ctrl_a = KeyPress {
+            key: &a,
+            text: None,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: Some(winit::keyboard::KeyCode::KeyA),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        };
+        pane.key(&ctrl_a);
+        pane.key_repeat = true;
+        pane.key(&ctrl_a);
+        pane.key_repeat = false;
+        assert!(pane.key_released(&ctrl_a));
+        assert_eq!(input(&mut pane), "\x1b[97;5u\x1b[97;5:2u\x1b[97;5:3u");
+        // Let go again, or a key it never heard, says nothing.
+        assert!(!pane.key_released(&ctrl_a));
+        // Text typed is text, and says nothing as it's let go.
+        let plain = KeyPress {
+            text: Some("a"),
+            modifiers: Modifiers::default(),
+            ..ctrl_a.clone()
+        };
+        pane.key(&plain);
+        assert!(!pane.key_released(&plain));
+        assert_eq!(input(&mut pane), "a");
+    }
+
     /// Presses `text`'s key, with no modifiers.
     fn key(pane: &mut Pane, text: &str) {
         let key = Key::Character(text.into());
@@ -4126,6 +4209,7 @@ mod mouse_tests {
                 ctrl: true,
                 shift: true,
                 alt: false,
+                super_key: false,
             },
         });
         assert_eq!(
@@ -4277,6 +4361,7 @@ mod mouse_tests {
                 ctrl: true,
                 shift: true,
                 alt: false,
+                super_key: false,
             },
         });
         let yanked = |pane: &mut Pane| {

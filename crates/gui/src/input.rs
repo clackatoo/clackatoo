@@ -14,10 +14,14 @@ use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
 /// The modifier keys held during a key press.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools, reason = "each key is held or not")]
 pub(crate) struct Modifiers {
     pub(crate) shift: bool,
     pub(crate) ctrl: bool,
     pub(crate) alt: bool,
+    /// The Super key, the one with the logo. Only the kitty keyboard
+    /// protocol says it; xterm's encoding has no room for it.
+    pub(crate) super_key: bool,
 }
 
 impl Modifiers {
@@ -113,12 +117,39 @@ pub(crate) fn is_modifier(key: &Key) -> bool {
     )
 }
 
+/// What happened to a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyEvent {
+    /// It went down.
+    Press,
+    /// It's held down, and the keyboard repeats it.
+    Repeat,
+    /// It was let go.
+    Release,
+}
+
 /// Appends what `press` sends to the program to `out`, as `modes` and the
 /// kitty keyboard protocol's flags `keyboard` say. Keys that send
 /// nothing, such as a modifier pressed alone, append nothing.
 pub(crate) fn encode(press: &KeyPress<'_>, modes: InputModes, keyboard: u8, out: &mut Vec<u8>) {
+    encode_event(press, modes, keyboard, KeyEvent::Press, out);
+}
+
+/// As [`encode`], for `event` of the key: only a program that asked for
+/// the kitty keyboard protocol's key events hears a release, or a repeat
+/// as anything but a press.
+pub(crate) fn encode_event(
+    press: &KeyPress<'_>,
+    modes: InputModes,
+    keyboard: u8,
+    event: KeyEvent,
+    out: &mut Vec<u8>,
+) {
     if keyboard & (DISAMBIGUATE | ALL_KEYS) != 0 {
-        kitty::encode(press, keyboard, out);
+        kitty::encode(press, keyboard, event, out);
+        return;
+    }
+    if event == KeyEvent::Release {
         return;
     }
     let modifiers = press.modifiers;
@@ -324,21 +355,25 @@ mod tests {
         shift: false,
         ctrl: true,
         alt: false,
+        super_key: false,
     };
     const ALT: Modifiers = Modifiers {
         shift: false,
         ctrl: false,
         alt: true,
+        super_key: false,
     };
     const SHIFT: Modifiers = Modifiers {
         shift: true,
         ctrl: false,
         alt: false,
+        super_key: false,
     };
     const NONE: Modifiers = Modifiers {
         shift: false,
         ctrl: false,
         alt: false,
+        super_key: false,
     };
 
     #[test]

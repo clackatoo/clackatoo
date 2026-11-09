@@ -1575,6 +1575,25 @@ impl App {
         self.key_event(&press, event.repeat);
     }
 
+    /// A key was let go: a program that heard it go down as a sequence of
+    /// the kitty keyboard protocol, and asked for key events, hears it go
+    /// up.
+    fn key_up(&mut self, event: &winit::event::KeyEvent) {
+        let press = input::KeyPress {
+            key: &event.logical_key,
+            text: None,
+            location: event.location,
+            code: match event.physical_key {
+                winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                winit::keyboard::PhysicalKey::Unidentified(_) => None,
+            },
+            modifiers: self.modifiers,
+        };
+        if self.desk.key_released(&press) {
+            self.send_outbox();
+        }
+    }
+
     /// A key went down, `repeat` if it's held: the input method's, while
     /// it composes, or else the window's.
     fn key_event(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
@@ -1643,7 +1662,7 @@ impl App {
             }
             true
         } else {
-            self.desk.key(press)
+            self.desk.key_held(press, repeat)
         };
         match self.desk.take_image_paste() {
             Some(crate::desk::PasteTo::Chat(chat)) => self.paste_into_chat(chat),
@@ -3889,6 +3908,7 @@ impl App {
                     shift: state.shift_key(),
                     ctrl: state.control_key(),
                     alt: state.alt_key(),
+                    super_key: state.super_key(),
                 };
                 // Ctrl underlines the link under the mouse, and shows the
                 // hand over it.
@@ -3904,6 +3924,11 @@ impl App {
                 is_synthetic: false,
                 ..
             } if event.state.is_pressed() => self.key_down(&event),
+            // Synthetic too, as when the window loses the focus with a key
+            // down, so no program thinks one's held for ever.
+            WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => {
+                self.key_up(&event);
+            }
             WindowEvent::Ime(ime) => self.ime_event(ime),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             #[allow(clippy::cast_possible_truncation)]

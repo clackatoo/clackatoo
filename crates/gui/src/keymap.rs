@@ -171,6 +171,7 @@ impl Chord {
             shift: self.shift || matches!(self.base, Base::Char(ch) if ch.is_uppercase()),
             ctrl: self.ctrl,
             alt: self.alt,
+            super_key: false,
         };
         let plain = !self.ctrl && !self.alt;
         let (key, text) = match self.base {
@@ -882,6 +883,7 @@ mod tests {
                 shift,
                 ctrl,
                 alt: false,
+                super_key: false,
             },
         })
     }

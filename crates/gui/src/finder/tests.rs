@@ -236,6 +236,7 @@ fn keys_move_through_the_list_and_open_what_is_picked_where_asked() {
         ctrl: true,
         shift: true,
         alt: false,
+        super_key: false,
     };
     let key = Key::Character("C".into());
     let press = KeyPress {

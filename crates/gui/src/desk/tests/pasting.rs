@@ -12,6 +12,7 @@ const CTRL_SHIFT_ALT: Modifiers = Modifiers {
     shift: true,
     ctrl: true,
     alt: true,
+    super_key: false,
 };
 
 fn image() -> ChatImage {

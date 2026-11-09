@@ -569,6 +569,9 @@ pub(crate) struct Desk {
     held_for: Option<PaneId>,
     /// Terminals whose program the daemon said has ended.
     exited: HashSet<TerminalId>,
+    /// Whether the key being handled is held down, repeating, which a
+    /// program that asked for key events is told.
+    key_repeat: bool,
     /// Whether a key or a click is being had as the focused pane's own
     /// doing, as Enter in an explorer is.
     acting: bool,
@@ -2080,6 +2083,26 @@ impl Desk {
 
     // --- Keys -------------------------------------------------------------
 
+    /// As [`key`](Self::key), for a key held down if `repeat`: a program
+    /// that asked for key events hears a repeat, not a press.
+    pub(crate) fn key_held(&mut self, press: &KeyPress<'_>, repeat: bool) -> bool {
+        self.key_repeat = repeat;
+        let redraw = self.key(press);
+        self.key_repeat = false;
+        redraw
+    }
+
+    /// A key was let go: whichever terminal's program heard it go down as
+    /// a sequence it can hear go up (see [`Pane::key_released`]) is told.
+    /// Returns whether anything was sent.
+    pub(crate) fn key_released(&mut self, press: &KeyPress<'_>) -> bool {
+        let mut sent = false;
+        for pane in self.panes.values_mut() {
+            sent |= pane.key_released(press);
+        }
+        sent
+    }
+
     /// Handles a key press: the command line's, a binding's, then the
     /// focused pane's, noting it in the macro being recorded, if one is,
     /// and then the keys of any macro it types. Returns whether the
@@ -2099,6 +2122,8 @@ impl Desk {
         // Any key but Shift and the like closes `:Messages`.
         let closed = !input::is_modifier(press.key) && self.key_closes_messages();
         let redraw = self.key_with(press, true);
+        // What a macro types after it is pressed, not held.
+        self.key_repeat = false;
         let typed = self.type_macros();
         self.recorded_press();
         self.settle_lesson();
@@ -2316,10 +2341,14 @@ impl Desk {
     /// later. (A chat's yank or search fails once settled.) Returns whether
     /// the pane must be redrawn.
     pub(super) fn pane_key(&mut self, press: &KeyPress<'_>) -> bool {
+        let repeat = self.key_repeat;
         let (redraw, failed) = if let Some(chat) = self.focused_chat_mut() {
             (chat.key(press), chat.take_failed())
         } else if let Some(pane) = self.focused_pane() {
-            (pane.key(press), pane.take_failed())
+            pane.key_repeat = repeat;
+            let redraw = pane.key(press);
+            pane.key_repeat = false;
+            (redraw, pane.take_failed())
         } else {
             return false;
         };
@@ -3348,6 +3377,7 @@ mod tests {
         shift: false,
         ctrl: true,
         alt: false,
+        super_key: false,
     };
 
     fn ctrl(desk: &mut Desk, letter: &str) {
@@ -5642,6 +5672,7 @@ mod tests {
             ctrl: true,
             shift: true,
             alt: false,
+            super_key: false,
         };
         press(&mut desk, Key::Character("O".into()), None, ctrl_shift);
         assert_eq!(shown_pane(&desk), PaneId(4));
@@ -7255,6 +7286,7 @@ mod tests {
             ctrl: true,
             shift: true,
             alt: false,
+            super_key: false,
         };
         press(&mut desk, Key::Character("O".into()), None, ctrl_shift);
         assert_eq!(shown_pane(&desk), PaneId(1));
@@ -11472,6 +11504,7 @@ mod tests {
             shift: true,
             ctrl: false,
             alt: false,
+            super_key: false,
         };
         press(desk, Key::Character(letter.into()), None, shift);
     }

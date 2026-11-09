@@ -10,17 +10,20 @@
 //! the flags on by a program that died can still be typed `reset` into.
 //! With [`ALL_KEYS`], every key is a sequence, text and all.
 //!
-//! What windows don't do yet: key repeats and releases
-//! ([`EVENT_TYPES`](clackatoo_term::keyboard::EVENT_TYPES)), which the
-//! emulator therefore never keeps; Super, Hyper, Meta, Caps Lock and Num
-//! Lock as modifiers; and modifier keys pressed alone. The key Shift
-//! makes, and the key in the base layout, are as the keyboard's own
+//! With [`EVENT_TYPES`], a key held down is sent again as a repeat, and
+//! a key let go as a release, as `CSI code ; modifiers:2 u` and `:3`: a
+//! key sent as a sequence, that is, as text typed is text again when held
+//! and nothing when let go, and Enter, Tab and Backspace without [`ALL_KEYS`]
+//! say neither, as the protocol has it. Super is a modifier (8); Hyper and
+//! Meta, which the window can't see apart from it, aren't, nor are Caps
+//! Lock and Num Lock; and modifier keys pressed alone aren't sent. The key
+//! Shift makes, and the key in the base layout, are as the keyboard's own
 //! layout has them for letters, and as a US layout has them otherwise.
 
-use clackatoo_term::keyboard::{ALL_KEYS, ALTERNATE_KEYS, TEXT};
+use clackatoo_term::keyboard::{ALL_KEYS, ALTERNATE_KEYS, EVENT_TYPES, TEXT};
 use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
-use super::{KeyPress, Modifiers};
+use super::{KeyEvent, KeyPress, Modifiers};
 
 /// What a key is, as the protocol numbers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,56 +36,87 @@ enum Code {
     Functional(u32, char),
 }
 
-/// Appends what `press` sends to a program that asked for the kitty
-/// keyboard protocol's `flags`, which include [`DISAMBIGUATE`](clackatoo_term::keyboard::DISAMBIGUATE) or
+/// Appends what `event` of `press` sends to a program that asked for the
+/// kitty keyboard protocol's `flags`, which include [`DISAMBIGUATE`](clackatoo_term::keyboard::DISAMBIGUATE) or
 /// [`ALL_KEYS`].
-pub(super) fn encode(press: &KeyPress<'_>, flags: u8, out: &mut Vec<u8>) {
+pub(super) fn encode(press: &KeyPress<'_>, flags: u8, event: KeyEvent, out: &mut Vec<u8>) {
+    // Without the flag, a repeat is a press, and a release says nothing.
+    let event = match event {
+        _ if flags & EVENT_TYPES == 0 && event == KeyEvent::Release => return,
+        _ if flags & EVENT_TYPES == 0 => KeyEvent::Press,
+        event => event,
+    };
+    let release = event == KeyEvent::Release;
     let modifiers = press.modifiers;
     let all = flags & ALL_KEYS != 0;
     let Some(code) = code(press) else {
         // Text an input method committed whole, which is sent as it is.
         if let Key::Character(text) = press.key
             && text.chars().nth(1).is_some()
+            && !release
         {
             out.extend_from_slice(text.as_bytes());
         }
         return;
     };
     let value = modifier_value(modifiers);
+    // Typed text is text, held or not, and nothing as it's let go.
+    let text_alone = |out: &mut Vec<u8>, text: String| {
+        if !release {
+            out.extend_from_slice(text.as_bytes());
+        }
+    };
+    // A release says no text.
+    let said = |text: Option<String>| text.filter(|_| !release);
     match code {
         Code::Text(ch) if !all => {
             // Text with no modifiers but Shift is just text, as before.
-            if !modifiers.ctrl && !modifiers.alt {
-                let text = typed(press).unwrap_or_else(|| ch.to_string());
-                out.extend_from_slice(text.as_bytes());
+            if !modifiers.ctrl && !modifiers.alt && !modifiers.super_key {
+                text_alone(out, typed(press).unwrap_or_else(|| ch.to_string()));
                 return;
             }
             sequence(
                 out,
                 u32::from(ch),
                 alternates(press, ch, flags),
-                value,
+                (value, event),
                 None,
                 'u',
             );
         }
         Code::Text(ch) => {
-            let text = (flags & TEXT != 0).then(|| typed(press)).flatten();
+            let text = said((flags & TEXT != 0).then(|| typed(press)).flatten());
             let alternates = alternates(press, ch, flags);
-            sequence(out, u32::from(ch), alternates, value, text.as_deref(), 'u');
+            sequence(
+                out,
+                u32::from(ch),
+                alternates,
+                (value, event),
+                text.as_deref(),
+                'u',
+            );
         }
         // The keypad's text is text, as the rest of the keyboard's.
-        Code::Keypad(_, ch) if !all && !modifiers.ctrl && !modifiers.alt => {
-            let text = typed(press).unwrap_or_else(|| ch.to_string());
-            out.extend_from_slice(text.as_bytes());
+        Code::Keypad(_, ch)
+            if !all && !modifiers.ctrl && !modifiers.alt && !modifiers.super_key =>
+        {
+            text_alone(out, typed(press).unwrap_or_else(|| ch.to_string()));
         }
         Code::Keypad(number, _) => {
-            let text = (all && flags & TEXT != 0).then(|| typed(press)).flatten();
-            sequence(out, number, (None, None), value, text.as_deref(), 'u');
+            let text = said((all && flags & TEXT != 0).then(|| typed(press)).flatten());
+            sequence(
+                out,
+                number,
+                (None, None),
+                (value, event),
+                text.as_deref(),
+                'u',
+            );
         }
         Code::Functional(number, trailer) => {
             if !all && value == 1 {
-                // Kept as they were, as the module's documentation says.
+                // Kept as they were, as the module's documentation says,
+                // held down too, and saying nothing as they're let go.
                 // By its number and `u`: F3 is 13 too, as `CSI 13 ~`.
                 let kept: &[u8] = match (number, trailer) {
                     // Enter, on the keypad too.
@@ -92,19 +126,24 @@ pub(super) fn encode(press: &KeyPress<'_>, flags: u8, out: &mut Vec<u8>) {
                     _ => &[],
                 };
                 if !kept.is_empty() {
-                    out.extend_from_slice(kept);
+                    if !release {
+                        out.extend_from_slice(kept);
+                    }
                     return;
                 }
             }
-            sequence(out, number, (None, None), value, None, trailer);
+            sequence(out, number, (None, None), (value, event), None, trailer);
         }
     }
 }
 
-/// The protocol's modifier value: 1, plus 1 for Shift, 2 for Alt and 4 for
-/// Ctrl, as xterm's.
+/// The protocol's modifier value: 1, plus 1 for Shift, 2 for Alt, 4 for
+/// Ctrl, as xterm's, and 8 for Super.
 fn modifier_value(modifiers: Modifiers) -> u8 {
-    1 + u8::from(modifiers.shift) + (u8::from(modifiers.alt) << 1) + (u8::from(modifiers.ctrl) << 2)
+    1 + u8::from(modifiers.shift)
+        + (u8::from(modifiers.alt) << 1)
+        + (u8::from(modifiers.ctrl) << 2)
+        + (u8::from(modifiers.super_key) << 3)
 }
 
 /// What key `press` is, if the protocol has a number for it.
@@ -180,21 +219,28 @@ fn typed(press: &KeyPress<'_>) -> Option<String> {
     Some(text.to_owned()).filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
 }
 
-/// Appends `CSI number[:shifted[:base]] [; modifiers [; text]] trailer`.
-/// The number 1 is left out of `CSI 1 A` and its like when nothing
-/// follows it, as the 1 of modifiers is when no text does.
+/// Appends `CSI number[:shifted[:base]] [; modifiers[:event] [; text]]
+/// trailer`. The number 1 is left out of `CSI 1 A` and its like when
+/// nothing follows it, as the 1 of modifiers is when neither an event
+/// but a press nor text does.
 fn sequence(
     out: &mut Vec<u8>,
     number: u32,
     (shifted, base): (Option<u32>, Option<u32>),
-    modifiers: u8,
+    (modifiers, event): (u8, KeyEvent),
     text: Option<&str>,
     trailer: char,
 ) {
     use std::fmt::Write;
 
+    let event = match event {
+        KeyEvent::Press => None,
+        KeyEvent::Repeat => Some(2),
+        KeyEvent::Release => Some(3),
+    };
     let mut sequence = String::from("\x1b[");
-    let implied = trailer != 'u' && number == 1 && modifiers == 1 && text.is_none();
+    let implied =
+        trailer != 'u' && number == 1 && modifiers == 1 && event.is_none() && text.is_none();
     if !implied {
         write!(sequence, "{number}").expect("writing to a string never fails");
     }
@@ -205,10 +251,13 @@ fn sequence(
         (None, None) => Ok(()),
     };
     written.expect("writing to a string never fails");
-    if modifiers != 1 || text.is_some() {
+    if modifiers != 1 || event.is_some() || text.is_some() {
         sequence.push(';');
-        if modifiers != 1 {
+        if modifiers != 1 || event.is_some() {
             write!(sequence, "{modifiers}").expect("writing to a string never fails");
+        }
+        if let Some(event) = event {
+            write!(sequence, ":{event}").expect("writing to a string never fails");
         }
     }
     if let Some(text) = text {
@@ -356,6 +405,7 @@ mod tests {
         shift: false,
         ctrl: false,
         alt: false,
+        super_key: false,
     };
     const SHIFT: Modifiers = Modifiers {
         shift: true,
@@ -372,6 +422,18 @@ mod tests {
         modifiers: Modifiers,
         flags: u8,
     ) -> String {
+        event_sent(key, text, code, modifiers, flags, KeyEvent::Press)
+    }
+
+    /// What `event` of `key` at `code`, typing `text`, sends with `flags`.
+    fn event_sent(
+        key: &Key,
+        text: Option<&str>,
+        code: Option<KeyCode>,
+        modifiers: Modifiers,
+        flags: u8,
+        event: KeyEvent,
+    ) -> String {
         let mut out = Vec::new();
         encode(
             &KeyPress {
@@ -382,9 +444,89 @@ mod tests {
                 modifiers,
             },
             flags,
+            event,
             &mut out,
         );
         String::from_utf8(out).expect("keys send UTF-8")
+    }
+
+    #[test]
+    fn repeats_and_releases_are_said_of_keys_sent_as_sequences() {
+        use clackatoo_term::keyboard::{DISAMBIGUATE, EVENT_TYPES};
+        let flags = DISAMBIGUATE | EVENT_TYPES;
+        let a = Key::Character("a".into());
+        let at = |modifiers, event| event_sent(&a, Some("a"), None, modifiers, flags, event);
+        assert_eq!(at(CTRL, KeyEvent::Press), "\x1b[97;5u");
+        assert_eq!(at(CTRL, KeyEvent::Repeat), "\x1b[97;5:2u");
+        assert_eq!(at(CTRL, KeyEvent::Release), "\x1b[97;5:3u");
+        // Text is text held down, and nothing let go.
+        assert_eq!(at(NONE, KeyEvent::Repeat), "a");
+        assert_eq!(at(NONE, KeyEvent::Release), "");
+        // Keys xterm sends in its own forms keep them.
+        let up = |event| {
+            event_sent(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                NONE,
+                flags,
+                event,
+            )
+        };
+        assert_eq!(up(KeyEvent::Press), "\x1b[A");
+        assert_eq!(up(KeyEvent::Repeat), "\x1b[1;1:2A");
+        assert_eq!(up(KeyEvent::Release), "\x1b[1;1:3A");
+        assert_eq!(
+            event_sent(
+                &Key::Named(NamedKey::Escape),
+                None,
+                None,
+                NONE,
+                flags,
+                KeyEvent::Release
+            ),
+            "\x1b[27;1:3u"
+        );
+        // Enter, Tab and Backspace stay as they are, and say no release.
+        let enter =
+            |event| event_sent(&Key::Named(NamedKey::Enter), None, None, NONE, flags, event);
+        assert_eq!(
+            (enter(KeyEvent::Repeat), enter(KeyEvent::Release)),
+            ("\r".into(), String::new())
+        );
+        // With every key a sequence, a release says no text.
+        let all = flags | ALL_KEYS | TEXT;
+        assert_eq!(
+            event_sent(&a, Some("a"), None, NONE, all, KeyEvent::Release),
+            "\x1b[97;1:3u"
+        );
+        assert_eq!(
+            event_sent(&a, Some("a"), None, NONE, all, KeyEvent::Repeat),
+            "\x1b[97;1:2;97u"
+        );
+        // Without the flag, a repeat is a press, and a release nothing.
+        let at = |event| event_sent(&a, Some("a"), None, CTRL, DISAMBIGUATE, event);
+        assert_eq!(at(KeyEvent::Repeat), "\x1b[97;5u");
+        assert_eq!(at(KeyEvent::Release), "");
+    }
+
+    #[test]
+    fn super_is_a_modifier_of_its_own() {
+        use clackatoo_term::keyboard::DISAMBIGUATE;
+        let super_key = Modifiers {
+            super_key: true,
+            ..NONE
+        };
+        let a = Key::Character("a".into());
+        assert_eq!(
+            sent(&a, Some("a"), None, super_key, DISAMBIGUATE),
+            "\x1b[97;9u"
+        );
+        let both = Modifiers {
+            ctrl: true,
+            ..super_key
+        };
+        assert_eq!(named(NamedKey::ArrowLeft, both, DISAMBIGUATE), "\x1b[1;13D");
     }
 
     fn named(key: NamedKey, modifiers: Modifiers, flags: u8) -> String {
@@ -484,7 +626,7 @@ mod tests {
                 code: None,
                 modifiers,
             };
-            encode(&press, flags, &mut out);
+            encode(&press, flags, KeyEvent::Press, &mut out);
             String::from_utf8(out).expect("keys send UTF-8")
         };
         let five = Key::Character("5".into());
