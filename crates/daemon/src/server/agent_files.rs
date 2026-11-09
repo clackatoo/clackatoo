@@ -244,7 +244,7 @@ impl AgentFiles {
         // the kernel makes up as it's read, isn't read whole.
         let room = CAPTURE_BYTES.saturating_sub(kept) as u64;
         let read = (regular::open(path, Links::Follow))
-            .and_then(|file| buffer::read_file_within(file, room));
+            .and_then(|file| buffer::read_file_within(&file, room));
         let text = match read {
             Ok(Ok((text, _))) => Seen::Text(buffer::lf(text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Seen::Absent,
@@ -294,11 +294,22 @@ pub(super) struct Reading {
     /// How big the file was found to be, in bytes, as it was given the
     /// worker.
     pub(super) size: usize,
+    /// The file, opened on the loop with [`regular::open`], for the worker
+    /// to read: too big to read there.
+    file: Option<std::fs::File>,
 }
 
 impl Reading {
     pub(super) fn chat(&self) -> TerminalId {
         self.chat
+    }
+
+    /// Reads the file opened for it, from its start, as the worker does.
+    pub(super) fn read(&mut self) -> std::io::Result<(String, DiskStamp)> {
+        use std::io::Seek as _;
+        let mut file = (self.file.take()).ok_or_else(|| std::io::Error::other("not opened"))?;
+        file.rewind()?;
+        buffer::read_file(file)
     }
 }
 
@@ -1389,18 +1400,24 @@ impl Daemon {
             reports,
             last,
             size: 0,
+            file: None,
         };
         // Opened only if it's a regular file, without waiting, and read
         // here only so far: a bigger file is read off the loop, and checked
         // once it's read (CLACKA-220).
-        let read = (regular::open(path, Links::Follow))
-            .and_then(|file| buffer::read_file_within(file, ON_LOOP as u64));
-        let size = match read {
+        // The worker reads the very file opened here, whatever is renamed
+        // over it meanwhile, as an open buffer's is (see `Checking`).
+        let file = match regular::open(path, Links::Follow) {
+            Ok(file) => file,
+            Err(err) => return self.settle_read(reading, Err(err)),
+        };
+        let size = match buffer::read_file_within(&file, ON_LOOP as u64) {
             Ok(Ok(read)) => return self.settle_read(reading, Ok(read)),
             Ok(Err(size)) => size,
             Err(err) => return self.settle_read(reading, Err(err)),
         };
         reading.size = usize::try_from(size).unwrap_or(usize::MAX);
+        reading.file = Some(file);
         {
             let maker = reading.maker.clone();
             match (self.agent_files.settler).submit(Job::Read(reading), &self.waker) {
@@ -1425,7 +1442,9 @@ impl Daemon {
                 }
             }
         }
-        self.settle_read(reading, buffer::read(path));
+        // The worker couldn't take it: read here after all.
+        let read = reading.read();
+        self.settle_read(reading, read);
     }
 
     /// Goes on with checking a file not open, as [`Self::settle_closed`]

@@ -1396,6 +1396,27 @@ pub(in crate::server) mod tests {
         assert_eq!(world.text(id), first);
     }
 
+    /// What's read off the loop of a big file a tool changed is the file
+    /// opened as the tool said so, whatever is renamed over it before the
+    /// worker reads it (CLACKA-220).
+    #[test]
+    fn a_big_file_is_read_as_it_was_opened_whatever_comes_after() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        let elsewhere = world.path("other.txt");
+        std::fs::write(&elsewhere, "something else entirely\n").unwrap();
+        std::fs::rename(&elsewhere, world.path("big.txt")).unwrap();
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        // The tool's change was known, from what was opened; what came
+        // after is someone else's, which undoing it won't overwrite.
+        let said = world.undo(0, false, false);
+        assert!(said.contains("big.txt, line 1 has changed since"), "{said}");
+        assert!(!said.contains("wasn't seen"), "{said}");
+        let _ = second;
+    }
+
     /// A big file a tool says it changed is read off the loop, as a file
     /// system that hangs would hang the daemon, and checked once it's read,
     /// what the chat's tools do next waiting for it (CLACKA-220).

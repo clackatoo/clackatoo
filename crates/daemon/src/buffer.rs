@@ -1125,7 +1125,7 @@ pub(crate) fn read_file(mut file: File) -> io::Result<(String, DiskStamp)> {
 /// holds at most `most` bytes: else `Err` with how big it said it is, or
 /// `most + 1` if it grew past that as it was read, having read no more.
 pub(crate) fn read_file_within(
-    mut file: File,
+    mut file: &File,
     most: u64,
 ) -> io::Result<Result<(String, DiskStamp), u64>> {
     let metadata = file.metadata()?;

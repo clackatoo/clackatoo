@@ -166,8 +166,8 @@ impl Job {
                 Worked::Open(checking, checked.ok())
             }
             // A test's panic is for what's worked out, not for reading.
-            Self::Read(reading) => {
-                let read = catch_unwind(AssertUnwindSafe(|| crate::buffer::read(&reading.path)));
+            Self::Read(mut reading) => {
+                let read = catch_unwind(AssertUnwindSafe(|| reading.read()));
                 let read = read.unwrap_or_else(|panic| {
                     log::warn!("settling: reading a file panicked: {panic:?}");
                     Err(std::io::Error::other("reading it failed"))
