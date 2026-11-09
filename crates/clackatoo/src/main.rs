@@ -448,9 +448,11 @@ struct Open {
 
 #[derive(Debug, Args)]
 struct Files {
-    /// The folder. A relative path is from the current directory, which
-    /// is the folder shown if there's none; one starting `~` is from the
-    /// home directory of the daemon's machine.
+    /// The folder. A relative path is from the current directory here,
+    /// which is the folder shown if there's none, even with `--remote`, as
+    /// for `edit`; one starting `~` is from the home directory of the
+    /// daemon's machine. Put `--` before one starting with `-`, so that it
+    /// isn't taken for an option.
     #[arg(default_value = ".")]
     path: PathBuf,
     #[command(flatten)]
