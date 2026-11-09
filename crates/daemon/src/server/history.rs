@@ -68,6 +68,10 @@ pub(super) struct Histories {
     /// History read as the daemon starts, by the name of its file, for
     /// the terminals made again to take.
     restoring: HashMap<String, KeptHistory>,
+    /// The terminals whose history isn't kept, as they're an agent's,
+    /// whose file has been removed since it was last written: so each is
+    /// removed once, whenever a terminal stops being one kept.
+    removed: HashSet<TerminalId>,
 }
 
 /// What's kept of a terminal's history beyond its lines.
@@ -221,8 +225,16 @@ impl Daemon {
     /// put off as its output hasn't paused, unless `now`.
     fn keep_history(&mut self, id: TerminalId, now: bool) -> bool {
         if !self.history_kept_of(id) {
+            // It may have had a file while it was kept.
+            if self.histories.removed.insert(id) {
+                let key = history::key(self.id, id.0);
+                if let Some(writer) = self.history_writer() {
+                    writer.send(key, Job::Remove);
+                }
+            }
             return true;
         }
+        self.histories.removed.remove(&id);
         let Some(lines) = self.history_config().map(|config| config.lines) else {
             return true;
         };
@@ -298,6 +310,7 @@ impl Daemon {
     pub(super) fn history_closed(&mut self, id: TerminalId) {
         self.histories.changed.remove(&id);
         self.histories.marks.remove(&id);
+        self.histories.removed.remove(&id);
         if self.held_until().is_some() || !self.history_kept_of_any() {
             return;
         }
@@ -328,7 +341,10 @@ impl Daemon {
             ));
         }
         let terminal = self.terminal_of_pane(pane).ok_or(Error::NoSuchPane(pane))?;
-        if !self.history_kept_of(terminal) {
+        // Forgetting, and keeping none, always work: its file, if it has
+        // one, goes.
+        let lets_go = matches!(how, HistoryKeeping::Forget | HistoryKeeping::Off);
+        if !lets_go && !self.history_kept_of(terminal) {
             return Err(Error::Other(format!(
                 "pane {pane}'s history is never kept: it's an agent's"
             )));
@@ -673,6 +689,44 @@ pub(in crate::server) mod tests {
         assert!(own.exists());
         assert!(!old.exists() && !half.exists());
         assert!(other.exists(), "nothing but history files is touched");
+    }
+
+    /// Only an agent's own terminals are never kept: one the user's agent
+    /// typed into is still the user's. One that becomes an agent's has
+    /// its file removed, and forgetting works on it all the same.
+    #[test]
+    fn an_agents_terminal_isnt_kept_and_one_that_becomes_one_loses_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = keeping(dir.path(), true);
+        let file = dir.path().join(format!(
+            "state/history/{}.history",
+            history::key(daemon.id, terminal.0)
+        ));
+        let chat = TerminalId(9999);
+        if let Some(Hosted::Pty(pty)) = daemon
+            .terminals
+            .get_mut(&terminal)
+            .map(|slot| &mut slot.terminal)
+        {
+            pty.emulator_mut().advance(b"printed\r\n");
+        }
+        let written = |daemon: &mut Daemon| {
+            daemon.history_moved_on(terminal);
+            daemon.keep_histories(true);
+            daemon.histories_kept_last(Instant::now() + Duration::from_secs(10));
+            file.exists()
+        };
+        daemon.commanded_by(terminal, chat, false);
+        assert!(
+            written(&mut daemon),
+            "typed into by an agent, it's still the user's"
+        );
+        daemon.commanded_by(terminal, chat, true);
+        assert!(!written(&mut daemon), "an agent's now, its file goes");
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::Forget);
+        assert!(matches!(asked, Ok(Response::Text(_))), "{asked:?}");
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::On);
+        assert!(asked.is_err(), "{asked:?}");
     }
 
     /// The user is told what they asked of a terminal's history is done

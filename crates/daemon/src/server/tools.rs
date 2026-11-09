@@ -2086,14 +2086,30 @@ impl Daemon {
         })
     }
 
+    /// Whether terminal `id` is an agent's own: one a chat's agent
+    /// started, to run a command in. Not one of the user's an agent typed
+    /// into, nor one running a command the user kept running or started
+    /// in a background tab.
+    pub(super) fn agents_terminal(&self, id: TerminalId) -> bool {
+        (self.tools.commanded.get(&id)).is_some_and(|commanded| commanded.owner.is_some())
+    }
+
+    /// Makes terminal `id` chat `chat`'s agent's own, as if it had
+    /// started it, or one the agent typed into, if not `owned`.
+    #[cfg(test)]
+    pub(super) fn commanded_by(&mut self, id: TerminalId, chat: TerminalId, owned: bool) {
+        self.tools.commanded.insert(
+            id,
+            Commanded {
+                owner: owned.then_some(chat),
+                ..Commanded::default()
+            },
+        );
+    }
+
     /// What `terminal`, in `pane`, has done: its last command, how it
     /// ended, and the last `lines` lines of its output, at most
     /// [`MAX_OUTPUT`] bytes.
-    /// Whether an agent asked for terminal `id`, to run a command in.
-    pub(super) fn agents_terminal(&self, id: TerminalId) -> bool {
-        self.tools.commanded.contains_key(&id)
-    }
-
     fn describe_terminal(&self, pane: PaneId, terminal: TerminalId, lines: usize) -> String {
         let Some(grid) = (self.terminals.get(&terminal)).and_then(|slot| slot.terminal.grid())
         else {
