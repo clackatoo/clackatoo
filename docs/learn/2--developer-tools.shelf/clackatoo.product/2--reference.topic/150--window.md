@@ -144,7 +144,7 @@ Plain Esc always goes to the program, since programs such as Vim and less use it
 The window shows your work at three levels:
 
 - **Workspaces**, one for each piece of distinct work, such as a project. Their names run along the [top bar](#the-frame). Often there's just one.
-- **Tabs**, inside a workspace. They run along the bottom bar, numbered, and named after the title of their focused pane's program, or, for a terminal whose program set none, the folder its shell is in (`~` for your home), unless you've named them.
+- **Tabs**, inside a workspace. They run along the bottom bar, numbered, and named after the title of their focused pane's program, or, for a terminal whose program set none, the folder its shell is in (`~` for your home, or for a terminal on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar), yours there), unless you've named them.
 - **Panes**, which a tab is split into, side by side or stacked. Each shows a terminal, a [chat with an agent](~clackatoo/reference/agents), a [file being edited](~clackatoo/reference/editor), or one of the other kinds: an [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boards), a [review](~clackatoo/reference/agents#reviewing-its-changes) or a chat's browser page. A split shares its space equally until you [resize it](#resizing-panes).
 
 Workspace names are unique on each machine, so one from another machine may share a name with one of yours. It then shows its machine after its name, as `notes@desk`; [`showhost`](~clackatoo/reference/config#options) changes when. `:workspace notes@desk` switches to it by its machine, and `:workspace notes` alone to your own.

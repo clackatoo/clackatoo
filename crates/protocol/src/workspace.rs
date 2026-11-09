@@ -118,6 +118,38 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::BACKGROUND }, _, _>"
     )]
     pub kept: Vec<Kept>,
+    /// The home directories of the other machines whose workspaces or
+    /// panes are among these, as their daemons say, for their folders to
+    /// be written from `~` under, as [`home`](Self::home) is for this
+    /// daemon's own. Empty from a daemon older than protocol 141.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::HOMES }, _>",
+        deserialize_with = "wire::since::<{ wire::HOMES }, _, _>"
+    )]
+    pub homes: Vec<MachineHome>,
+}
+
+/// Another machine's home directory: see [`Workspaces::homes`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineHome {
+    /// The machine.
+    pub id: MachineId,
+    /// Its user's home directory, as its daemon says.
+    pub home: String,
+}
+
+impl Workspaces {
+    /// The home directory of machine `on`, as [`homes`](Self::homes)
+    /// says, or for `None`, this daemon's own.
+    #[must_use]
+    pub fn home_of(&self, on: Option<MachineId>) -> Option<&str> {
+        match on {
+            None => self.home.as_deref(),
+            Some(on) => (self.homes.iter())
+                .find(|known| known.id == on)
+                .map(|known| known.home.as_str()),
+        }
+    }
 }
 
 /// A terminal the user marked to keep running: see [`Workspaces::kept`].

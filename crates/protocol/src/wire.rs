@@ -391,6 +391,11 @@ gates! {
     /// (CLACKA-118): `Request::ChatChoices`' `on`. An older daemon answers
     /// for the pane's machine.
     CHOICES_ON = 140,
+    /// The home directories of the other machines whose workspaces or
+    /// panes a daemon shows, for a window to shorten their folders by
+    /// (CLACKA-118): `Workspaces::homes`. Empty to an older peer, whose
+    /// folders are shortened by the daemon's own home.
+    HOMES = 141,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

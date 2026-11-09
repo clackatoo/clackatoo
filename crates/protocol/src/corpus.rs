@@ -574,6 +574,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 others: Vec::new(),
                 passed: Vec::new(),
                 kept: Vec::new(),
+                homes: Vec::new(),
             }))),
         ),
         (
@@ -1044,6 +1045,16 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             pane: Some(PaneId(1)),
             on: Some(MachineId([9; 16])),
         })),
+    ));
+    // Another machine's home directory, beside the workspaces.
+    let mut homes = workspaces();
+    homes.homes = vec![crate::MachineHome {
+        id: MachineId([7; 16]),
+        home: "/home/jack".into(),
+    }];
+    samples.push((
+        crate::wire::HOMES,
+        Server(ServerMessage::Event(Event::Workspaces(homes))),
     ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
@@ -3856,6 +3867,7 @@ fn workspaces() -> Workspaces {
         others: Vec::new(),
         passed: Vec::new(),
         kept: Vec::new(),
+        homes: Vec::new(),
     }
 }
 

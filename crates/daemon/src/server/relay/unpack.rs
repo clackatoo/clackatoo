@@ -40,6 +40,11 @@ pub(crate) enum Need {
 
 /// A frame from another daemon, unpacked.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per frame unpacked off the loop, moved once: boxing it costs an allocation \
+              for each"
+)]
 pub(crate) enum Unpacked {
     /// Decoded, or why it couldn't be.
     Decoded(Result<ServerMessage, String>),

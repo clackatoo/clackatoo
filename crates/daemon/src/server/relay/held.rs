@@ -723,13 +723,40 @@ impl Daemon {
 
     /// What the machines the panes shown are on are called, for those this
     /// daemon isn't connected to: as it knows them, and as the machines it
-    /// shows the workspaces of say.
+    /// shows the workspaces of say; and where every other machine shown
+    /// keeps its user's files (see [`homes_shown`](Self::homes_shown)).
     pub(super) fn others_shown(&self, shown: &mut Workspaces) {
+        self.homes_shown(shown);
         for linked in &self.links.list {
             for other in &linked.relayed.mirror.others {
                 if !shown.others.iter().any(|known| known.id == other.id) {
                     shown.others.push(other.clone());
                 }
+            }
+        }
+    }
+
+    /// Says in `shown` the home directories of the other machines shown:
+    /// each connected to's own, as it says, then those they pass on, as
+    /// they say them, the nearest first.
+    fn homes_shown(&self, shown: &mut Workspaces) {
+        let own = self.machine.id;
+        let mut add = |id: MachineId, home: &str| {
+            if id != own && !shown.homes.iter().any(|known| known.id == id) {
+                let home = home.to_owned();
+                shown
+                    .homes
+                    .push(clackatoo_protocol::MachineHome { id, home });
+            }
+        };
+        for linked in &self.links.list {
+            if let (Some(machine), Some(home)) = (&linked.machine, &linked.relayed.mirror.home) {
+                add(machine.id, home);
+            }
+        }
+        for linked in &self.links.list {
+            for known in &linked.relayed.mirror.homes {
+                add(known.id, &known.home);
             }
         }
     }

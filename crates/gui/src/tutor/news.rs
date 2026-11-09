@@ -1337,6 +1337,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: ":Agent@desk's start page offers desk's agents, folder and sessions, even from one of this machine's panes",
     },
+    News {
+        id: "remote-home-tabs",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "A terminal tab on another machine, named after its folder, writes that machine's home as ~, not this one's",
+    },
 ];
 
 impl News {

@@ -45,8 +45,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
     Background, BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Kept as KeptRunning,
-    Layout, Machine, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored, ReviewId, Tab,
-    TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    Layout, Machine, MachineHome, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored,
+    ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::server::restore::kept_command;
@@ -83,6 +83,10 @@ pub(crate) const MOST_HUNKS: usize = 1 << 16;
 /// The longest name of another daemon's kept, in characters: a workspace's,
 /// a tab's, or a chat's title.
 const LONGEST_NAME: usize = 256;
+
+/// The longest home directory taken in from another daemon, in bytes: a
+/// longer one is taken as none.
+const LONGEST_HOME: usize = 4096;
 
 /// The most of a workspace's background tabs taken in from another
 /// daemon: as many as one here may have.
@@ -205,6 +209,13 @@ pub(crate) struct Mirror {
     pub(crate) held_keys: BTreeSet<(MachineId, u64)>,
     /// What it says the machines it isn't connected to are called.
     pub(crate) others: Vec<OtherMachine>,
+    /// Its user's home directory, as it says, for windows to shorten its
+    /// folders by. Not handed over: it says it again as the connection is
+    /// made again.
+    pub(crate) home: Option<String>,
+    /// The home directories of the machines it passes on, as it says
+    /// them.
+    pub(crate) homes: Vec<MachineHome>,
     /// Some of its workspaces or panes were left out, past what's shown:
     /// a pane of another machine's not among [`held`](Self::held) may
     /// still be in its layouts.
@@ -409,9 +420,27 @@ impl Mirror {
                 name: shown_name(&other.name).replace('@', "_"),
             })
             .collect();
+        taken.changed |= self.take_homes(remote, machine.id, own);
         taken.chats = self.renumber_chats(fresh);
         self.keep_terminals(&followed.terminals);
         taken
+    }
+
+    /// Takes in where `remote`, the workspaces the daemon there,
+    /// `machine`, says it has, says its user's files are, and those of the
+    /// machines it passes on but `own`. Returns whether that changed.
+    fn take_homes(&mut self, remote: &Workspaces, machine: MachineId, own: MachineId) -> bool {
+        let said = |home: &String| home.len() <= LONGEST_HOME;
+        let home = remote.home.clone().filter(said);
+        let homes: Vec<MachineHome> = (remote.homes.iter())
+            .filter(|known| known.id != own && known.id != machine && said(&known.home))
+            .take(MOST_OTHERS)
+            .cloned()
+            .collect();
+        let changed = home != self.home || homes != self.homes;
+        self.home = home;
+        self.homes = homes;
+        changed
     }
 
     /// Takes in `remote`, the chats the daemon there has, summed up,
@@ -1068,6 +1097,9 @@ impl From<Snapshot> for Mirror {
             held: m.held,
             held_keys: m.held_keys,
             others: m.others,
+            // Said again as the connection is made again.
+            home: None,
+            homes: Vec::new(),
             cut: m.cut,
             workspace_numbers: m.workspace_numbers,
             tab_numbers: m.tab_numbers,

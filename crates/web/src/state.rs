@@ -2414,6 +2414,7 @@ mod tests {
                 others: Vec::new(),
                 passed: Vec::new(),
                 kept: Vec::new(),
+                homes: Vec::new(),
             },
             ..State::default()
         };

@@ -142,13 +142,14 @@ pub use view::{
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
-    LentBackground, LentBackgroundAction, MAX_NESTING, OpenOutput, OtherMachine, Pane, PaneId,
-    PaneKind, PaneTerminal, Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
+    LentBackground, LentBackgroundAction, MAX_NESTING, MachineHome, OpenOutput, OtherMachine, Pane,
+    PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId,
+    Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 140;
+pub const PROTOCOL_VERSION: u32 = 141;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

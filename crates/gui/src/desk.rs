@@ -973,7 +973,7 @@ impl Desk {
             .and_then(|(_, _, pane)| match pane.content {
                 Content::Terminal(terminal) => match self.chats.get(&terminal) {
                     Some(chat) => Some(chat.title()),
-                    None => self.panes.get(&terminal)?.name(self.home()),
+                    None => self.panes.get(&terminal)?.name(self.home_of(pane.id)),
                 },
                 Content::Buffer(_) => self.editor_title(pane.id),
                 Content::Files(_) | Content::Folder(_) => {
@@ -994,6 +994,17 @@ impl Desk {
     fn home(&self) -> Option<&str> {
         (self.workspaces.home.as_deref())
             .or_else(|| self.own_home.as_deref().filter(|_| !self.remote))
+    }
+
+    /// The home directory of the machine `pane` is on, which its folders
+    /// are written from `~` under: the daemon's own, as
+    /// [`home`](Self::home) says, or another machine's, as the daemon
+    /// says, if it does.
+    fn home_of(&self, pane: PaneId) -> Option<&str> {
+        match self.pane_machine(pane) {
+            None => self.home(),
+            on => self.workspaces.home_of(on),
+        }
     }
 
     /// Opens the palette to rename `workspace`, starting from its name.
@@ -3088,6 +3099,7 @@ mod tests {
             others: Vec::new(),
             passed: Vec::new(),
             kept: Vec::new(),
+            homes: Vec::new(),
         }
     }
 
@@ -3542,6 +3554,48 @@ mod tests {
         desk.agent_shows(PaneId(9), None);
         assert_eq!(desk.pointed(), Some(PaneId(3)));
         assert_eq!(shown_pane(&desk), PaneId(1));
+    }
+
+    /// A terminal on another machine is named from that machine's home,
+    /// as the daemon says it, not this one's (CLACKA-118).
+    #[test]
+    fn another_machines_terminal_is_named_from_its_own_home() {
+        use clackatoo_protocol::{MachineHome, MachineId};
+        let desk_machine = MachineId([7; 16]);
+        // This machine's workspace, holding a terminal on desk beside its
+        // own.
+        let borrowed = Layout::Pane(LayoutPane {
+            id: PaneId(2),
+            content: Content::Terminal(TerminalId(2)),
+            home: Some(desk_machine),
+            key: None,
+        });
+        let tabs = vec![tab(1, pane(1)), tab(2, borrowed)];
+        let mut list = workspaces(vec![workspace(1, "w", tabs)]);
+        list.home = Some("/home/me".into());
+        list.homes = vec![MachineHome {
+            id: desk_machine,
+            home: "/home/them".into(),
+        }];
+        let mut desk = desk(list.clone());
+        for terminal in [1, 2] {
+            let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
+            screen.advance(b"\x1b]7;file://host/home/them\x07");
+            desk.view_changed(
+                TerminalId(terminal),
+                &ViewUpdate::Snapshot(View::capture(&screen)),
+            );
+        }
+        let name = |desk: &Desk, tab: u32| {
+            (desk.workspaces.find_tab(TabId(tab)))
+                .map(|(_, tab)| desk.tab_title(tab).map(str::to_owned))
+        };
+        assert_eq!(name(&desk, 1), Some(Some("them".to_owned())));
+        assert_eq!(name(&desk, 2), Some(Some("~".to_owned())));
+        // A daemon that doesn't say: the folder's own name.
+        list.homes.clear();
+        desk.workspaces_changed(list);
+        assert_eq!(name(&desk, 2), Some(Some("them".to_owned())));
     }
 
     #[test]

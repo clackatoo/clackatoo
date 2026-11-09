@@ -1475,6 +1475,21 @@ fn what_a_chat_could_be_is_asked_of_the_machine_it_would_be_on() {
     );
 }
 
+/// Windows are told where the other machines shown keep their user's
+/// files, to name those machines' folders from, as this daemon's own are
+/// from its home (CLACKA-118).
+#[test]
+fn windows_are_told_the_other_machines_homes() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let home = pair.world.host("laptop").display().to_string();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| !shown.homes.is_empty());
+    assert_eq!(
+        shown.homes,
+        [clackatoo_protocol::MachineHome { id: laptop, home }]
+    );
+}
+
 #[test]
 fn a_form_an_agent_on_another_machine_asks_is_filled_in_through_this_daemon() {
     use clackatoo_protocol::{FieldValue, FormReply};

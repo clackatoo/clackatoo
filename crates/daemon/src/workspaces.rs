@@ -390,14 +390,9 @@ impl WorkspaceState {
         }
         Ok(Self {
             workspaces: Workspaces {
-                passed: Vec::new(),
                 list,
                 active,
-                home: None,
-                restored: Vec::new(),
-                machine: None,
-                others: Vec::new(),
-                kept: Vec::new(),
+                ..Workspaces::default()
             },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
