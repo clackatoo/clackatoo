@@ -24,7 +24,8 @@ use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
     Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Sender, Setting,
     SettingChoice, SettingKind, Size, Spent, Switch, TerminalId, TerminalInfo, TerminalStatus,
-    Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
+    Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnNotice, Usage, View,
+    ViewUpdate,
 };
 use serde_json::Value;
 
@@ -969,6 +970,11 @@ impl HostedChat {
         resumed.relations = relations;
         for (index, sender) in senders {
             if let Some(turn) = resumed.node.turns.get_mut(index) {
+                // What a notice said of how chats went isn't handed
+                // over: it shows as clackatoo's still, with its text.
+                if relations::from_clackatoo(&sender) {
+                    turn.notice = Some(TurnNotice::default());
+                }
                 turn.from = Some(sender);
             }
         }
@@ -1394,16 +1400,17 @@ impl HostedChat {
         // The user's own: what agents do of it comes of this turn.
         self.relations.hops = 0;
         self.relations.cause = Some((self.id, self.next_uid().0));
-        self.begin(prompt.shown(), prompt, None, actions);
+        self.begin(prompt.shown(), prompt, (None, None), actions);
     }
 
     /// Starts a turn: shows `shown`, sent by `from` if another chat's
-    /// agent sent it, and sends the agent `prompt`.
+    /// agent sent it, or if `notice` says, a notice from clackatoo itself
+    /// about it, and sends the agent `prompt`.
     fn begin(
         &mut self,
         shown: String,
         prompt: Prompt,
-        from: Option<Sender>,
+        (from, notice): (Option<Sender>, Option<TurnNotice>),
         actions: &mut Vec<Action>,
     ) {
         self.stop_requested = false;
@@ -1436,6 +1443,7 @@ impl HostedChat {
         }
         self.push_turn(Turn {
             woke: None,
+            notice,
             previews,
             prompt: shown,
             sent: now(),
@@ -1568,10 +1576,15 @@ impl HostedChat {
         }
         self.relations.cause = message.cause.or(self.relations.cause);
         let prompt = relations::prompt_for(&message);
+        // A notice is shown as clackatoo's, as a card: the agent is told
+        // its text all the same.
+        let notice = (message.is_notice()).then(|| TurnNotice {
+            finished: message.finished,
+        });
         self.begin(
             message.text,
             prompt.into(),
-            Some(message.from),
+            (Some(message.from), notice),
             &mut actions,
         );
         actions
@@ -1929,6 +1942,7 @@ impl HostedChat {
         self.withdraw_install();
         self.push_turn(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: String::new(),
             sent: now(),
@@ -4597,6 +4611,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
 fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
     Turn {
         woke: None,
+        notice: None,
         previews: Vec::new(),
         prompt: resume::without_inline_images(turn.prompt),
         sent: turn.sent,
@@ -4975,7 +4990,7 @@ mod tests {
                 text: "test".into(),
                 images: Vec::new(),
             },
-            None,
+            (None, None),
             &mut Vec::new(),
         );
         update(
@@ -5036,7 +5051,7 @@ mod tests {
                     preview: Some(preview.clone()),
                 }],
             };
-            chat.begin(prompt.shown(), prompt, None, &mut Vec::new());
+            chat.begin(prompt.shown(), prompt, (None, None), &mut Vec::new());
         }
         assert!(chat.node.turns[0].previews.is_empty());
         assert!(chat.node.turns[0].prompt.contains("Image"));
@@ -5077,7 +5092,7 @@ mod tests {
                 text: "look".into(),
                 images: Vec::new(),
             },
-            None,
+            (None, None),
             &mut Vec::new(),
         );
         update(
@@ -5138,7 +5153,7 @@ mod tests {
             let mut prompt = image_prompt();
             prompt.text = format!("image {index}");
             prompt.images[0].preview = Some(preview.clone());
-            chat.begin(prompt.shown(), prompt, None, &mut Vec::new());
+            chat.begin(prompt.shown(), prompt, (None, None), &mut Vec::new());
             update(
                 &mut chat,
                 r#"{"sessionUpdate":"tool_call","toolCallId":"image","title":"View Image","kind":"read","status":"completed"}"#,
@@ -8119,6 +8134,7 @@ mod tests {
             text: text.into(),
             hops,
             cause: None,
+            finished: Vec::new(),
         }
     }
 
@@ -8189,6 +8205,10 @@ mod tests {
         chat.started_by(TerminalId(3), TerminalId(2), 1, None);
         chat.deliver(message(3, "do it", 2)).unwrap();
         chat.answered(Ok(StopReason::EndTurn));
+        let id = chat.id;
+        chat.deliver(Message::upgrade_notice(id, "restarted".into()))
+            .unwrap();
+        chat.answered(Ok(StopReason::EndTurn));
         send(&mut chat, "and you");
         chat.deliver(message(5, "waiting", 3)).unwrap();
         let agent = crate::agents::AgentConfig::default()
@@ -8198,10 +8218,23 @@ mod tests {
         assert_eq!(resumed.relations().parent, Some(TerminalId(3)));
         assert_eq!(resumed.relations().depth, 1);
         assert_eq!(resumed.relations().inbox, [message(5, "waiting", 3)]);
-        let senders: Vec<Option<TerminalId>> = (resumed.node.turns.iter())
-            .map(|turn| turn.from.as_ref().map(|from| from.chat))
+        let senders: Vec<(Option<TerminalId>, bool)> = (resumed.node.turns.iter())
+            .map(|turn| {
+                (
+                    turn.from.as_ref().map(|from| from.chat),
+                    turn.notice.is_some(),
+                )
+            })
             .collect();
-        assert_eq!(senders, [Some(TerminalId(3)), None]);
+        // A notice stays clackatoo's, if no longer what it said of chats.
+        assert_eq!(
+            senders,
+            [
+                (Some(TerminalId(3)), false),
+                (Some(id), true),
+                (None, false)
+            ]
+        );
         // It isn't one of the values the agent is asked for.
     }
 

@@ -295,6 +295,7 @@ impl HostedChat {
     fn push_replayed(&mut self, prompt: String) {
         self.push_turn(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt,
             sent: now(),
@@ -474,6 +475,7 @@ impl HostedChat {
                 self.set_notice(None);
                 self.push_turn(Turn {
                     woke: None,
+                    notice: None,
                     previews: Vec::new(),
                     prompt: text.shown(),
                     sent: now(),
@@ -510,7 +512,7 @@ impl HostedChat {
         }
         if let Some(prompt) = self.told.held.take() {
             self.link = Link::Opening;
-            self.begin(prompt.shown(), prompt, None, &mut Vec::new());
+            self.begin(prompt.shown(), prompt, (None, None), &mut Vec::new());
         }
     }
 }

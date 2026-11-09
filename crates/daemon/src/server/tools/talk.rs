@@ -82,7 +82,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn, WorkspaceId,
+    AgentTools, ChatState, FinishedChat, Item, Outcome, TerminalId, ToolStatus, Turn, WorkspaceId,
 };
 use mio::Token;
 use serde_json::Value;
@@ -844,6 +844,7 @@ impl Daemon {
             // Never 0, which only a notice from clackatoo has.
             hops: own.relations().hops.saturating_add(1).max(1),
             cause: self.cause_of(chat),
+            finished: Vec::new(),
         })
     }
 
@@ -1417,12 +1418,15 @@ impl Daemon {
             return true;
         }
         let mut text = String::new();
+        let mut finished = Vec::with_capacity(children.len());
         // However many finished, the notice stays a size to read.
         let share = (MOST_NOTICE / children.len()).min(MAX_READ);
         let children: Vec<(TerminalId, bool)> = (children.into_iter())
             .map(|child| (child, self.wait_cut_off(id, child)))
             .collect();
         for (child, cut) in children {
+            // Before the answer is read, which counts it as had.
+            finished.extend(self.finished_chat(id, child, share));
             let answer = self.answer_within(id, child, false, share);
             let which = if cut {
                 "which this chat was waiting for as the daemon restarted for an upgrade"
@@ -1446,9 +1450,47 @@ impl Daemon {
         }
         self.charge_notice(id);
         if let Some(chat) = self.chat(id) {
-            chat.fill_finished_notice(Some(text.trim_end().to_owned()));
+            chat.fill_finished_notice(Some((text.trim_end().to_owned(), finished)));
         }
         true
+    }
+
+    /// How the chat `child` finished, as the notice to the chat `chat`
+    /// shows it, from the answer that notice will quote: the last of
+    /// those `chat` hasn't had, or else its last, with at most `max`
+    /// bytes of what it said. `None` if `chat` may no longer see it.
+    fn finished_chat(
+        &self,
+        chat: TerminalId,
+        child: TerminalId,
+        max: usize,
+    ) -> Option<FinishedChat> {
+        let kid = self.chat_ref(child)?;
+        if !self.may_see(chat, child) {
+            return None;
+        }
+        let turns = &kid.node().turns;
+        let heard = kid.turns_heard_by(chat);
+        let answers = answers_to(turns, chat, child);
+        let unheard = (answers.iter().copied())
+            .filter(|&(_, end)| end >= heard && turns[end].end.is_some())
+            .last();
+        let last = || (turns.iter()).rposition(|turn| turn.switch.is_none());
+        let (asked, end) = (unheard.or_else(|| answers.last().copied()))
+            .or_else(|| last().map(|index| (index, index)))
+            .unwrap_or_default();
+        let (asked, answered) = (turns.get(asked), turns.get(end));
+        let ended = answered.and_then(|turn| turn.end.as_ref());
+        Some(FinishedChat {
+            chat: child,
+            agent: kid.node().agent.clone(),
+            profile: kid.profile().map(str::to_owned),
+            asked: asked.map_or_else(String::new, |turn| quote(&turn.prompt)),
+            started: asked.map_or(0, |turn| turn.sent),
+            ended: ended.map_or(0, |end| end.at),
+            outcome: ended.map(|end| end.outcome.clone()),
+            answer: answered.map_or_else(String::new, |turn| head(&final_words(turn), max)),
+        })
     }
 
     /// The notice that the daemon restarted for an upgrade, if it's next
@@ -2492,6 +2534,7 @@ mod tests {
             text: text.to_owned(),
             hops: 1,
             cause: None,
+            finished: Vec::new(),
         }
     }
 
@@ -2540,6 +2583,7 @@ mod tests {
     fn turn(items: Vec<Item>) -> Turn {
         Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             files: None,
             switch: None,
@@ -2993,6 +3037,24 @@ mod tests {
         ] {
             assert!(told.prompt.contains(said), "{said}: {}", told.prompt);
         }
+        // Clients are told how each went, to show the notice as a card:
+        // the agent's text above stays as it is.
+        let finished = &told.notice.as_ref().expect("a notice").finished;
+        let shown: Vec<_> = (finished.iter())
+            .map(|chat| {
+                let took = chat.ended.checked_sub(chat.started).is_some();
+                let row = (chat.chat, chat.asked.as_str(), chat.answer.as_str());
+                (row, chat.outcome.clone(), took)
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ((b, "build it", "built it"), Some(Outcome::Done), true),
+                ((c, "build it", "built that"), Some(Outcome::Done), true),
+            ]
+        );
+        assert_eq!(finished[0].agent, daemon.chat_ref(b).unwrap().node().agent);
         assert_eq!(daemon.chat_ref(b).unwrap().turns_heard_by(a), 1);
         assert_eq!(daemon.chat_ref(c).unwrap().turns_heard_by(a), 1);
         // A chat waited for gets no notice: the wait gives the answer.
@@ -3254,9 +3316,13 @@ mod tests {
             text: "Clackatoo activity \"x\" is done.".to_owned(),
             hops: 0,
             cause: None,
+            finished: Vec::new(),
         };
         drop(daemon.chat(pm).unwrap().deliver(notice).unwrap());
         assert_eq!(daemon.chat_ref(pm).unwrap().node().turns.len(), 2);
+        // Shown as clackatoo's, though no chats finished.
+        let turn = &daemon.chat_ref(pm).unwrap().node().turns[1];
+        assert_eq!(turn.notice, Some(clackatoo_protocol::TurnNotice::default()));
         assert_eq!(
             daemon.chat_ref(pm).unwrap().relations().hops,
             SubagentLimits::default().hops
@@ -3370,6 +3436,7 @@ mod tests {
             text: "Clackatoo activity \"gate\" is done.".to_owned(),
             hops: 0,
             cause: Some((a, 0)),
+            finished: Vec::new(),
         };
         assert!(daemon.chat(a).unwrap().deliver(notice).unwrap().is_empty());
         daemon.watch_chat_queue(a);

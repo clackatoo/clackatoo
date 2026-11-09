@@ -378,13 +378,7 @@ fn ago(ms: u64) -> String {
 
 /// `ms` milliseconds, short: "<1s", "42s", "4m 58s", "1h 3m".
 fn duration(ms: u64) -> String {
-    let seconds = ms / 1000;
-    match seconds {
-        0 => "<1s".to_owned(),
-        1..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-    }
+    clackatoo_protocol::duration(ms)
 }
 
 /// The shown chat's header: back, its title, what it's doing, and stop.
@@ -492,11 +486,12 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
     if let Some(place) = branches_at(node, index) {
         section = section.child(el("div").class("branches").text(branches_said(place)));
     }
-    if !turn.prompt.is_empty() || !turn.previews.is_empty() {
+    if turn.shows_finished() {
+        section = section.child(finished(node, turn, open, index));
+    } else if let Some(from) = turn.from.as_ref().filter(|_| !turn.prompt.is_empty()) {
+        section = section.child(quoted(node, turn, from));
+    } else if !turn.prompt.is_empty() || !turn.previews.is_empty() {
         let mut prompt = el("div").class("prompt");
-        if let Some(from) = &turn.from {
-            prompt = prompt.child(el("div").class("from").text(format!("From {}", from.title)));
-        }
         if !turn.previews.is_empty() {
             prompt = prompt.child(
                 el("div")
@@ -599,6 +594,81 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         )));
     }
     section
+}
+
+/// A message no one typed, quoted down the left under where it came
+/// from: "From chat 7 · explore", from another chat's agent, with the
+/// profile it was started as if this chat's agent started it; or what a
+/// notice of clackatoo's is.
+fn quoted(node: &ChatNode, turn: &Turn, from: &clackatoo_protocol::Sender) -> Element {
+    let head = match &turn.notice {
+        Some(notice) => el("div").class("from").text(notice.heading(&from.title)),
+        None => {
+            let profile = (node.subagents.iter())
+                .find(|entry| entry.chat == from.chat)
+                .and_then(|entry| entry.profile.as_deref());
+            let what = profile.unwrap_or(&from.agent);
+            el("div")
+                .class("from")
+                .class("subagent")
+                .text(format!("From chat {} · {what}", from.chat))
+        }
+    };
+    el("div")
+        .class("quote")
+        .class_if(turn.notice.is_none(), "subagent")
+        .child(head)
+        .child(message(&turn.prompt).class("quoted"))
+}
+
+/// A notice that chats this one's agent started have finished, as a card:
+/// "↳ 2 subagents finished", and a line for each saying what it was asked,
+/// how long it took and how it went, with the first line of its answer,
+/// that opens to the whole answer and a button to the chat.
+fn finished(node: &ChatNode, turn: &Turn, open: &OpenChat, index: usize) -> Element {
+    let Some(notice) = &turn.notice else {
+        return el("div");
+    };
+    let title = turn.from.as_ref().map_or("", |from| from.title.as_str());
+    let mut card = el("div").class("notice").child(
+        el("div")
+            .class("from")
+            .class("subagent")
+            .text(notice.heading(title)),
+    );
+    for (row, (tool, chat)) in turn.notice_cards().iter().zip(&notice.finished).enumerate() {
+        let mark = if tool.status == ToolStatus::Failed {
+            "✗"
+        } else {
+            "✓"
+        };
+        let summary = el("summary")
+            .child(el("span").class("mark").text(mark))
+            .child(el("span").class("tool-title").text(tool.title.clone()))
+            .child(el("span").class("first").text(chat.first_line()));
+        let mut answer = folded(open, format!("t{index}n{row}"), "tool", summary)
+            .class("answer")
+            .class(if tool.status == ToolStatus::Failed {
+                "failed"
+            } else {
+                "done"
+            })
+            .child(
+                el("div")
+                    .class("words")
+                    .children(markdown::render(&chat.answer)),
+            );
+        if (node.subagents.iter()).any(|entry| entry.chat == chat.chat) {
+            answer = answer.child(
+                el("button")
+                    .class("quiet")
+                    .action(&Action::Open(chat.chat))
+                    .text(format!("Open chat {}", chat.chat)),
+            );
+        }
+        card = card.child(answer);
+    }
+    card
 }
 
 /// What the line a turn's work folds under says: how long it took, or
@@ -2105,6 +2175,7 @@ mod tests {
         for prompt in ["one", "two"] {
             node.turns.push(Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 prompt: prompt.into(),
                 sent: 0,
@@ -2151,6 +2222,7 @@ mod tests {
         let mut node = ChatNode::default();
         node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "look".into(),
             sent: 1_000,
@@ -2184,6 +2256,74 @@ mod tests {
         assert_eq!(section.find_all("data-fold")[0].get("open"), Some(""));
     }
 
+    /// A notice that chats finished is a card of them, each folded to the
+    /// first line of its answer, not the text the agent was told; and a
+    /// message from another chat's agent is quoted under where it came
+    /// from (CLACKA-230).
+    #[test]
+    fn a_notice_is_a_card_and_another_agents_message_a_quote() {
+        let finished = clackatoo_protocol::FinishedChat {
+            chat: TerminalId(7),
+            agent: "Claude Code".into(),
+            profile: Some("explore".into()),
+            asked: "Find the parser".into(),
+            started: 1_000,
+            ended: 21_000,
+            outcome: Some(Outcome::Done),
+            answer: "It's in `parse.rs`.\n\nMore.".into(),
+        };
+        let told = Turn {
+            woke: None,
+            notice: Some(clackatoo_protocol::TurnNotice {
+                finished: vec![finished],
+            }),
+            previews: Vec::new(),
+            prompt: "[chat 7 finished] for the agent".into(),
+            sent: 30_000,
+            items: Vec::new(),
+            end: Some(TurnEnd {
+                at: 31_000,
+                outcome: Outcome::Done,
+                raw: None,
+                spent: None,
+            }),
+            files: None,
+            from: Some(clackatoo_protocol::Sender {
+                chat: TerminalId(1),
+                agent: "Clackatoo".into(),
+                title: "Subagents finished".into(),
+            }),
+            switch: None,
+        };
+        let mut node = ChatNode::default();
+        node.turns.push(told.clone());
+        let section = turn(&node, &open(), 0, 50_000);
+        let text = section.all_text();
+        assert!(text.starts_with("↳ 1 subagent finished in 20s"), "{text}");
+        assert!(
+            text.contains("chat 7 · explore · 20s — Find the parser"),
+            "{text}"
+        );
+        assert!(text.contains("It's in parse.rs."), "{text}");
+        assert!(!text.contains("for the agent"), "{text}");
+        let answer = &section.find_all("data-fold")[0];
+        assert_eq!(answer.get("data-fold"), Some("t0n0"));
+        assert_eq!(answer.get("open"), None, "folded");
+        // A message from another chat's agent.
+        node.turns[0] = Turn {
+            notice: None,
+            prompt: "Can you look?".into(),
+            from: Some(clackatoo_protocol::Sender {
+                chat: TerminalId(7),
+                agent: "Claude Code".into(),
+                title: "chat 7".into(),
+            }),
+            ..told
+        };
+        let section = turn(&node, &open(), 0, 50_000);
+        assert_eq!(section.all_text(), "From chat 7 · Claude CodeCan you look?");
+    }
+
     #[test]
     fn a_task_subagents_work_folds_under_its_tool_saying_what_it_does_now() {
         let tool = |id: &str, title: &str, status| Tool {
@@ -2199,6 +2339,7 @@ mod tests {
         let mut node = ChatNode::default();
         node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "look".into(),
             sent: 1_000,
@@ -2738,6 +2879,7 @@ mod tests {
         };
         node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "test it".into(),
             sent: 1_000,

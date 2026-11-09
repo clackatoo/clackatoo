@@ -1071,6 +1071,132 @@ pub struct Turn {
         deserialize_with = "wire::since::<{ wire::AGENT_TURNS }, _, _>"
     )]
     pub woke: Option<String>,
+    /// The message is a notice from clackatoo itself, not anything an
+    /// agent or the user wrote: what it says, for clients to show as a
+    /// card rather than a message. Its `prompt` is what the agent was
+    /// told, word for word, which an older client shows.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_NOTICES }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_NOTICES }, _, _>"
+    )]
+    pub notice: Option<TurnNotice>,
+}
+
+/// A notice from clackatoo itself that started a turn: that chats the
+/// chat's agent started have finished, and how each went; or, with none,
+/// anything else clackatoo tells an agent, as that an activity ended or
+/// the daemon restarted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnNotice {
+    /// The chats that finished, in the order the notice says them.
+    pub finished: Vec<FinishedChat>,
+}
+
+/// A chat that finished, as the notice that says so shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishedChat {
+    /// The chat.
+    pub chat: crate::TerminalId,
+    /// Its agent, as it's shown: "Claude Code".
+    pub agent: String,
+    /// The profile it was started as, such as `explore`, if one.
+    pub profile: Option<String>,
+    /// What it was asked: the first line of the message it answered, cut
+    /// short.
+    pub asked: String,
+    /// When it started on that message, in milliseconds since the Unix
+    /// epoch.
+    pub started: u64,
+    /// When it finished.
+    pub ended: u64,
+    /// How its answer ended, or `None` if it had none.
+    pub outcome: Option<Outcome>,
+    /// What it said last, as Markdown, cut short as the notice cuts it.
+    pub answer: String,
+}
+
+/// What the id of the card for a chat a notice says finished starts with
+/// (see [`Turn::notice_cards`]).
+pub const FINISHED_CARD: &str = "clackatoo-finished:";
+
+impl TurnNotice {
+    /// What heads its card: "↳ 3 subagents finished in 2m 4s · 1
+    /// failed", or "↳ 2 subagents failed"; or for a notice that says no
+    /// chats finished, "Clackatoo · " and `title`, what it's called.
+    #[must_use]
+    pub fn heading(&self, title: &str) -> String {
+        let count = self.finished.len();
+        if count == 0 {
+            return format!("Clackatoo · {title}");
+        }
+        let noun = if count == 1 { "subagent" } else { "subagents" };
+        let counted = |of: fn(&Outcome) -> bool| {
+            (self.finished.iter())
+                .filter(|chat| chat.outcome.as_ref().is_some_and(of))
+                .count()
+        };
+        let failed = counted(|outcome| matches!(outcome, Outcome::Failed(_)));
+        let stopped = counted(|outcome| *outcome == Outcome::Stopped);
+        if failed == count {
+            return format!("↳ {count} {noun} failed");
+        }
+        let mut heading = format!("↳ {count} {noun} finished");
+        let first = (self.finished.iter())
+            .map(|chat| chat.started)
+            .filter(|&started| started > 0)
+            .min();
+        let last = self.finished.iter().map(|chat| chat.ended).max();
+        if let (Some(first), Some(last)) = (first, last)
+            && last >= first
+        {
+            let _ = write!(heading, " in {}", duration(last - first));
+        }
+        for (many, what) in [(failed, "failed"), (stopped, "stopped")] {
+            if many > 0 {
+                let _ = write!(heading, " · {many} {what}");
+            }
+        }
+        heading
+    }
+}
+
+impl FinishedChat {
+    /// What its card's line says: "chat 7 · explore · 1m 20s — Find where
+    /// turns are drawn", and how it went if not well.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let mut label = format!(
+            "chat {} · {}",
+            self.chat,
+            self.profile.as_deref().unwrap_or(&self.agent)
+        );
+        if self.started > 0 && self.ended >= self.started {
+            let _ = write!(label, " · {}", duration(self.ended - self.started));
+        }
+        match &self.outcome {
+            Some(Outcome::Done) => {}
+            Some(Outcome::Stopped) => label.push_str(" · stopped"),
+            Some(Outcome::Failed(why)) => {
+                let _ = write!(label, " · failed: {why}");
+            }
+            None => label.push_str(" · no answer"),
+        }
+        if !self.asked.is_empty() {
+            let _ = write!(label, " — {}", self.asked);
+        }
+        label
+    }
+
+    /// The first line of what it said that has any words, as its card
+    /// shows folded.
+    #[must_use]
+    pub fn first_line(&self) -> &str {
+        (self.answer.lines())
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+    }
 }
 
 impl Turn {
@@ -1082,6 +1208,51 @@ impl Turn {
     pub fn user_prompt(&self) -> Option<&str> {
         let own = self.from.is_none() && self.switch.is_none() && self.woke.is_none();
         (own && !self.prompt.trim().is_empty()).then_some(self.prompt.as_str())
+    }
+
+    /// The cards of the chats a notice that chats finished says finished,
+    /// as tools, for clients to show as they show a tool's: each titled
+    /// with its [`FinishedChat::label`], holding what it said, and with an
+    /// id that starts with [`FINISHED_CARD`] and stays the same as older
+    /// turns load. None for any other turn.
+    #[must_use]
+    pub fn notice_cards(&self) -> Vec<Tool> {
+        let Some(notice) = &self.notice else {
+            return Vec::new();
+        };
+        (notice.finished.iter().enumerate())
+            .map(|(index, chat)| Tool {
+                id: format!("{FINISHED_CARD}{}:{index}", self.sent),
+                title: chat.label(),
+                kind: ToolKind::Other,
+                status: match chat.outcome {
+                    Some(Outcome::Failed(_) | Outcome::Stopped) => ToolStatus::Failed,
+                    Some(Outcome::Done) | None => ToolStatus::Done,
+                },
+                content: vec![ToolContent::Text(chat.answer.clone())],
+                locations: Vec::new(),
+                exit: None,
+            })
+            .collect()
+    }
+
+    /// Whether its message is shown as a card of the chats that finished,
+    /// rather than as words: a notice that says some did.
+    #[must_use]
+    pub fn shows_finished(&self) -> bool {
+        (self.notice.as_ref()).is_some_and(|notice| !notice.finished.is_empty())
+    }
+}
+
+/// `ms` milliseconds, short: "<1s", "42s", "4m 58s", "1h 3m".
+#[must_use]
+pub fn duration(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        0 => "<1s".to_owned(),
+        1..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
     }
 }
 
@@ -2412,7 +2583,18 @@ impl ChatNode {
             if let Some(switch) = &turn.switch {
                 let _ = write!(text, "— {} —\n\n", switch.label());
             }
-            if !turn.prompt.is_empty() {
+            // A notice that chats finished, as its card shows it: what the
+            // agent was told is for the agent.
+            if let Some(notice) = turn.notice.as_ref().filter(|_| turn.shows_finished()) {
+                let _ = write!(text, "{}\n\n", notice.heading(""));
+                for (card, chat) in turn.notice_cards().iter().zip(&notice.finished) {
+                    let _ = writeln!(text, "{} {}", mark(card.status), card.title);
+                    for line in chat.answer.trim_end().lines() {
+                        let _ = writeln!(text, "  {line}");
+                    }
+                    text.push('\n');
+                }
+            } else if !turn.prompt.is_empty() {
                 text.push_str("> ");
                 text.push_str(&turn.prompt.replace('\n', "\n> "));
                 text.push_str("\n\n");
@@ -2859,6 +3041,7 @@ mod tests {
             switch: None,
             previews: Vec::new(),
             woke: None,
+            notice: None,
         };
         let work = turn.nested_work();
         let task = turn.items[0].tool().unwrap().clone();
@@ -2955,6 +3138,85 @@ mod tests {
             ..turn("", Vec::new())
         };
         assert_eq!(woke.user_prompt(), None);
+    }
+
+    /// A notice that chats finished says how each went, for clients to
+    /// show as cards, with what's copied of the chat as they show it, not
+    /// what the agent was told (CLACKA-230).
+    #[test]
+    fn a_notice_that_chats_finished_is_cards_of_how_each_went() {
+        let chat = |id: u32, outcome: Option<Outcome>| FinishedChat {
+            chat: crate::TerminalId(id),
+            agent: "Claude Code".into(),
+            profile: (id == 7).then(|| "explore".into()),
+            asked: "Find where turns are drawn".into(),
+            started: 1_000,
+            ended: 81_000,
+            outcome,
+            answer: "\n  In `paint.rs`.\nAnd more.".into(),
+        };
+        let notice = TurnNotice {
+            finished: vec![
+                chat(7, Some(Outcome::Done)),
+                chat(9, Some(Outcome::Failed("it broke".into()))),
+            ],
+        };
+        assert_eq!(
+            notice.heading("x"),
+            "↳ 2 subagents finished in 1m 20s · 1 failed"
+        );
+        let failed = TurnNotice {
+            finished: vec![chat(9, Some(Outcome::Stopped)), chat(9, None)],
+        };
+        assert_eq!(
+            failed.heading("x"),
+            "↳ 2 subagents finished in 1m 20s · 1 stopped"
+        );
+        let all_failed = TurnNotice {
+            finished: vec![chat(9, Some(Outcome::Failed("no".into())))],
+        };
+        assert_eq!(all_failed.heading("x"), "↳ 1 subagent failed");
+        assert_eq!(
+            TurnNotice::default().heading("Activity completion"),
+            "Clackatoo · Activity completion"
+        );
+        let [done, broke] = &notice.finished[..] else {
+            unreachable!()
+        };
+        assert_eq!(
+            done.label(),
+            "chat 7 · explore · 1m 20s — Find where turns are drawn"
+        );
+        assert_eq!(
+            broke.label(),
+            "chat 9 · Claude Code · 1m 20s · failed: it broke — Find where turns are drawn"
+        );
+        assert_eq!(done.first_line(), "In `paint.rs`.");
+        let told = Turn {
+            notice: Some(notice),
+            sent: 5,
+            ..turn("[chat 7 finished] what the agent reads", Vec::new())
+        };
+        assert!(told.shows_finished());
+        let cards = told.notice_cards();
+        assert_eq!(
+            (cards.iter())
+                .map(|card| (card.id.as_str(), card.status))
+                .collect::<Vec<_>>(),
+            [
+                ("clackatoo-finished:5:0", ToolStatus::Done),
+                ("clackatoo-finished:5:1", ToolStatus::Failed)
+            ]
+        );
+        let node = ChatNode {
+            turns: vec![told],
+            ..ChatNode::default()
+        };
+        let text = node.text();
+        assert!(text.starts_with("↳ 2 subagents finished"), "{text}");
+        assert!(text.contains("✓ chat 7 · explore"), "{text}");
+        assert!(text.contains("  In `paint.rs`."), "{text}");
+        assert!(!text.contains("what the agent reads"), "{text}");
     }
 
     #[test]
@@ -3279,6 +3541,7 @@ mod tests {
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: prompt.into(),
             sent: 0,

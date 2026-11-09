@@ -1,0 +1,21 @@
+# Subagents finishing, shown as a card, and a message from another
+# chat's agent, shown as a quote (CLACKA-230).
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type mcp start_chat {"prompt":"Find where turns are drawn","profile":"explore"}
+keys <S-CR>
+type mcp start_chat {"prompt":"usage-limit"}
+keys <CR>
+wait-for subagents finished
+sleep 300
+shot notice-folded
+keys <C-;>gg/Find where<CR>za
+sleep 300
+shot notice-open
+keys zMi
+type mcp start_chat {"prompt":"Look at the parser","show":true}
+keys <CR>
+wait-for From chat
+sleep 300
+shot message-quoted

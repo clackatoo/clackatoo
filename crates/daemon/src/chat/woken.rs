@@ -83,6 +83,7 @@ impl HostedChat {
             from: None,
             switch: None,
             woke: Some(why.unwrap_or_default()),
+            notice: None,
         });
         self.set_state(ChatState::Answering);
         // What was taken for a notice just now was this turn's start.

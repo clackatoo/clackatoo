@@ -45,6 +45,7 @@ use clackatoo_protocol::{ChatAction, ChatNode, Item};
 use winit::keyboard::{Key, NamedKey};
 
 use super::card::Card;
+use super::paint::notice::{notice_piece, notice_text};
 use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, control};
 use super::{ChatView, Input};
 use crate::input::KeyPress;
@@ -131,11 +132,11 @@ impl Dialect for ChatKeys {
             ChatKey::Detail => "Open context and usage limits",
             ChatKey::Undo { redo: false } => "Undo turn file changes",
             ChatKey::Undo { redo: true } => "Redo turn file changes",
-            ChatKey::Fold(Fold::Toggle) => "Toggle work, tool or subagents",
-            ChatKey::Fold(Fold::Open) => "Expand work, tool or subagents",
-            ChatKey::Fold(Fold::Close) => "Fold work, tool or subagents",
-            ChatKey::Fold(Fold::All { open: true }) => "Expand all work",
-            ChatKey::Fold(Fold::All { open: false }) => "Fold all work",
+            ChatKey::Fold(Fold::Toggle) => "Toggle work, tool, subagents or a subagent's answer",
+            ChatKey::Fold(Fold::Open) => "Expand work, tool, subagents or a subagent's answer",
+            ChatKey::Fold(Fold::Close) => "Fold work, tool, subagents or a subagent's answer",
+            ChatKey::Fold(Fold::All { open: true }) => "Expand all work and subagents' answers",
+            ChatKey::Fold(Fold::All { open: false }) => "Fold all work and subagents' answers",
             ChatKey::Sideways {
                 right: true,
                 half: false,
@@ -1017,6 +1018,7 @@ impl ChatView {
             Fold::All { open } => {
                 self.set_all_folds(open);
                 self.set_all_agents(open);
+                self.set_all_answers(open);
                 self.after_fold();
                 return true;
             }
@@ -1046,6 +1048,7 @@ impl ChatView {
     /// a card folded away, onto the card's own, and out of a turn's work
     /// folded away, onto the line it folds under.
     fn after_fold(&mut self) {
+        self.cursor_off_folded_answer();
         if let Some(cursor) = self.cursor
             && cursor.text.piece == AGENTS
             && cursor.text.part > 0
@@ -1136,6 +1139,9 @@ impl ChatView {
         let Some(cursor) = self.cursor else {
             return false;
         };
+        if notice_piece(cursor.text.piece).is_some() {
+            return self.fold_answer(open);
+        }
         let Some(item) = cursor.text.piece.checked_sub(ITEMS) else {
             return false;
         };
@@ -1214,6 +1220,7 @@ impl ChatView {
         match key.piece {
             PROMPT => Some(turn.prompt.clone()),
             AGENTS => Some(self.agents_text(key.turn)),
+            piece if notice_piece(piece).is_some() => notice_text(turn, piece, true),
             FOLD => {
                 let alone = ChatNode {
                     turns: vec![turn.clone()],

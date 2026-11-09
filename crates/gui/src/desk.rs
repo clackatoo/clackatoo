@@ -3879,6 +3879,7 @@ mod tests {
         }
         let turn = Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             from: None,
             prompt: "Why does CI fail?".into(),
@@ -9514,6 +9515,7 @@ mod tests {
             state: ChatState::Ready,
             turns: vec![Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "how?".into(),

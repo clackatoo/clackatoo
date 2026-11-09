@@ -172,6 +172,7 @@ mod tests {
             state: ChatState::Ready,
             turns: vec![Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "Serve the docs".into(),

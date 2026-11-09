@@ -2540,6 +2540,7 @@ impl ChatView {
                     self.open_cards.insert(tool);
                 }
                 self.cursor_off_folded_work();
+                self.cursor_off_folded_answer();
             }
             Some(Hit::Undo(turn)) => settled.actions.push(ChatAction::Undo {
                 turn: u32::try_from(turn).unwrap_or(u32::MAX),
@@ -3132,6 +3133,7 @@ mod tests {
         view.paste_image(pasted_image());
         view.node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "previous".into(),
             sent: 0,
@@ -3442,6 +3444,7 @@ mod tests {
         let mut node = ChatNode::default();
         node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "hi".into(),
             sent: 0,
@@ -4603,6 +4606,7 @@ mod tests {
         for &state in states {
             node.turns.push(Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "change it".into(),
@@ -4656,6 +4660,7 @@ mod tests {
         let mut node = ChatNode::default();
         node.turns.push(Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             from: None,
             prompt: "fix it".into(),

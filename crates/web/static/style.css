@@ -3,6 +3,7 @@
   --bg: #0b0b0c; --panel: #131315; --raised: #1e1e22; --line: #29292e;
   --text: #eceae5; --muted: #a8a6a0; --accent: #f2c14e; --on-accent: #1a1404;
   --link: #8cbcf0; --danger: #ee9289; --caution: #e3bc52; --ok: #5bc08a; --subtle: #86847e; --running: #7db2ff;
+  --subagent: #6fd3c9;
   --added: #20352a; --removed: #3a2326; --radius: 16px;
   --mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", monospace;
   color-scheme: dark;
@@ -101,6 +102,10 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 .turn.switch .divider { text-align: center; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
 .prompt { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 22px; }
 .prompt .from { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.quote, .notice { border-left: 2px solid var(--line); padding-left: 12px; margin-bottom: 22px; }.quote.subagent, .notice { border-left-color: var(--subagent); }
+.quote .from, .notice > .from { font-size: 12px; color: var(--muted); margin-bottom: 6px; }.from.subagent { color: var(--subagent); }
+.quote .bubble.quoted { max-width: none; background: none; border: 0; border-radius: 0; padding: 0; }
+.answer > summary { flex-wrap: wrap; row-gap: 4px; }.answer .first { flex-basis: 100%; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.answer[open] .first { display: none; }
 .turn .branches { font-size: 12px; color: var(--muted); text-align: right; margin-bottom: 6px; }
 .bubble { max-width: 88%; background: var(--raised); border: 1px solid #2b2e33; border-radius: 18px 18px 5px 18px; padding: 12px 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .words { overflow-wrap: anywhere; line-height: 1.7; }

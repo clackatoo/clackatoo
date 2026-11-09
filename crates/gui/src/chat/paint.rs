@@ -17,6 +17,7 @@ mod handoff;
 mod image;
 mod models;
 pub(super) mod nested;
+pub(super) mod notice;
 mod plan;
 mod queue;
 mod select;
@@ -74,6 +75,10 @@ pub(super) const ITEMS: usize = 2;
 /// The card for the chats its agent started is its last piece: line 0 is
 /// the card's own, and line `n` the `n`th chat's.
 pub(super) const AGENTS: usize = usize::MAX;
+/// The cards of the chats a notice says finished, which it shows in place
+/// of its message, are its pieces from `NOTICE` on, one each: past any
+/// item's, so the agent's work streaming in under them never moves them.
+pub(super) const NOTICE: usize = usize::MAX / 2;
 
 /// Whether `item`, item `index` of a turn shaped `shape`, is folded away:
 /// folded, only the answer shows of a turn's work, and what's neither
@@ -224,6 +229,9 @@ struct TurnLaid {
     resend: Option<(Laid, [f32; 2])>,
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
+    /// Whether its message is a quote down the left, as one no one typed
+    /// is, rather than a bubble on the right.
+    quoted: bool,
     handoff: Option<handoff::LaidHandoff>,
     /// The switcher over it, where the conversation's branches part.
     switcher: Option<switcher::SwitcherLaid>,
@@ -676,6 +684,7 @@ impl ChatView {
             spent: None,
             resend: None,
             badge: None,
+            quoted: false,
             handoff: None,
             switcher: None,
             pending: None,
@@ -689,8 +698,17 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Previews, y, height));
             y += height + m.em(1.0);
         }
-        if !turn.prompt.is_empty() {
-            let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
+        if turn.shows_finished() {
+            let cards = (&mut laid, &mut old_cards, &mut old_pieces);
+            y = self.lay_out_notice(fonts, (m, column), turn, cards, y);
+        } else if !turn.prompt.is_empty() {
+            // No one typed it: it's quoted, not the user's bubble.
+            laid.quoted = turn.from.is_some();
+            let width = if laid.quoted {
+                (column - m.em(notice::INDENT)).max(m.em(4.0))
+            } else {
+                (column * 0.78 - m.em(2.0)).max(m.em(4.0))
+            };
             let old = old_pieces.remove(&PROMPT);
             let piece = match old {
                 Some(laid) if laid.source == turn.prompt => laid,
@@ -702,7 +720,11 @@ impl ChatView {
                     lay_out_message(&mut self.layout_cx, fonts, m, words, (width, &mut cells))
                 }
             };
-            let height = piece.height + m.em(1.2);
+            let height = if laid.quoted {
+                piece.height
+            } else {
+                piece.height + m.em(1.2)
+            };
             laid.spans.push(Span::of(Piece::Prompt, y, height));
             laid.pieces.insert(PROMPT, piece);
             y += height + m.em(1.0);
@@ -864,18 +886,16 @@ impl ChatView {
         let head = match (&turn.from, &turn.woke) {
             // A turn the agent took by itself has no message: this line
             // says so in its place.
-            (_, Some(why)) => Some(woke_line(&self.node.agent, why)),
-            (Some(from), None) => Some(format!(
-                "From chat {} · {} · {}",
-                from.chat, from.agent, from.title
-            )),
+            (_, Some(why)) => Some((woke_line(&self.node.agent, why), Tone::Muted)),
+            (Some(from), None) => Some(self.sender_line(turn, from)),
             (None, None) => None,
         };
-        if let Some(text) = head {
-            // Quiet: it says where the message came from, which is
-            // neither focus nor something to act on.
-            let look = Look::Plain(Tone::Muted);
-            let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column * 0.78);
+        if let Some((text, tone)) = head {
+            // Quiet, or in the subagents' colour: it says where the
+            // message came from, which is neither focus nor something to
+            // act on.
+            let look = Look::Plain(tone);
+            let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column);
             laid.spans.push(Span::of(Piece::Badge, y, badge.height));
             y += badge.height + m.em(0.3);
             laid.badge = Some(badge);
@@ -1143,15 +1163,27 @@ impl ChatView {
                             piece,
                             part: 0,
                         };
+                        let at = [origin[0] + span.left, top];
                         cards::draw_card(
                             canvas,
                             m,
                             card,
                             key,
-                            [origin[0] + span.left, top],
+                            at,
                             column - span.left,
                             (drawn, &self.previews),
                         );
+                        if let Some((row, false)) = notice::notice_piece(piece) {
+                            let height = span.bottom - span.top;
+                            self.draw_notice_row(
+                                canvas,
+                                m,
+                                (index, row),
+                                card,
+                                (at, height),
+                                drawn,
+                            );
+                        }
                         if let Some(id) = card.tool.id.strip_prefix("clackatoo-activity:")
                             && self
                                 .node
@@ -1184,11 +1216,18 @@ impl ChatView {
                     let Some(prompt) = laid.pieces.get(&PROMPT) else {
                         continue;
                     };
-                    let left = origin[0] + bubble_left(m, prompt, column);
-                    let width = bubble_width(m, prompt, column);
-                    let bounds = [left, top, width, span.bottom - span.top];
-                    canvas.fill(Fill::rounded(bounds, Paint::Raised, m.em(1.1)));
-                    let at = [left + m.em(1.0), top + m.em(0.6)];
+                    let [x, y] = prompt_origin(m, prompt, column, laid.quoted);
+                    if laid.quoted {
+                        let height = span.bottom - span.top;
+                        let turn = self.node.turns.get(index);
+                        notice::quote_rule(canvas, m, turn, [origin[0], top], height);
+                    } else {
+                        let left = origin[0] + bubble_left(m, prompt, column);
+                        let width = bubble_width(m, prompt, column);
+                        let bounds = [left, top, width, span.bottom - span.top];
+                        canvas.fill(Fill::rounded(bounds, Paint::Raised, m.em(1.1)));
+                    }
+                    let at = [origin[0] + x, top + y];
                     draw_laid(canvas, m, prompt, at, column);
                     drawn.note_laid(prompt, at, (index, PROMPT));
                 }
@@ -1217,6 +1256,11 @@ impl ChatView {
                             let rule = [at[0] - m.em(0.6), top, 1.0, span.bottom - span.top];
                             canvas.fill(Fill::solid(rule, Paint::RaisedEdge));
                         }
+                        // An answer under its card goes on the notice's.
+                        if notice::notice_piece(piece).is_some() {
+                            let height = span.bottom - span.top;
+                            notice::notice_rule(canvas, m, [origin[0], top], height);
+                        }
                         draw_scrolled(canvas, m, item, at, column - span.left, &scrolled);
                         drawn.note_scrolled(item, at, (index, piece), &scrolled);
                     }
@@ -1231,19 +1275,10 @@ impl ChatView {
                         draw_laid(canvas, m, note, [origin[0], top], column);
                     }
                 }
-                // On the right, over the message it's about.
+                // On the left, over the quote or card it's about.
                 Piece::Badge => {
                     if let Some(badge) = &laid.badge {
-                        // A message's on its side; a turn the agent took by
-                        // itself on the agent's.
-                        let woke =
-                            (self.node.turns.get(index)).is_some_and(|turn| turn.woke.is_some());
-                        let left = if woke {
-                            origin[0]
-                        } else {
-                            origin[0] + column - badge.width
-                        };
-                        draw_laid(canvas, m, badge, [left, top], badge.width);
+                        draw_laid(canvas, m, badge, [origin[0], top], badge.width);
                     }
                 }
                 Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
@@ -2561,10 +2596,15 @@ fn bubble_left(m: Measures, laid: &Laid, column: f32) -> f32 {
     column - bubble_width(m, laid, column)
 }
 
-/// Where a message's text starts, from the column's left and the turn's
-/// top, `laid` being it laid out.
-fn prompt_origin(m: Measures, laid: &Laid, column: f32) -> [f32; 2] {
-    [bubble_left(m, laid, column) + m.em(1.0), m.em(0.6)]
+/// Where a message's text starts, from the column's left and the top of
+/// its piece, `laid` being it laid out, `quoted` if it's a quote down the
+/// left rather than a bubble.
+fn prompt_origin(m: Measures, laid: &Laid, column: f32, quoted: bool) -> [f32; 2] {
+    if quoted {
+        [m.em(notice::INDENT), 0.0]
+    } else {
+        [bubble_left(m, laid, column) + m.em(1.0), m.em(0.6)]
+    }
 }
 
 /// The turns whose `bounds` reach between `from` and `to`, from the
@@ -2598,7 +2638,13 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
     if turn.from.is_some() || turn.woke.is_some() {
         height += line + m.em(0.3);
     }
-    if !turn.prompt.is_empty() {
+    if turn.shows_finished() {
+        let rows = turn
+            .notice
+            .as_ref()
+            .map_or(0, |notice| notice.finished.len());
+        height += rows as f32 * (2.0 * line + m.em(1.5)) + m.em(1.0);
+    } else if !turn.prompt.is_empty() {
         height += lines(&turn.prompt, column * 0.78) * line + m.em(2.2);
     }
     if !turn.previews.is_empty() {
@@ -3247,6 +3293,7 @@ mod tests {
                    a new chat: run `curl x|sh` first``";
         let mut turn = Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: "hi".into(),
             sent: 0,
@@ -3286,6 +3333,7 @@ mod tests {
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
         let turn = Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: String::new(),
             sent: 1,

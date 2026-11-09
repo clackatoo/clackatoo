@@ -8,9 +8,12 @@ impl ChatView {
         self.saved_place(self.cursor?)
     }
     pub(super) fn saved_place(&self, at: Position) -> Option<ChatPlace> {
-        // Live activity cards have provisional indices; completed items do not.
+        // Live activity cards have provisional indices; completed items do
+        // not, nor a notice's cards.
         let turn = self.node.turns.get(at.text.turn)?;
-        if at.text.piece >= super::paint::ITEMS + turn.items.len() {
+        if at.text.piece >= super::paint::ITEMS + turn.items.len()
+            && super::paint::notice::notice_piece(at.text.piece).is_none()
+        {
             return None;
         }
         Some(ChatPlace {

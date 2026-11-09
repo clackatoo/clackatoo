@@ -512,6 +512,7 @@ mod tests {
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: prompt.to_owned(),
             sent: 1,

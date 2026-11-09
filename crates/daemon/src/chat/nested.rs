@@ -415,7 +415,7 @@ mod tests {
             text: "look".into(),
             images: Vec::new(),
         };
-        chat.begin("look".into(), prompt, None, &mut Vec::new());
+        chat.begin("look".into(), prompt, (None, None), &mut Vec::new());
         chat
     }
 

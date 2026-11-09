@@ -68,6 +68,7 @@ fn leaving_a_chat_for_a_bar_takes_away_its_copy_button() {
         state: ChatState::Ready,
         turns: vec![Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             from: None,
             prompt: "how?".into(),

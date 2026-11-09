@@ -257,7 +257,7 @@ impl ChatView {
         let piece = laid.pieces.get(&key.piece)?;
         let block = piece.blocks.get(key.part)?;
         let origin = if key.piece == PROMPT {
-            prompt_origin(m, piece, self.cache.width)
+            prompt_origin(m, piece, self.cache.width, laid.quoted)
         } else {
             [0.0; 2]
         };

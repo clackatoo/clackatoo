@@ -132,6 +132,7 @@ mod tests {
             state: ChatState::Answering,
             turns: vec![Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "Where's the parser?".into(),

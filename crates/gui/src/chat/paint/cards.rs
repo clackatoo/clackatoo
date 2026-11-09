@@ -209,6 +209,7 @@ impl ChatView {
             w.summary(&title, head_wide)
         };
         let (mut body, gutter, _) = match &card {
+            Some(Card::Answer(answer)) => (w.answer(answer), None, 0),
             _ if !open && tool.status != ToolStatus::Failed => (Vec::new(), None, 0),
             Some(Card::Command {
                 purpose, output, ..
@@ -317,6 +318,19 @@ impl Writer<'_> {
             look,
             wide,
         )
+    }
+
+    /// What a chat a notice says finished answered, folded: its first
+    /// line, cut off at the card's edge. Open, the whole of it shows under
+    /// the card, as the agent's words do (see `paint/notice.rs`).
+    fn answer(&mut self, answer: &str) -> Vec<Section> {
+        let first = (answer.lines().map(str::trim))
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        if self.open || first.is_empty() {
+            return Vec::new();
+        }
+        vec![Section::Text(self.summary(first, self.inner))]
     }
 
     /// How wide the lines of what it shows are: folded, a line is a line,

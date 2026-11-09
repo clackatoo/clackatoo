@@ -1223,6 +1223,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "snippets",
         what: "Language servers start only in folders you trust: the bar asks once per folder; :trust and :untrust change it",
     },
+    News {
+        id: "finished-cards",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "Subagents finishing show as a card with each one's answer folded, and other agents' messages as quotes",
+    },
 ];
 
 impl News {

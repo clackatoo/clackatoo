@@ -894,6 +894,45 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::TRUST, sample)),
     );
+    // A notice that chats finished, said for a card (CLACKA-230): one
+    // done, one that failed with no answer.
+    samples.push((
+        crate::wire::CHAT_NOTICES,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 2,
+                turn: Box::new(Turn {
+                    prompt: "[chat 7 finished] …".into(),
+                    notice: Some(crate::TurnNotice {
+                        finished: vec![
+                            crate::FinishedChat {
+                                chat: TerminalId(7),
+                                agent: "Claude Code".into(),
+                                profile: Some("explore".into()),
+                                asked: "Find where turns are drawn".into(),
+                                started: 1_760_000_000,
+                                ended: 1_760_000_042,
+                                outcome: Some(Outcome::Done),
+                                answer: "In `paint.rs`.".into(),
+                            },
+                            crate::FinishedChat {
+                                chat: TerminalId(9),
+                                agent: "Codex".into(),
+                                profile: None,
+                                asked: String::new(),
+                                started: 0,
+                                ended: 0,
+                                outcome: None,
+                                answer: String::new(),
+                            },
+                        ],
+                    }),
+                    ..turn()
+                }),
+            })]),
+        })),
+    ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
@@ -1112,6 +1151,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 index: 0,
                 turn: Box::new(Turn {
                     woke: None,
+                    notice: None,
                     prompt: "[Image]".into(),
                     sent: 1,
                     items: Vec::new(),
@@ -3789,6 +3829,7 @@ fn chat() -> ChatNode {
 fn turn() -> Turn {
     Turn {
         woke: None,
+        notice: None,
         previews: Vec::new(),
         prompt: "fix it".into(),
         sent: 1_760_000_000,

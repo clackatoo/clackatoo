@@ -124,6 +124,7 @@ fn chat_history(c: &mut Criterion) {
         turns: (0..96)
             .map(|i| Turn {
                 woke: None,
+                notice: None,
                 prompt: format!("Turn {i}"),
                 sent: 0,
                 items: vec![Item::Words("answer ".repeat(18_000))],

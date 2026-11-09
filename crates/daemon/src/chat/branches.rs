@@ -1924,6 +1924,7 @@ fn first_line(prompt: &str) -> String {
 fn not_told_turn() -> Turn {
     Turn {
         woke: None,
+        notice: None,
         previews: Vec::new(),
         prompt: String::new(),
         sent: 0,

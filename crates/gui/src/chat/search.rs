@@ -47,6 +47,7 @@
 use clackatoo_protocol::{Item, Tool};
 
 use super::card::Card;
+use super::paint::notice::{answer_piece, card_piece, notice_piece, notice_text};
 use super::paint::{ITEMS, Position, after, blocks_text, control, folded_away};
 use super::{ChatView, Input};
 use crate::cmdline::Line;
@@ -717,11 +718,31 @@ impl ChatView {
         };
         let shape = self.shape(turn, at);
         let closed = |tool: &Tool| (!self.open_cards.contains(&tool.id)).then(|| tool.id.clone());
-        let mut pieces = vec![Looked {
-            piece: super::paint::PROMPT,
-            fold: false,
-            cards: Vec::new(),
-        }];
+        // A notice that chats finished shows their cards, and under each
+        // open one its answer, in place of its message.
+        let mut pieces = if at.shows_finished() {
+            (at.notice_cards().iter().enumerate())
+                .flat_map(|(row, card)| {
+                    let card_looked = Looked {
+                        piece: card_piece(row),
+                        fold: false,
+                        cards: Vec::new(),
+                    };
+                    let answer = Looked {
+                        piece: answer_piece(row),
+                        fold: false,
+                        cards: closed(card).into_iter().collect(),
+                    };
+                    [card_looked, answer]
+                })
+                .collect()
+        } else {
+            vec![Looked {
+                piece: super::paint::PROMPT,
+                fold: false,
+                cards: Vec::new(),
+            }]
+        };
         let nesting = super::paint::nested::Nesting::of(at);
         for (index, item) in at.items.iter().enumerate() {
             // What a subagent did shows once its tools' cards are open.
@@ -757,6 +778,10 @@ impl ChatView {
         if piece == super::paint::PROMPT {
             return Some(Cow::Borrowed(&at.prompt));
         }
+        if let Some((_, answer)) = notice_piece(piece) {
+            let text = notice_text(at, piece, false)?;
+            return Some(Cow::Owned(if answer { blocks_text(&text) } else { text }));
+        }
         let index = piece.checked_sub(ITEMS)?;
         let owned = match at.items.get(index).map(Item::inner) {
             Some(Item::Words(text) | Item::Thought(text) | Item::Other(text)) => blocks_text(text),
@@ -773,6 +798,10 @@ impl ChatView {
         let Some(at) = self.node.turns.get(turn) else {
             return false;
         };
+        // A notice's chat's card shows its text whole; its answer is words.
+        if notice_piece(piece).is_some() {
+            return false;
+        }
         let index = piece - ITEMS;
         index >= at.items.len()
             || at

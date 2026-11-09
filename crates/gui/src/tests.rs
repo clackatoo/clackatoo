@@ -830,6 +830,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
         turns: vec![
             Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 prompt: "Why is the build failing?".into(),
                 sent: 0,
@@ -859,6 +860,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             },
             Turn {
                 woke: None,
+                notice: None,
                 previews: Vec::new(),
                 prompt: "Turn on vendored and try again".into(),
                 sent: 2,
@@ -1249,6 +1251,7 @@ fn moved_chat_node() -> clackatoo_protocol::ChatNode {
         1,
         Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             prompt: String::new(),
             sent: 1,
@@ -1386,6 +1389,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
                 state: ChatState::Ready,
                 turns: vec![Turn {
                     woke: None,
+                    notice: None,
                     previews: Vec::new(),
                     from: None,
                     prompt: "change it".into(),

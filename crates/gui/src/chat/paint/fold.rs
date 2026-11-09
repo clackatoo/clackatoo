@@ -53,13 +53,7 @@ fn epoch_now() -> u64 {
 
 /// `ms` milliseconds, short: "<1s", "42s", "4m 58s", "1h 3m".
 pub(in crate::chat) fn duration(ms: u64) -> String {
-    let seconds = ms / 1000;
-    match seconds {
-        0 => "<1s".to_owned(),
-        1..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-    }
+    clackatoo_protocol::duration(ms)
 }
 
 impl ChatView {
@@ -240,6 +234,7 @@ mod tests {
             turns: vec![
                 Turn {
                     woke: None,
+                    notice: None,
                     previews: Vec::new(),
                     from: None,
                     prompt: "What's in it?".into(),
@@ -260,6 +255,7 @@ mod tests {
                 },
                 Turn {
                     woke: None,
+                    notice: None,
                     previews: Vec::new(),
                     from: None,
                     prompt: "And the other?".into(),

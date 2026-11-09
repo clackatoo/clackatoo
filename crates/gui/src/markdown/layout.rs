@@ -52,6 +52,9 @@ pub(crate) enum Tone {
     Added,
     /// Removed from a file.
     Removed,
+    /// In the subagents' colour, as what another chat's agent sent is
+    /// headed.
+    Subagent,
 }
 
 /// Space between lines of text, as a multiple of the text's size.
@@ -276,6 +279,7 @@ impl Canvas<'_> {
                     Tone::Caution => Ink::Caution,
                     Tone::Added => Ink::Added,
                     Tone::Removed => Ink::Removed,
+                    Tone::Subagent => Ink::Subagent,
                     Tone::OnAccent => Ink::OnColor,
                 };
                 for glyph in run.positioned_glyphs() {

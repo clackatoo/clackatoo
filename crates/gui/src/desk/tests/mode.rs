@@ -561,6 +561,7 @@ fn leaving_a_chat_ends_its_selection_and_arrives_at_its_box_in_insert_mode() {
         state: ChatState::Ready,
         turns: vec![Turn {
             woke: None,
+            notice: None,
             previews: Vec::new(),
             from: None,
             prompt: "how?".into(),

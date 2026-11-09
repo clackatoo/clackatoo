@@ -1,5 +1,6 @@
 //! What a tool shown as a card shows: a command, with its output, or
-//! changes to files, line by line.
+//! changes to files, line by line; or, for a chat a notice says finished
+//! (see `Turn::notice_cards`), what it answered.
 //!
 //! Claude Code's adapter gives a command's output as one fenced block of
 //! Markdown, and while the command runs, a line saying what it's for. A
@@ -10,7 +11,7 @@
 
 use std::time::Duration;
 
-use clackatoo_protocol::{Diff, Location, Tool, ToolContent, ToolKind};
+use clackatoo_protocol::{Diff, FINISHED_CARD, Location, Tool, ToolContent, ToolKind};
 use similar::{ChangeTag, TextDiff};
 
 /// How long comparing a file before and after may take, before what's
@@ -28,6 +29,9 @@ pub(super) enum Card {
     },
     /// Changes to files.
     Change(Vec<FileChange>),
+    /// What a chat a notice says finished answered, as Markdown: its first
+    /// line shows folded, and the whole of it open.
+    Answer(String),
 }
 
 /// A change to one file.
@@ -58,6 +62,13 @@ pub(super) enum Sign {
 impl Card {
     /// A command or file change with structured detail.
     pub(super) fn of(tool: &Tool) -> Option<Self> {
+        if tool.id.starts_with(FINISHED_CARD) {
+            let answer = (tool.content.iter()).find_map(|content| match content {
+                ToolContent::Text(text) => Some(text.clone()),
+                _ => None,
+            });
+            return Some(Self::Answer(answer.unwrap_or_default()));
+        }
         let diffs: Vec<&Diff> = (tool.content.iter())
             .filter_map(|content| match content {
                 ToolContent::Diff(diff) => Some(diff),
@@ -126,6 +137,7 @@ impl Card {
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n"),
+            Self::Answer(answer) => answer.clone(),
         }
     }
 

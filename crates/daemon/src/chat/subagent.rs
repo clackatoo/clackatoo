@@ -14,7 +14,8 @@ use agent_client_protocol_schema::v1::{
     PermissionOption, PermissionOptionKind, SessionConfigOption, ToolCallUpdate,
 };
 use clackatoo_protocol::{
-    ChatPatch, ChatState, Outcome, SettingKind, Subagent, SubagentStatus, TerminalId, ToolKind,
+    ChatPatch, ChatState, FinishedChat, Outcome, SettingKind, Subagent, SubagentStatus, TerminalId,
+    ToolKind,
 };
 
 use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, Message, PROFILE_SETTING, tool_kind};
@@ -287,12 +288,14 @@ impl HostedChat {
     }
 
     /// The notice that chats it started have finished, next, says `text`,
-    /// or with none, goes: there's nothing left it hasn't heard.
-    pub(crate) fn fill_finished_notice(&mut self, text: Option<String>) {
-        match text {
-            Some(text) => {
+    /// with how each in `finished` went, or with none, goes: there's
+    /// nothing left it hasn't heard.
+    pub(crate) fn fill_finished_notice(&mut self, said: Option<(String, Vec<FinishedChat>)>) {
+        match said {
+            Some((text, finished)) => {
                 if let Some(notice) = self.relations.inbox.front_mut() {
                     notice.text = text;
+                    notice.finished = finished;
                 }
             }
             None => drop(self.relations.inbox.pop_front()),

@@ -347,6 +347,11 @@ gates! {
     /// (CLACKA-224): `Request::Trust`, and `BufferUpdate::Trust`, which a
     /// daemon sends only to a client of this protocol or later.
     TRUST = 131,
+    /// Notices from clackatoo itself, as that chats an agent started have
+    /// finished, said for clients to show as cards (CLACKA-230): `Turn`'s
+    /// `notice` (`TurnNotice`, `FinishedChat`). An older client shows the
+    /// notice's text, as the agent was told it.
+    CHAT_NOTICES = 132,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1915,6 +1920,7 @@ mod tests {
             switch: None,
             previews: Vec::new(),
             woke: None,
+            notice: None,
         };
         let flat: Vec<Item> = items.into_iter().map(Item::flattened).collect();
         let message = |patches| {
@@ -2235,6 +2241,7 @@ mod tests {
         assert_eq!(read::<crate::ChatImage>(CHAT_IMAGES, &bytes), image);
         let mut turn = crate::Turn {
             woke: None,
+            notice: None,
             prompt: "[Image]".into(),
             sent: 0,
             items: Vec::new(),
