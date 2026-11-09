@@ -24,7 +24,7 @@ use crate::workspaces::WorkspaceState;
 /// it everything the daemon makes of a handover that needs no fds: the
 /// workspaces, terminals' screens, buffers and chats.
 pub fn handover(bytes: &[u8]) {
-    let Ok(mut state) = State::from_bytes(bytes) else {
+    let Ok((mut state, _)) = State::from_bytes(bytes) else {
         return;
     };
     if let Ok(mut workspaces) = WorkspaceState::resume(&state.workspaces, &state.lent) {
@@ -74,6 +74,11 @@ pub fn handover(bytes: &[u8]) {
         chat.resume_draft(&mut state.drafts);
         if let Some(talk) = talk.as_mut() {
             chat.resume_standing(talk, false);
+        }
+        let id = chat.info().id.0;
+        let sessions = state.mcp.iter().flat_map(|mcp| &mcp.sessions);
+        for (_, session, token) in sessions.filter(|(chat, _, _)| *chat == id) {
+            chat.resume_mcp_token(session.clone(), token.clone());
         }
     }
 }

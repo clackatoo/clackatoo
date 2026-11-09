@@ -42,7 +42,7 @@ The first build takes a while: it builds the daemon and everything it uses, with
 - `-malloc_limit_mb` treats a single allocation that big as a failure. That's how a reader that allocates far more than it was sent is caught.
 - `-fork=2 -ignore_crashes=1` runs two processes and keeps going after a failure, saving each one. Leave a core or two free for the rest of the machine.
 
-The fuzz targets are a workspace of their own, so builds, tests and CI of the rest never build them. Their build goes in `fuzz/target`. `corpus/` and `artifacts/` stay out of git.
+The fuzz targets are a workspace of their own, so builds and tests of the rest never build them. CI only checks that they still compile, on the nightly its `fuzz` job pins, so a change to what they reach inside the crates can't leave them broken. Their build goes in `fuzz/target`. `corpus/` and `artifacts/` stay out of git.
 
 ## When it finds something
 

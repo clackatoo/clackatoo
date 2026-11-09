@@ -93,6 +93,26 @@ jobs:
       - run: cargo nextest run --workspace --locked --profile ci
       - run: cargo test --workspace --locked --doc
 
+  fuzz:
+    # The fuzz targets (fuzz/, a workspace of their own) still build
+    # against the crates' insides: checked only, never run here. The
+    # nightly cargo-fuzz runs them on, pinned like the stable toolchain.
+    runs-on: ubuntu-24.04
+    env:
+      NIGHTLY: nightly-2026-08-30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install "$NIGHTLY" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: fuzz
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo +"$NIGHTLY" check --manifest-path fuzz/Cargo.toml --locked --bins
+
   licences:
     # Every crate built in must be under a licence .config/about.toml
     # accepts, or the release fails; this says so before a tag does.

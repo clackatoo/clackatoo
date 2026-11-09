@@ -1701,8 +1701,8 @@ impl State {
         Self::from_bytes(&bytes)
     }
 
-    /// Reads a state [`write`](Self::write) wrote, from its bytes.
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, HandoverError> {
+    /// As [`read_versioned`](Self::read_versioned), from the file's bytes.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<(Self, u32), HandoverError> {
         let rest = bytes
             .strip_prefix(MAGIC)
             .ok_or(HandoverError::NotAHandover)?;
