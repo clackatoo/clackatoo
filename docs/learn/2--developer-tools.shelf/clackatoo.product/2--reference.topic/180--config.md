@@ -7,7 +7,7 @@ related:
   - clackatoo/reference/cli
 ---
 
-The window's behaviour is configured in code: an `init.lua`, as Neovim's is, written in [Luau](https://luau.org), a fast dialect of Lua with optional types and a sandbox. Without one, the window works as it always does. Settings needed before the window starts, such as the graphics API, stay in [`startup.toml`](~clackatoo/reference/window#settings), beside it. The font is both: startup.toml's is what the window starts in, and `init.lua`'s outdoes it.
+The window's behavior is configured in code: an `init.lua`, as Neovim's is, written in [Luau](https://luau.org), a fast dialect of Lua with optional types and a sandbox. Without one, the window works as it always does. Settings needed before the window starts, such as the graphics API, stay in [`startup.toml`](~clackatoo/reference/window#settings), beside it. The font is both: startup.toml's is what the window starts in, and `init.lua`'s outdoes it.
 
 ```lua
 -- ~/.config/clackatoo/client/init.lua
@@ -143,7 +143,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 
 | Option | Short | Is | Starts |
 |---|---|---|---|
-| `font` | `gfn` | The font family terminals and editors are drawn in, as `fc-list : family` names it, such as `JetBrains Mono`. Empty is your system's monospace font. A family that isn't installed is refused, and the font stays as it was. `--font` or `CLACKATOO_FONT` outdoes what `init.lua` sets as it runs, but not `:set` or what your keys set afterwards. | your system's |
+| `font` | `gfn` | The font family terminals and editors are drawn in, as `fc-list : family` names it, such as `JetBrains Mono`. Empty is your system's monospace font. A family that isn't installed is refused, and the font stays as it was. `--font` or `CLACKATOO_FONT` outdoes what `init.lua` sets as it runs, but not `:set` or what your keys set afterward. | your system's |
 | `fontsize` | `fsz` | The size text is drawn at, in points, from 4 to 200, such as `12` or `10.5`. The window keeps its size, and the panes fit as many cells as now fit, as when it's resized. `--font-size` or `CLACKATOO_FONT_SIZE` outdoes what `init.lua` sets as it runs. | 12 |
 | `number` | `nu` | Line numbers down an [editor](~clackatoo/reference/editor#line-numbers)'s left, the cursor's line showing its own. | on |
 | `relativenumber` | `rnu` | The other lines show how far they are from the cursor's, for counts such as `5j`. Without `number`, the cursor's line shows 0. | on |
@@ -197,7 +197,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/editor#language-servers) says; where it's given a value a little brighter. | on |
 | `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/editor#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
 | `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
-| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor#agents-changes) that you haven't reviewed, in the chat's colour. It shows only while a file has such lines, or `:blame` is on. | on |
+| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
 | `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/window#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/editor#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |

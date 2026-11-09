@@ -63,7 +63,7 @@ It runs your `$SHELL` in the current directory, at 80×24. Type a command into i
 clackatoo run 1 ls --color=always
 ```
 
-See what it shows with `capture`. Add `--ansi` to keep the colours:
+See what it shows with `capture`. Add `--ansi` to keep the colors:
 
 ```sh
 clackatoo capture 1 --ansi

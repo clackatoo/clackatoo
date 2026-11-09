@@ -1,7 +1,7 @@
 ---
 title: Editing files
 type: reference
-description: An editor pane edits a file with Vim's keys. The daemon keeps the file's text and its undo history, so every window edits the same text, agents' edits and yours meet, and nothing is lost when the window closes or the daemon upgrades. How to open and write files, the languages files are coloured in, language servers and the mistakes they find, line numbers, tabs and indenting, the view, Markdown rendered, the keys, and what doesn't work yet.
+description: An editor pane edits a file with Vim's keys. The daemon keeps the file's text and its undo history, so every window edits the same text, agents' edits and yours meet, and nothing is lost when the window closes or the daemon upgrades. How to open and write files, the languages files are colored in, language servers and the mistakes they find, line numbers, tabs and indenting, the view, Markdown rendered, the keys, and what doesn't work yet.
 related:
   - clackatoo/reference/window
   - clackatoo/reference/cli
@@ -58,7 +58,7 @@ The daemon keeps each buffer, as it keeps terminals:
 
 Each command in normal mode is one undo step, as is each go of insert mode, with the command that started it, such as `cw`.
 
-Undo is the daemon's, one history per file that every window shares: each step keeps where the cursor was and the file's last selection as it began, which follow other windows' and agents' edits made since, so an undo puts them back whoever edited meanwhile. Undo keeps your last 1000 steps in each file, or as many as fit in 64 MB. Past that the oldest are let go, and `u` past the oldest one kept says so in the bar. The daemon also keeps the last 32 MB of edits made to each file, to bring up to date an edit a window made before it heard of others'. A window that has fallen further behind than that, or so far that bringing its edit up to date would hold up the daemon for more than a few milliseconds, catches up itself and sends its edit again. You don't see this happen, except with a window from before protocol 92, whose edit that far behind isn't made: it keeps its own text, as when a change couldn't be made, until `:w!` or `:e!`. An edit of more than 16,384 pieces, as `:%s` over a big file can make, is sent with neighbouring changes joined into one, so marks between them move as if the text between had been typed again.
+Undo is the daemon's, one history per file that every window shares: each step keeps where the cursor was and the file's last selection as it began, which follow other windows' and agents' edits made since, so an undo puts them back whoever edited meanwhile. Undo keeps your last 1000 steps in each file, or as many as fit in 64 MB. Past that the oldest are let go, and `u` past the oldest one kept says so in the bar. The daemon also keeps the last 32 MB of edits made to each file, to bring up to date an edit a window made before it heard of others'. A window that has fallen further behind than that, or so far that bringing its edit up to date would hold up the daemon for more than a few milliseconds, catches up itself and sends its edit again. You don't see this happen, except with a window from before protocol 92, whose edit that far behind isn't made: it keeps its own text, as when a change couldn't be made, until `:w!` or `:e!`. An edit of more than 16,384 pieces, as `:%s` over a big file can make, is sent with neighboring changes joined into one, so marks between them move as if the text between had been typed again.
 
 A file whose lines end with CRLF, as Windows ends them, is edited with plain line ends, and written with CRLF again, as its first line says; a file that mixes the two is written all one way. Its git signs compare it line by line, but it's staged a change at a time in a terminal, not here.
 
@@ -66,7 +66,7 @@ A buffer closes with its last pane, unless it has changes that aren't written. `
 
 ## Languages
 
-A file in a language that's installed is coloured as the language's grammar reads it: keywords, strings, comments, functions, types and so on.
+A file in a language that's installed is colored as the language's grammar reads it: keywords, strings, comments, functions, types and so on.
 
 Opening a file in a language that isn't installed, but that clackatoo knows where to get, asks in the bottom bar:
 
@@ -74,7 +74,7 @@ Opening a file in a language that isn't installed, but that clackatoo knows wher
 Install toml's grammar and taplo? [Y/n]
 ```
 
-`y` or Enter installs the language, and its [language server](#language-servers) if that isn't installed either. The bar says when it's done, and the file is coloured and checked straight away. `n` means it's never offered again. Any other key leaves the question unanswered, and does what it would have done. Each window asks once about each language, so a window opened later asks again. The question waits while a terminal has the focus, or the command line is open.
+`y` or Enter installs the language, and its [language server](#language-servers) if that isn't installed either. The bar says when it's done, and the file is colored and checked straight away. `n` means it's never offered again. Any other key leaves the question unanswered, and does what it would have done. Each window asks once about each language, so a window opened later asks again. The question waits while a terminal has the focus, or the command line is open.
 
 The [option](~clackatoo/reference/config#options) `languageinstall` decides what happens instead: `ask`, `always` (install without asking) or `never`.
 
@@ -91,7 +91,7 @@ clackatoo knows where to get Bash, C, CSS, Go, HTML, JavaScript, JSON, Lua, Pyth
 How it works:
 
 - **Grammars are [tree-sitter](https://tree-sitter.github.io)'s**, compiled to WebAssembly by their authors, and run in the daemon by [wasmtime](https://wasmtime.dev). A grammar can't reach anything outside itself, so one that goes wrong can't take the daemon, and every terminal it keeps, with it. Nor does a new language need a new clackatoo.
-- **The daemon parses each file once, whichever windows show it**, on a thread of its own, so typing never waits for a parse. After an edit, only what it changed is read again: about a tenth of a millisecond in a big source file. The colours of text you've just typed follow within a frame or so; until then, the colours already there move with the text.
+- **The daemon parses each file once, whichever windows show it**, on a thread of its own, so typing never waits for a parse. After an edit, only what it changed is read again: about a tenth of a millisecond in a big source file. The colors of text you've just typed follow within a frame or so; until then, the colors already there move with the text.
 - **Opening a file reads it all**, which takes about 50 ms for an 80 KB file in a language not used since the daemon started, most of it getting the grammar ready, and less after.
 
 ### Language packs
@@ -112,7 +112,7 @@ extensions = ["rs"]
 filenames = []
 ```
 
-A query's names are coloured by the first part: `@function.method.call` as a function, `@string.escape` as an escape. A pack the daemon can't load is passed over, and its log says why.
+A query's names are colored by the first part: `@function.method.call` as a function, `@string.escape` as an escape. A pack the daemon can't load is passed over, and its log says why.
 
 ## Language servers
 
@@ -124,9 +124,9 @@ main.rs  12:9  error: mismatched types [E0308 rustc]
 
 That's the one under the cursor, or else the one on the line that matters most.
 
-The worst on each line is also written dimly after the line's end, in its colour, as far as the pane has room, unless the [option](~clackatoo/reference/config#options) `virtualtext` is off; and the line's number takes its colour. `]d` goes to the next mistake and `[d` to the one before, round the file's ends.
+The worst on each line is also written dimly after the line's end, in its color, as far as the pane has room, unless the [option](~clackatoo/reference/config#options) `virtualtext` is off; and the line's number takes its color. `]d` goes to the next mistake and `[d` to the one before, round the file's ends.
 
-`K` asks the server what's under the cursor and shows it in a panel under the cursor, or over it where there's more room, as wide as its text up to 80 columns, scrolling past 20 lines. Headings and strong text are bold, and code is on a faint band. Code in a fenced block is coloured in the language its tag names, such as `rust` or `py`, or in the file's own language if it has no tag, once the daemon has read it; code in a language that isn't installed stays plain. The name the server says it's about is underlined while the panel is shown, until the panel closes or the text there changes. What's wrong there comes first, in full. Ctrl+W `d` shows only what's wrong there, in full.
+`K` asks the server what's under the cursor and shows it in a panel under the cursor, or over it where there's more room, as wide as its text up to 80 columns, scrolling past 20 lines. Headings and strong text are bold, and code is on a faint band. Code in a fenced block is colored in the language its tag names, such as `rust` or `py`, or in the file's own language if it has no tag, once the daemon has read it; code in a language that isn't installed stays plain. The name the server says it's about is underlined while the panel is shown, until the panel closes or the text there changes. What's wrong there comes first, in full. Ctrl+W `d` shows only what's wrong there, in full.
 
 `grn` renames what's under the cursor everywhere the server knows of it, asking in the bottom bar for the new name. The new name starts selected, so what you type replaces it; an arrow key, Home or End keeps it to edit, and Backspace, Delete or Ctrl+W clears it. A server that can tell is asked first whether there's anything there to rename: if there isn't, the bar says so at once, in the server's words if it gives any; if there is, the new name starts as the server suggests, or as the name it would rename. With any other server it starts as the word under the cursor. Files that are open are changed as if you'd typed it, one undo step each, so every window sees it. Files that aren't open are written: all of them, or none, if one can't be, or has changed meanwhile. A rename that would make, rename or delete files, or write outside the project, is refused, as is one touching over 200 files that aren't open.
 
@@ -157,7 +157,7 @@ Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 - **Only a key you press then answers it.** Not one a [macro](#macros) or a key binding types, nor one held while the window waited for something, nor one pressed in the first half second the question shows, which says to press it again: so a `y` meant for a yank, typed just as the question came, doesn't trust anything. Agents never answer it: no tool of theirs trusts a folder, and a window under an agent's [native control](~clackatoo/reference/agents) refuses to send a trust. A device on the [web app](~clackatoo/reference/remote) can't trust a folder either, and isn't asked.
 - **A folder is trusted with everything inside it**, but for a folder inside it marked not trusted: the nearest folder marked, the project's own or one it's in, decides. So `clackatoo trust ~/src` trusts every project under it, and `clackatoo untrust ~/src/cloned-thing` still keeps that one out.
 - **What's marked is the folder a server starts for**, the project's root (see below), so only a mark on that folder or one it's in counts. A Rust project's root is the outermost folder with a `Cargo.toml`: in a workspace of many crates, marking one crate's folder does nothing, as rust-analyzer starts for the workspace's folder. `:trusted` lists what's marked, and the question names the folder that counts.
-- **A folder not trusted keeps its colours**, which clackatoo's own parser gives, and every editor key that doesn't need a server; it gets no mistakes, `K`, `gd`, completion, renames or formatting.
+- **A folder not trusted keeps its colors**, which clackatoo's own parser gives, and every editor key that doesn't need a server; it gets no mistakes, `K`, `gd`, completion, renames or formatting.
 
 | Command | What it does |
 |---|---|
@@ -175,7 +175,7 @@ How it works:
 - **The daemon runs the server, not the window**, one for each project, and keeps each file open in it as it's edited, by anyone. Every window, and every agent, sees the same.
 - **A project is found from the file's place:** the nearest directory above it with one of the server's root files, such as `go.mod`, or else the nearest with a `.git`, or else the file's own directory. A file right in your home directory has no project, and no server, rather than make the whole of home one. A Rust project is the outermost directory with a `Cargo.toml`, so a workspace of many crates has one rust-analyzer, not one each.
 - **Only what changes is sent** after each edit, for servers that can take that, which most can.
-- **A question asked again cancels the last.** A newer `K`, completion or call help from the same window about the same file tells the server to stop working on the one before, and an answer that comes anyway is ignored. So do a newer search of the project's symbols, the file's symbols asked again, and a rename's check. Inlay hints asked again cancel only those asked for a part of the file the new question covers, so two panes on one file never cancel each other's. Another window's questions are never cancelled.
+- **A question asked again cancels the last.** A newer `K`, completion or call help from the same window about the same file tells the server to stop working on the one before, and an answer that comes anyway is ignored. So do a newer search of the project's symbols, the file's symbols asked again, and a rename's check. Inlay hints asked again cancel only those asked for a part of the file the new question covers, so two panes on one file never cancel each other's. Another window's questions are never canceled.
 - **A server starts when a file of its is first opened, if its folder is [trusted](#trusted-folders), and stops five minutes after the last closes,** so going to a library's file and back, or closing a project's files and opening another soon after, doesn't make it read the whole project again. A file gone to from an answer, such as a library's definition, is opened in the server that answered, not one of its own. One that stops by itself is started again at once, for the files of its on screen; if it stops by itself again, it's left stopped until its project's files are all closed, and the daemon's log says why. Servers don't come through an [upgrade](~clackatoo/reference/cli#upgrade): they start again as their files are next shown. A server stopped is asked to shut down, then told to exit, as LSP asks, and killed if it hasn't gone a second later. The daemon stops its servers the same way when it stops or upgrades, waiting at most a second and a half. What a server writes to stderr reaches the daemon's log, its last lines too. A server that stops listening is still read for a moment, so its last answers arrive, but it isn't asked anything more: questions, and commands from code actions, fail at once with "its language server has hung up". A server runs in a process group of its own, so stopping it also ends whatever it started (before Linux 6.9, only the server's own process).
 - **A server's big answers don't hold up typing.** A message of 256 KiB or more is read, and later freed, on a thread of the daemon's own, so a 60 MB list of a project's symbols doesn't stop a key's echo in another pane. What the server sends after it waits behind it, so its messages are still taken in the order it sent them, and an answer sent just before a server stops still arrives. A message longer than 64 MiB stops the server, and the daemon's log says how long it was.
 - **Servers hear of files changed on disk**, by git, an agent or another editor, if they ask, as rust-analyzer does: a file made, written or deleted is told them a tenth of a second later, a few at a time. Only folders inside the server's project are watched, never `.git`, what `.gitignore` leaves out, or `target`, `node_modules`, `.venv` and `__pycache__`, and the servers share up to 3072 of them. A file open in a buffer isn't told of, as the server has it from the buffer. A server that asks for nothing still hears of changes to files it has said are wrong.
@@ -313,7 +313,7 @@ When a file is in a git repository, a column left of the line numbers shows how 
 
 ## Agents' changes
 
-Lines an agent changed and you haven't reviewed have a bar in a column right of git's signs, in the chat's colour, shown while a file has such lines (`agentsigns`). They follow your typing; typing a line back as it was clears it.
+Lines an agent changed and you haven't reviewed have a bar in a column right of git's signs, in the chat's color, shown while a file has such lines (`agentsigns`). They follow your typing; typing a line back as it was clears it.
 
 | Key | Does |
 |---|---|
@@ -408,7 +408,7 @@ The marks are drawn behind the text, and the selection over it. See [the options
 
 ## Rendered Markdown
 
-`<Space>tm`, or `:markdown`, shows a Markdown file (`.md`, `.markdown`) rendered, in place of its text: headings, lists, task lists, quotes, tables, rules, links, and code coloured as the editor colours its language, in a column of prose down the pane. Again, it shows the text. Either way it keeps your place: the rendered view opens with the block holding the line at the top of the text's view at its top, and the text comes back with the top block's first line at the top. It's a view of the file: what anyone changes, in another pane or window or an agent's chat, shows as it's made.
+`<Space>tm`, or `:markdown`, shows a Markdown file (`.md`, `.markdown`) rendered, in place of its text: headings, lists, task lists, quotes, tables, rules, links, and code colored as the editor colors its language, in a column of prose down the pane. Again, it shows the text. Either way it keeps your place: the rendered view opens with the block holding the line at the top of the text's view at its top, and the text comes back with the top block's first line at the top. It's a view of the file: what anyone changes, in another pane or window or an agent's chat, shows as it's made.
 
 | Key | Does |
 |---|---|
@@ -460,7 +460,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `]d` `[d` | The next mistake a [language server](#language-servers) found, or the one before, going round the file's ends. A count goes that many. |
 | `gd` `gD` `gy` `gri` | Where what's under the cursor is defined, declared, where its type is defined, or what implements it, as the [language server](#language-servers) says, as Neovim's keys go. A place in another file opens there in place of this one, as `:e` does. Several places open [the finder](~clackatoo/reference/window#the-finder) on them, each with its line. |
 | `grr` | Everywhere what's under the cursor is used, its declaration included, as the language server says, in [the finder](~clackatoo/reference/window#the-finder), each with its line. |
-| `K` | What's under the cursor, as the [language server](#language-servers) says, in a panel by the cursor, with what's wrong there in full above it, its code coloured and the name it's about underlined. `K` again pages through a long one, Ctrl+E and Ctrl+Y scroll it, and Esc, moving the cursor or an edit closes it. |
+| `K` | What's under the cursor, as the [language server](#language-servers) says, in a panel by the cursor, with what's wrong there in full above it, its code colored and the name it's about underlined. `K` again pages through a long one, Ctrl+E and Ctrl+Y scroll it, and Esc, moving the cursor or an edit closes it. |
 | Ctrl+W `d`, Ctrl+W Ctrl+D | What's wrong under the cursor, or else on its line, in full, in the same panel. |
 
 A word is letters, digits and `_`, and in a language whose pack says so, more: in CSS, `margin-top` and `--main-color` are each one word to `w`, `b`, `e`, `iw`, `aw`, `cw`, `*`, `#` and Ctrl+W in insert mode, and to `\<`, `\>` and `\k` in a search, which take words as the motions do, past ASCII too: `*` on the `中文` of `x中文` searches for `中文`, a word of its own, as Vim's does. A search with `\<` or `\>` in such a file that would take too long to finish says it's too complex, and changes nothing. `W`, `B` and `E` are the same in every language, and terminals keep plain words. Past ASCII, characters make words as Vim sorts them: in Latin-1, accented letters and `µ` are letters, but `ª`, `²` and `½` are punctuation and the no-break space is blank; past it, CJK ideographs, kana, hangul and emoji are each a kind of word of their own, apart from letters, so `w` goes from `中文` to the `x` after it. A skin tone after an emoji, or after any other character, goes with it as part of its word to the motions (`dw` on `👍🏽` takes it whole), though not after a tab or at a line's start, and only up to four in a row; to `*`, `#`, `\<` and `\>` a skin tone is punctuation, so `*` on `👍🏽` searches for `👍` with any tone or none.
@@ -558,9 +558,9 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - A server installed some other way than through clackatoo, after a file of its was first opened, isn't looked for again until the daemon restarts.
 - `indentkeys` and `indentexpr` as options. Esc on a line with nothing but its indent leaves the indent. `.` doesn't wait for a repeated new line's indent to be put right.
 - In Python, `else:` typed under the body it ends stays where it's typed, where Neovim takes it back a step: the grammar clackatoo installs reads that line differently.
-- Languages inside others, such as code in a Markdown file, or CSS in HTML: they're coloured as the outer language only. Code in a Markdown file is coloured only when it's [rendered](#rendered-markdown).
+- Languages inside others, such as code in a Markdown file, or CSS in HTML: they're colored as the outer language only. Code in a Markdown file is colored only when it's [rendered](#rendered-markdown).
 - Selecting, copying or searching rendered Markdown, images in it, scrolling a wide table in it sideways, and a link's heading in another file.
-- Choosing the colours. They're the palette's named colours where there's one to suit, so they follow the terminal's.
+- Choosing the colors. They're the palette's named colors where there's one to suit, so they follow the terminal's.
 - Options for one pane only: `:set` sets them for every pane.
 - `clackatoo edit` opens the tab, but the window doesn't switch to it ([`clackatoo open`](~clackatoo/reference/cli#open) does).
 - `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that moves more than one line, as `:g/^/m0` does, leaves marks on them where they were, as its moves are made as one edit. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.

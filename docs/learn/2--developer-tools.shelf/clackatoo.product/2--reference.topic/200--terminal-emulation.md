@@ -7,7 +7,7 @@ related:
   - clackatoo/getting-started/what-is-clackatoo
 ---
 
-clackatoo emulates enough of xterm for shells, ncurses programs such as htop, and vim, under `TERM=xterm-256color`, with the extensions modern terminals such as kitty, foot, WezTerm and Ghostty share: the kitty keyboard protocol, synchronized output, styled and coloured underlines, and a program's progress shown on its tab. Sequences it doesn't support are ignored, as xterm ignores ones it doesn't know.
+clackatoo emulates enough of xterm for shells, ncurses programs such as htop, and vim, under `TERM=xterm-256color`, with the extensions modern terminals such as kitty, foot, WezTerm and Ghostty share: the kitty keyboard protocol, synchronized output, styled and colored underlines, and a program's progress shown on its tab. Sequences it doesn't support are ignored, as xterm ignores ones it doesn't know.
 
 ## The environment
 
@@ -48,14 +48,14 @@ A program you started from a shell is no different from one the daemon started: 
 
 [`clackatoo display`](~clackatoo/reference/cli#display) shows the display programs get now, and where it came from. `CLACKATOO_DISPLAY=off` in the daemon's environment turns all of this off: programs get the daemon's own environment, and shells change nothing. Each machine's daemon follows its own desktop; nothing about it passes between machines.
 
-## Screen behaviour
+## Screen behavior
 
 - **Scrollback**: the primary screen keeps the last 10,000 lines that scroll off its top. Lines only enter scrollback when the whole screen scrolls. Scrolling inside a region an app has narrowed (as vim does) discards them. Scrollback is stored as compact text, typically under 100 bytes a line, and remembers which lines were wrapped, so they can be rewrapped to another width. Compacting a line takes about as long as printing it did, so by default the daemon waits until a terminal's output has paused for 100 ms. Lines that scroll away during a flood (`cat` of a huge file) are never compacted at all. Until then, history keeps lines as they were on screen, about 8 bytes per column, capped at 16 MiB per terminal. The daemon's `--scrollback-compaction` option changes this: `eager` compacts each line as it scrolls off, which is the smallest but the slowest, and `off` never compacts, which is the fastest but the largest.
 - **Floods**: a terminal printing without end never holds up another you're typing in. The daemon reads it last in each turn, after updates have gone out, and stops as soon as anything else is ready. Output a program prints at once, such as a full-screen redraw, is still shown whole, and a program's last output always reaches its pane before the pane closes.
 - **Resizing**: lines on the primary screen are rewrapped to the new width, and the cursor stays on the same character. A line that started in scrollback is rewrapped whole, as if it had been printed at the new width, so its part on screen still lines up with its part above. Only the last few screens' worth of a very long line is rewrapped, and older scrollback is left as it is. When the screen gets shorter, blank lines below the cursor go first, then lines above it move into scrollback. Erasing the top line or scrolling it away ends a line continuing from scrollback, so a resize never joins what's printed next onto it. The alternate screen is cut off or extended instead, because the full-screen programs that use it redraw after a resize.
 - **Alternate screen**: full-screen programs switch to a second screen with no scrollback. Leaving it restores the primary screen and cursor exactly.
 - **Wrapping**: printing in the last column leaves the cursor there, and the line wraps only when the next character arrives.
-- **Background colour erase**: clearing part of the screen fills it with the current background colour.
+- **Background color erase**: clearing part of the screen fills it with the current background color.
 - **Wide characters** take two columns. A wide character that doesn't fit at the end of a line wraps to the next one.
 - **Combining characters** (accents, variation selectors) join the character before them. So do characters after a zero-width joiner, so emoji sequences such as 👩&#x200D;💻 stay one character.
 
@@ -71,28 +71,28 @@ A program you started from a shell is no different from one the daemon started: 
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
 | DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)) |
-| SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colours for text, background and underline (`58`), in both the `;` and `:` spellings. |
+| SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
 | `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/window#commands); the marks also say whether a [background tab](~clackatoo/reference/window#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/window#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)) |
 
 ## Queries answered
 
 | Query | Reply |
 |---|---|
-| `CSI c` (primary device attributes) | `CSI ? 62 ; 22 c`: a VT220 with colour |
+| `CSI c` (primary device attributes) | `CSI ? 62 ; 22 c`: a VT220 with color |
 | `CSI 5 n` (status) | `CSI 0 n` |
 | `OSC 52 ; c ; ?` (clipboard) | `OSC 52 ; c ; <base64> ST`, empty if refused or unanswered within 2 s, ended with BEL if the query was |
 | `CSI 6 n` and `CSI ? 6 n` (cursor position) | `CSI <line> ; <col> R`, with `?` for the second form. Relative to the scroll region in origin mode. |
 | `CSI > q` (terminal version) | `DCS > \| clackatoo <version> ST` |
 | `CSI > c` (secondary device attributes) | `CSI > 1 ; <version> ; 0 c`: a VT220, its version clackatoo's year and month, as `202611`, as foot answers with its own. vim reads a number this high as a modern terminal's, not an old xterm's. |
 | `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 included. 2027 (grapheme clustering) is answered 0: not every character's width is as Unicode's segmentation would have it. |
-| `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's and cursor's colours) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colours, as vim, bat and delta do. |
+| `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's and cursor's colors) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colors, as vim, bat and delta do. |
 | `OSC 4 ; <index> ; ?` (a palette entry, several pairs at once) | `OSC 4 ; <index> ; rgb:… ST` for each |
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
 | `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels (`14t`, `16t`) aren't answered: the daemon knows the terminal's size in cells alone. Nor is the title read back (`21t`), which would let a program type what it set. |
-| `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say, the name said back only if it's hex, and `DCS 0 + r ST` otherwise: no answer ever says back what a program printed, which could have it type anything into the shell. It says `xterm-256color`'s name (`TN`) and colours (`Co`), 24-bit colour (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and coloured underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
+| `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say, the name said back only if it's hex, and `DCS 0 + r ST` otherwise: no answer ever says back what a program printed, which could have it type anything into the shell. It says `xterm-256color`'s name (`TN`) and colors (`Co`), 24-bit color (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and colored underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
 | `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own) and the scroll region (`r`); `DCS 0 $ r ST` for any other. |
 
-The colours are those the window draws terminals in, which it tells the daemon as it connects, so the daemon answers at once, as programs wait only a moment. Every terminal answers with those of the window that told it last, and the daemon tells those on [other machines](~clackatoo/reference/remote) it's connected to. Until a window has told it, as with a window older than protocol 139, these questions aren't answered, and programs keep their defaults.
+The colors are those the window draws terminals in, which it tells the daemon as it connects, so the daemon answers at once, as programs wait only a moment. Every terminal answers with those of the window that told it last, and the daemon tells those on [other machines](~clackatoo/reference/remote) it's connected to. Until a window has told it, as with a window older than protocol 139, these questions aren't answered, and programs keep their defaults.
 
 A program that asks faster than it reads the answers, as one at the far end of an ssh connection that has stopped reading can, gets no more once 64 KiB of answers and input wait for it. Answers are dropped whole, never cut, and what you type still goes in. The clipboard's answers go the same way, and so do answers to a program still reading a long paste: it gets none until it has read most of it.
 
@@ -126,7 +126,7 @@ A program can say how far a long task has got with `OSC 9 ; 4 ; <state> ; <perce
 These are ignored:
 
 - The kitty graphics protocol (`APC G`), sixels and other images.
-- Setting colours: `OSC 4`, `10`, `11`, `12`, `104` and the others. Asking about them is [answered](#queries-answered).
+- Setting colors: `OSC 4`, `10`, `11`, `12`, `104` and the others. Asking about them is [answered](#queries-answered).
 - Desktop notifications from programs: `OSC 99`, `OSC 777` and iTerm2's `OSC 9`.
 - Key repeats and releases (the kitty keyboard protocol's flag 2), and Super, Hyper and Meta as modifiers.
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).

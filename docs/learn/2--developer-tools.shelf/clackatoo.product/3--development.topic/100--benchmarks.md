@@ -36,11 +36,11 @@ Both suites use the same workloads. They are generated in code from a fixed seed
 | Workload | Stands for |
 |---|---|
 | `ascii` | Plain text scrolling, like `cat` of a log. Lines vary in length, and some wrap. |
-| `highlight` | Words in 24-bit colours, some bold, like syntax-highlighted code. |
+| `highlight` | Words in 24-bit colors, some bold, like syntax-highlighted code. |
 | `dense` | A different style in every cell, redrawing the whole screen. The worst case for style handling. |
 | `region` | Scrolling inside a scroll region, the way pagers and editors scroll part of the screen. |
 | `unicode` | Wide CJK characters and emoji, combining accents, and emoji joined with ZWJ (zero width joiner). |
-| `cursor` | Short writes at random places, sometimes recoloured, like a full-screen program redrawing. |
+| `cursor` | Short writes at random places, sometimes recolored, like a full-screen program redrawing. |
 | `vim` | A recorded vim session (open, edit, quit), repeated. Emulator suite only. |
 
 Generated workloads play in a 120x40 terminal, a typical window. The vim recording plays at the size it was recorded at.
@@ -135,7 +135,7 @@ Both suites work like criterion's baselines:
 - `--save-baseline NAME` compares with the baseline called `NAME` and replaces it.
 - `--baseline NAME` compares with `NAME` without saving anything.
 
-To measure a change, save a baseline before making it, then compare against it afterwards:
+To measure a change, save a baseline before making it, then compare against it afterward:
 
 ```sh
 cargo bench -- --save-baseline before
@@ -155,7 +155,7 @@ To see where the time goes, replay one workload through the emulator in a loop a
 cargo run --release -p clackatoo-bench --example replay -- dense 20
 ```
 
-That plays `dense` for 20 seconds and prints its throughput. Release builds use link-time optimisation, so build with `CARGO_PROFILE_RELEASE_DEBUG=true` to get the function names back in a profiler.
+That plays `dense` for 20 seconds and prints its throughput. Release builds use link-time optimization, so build with `CARGO_PROFILE_RELEASE_DEBUG=true` to get the function names back in a profiler.
 
 ## Pane status and focus
 
@@ -169,7 +169,7 @@ CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clack
 
 It reports the median of seven batches for each operation. Compare the same
 harness and build profile on both revisions, with other builds finished.
-The default test profile is unoptimised: these numbers help find changes in
+The default test profile is unoptimized: these numbers help find changes in
 dispatch cost, but do not measure release frame latency. There is no timing
 assertion because a shared machine's load varies.
 
@@ -200,7 +200,7 @@ CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clack
 
 Each reports nanoseconds per stroke, taking the median of seven batches:
 10,000 navigation sequences or 100 search sequences, whose pattern compilation
-is much more expensive in an unoptimised build. The search query matches entries in the board and
+is much more expensive in an unoptimized build. The search query matches entries in the board and
 explorer; the review fixture exercises a missing query. Compare identical
 harnesses and build profiles, with compilation finished. These default
-unoptimised test timings compare dispatch cost, not release input latency.
+unoptimized test timings compare dispatch cost, not release input latency.
