@@ -37,9 +37,11 @@ pub(super) struct Configuring {
     /// What the config set as it last ran without a mistake, once it's run
     /// again; until then, what it set as the daemon started.
     configured: Option<Settings>,
-    /// Why it didn't run, as its files are now, if it didn't; until it's
-    /// run again, as the daemon started.
-    failure: Option<Option<String>>,
+    /// Why it didn't run, as its files are now, if it didn't, once it's
+    /// run again; until then, [`settings::Own::failure`] says.
+    failure: Option<String>,
+    /// It has run again since the daemon started.
+    ran: bool,
     /// When to run it again, as its files have changed.
     due: Option<Instant>,
     /// A run under way, off the loop.
@@ -180,15 +182,19 @@ impl Daemon {
             Ok((settings, fresh)) => {
                 self.take_live_config(&fresh);
                 self.configuring.configured = Some(settings);
-                self.configuring.failure = Some(None);
+                self.configuring.failure = None;
+                self.configuring.ran = true;
                 // Modules it requires now are watched too.
                 self.watch_config();
             }
             // A change refused leaves the config as it was, and as it ran.
             Err(_) if asked.is_some() => {}
-            Err(said) => self.configuring.failure = Some(Some(said)),
+            Err(said) => {
+                self.configuring.failure = Some(said);
+                self.configuring.ran = true;
+            }
         }
-        self.tell_daemon_settings(asked.map(|asked| asked.token), saved);
+        self.tell_daemon_settings(asked.map(|asked| asked.token), saved.as_ref());
     }
 
     /// Takes from `fresh`, the daemon's config as its own config is now,
@@ -206,7 +212,7 @@ impl Daemon {
     /// Tells every window of the daemon's settings, and the one at `asker`,
     /// what came of its change, `saved`: never a device on the web app, a
     /// daemon relaying, nor what serves agents' tools.
-    fn tell_daemon_settings(&mut self, asker: Option<Token>, saved: Option<OptionSaved>) {
+    fn tell_daemon_settings(&mut self, asker: Option<Token>, saved: Option<&OptionSaved>) {
         let windows: Vec<Token> = (self.sources.iter())
             .filter_map(|(at, source)| match source {
                 Source::Client(client)
@@ -225,7 +231,7 @@ impl Daemon {
         }
         let settings = self.daemon_settings();
         for token in windows {
-            let saved = (Some(token) == asker).then(|| saved.clone()).flatten();
+            let saved = saved.filter(|_| Some(token) == asker).cloned();
             self.send_event(
                 token,
                 Event::DaemonSettings {
@@ -245,9 +251,10 @@ impl Daemon {
             };
         };
         let configured = (self.configuring.configured.as_ref()).unwrap_or(&own.settings);
-        let failure = match &self.configuring.failure {
-            Some(failure) => failure.clone(),
-            None => own.failure.clone(),
+        let failure = if self.configuring.ran {
+            self.configuring.failure.clone()
+        } else {
+            own.failure.clone()
         };
         let options = (options::ALL.iter())
             .map(|info| {

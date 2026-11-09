@@ -213,7 +213,7 @@ pub enum Read {
 impl Read {
     /// The value `text` is, if it's one clackatoo writes.
     #[must_use]
-    pub fn read(text: &str) -> Option<Self> {
+    pub fn of(text: &str) -> Option<Self> {
         match text {
             "true" => return Some(Self::Bool(true)),
             "false" => return Some(Self::Bool(false)),
@@ -256,9 +256,9 @@ impl Read {
             (Self::Bool(on), Kind::Bool) => Value::Bool(*on),
             (Self::Whole(number), Kind::Number { .. }) => Value::Number(*number),
             (Self::Whole(number), Kind::Decimal { .. }) => Value::Decimal(Decimal::whole(*number)),
-            (Self::Fraction(text), Kind::Decimal { .. }) => return info.parse(text).ok(),
             (Self::Numbers(numbers), Kind::List { .. }) => Value::List(numbers.clone()),
-            (Self::Text(text), Kind::Choice(_) | Kind::Text) => return info.parse(text).ok(),
+            (Self::Fraction(text), Kind::Decimal { .. })
+            | (Self::Text(text), Kind::Choice(_) | Kind::Text) => return info.parse(text).ok(),
             _ => return None,
         };
         info.check(&value).ok().map(|()| value)

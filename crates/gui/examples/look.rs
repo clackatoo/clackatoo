@@ -335,7 +335,14 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                         contents.push('\n');
                     }
                 }
-                if word != "file" {
+                if word == "file" {
+                    let path = PathBuf::from(path);
+                    if path.is_absolute() || path.components().any(|part| part.as_os_str() == "..")
+                    {
+                        bail!("line {line_number}: files go in the project");
+                    }
+                    Command::File(path, contents)
+                } else {
                     if !path.is_empty() || until.is_none() {
                         bail!("line {line_number}: `{word}` takes its lines: `{word} <<END`");
                     }
@@ -344,13 +351,6 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                         "daemon-config" => Command::DaemonConfig(contents),
                         _ => Command::Config(contents),
                     }
-                } else {
-                    let path = PathBuf::from(path);
-                    if path.is_absolute() || path.components().any(|part| part.as_os_str() == "..")
-                    {
-                        bail!("line {line_number}: files go in the project");
-                    }
-                    Command::File(path, contents)
                 }
             }
             "open" => Command::Open(rest.to_owned()),

@@ -193,10 +193,11 @@ pub(crate) fn daemon_elsewhere(facts: &Facts) -> Option<String> {
 /// The option called `name`, the window's or, written `group.name`, the
 /// daemon's.
 pub(crate) fn find(name: &str) -> Result<&'static Info, String> {
-    match name.contains('.') {
-        true => clackatoo_daemon::settings::options::find(name)
-            .ok_or_else(|| format!("the daemon has no option ‘{name}’")),
-        false => crate::options::find(name),
+    if name.contains('.') {
+        clackatoo_daemon::settings::options::find(name)
+            .ok_or_else(|| format!("the daemon has no option ‘{name}’"))
+    } else {
+        crate::options::find(name)
     }
 }
 
@@ -435,10 +436,9 @@ enum Section {
 impl Section {
     fn title(self) -> &'static str {
         match self {
-            Self::Options(category) => category.title(),
             Self::Keys => "Keys",
             Self::Daemon(Category::Agents) => "The daemon's agents",
-            Self::Daemon(category) => category.title(),
+            Self::Options(category) | Self::Daemon(category) => category.title(),
         }
     }
 }
@@ -1563,7 +1563,6 @@ impl SettingsMenu {
         let index = self.ranking.get(rank)?;
         let accents = self.ranking.matched_chars(self.items.get(index));
         let mut pieces: Vec<(String, Ink)> = Vec::new();
-        let tag: Option<(String, Ink)>;
         // The characters of what's matched that a piece of the row shows,
         // from where it starts in the row's text.
         let matched_in = |piece: &str, from: usize| -> Vec<bool> {
@@ -1576,7 +1575,7 @@ impl SettingsMenu {
                 .collect()
         };
         let mut lit: Vec<bool> = Vec::new();
-        match &self.entries[index] {
+        let tag: Option<(String, Ink)> = match &self.entries[index] {
             Entry::Option(info) => {
                 let changed = facts.value(info) != info.default_value();
                 // The daemon's, whose names are longer, as wide as theirs,
@@ -1597,7 +1596,7 @@ impl SettingsMenu {
                 pieces.push((name, if changed { Ink::Bold } else { Ink::Plain }));
                 pieces.push((shown_value(info, &facts.value(info)), Ink::Plain));
                 let differs = facts.get(info) != facts.configured_value(info);
-                tag = if let Some(by) = facts.locked(info) {
+                if let Some(by) = facts.locked(info) {
                     Some((short_place(&by), Ink::Muted))
                 } else if facts.local(info).is_some() {
                     Some(("this window's own".into(), Ink::Muted))
@@ -1610,7 +1609,7 @@ impl SettingsMenu {
                     Some(("for windows opened after".into(), Ink::Muted))
                 } else {
                     None
-                };
+                }
             }
             Entry::Keys(bound) => {
                 let keys = display(&bound.keys);
@@ -1619,15 +1618,15 @@ impl SettingsMenu {
                 lit.resize(name.chars().count(), false);
                 pieces.push((name, Ink::Plain));
                 pieces.push((bound.does(), Ink::Plain));
-                tag = Some(match facts.bound_by(bound) {
+                Some(match facts.bound_by(bound) {
                     Some(by) if by.config_loading() => (short_place(&by), Ink::Muted),
                     Some(by) if by.source == Source::Settings => {
                         ("settings.lua".into(), Ink::Muted)
                     }
                     _ => (KeyMode::letters(&bound.modes), Ink::Muted),
-                });
+                })
             }
-        }
+        };
         let mut text = String::new();
         let mut inks = Vec::new();
         for (piece, ink) in &pieces {
@@ -1891,6 +1890,7 @@ fn detail(picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> Previe
 }
 
 /// What the preview says of `info`'s option.
+#[allow(clippy::too_many_lines, reason = "a few lines for each thing said")]
 fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
     let mut title = vec![(info.name.to_owned(), Ink::Bold)];
     if !info.short.is_empty() {

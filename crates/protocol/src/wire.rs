@@ -1277,6 +1277,7 @@ pub trait Downgrade: Sized {
 /// Windows check capabilities before sending. A relay may reach an older
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
+    #[allow(clippy::too_many_lines, reason = "one check per gate, each short")]
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if wire < UNDO_STATE
             && let Some(older) = change_as_older(self)

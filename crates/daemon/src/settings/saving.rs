@@ -343,7 +343,7 @@ fn sets(trimmed: &str) -> Option<Line> {
     if !literal::ends_line(comment) {
         return None;
     }
-    let read = Read::read(written)?;
+    let read = Read::of(written)?;
     let saved = options::find(name)
         .and_then(|info| read.value_for(info))
         .map_or_else(|| Saved::Written(written.to_owned()), Saved::Value);

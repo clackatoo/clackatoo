@@ -26837,6 +26837,7 @@ fn daemon_option<'a>(
 /// back, one init.lua sets is refused, and a broken init.lua keeps the
 /// last good, saying why (CLACKA-237).
 #[test]
+#[allow(clippy::too_many_lines, reason = "one change after another")]
 fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     use clackatoo_daemon::settings;
     let daemon = TestDaemon::start_with(|dir, config| {

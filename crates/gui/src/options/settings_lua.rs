@@ -413,7 +413,7 @@ fn sets(trimmed: &str) -> Option<Line> {
     if !commented {
         return None;
     }
-    let read = Literal::read(literal)?;
+    let read = Literal::of(literal)?;
     let saved = lookup(name)
         .and_then(|info| read.value_for(info))
         .map_or_else(|| Saved::Written(literal.to_owned()), Saved::Value);

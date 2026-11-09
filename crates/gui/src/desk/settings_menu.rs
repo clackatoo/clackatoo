@@ -166,7 +166,8 @@ impl Desk {
             .failure
             .clone()
             .filter(|failure| Some(failure) != before.as_ref());
-        self.daemon_settings = Some(facts);
+        // A daemon without a config of its own has no settings to show.
+        self.daemon_settings = (!settings.options.is_empty()).then_some(facts);
         self.settings_changed();
         match saved {
             Some(OptionSaved {
@@ -203,18 +204,18 @@ impl Desk {
     fn save_daemon_option(
         &mut self,
         info: &'static crate::options::Info,
-        value: Option<crate::options::Value>,
+        value: Option<&crate::options::Value>,
     ) {
         if !self.daemon_has(wire::DAEMON_SETTINGS) {
             return self.warn_saved("this daemon is too old to change its settings here".into());
         }
         if let Some(daemon) = &mut self.daemon_settings {
-            daemon.counting_on(info, value.clone());
+            daemon.counting_on(info, value.cloned());
         }
         self.request(
             Request::SetDaemonOption {
                 name: info.name.to_owned(),
-                value: value.as_ref().map(crate::options::Value::text),
+                value: value.map(crate::options::Value::text),
             },
             Asked::DaemonOption(info),
         );
@@ -419,7 +420,7 @@ impl Desk {
                 let (daemons, sets): (Vec<_>, Vec<_>) =
                     (sets.into_iter()).partition(|set| set.info.scope == Scope::Daemon);
                 for set in daemons {
-                    self.save_daemon_option(set.info, set.saved);
+                    self.save_daemon_option(set.info, set.saved.as_ref());
                 }
                 if sets.is_empty() {
                     return;

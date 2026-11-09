@@ -861,7 +861,6 @@ mod tests {
             logind: None,
             history: None,
             notes: Vec::new(),
-            own_config: None,
             ..DaemonConfig::from_env()
         };
         let mut daemon = Daemon::bind(&runtime.socket_path(), config).unwrap();
