@@ -404,3 +404,36 @@ fn an_option_read_as_a_window_opens_steps_from_what_is_saved() {
     saved(&mut desk, 1);
     assert_eq!(read(&dir, "client/startup.toml"), "renderer = \"opengl\"\n");
 }
+
+#[test]
+fn an_agents_keys_save_no_keys_and_leave_nothing_to_undo() {
+    let (mut desk, dir) = configured("");
+    command(&mut desk, "mapp n <A-u> u");
+    saved(&mut desk, 1);
+    command(&mut desk, "Settings new tab");
+    desk.automating = true;
+    named(&mut desk, NamedKey::Enter);
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("t".into()), None, alt);
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(menu(&mut desk).1, "an agent's input can't save keys");
+    desk.automating = false;
+    type_keys(&mut desk, "u");
+    assert_eq!(menu(&mut desk).1, "the menu hasn't changed niv <C-b>c");
+    let keys = parse_keys("<A-t>").unwrap();
+    assert!(desk.client().0.keys().get(KeyMode::Normal, &keys).is_none());
+    // Nor take any out.
+    named(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, "/<A-u>");
+    named(&mut desk, NamedKey::Enter);
+    desk.automating = true;
+    type_keys(&mut desk, "d");
+    assert_eq!(menu(&mut desk).1, "an agent's input can't save keys");
+    desk.automating = false;
+    assert!(read(&dir, "client/settings.lua").contains("<A-u>"));
+    type_keys(&mut desk, "u");
+    assert_eq!(menu(&mut desk).1, "the menu hasn't changed n <A-u>");
+}

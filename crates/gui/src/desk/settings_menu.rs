@@ -33,6 +33,7 @@ impl Desk {
                 window: self.options.window(),
                 keys: &keys,
                 dir: dir.as_deref(),
+                automating: self.automating,
             };
             menu.follow_keys(&facts, client.keys_changes());
             with(&mut menu, &facts, &mut history)
@@ -59,6 +60,7 @@ impl Desk {
                 window: self.options.window(),
                 keys: &keys,
                 dir: dir.as_deref(),
+                automating: self.automating,
             };
             SettingsMenu::new(query, case, &facts, client.keys_changes())
         };

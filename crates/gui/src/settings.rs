@@ -66,6 +66,9 @@ pub(crate) struct Facts<'a> {
     pub(crate) keys: &'a Keys,
     /// clackatoo's config directory, which places are said from.
     pub(crate) dir: Option<&'a Path>,
+    /// The keys are an agent's, through native window access, which can't
+    /// save keys (see `Desk::automating`).
+    pub(crate) automating: bool,
 }
 
 impl Facts<'_> {
@@ -306,6 +309,9 @@ pub(crate) struct SettingsMenu {
     /// them again once they change.
     keys_seen: u64,
 }
+
+/// Why an agent's keys don't change keys, as the window says too.
+const AGENTS_SAVE_NO_KEYS: &str = "an agent's input can't save keys";
 
 /// What the font picker lists for the system's monospace font, first.
 const SYSTEM_FONT: &str = "the system's monospace font";
@@ -859,6 +865,11 @@ impl SettingsMenu {
                 }
                 Outcome::Change { info, live, saved }
             }
+            Undo::Keys(changes) if facts.automating => {
+                // Kept, for the user to undo.
+                history.0.entry(name).or_default().push(Undo::Keys(changes));
+                self.refuse(AGENTS_SAVE_NO_KEYS)
+            }
             Undo::Keys(changes) => Outcome::Keys(changes),
         }
     }
@@ -880,6 +891,9 @@ impl SettingsMenu {
         let Some(Entry::Keys(bound)) = self.picked() else {
             return Outcome::Nothing;
         };
+        if facts.automating {
+            return self.refuse(AGENTS_SAVE_NO_KEYS);
+        }
         let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
         let (Binding::Keys(to), Source::Settings) = (&bound.binding, by.source) else {
             return self.refuse(&format!(
@@ -945,6 +959,9 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
+        if facts.automating {
+            return self.refuse(AGENTS_SAVE_NO_KEYS);
+        }
         if let Some(by) = facts.keys_locked(&bound.modes, &keys) {
             let said = format!(
                 "{} binds {}, which outdoes what the menu saves",
