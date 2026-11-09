@@ -102,6 +102,10 @@ impl Desk {
             log::info!("an image Markdown names can't be shown: {path}: {why}");
         }
         let found = found.ok();
+        // Read again, an image let go before can be fetched now.
+        if let Some(info) = &found {
+            self.pictures.images.offered(info.id);
+        }
         let mut changed = false;
         for (_, editor) in self.editors_mut() {
             if editor.buffer() == buffer {

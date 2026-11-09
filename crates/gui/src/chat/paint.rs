@@ -3633,7 +3633,7 @@ mod tests {
         assert_eq!(drawn.images.len(), 1);
         assert_eq!(
             drawn.images[0].key,
-            crate::render::TextureKey::Image(id, side)
+            crate::render::TextureKey::Image(images.key(id), side)
         );
         assert_eq!(&drawn.images[0].image.rgba[..4], &[1, 2, 3, 255]);
     }

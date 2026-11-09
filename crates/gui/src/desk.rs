@@ -12214,31 +12214,23 @@ mod tests {
 
     // --- Pictures --------------------------------------------------------
 
-    /// A picture pane attaches to its picture while its tab's shown, asks
-    /// the daemon for its image a part at a time once it's drawn, has it
-    /// decoded, and draws it below its words, fitted; its keys zoom it.
-    #[test]
-    #[allow(
-        clippy::float_cmp,
-        clippy::too_many_lines,
-        reason = "places are whole pixels; one pane's life"
-    )]
-    fn a_picture_pane_fetches_its_image_and_draws_it_fitted_below_its_words() {
-        use clackatoo_protocol::{
-            ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, Picture, PictureId,
-            PictureState,
-        };
-        let mut png = Vec::new();
-        image::RgbaImage::from_pixel(200, 100, image::Rgba([9, 8, 7, 255]))
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-        let info = ImageInfo {
-            id: ImageId([3; 16]),
-            width: 200,
-            height: 100,
-            format: ImageFormat::Png,
-            bytes: png.len() as u64,
-        };
+    /// The requests `desk` has to send.
+    fn requests_of(desk: &mut Desk) -> Vec<Request> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A desk showing a picture pane, attached, shown `info`, and drawn
+    /// once, with where its panes are.
+    fn picture_desk(
+        info: clackatoo_protocol::ImageInfo,
+    ) -> (Desk, Vec<(PaneId, crate::layout::Tile)>) {
+        use clackatoo_protocol::{Picture, PictureId, PictureState};
+        let take = requests_of;
         let picture = Layout::Pane(LayoutPane {
             id: PaneId(4),
             content: Content::Picture(PictureId(2)),
@@ -12258,14 +12250,6 @@ mod tests {
             inset: 5.0,
         }));
         desk.connected(one_tab(picture), false);
-        let take = |desk: &mut Desk| -> Vec<Request> {
-            (desk.take_outbox().into_iter())
-                .filter_map(|message| match message {
-                    ClientMessage::Request(request) => Some(request),
-                    _ => None,
-                })
-                .collect()
-        };
         // Attached as it's shown: answered with what it shows.
         let asked = take(&mut desk);
         assert!(asked.contains(&Request::AttachPicture {
@@ -12289,6 +12273,33 @@ mod tests {
         );
         let tiles = desk.placement().unwrap().panes;
         assert!(desk.paint_pictures(&tiles, [10.0, 20.0]).is_empty());
+        (desk, tiles)
+    }
+
+    /// A picture pane attaches to its picture while its tab's shown, asks
+    /// the daemon for its image a part at a time once it's drawn, has it
+    /// decoded, and draws it below its words, fitted; its keys zoom it.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        clippy::too_many_lines,
+        reason = "places are whole pixels; one pane's life"
+    )]
+    fn a_picture_pane_fetches_its_image_and_draws_it_fitted_below_its_words() {
+        use clackatoo_protocol::{ImageAnswer, ImageFormat, ImageFrom, ImageInfo, PictureId};
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(200, 100, image::Rgba([9, 8, 7, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let info = ImageInfo {
+            id: clackatoo_daemon::image_id(&png),
+            width: 200,
+            height: 100,
+            format: ImageFormat::Png,
+            bytes: png.len() as u64,
+        };
+        let (mut desk, tiles) = picture_desk(info);
+        let take = requests_of;
         // Drawn, its image is asked for, a part at a time.
         assert!(desk.settle_images());
         let asked = take(&mut desk);
@@ -12337,6 +12348,43 @@ mod tests {
         // `q` closes it.
         type_keys(&mut desk, "q");
         assert!(take(&mut desk).contains(&Request::ClosePane { pane: PaneId(4) }));
+    }
+
+    /// Bytes fetched that aren't the image their ID says aren't kept, nor
+    /// shown, which other windows would show too: nor asked for again.
+    #[test]
+    fn an_image_fetched_changed_on_the_way_isnt_kept() {
+        use clackatoo_protocol::{ImageAnswer, ImageFormat, ImageFrom, ImageInfo, PictureId};
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(20, 10, image::Rgba([9, 8, 7, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let info = ImageInfo {
+            id: clackatoo_daemon::image_id(&png),
+            width: 20,
+            height: 10,
+            format: ImageFormat::Png,
+            bytes: png.len() as u64,
+        };
+        let (mut desk, tiles) = picture_desk(info);
+        assert!(desk.settle_images());
+        assert_eq!(requests_of(&mut desk).len(), 1);
+        let last = png.len() - 1;
+        png[last] ^= 1;
+        desk.answered(Response::Image(ImageAnswer::Part {
+            info,
+            total: info.bytes,
+            at: 0,
+            bytes: png,
+        }));
+        let from = ImageFrom::Picture(PictureId(2));
+        assert!(matches!(
+            desk.pictures.images.show(from, info.id, 20.0),
+            crate::images::Shown::Failed(why) if why.contains("changed")
+        ));
+        assert!(desk.paint_pictures(&tiles, [10.0, 20.0]).is_empty());
+        desk.settle_images();
+        assert!(requests_of(&mut desk).is_empty(), "not asked for again");
     }
 
     // --- Browsers --------------------------------------------------------

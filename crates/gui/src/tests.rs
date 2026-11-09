@@ -2801,7 +2801,11 @@ fn windows_share_pictures_on_the_gpu_and_keep_them_between_frames() {
         height: 1,
         rgba: vec![0, 255, 0, 255],
     };
-    let kept = TextureKey::Image(clackatoo_protocol::ImageId([1; 16]), 64);
+    let image_key = crate::images::ImageKey {
+        machine: None,
+        id: clackatoo_protocol::ImageId([1; 16]),
+    };
+    let kept = TextureKey::Image(image_key, 64);
     let slot = TextureKey::Slot(9);
     let placed = [
         PlacedImage::at(kept, &image, [0.0, 0.0, 10.0, 10.0]),

@@ -70,7 +70,7 @@ pub mod upgrade;
 pub mod web;
 mod workspaces;
 
-pub use images::Limits as ImageLimits;
+pub use images::{Limits as ImageLimits, id_of as image_id};
 
 use std::ffi::OsString;
 use std::ops::RangeInclusive;

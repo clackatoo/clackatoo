@@ -251,6 +251,8 @@ impl Desk {
     pub(crate) fn settle_images(&mut self) -> bool {
         let asked = self.asks_sent;
         let images = self.pictures.images.clone();
+        // What one daemon can't show, or sent as a copy, is its alone.
+        images.on_machine(self.workspaces.machine.as_ref().map(|machine| machine.id));
         let (came, decoding) = images.take_decoded();
         self.pictures.decoding = decoding;
         for ((id, side), from) in images.take_wanted() {
@@ -342,7 +344,15 @@ impl Desk {
                 fetching.bytes.extend_from_slice(&bytes);
                 if fetching.bytes.len() as u64 == total {
                     let fetched = self.pictures.fetching.remove(&fetch).expect("found above");
-                    images.keep(fetch.id, fetch.copy, info, fetched.bytes);
+                    // An image is what its ID says, which its bytes are
+                    // checked against, as other windows draw them too.
+                    if fetch.copy.is_none()
+                        && clackatoo_daemon::image_id(&fetched.bytes) != fetch.id
+                    {
+                        images.gone(fetch.id, Gone::Failed("it came changed".into()));
+                    } else {
+                        images.keep(fetch.id, fetch.copy, info, fetched.bytes);
+                    }
                     return true;
                 }
                 if empty {

@@ -14,14 +14,14 @@
 //! let go first: the bytes fetched, the pixels decoded, and the textures on
 //! the GPU (see `render::textures`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
-use clackatoo_protocol::{ImageFormat, ImageFrom, ImageId, ImageInfo};
+use clackatoo_protocol::{ImageFormat, ImageFrom, ImageId, ImageInfo, MachineId};
 
 use crate::render::{Image, MAX_IMAGE_SIDE, TextureKey};
 
@@ -65,6 +65,15 @@ pub(crate) enum Shown {
     Failed(String),
 }
 
+/// An image, by its ID and the machine whose daemon the window fetches
+/// it from: what one daemon couldn't show, or sent as a copy, which can't
+/// be checked against the ID, is that daemon's alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ImageKey {
+    pub(crate) machine: Option<MachineId>,
+    pub(crate) id: ImageId,
+}
+
 /// Why an image can't be shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Gone {
@@ -91,7 +100,7 @@ struct Decoded {
 /// What the decoding thread is asked: `bytes`, which `info` describes,
 /// decoded at no more than `side`.
 struct Job {
-    key: (ImageId, u32),
+    key: (ImageKey, u32),
     info: ImageInfo,
     bytes: Arc<[u8]>,
 }
@@ -100,12 +109,12 @@ struct Job {
 #[derive(Debug, Default)]
 pub(crate) struct Cache {
     /// The bytes fetched, by image, and the side of the copy, if it is one.
-    fetched: HashMap<(ImageId, Option<u32>), Fetched>,
+    fetched: HashMap<(ImageKey, Option<u32>), Fetched>,
     fetched_bytes: u64,
-    decoded: HashMap<(ImageId, u32), Decoded>,
+    decoded: HashMap<(ImageKey, u32), Decoded>,
     decoded_bytes: u64,
-    gone: HashMap<ImageId, Gone>,
-    decoding: HashSet<(ImageId, u32)>,
+    gone: HashMap<ImageKey, Gone>,
+    decoding: HashSet<(ImageKey, u32)>,
     worker: Option<Worker>,
     tick: u64,
 }
@@ -114,7 +123,7 @@ pub(crate) struct Cache {
 #[derive(Debug)]
 struct Worker {
     jobs: mpsc::Sender<Job>,
-    done: mpsc::Receiver<((ImageId, u32), Result<Image, String>)>,
+    done: mpsc::Receiver<((ImageKey, u32), Result<Image, String>)>,
 }
 
 impl std::fmt::Debug for Job {
@@ -142,7 +151,7 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Cache> {
 impl Cache {
     /// How image `id`, wanted at `side`, is: the nearest size decoded
     /// stands in for it meanwhile.
-    fn shown(&mut self, id: ImageId, side: u32) -> Option<Shown> {
+    fn shown(&mut self, id: ImageKey, side: u32) -> Option<Shown> {
         self.tick += 1;
         let tick = self.tick;
         if let Some(decoded) = self.decoded.get_mut(&(id, side)) {
@@ -168,13 +177,13 @@ impl Cache {
     }
 
     /// Whether image `id` at `side` is ready, or can't be shown.
-    fn settled(&self, id: ImageId, side: u32) -> bool {
+    fn settled(&self, id: ImageKey, side: u32) -> bool {
         self.decoded.contains_key(&(id, side)) || self.gone.contains_key(&id)
     }
 
     /// The bytes fetched of image `id` that make it at `side`: the image
     /// itself, or a copy at least that big.
-    fn bytes_for(&self, id: ImageId, side: u32) -> Option<(ImageInfo, Arc<[u8]>)> {
+    fn bytes_for(&self, id: ImageKey, side: u32) -> Option<(ImageInfo, Arc<[u8]>)> {
         (self.fetched.iter())
             .filter(|((image, copy), _)| *image == id && copy.is_none_or(|copy| copy >= side))
             .min_by_key(|((_, copy), _)| copy.unwrap_or(u32::MAX))
@@ -182,7 +191,13 @@ impl Cache {
     }
 
     /// Keeps the bytes fetched of image `id`, or of its copy at `copy`.
-    pub(crate) fn keep(&mut self, id: ImageId, copy: Option<u32>, info: ImageInfo, bytes: Vec<u8>) {
+    pub(crate) fn keep(
+        &mut self,
+        id: ImageKey,
+        copy: Option<u32>,
+        info: ImageInfo,
+        bytes: Vec<u8>,
+    ) {
         self.tick += 1;
         self.gone.remove(&id);
         self.fetched_bytes += bytes.len() as u64;
@@ -208,13 +223,13 @@ impl Cache {
     }
 
     /// Notes image `id` can't be shown, as `gone` says.
-    pub(crate) fn gone(&mut self, id: ImageId, gone: Gone) {
+    pub(crate) fn gone(&mut self, id: ImageKey, gone: Gone) {
         self.gone.insert(id, gone);
     }
 
     /// Has image `id`'s bytes decoded at `side`, if they're fetched and
     /// it isn't being already. Returns whether it is now.
-    fn decode(&mut self, id: ImageId, side: u32) -> bool {
+    fn decode(&mut self, id: ImageKey, side: u32) -> bool {
         if self.decoding.contains(&(id, side)) {
             return true;
         }
@@ -369,6 +384,9 @@ pub(crate) struct Images {
     /// The images panes asked for and didn't have: each at a side, with
     /// whose it is.
     wanted: Rc<RefCell<HashMap<(ImageId, u32), ImageFrom>>>,
+    /// The machine whose daemon the window's connected to, once it's
+    /// known.
+    machine: Rc<Cell<Option<MachineId>>>,
 }
 
 impl Default for Images {
@@ -383,6 +401,21 @@ impl Images {
         Self {
             shared,
             wanted: Rc::default(),
+            machine: Rc::default(),
+        }
+    }
+
+    /// Says the window's daemon is `machine`'s: the images it fetches are
+    /// kept as that daemon's from now on.
+    pub(crate) fn on_machine(&self, machine: Option<MachineId>) {
+        self.machine.set(machine);
+    }
+
+    /// Image `id`, as fetched from the window's daemon.
+    pub(crate) fn key(&self, id: ImageId) -> ImageKey {
+        ImageKey {
+            machine: self.machine.get(),
+            id,
         }
     }
 
@@ -390,9 +423,10 @@ impl Images {
     /// is: noted as wanted if it isn't ready at that size.
     pub(crate) fn show(&self, from: ImageFrom, id: ImageId, drawn: f32) -> Shown {
         let side = side_for(drawn);
+        let key = self.key(id);
         let mut cache = lock(&self.shared);
-        let shown = cache.shown(id, side);
-        if !cache.settled(id, side) {
+        let shown = cache.shown(key, side);
+        if !cache.settled(key, side) {
             self.wanted.borrow_mut().insert((id, side), from);
         }
         shown.unwrap_or(Shown::Loading)
@@ -404,32 +438,33 @@ impl Images {
         let wanted = std::mem::take(&mut *self.wanted.borrow_mut());
         let cache = lock(&self.shared);
         (wanted.into_iter())
-            .filter(|((id, side), _)| !cache.settled(*id, *side))
+            .filter(|((id, side), _)| !cache.settled(self.key(*id), *side))
             .collect()
     }
 
     /// Has image `id` decoded at `side`, if its bytes are fetched. Returns
     /// whether it's being decoded now.
     pub(crate) fn decode(&self, id: ImageId, side: u32) -> bool {
-        lock(&self.shared).decode(id, side)
+        lock(&self.shared).decode(self.key(id), side)
     }
 
     /// Keeps the bytes fetched of image `id`, or of its copy at `copy`.
     pub(crate) fn keep(&self, id: ImageId, copy: Option<u32>, info: ImageInfo, bytes: Vec<u8>) {
-        lock(&self.shared).keep(id, copy, info, bytes);
+        lock(&self.shared).keep(self.key(id), copy, info, bytes);
     }
 
     /// Notes image `id` can't be shown, as `gone` says.
     pub(crate) fn gone(&self, id: ImageId, gone: Gone) {
-        lock(&self.shared).gone(id, gone);
+        lock(&self.shared).gone(self.key(id), gone);
     }
 
     /// The daemon offers image `id` again, as a picture read again does:
     /// let go there before, it can be fetched now.
     pub(crate) fn offered(&self, id: ImageId) {
+        let key = self.key(id);
         let mut cache = lock(&self.shared);
-        if matches!(cache.gone.get(&id), Some(Gone::Dropped(_))) {
-            cache.gone.remove(&id);
+        if matches!(cache.gone.get(&key), Some(Gone::Dropped(_))) {
+            cache.gone.remove(&key);
         }
     }
 
@@ -497,14 +532,14 @@ mod tests {
         };
         assert_eq!((image.width, image.height), (256, 128));
         assert_eq!(&image.rgba[..4], &[10, 20, 30, 255]);
-        assert_eq!(key, TextureKey::Image(info.id, 256));
+        assert_eq!(key, TextureKey::Image(images.key(info.id), 256));
         assert!(images.take_wanted().is_empty());
         // Wanted bigger, the smaller stands in while it's decoded.
         let Shown::Ready(standing, key) = images.show(from, info.id, 900.0) else {
             panic!("nothing stands in");
         };
         assert_eq!(standing.width, 256);
-        assert_eq!(key, TextureKey::Image(info.id, 256));
+        assert_eq!(key, TextureKey::Image(images.key(info.id), 256));
         assert_eq!(images.take_wanted(), vec![((info.id, 1024), from)]);
         assert!(images.decode(info.id, 1024));
         settle(&images);
@@ -549,6 +584,20 @@ mod tests {
         assert!(
             matches!(images.show(from, dropped, 10.0), Shown::Dropped(limit) if limit == 64 << 20)
         );
+        // What one daemon couldn't show, another's window may.
+        let elsewhere = Images::new(Arc::clone(&images.shared));
+        elsewhere.on_machine(Some(MachineId([7; 16])));
+        assert!(matches!(
+            elsewhere.show(from, dropped, 10.0),
+            Shown::Loading
+        ));
+        assert!(matches!(
+            elsewhere.show(from, info.id, 10.0),
+            Shown::Loading
+        ));
+        // Offered again, it's fetched again.
+        images.offered(dropped);
+        assert!(matches!(images.show(from, dropped, 10.0), Shown::Loading));
     }
 
     #[test]

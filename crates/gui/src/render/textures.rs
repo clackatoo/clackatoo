@@ -7,8 +7,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use clackatoo_protocol::ImageId;
-
 /// How many bytes of pictures are kept on the GPU, beyond those drawn in
 /// the frame: past it, those drawn longest ago are let go.
 pub(crate) const BUDGET: u64 = 256 * 1024 * 1024;
@@ -25,7 +23,7 @@ pub(crate) enum TextureKey {
     /// the pane, kept only while it's drawn, or was a few frames ago.
     Slot(u64),
     /// An image of the daemon's (see `crate::images`), decoded at a side.
-    Image(ImageId, u32),
+    Image(crate::images::ImageKey, u32),
     /// Pixels the window has, as a thumbnail an older daemon sent, by the
     /// picture's own number, which is never reused.
     Pixels(u64),
