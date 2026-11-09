@@ -44,6 +44,21 @@ pub(crate) struct HintMark<'a> {
     pub(crate) typed: usize,
 }
 
+/// The most characters of what's copied the bar says.
+const SAID: usize = 80;
+
+/// `text`, copied, as the bar says it: as a link's target is shown, every
+/// character that could hide or pass for another written out (see
+/// [`crate::links::shown_whole`]), and cut short past [`SAID`]
+/// characters.
+fn shown_short(text: &str) -> String {
+    let shown = crate::links::shown_whole(text);
+    match shown.char_indices().nth(SAID - 1) {
+        Some((cut, _)) if shown.chars().count() > SAID => format!("{}…", &shown[..cut]),
+        _ => shown,
+    }
+}
+
 /// What a label typed does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pick {
@@ -189,7 +204,7 @@ impl Desk {
             (Pick::Type, _) => self.paste(&hint.text),
             (Pick::Open, Some(target)) => self.open_hint(pane, target),
             (Pick::Copy | Pick::Open, _) => {
-                self.say(format!("copied {}", hint.text));
+                self.say(format!("copied {}", shown_short(&hint.text)));
                 self.pane_yanked(Yanked {
                     register: Register::chars(hint.text),
                     to: CopyTo::Clipboard,
@@ -284,5 +299,21 @@ impl Desk {
             selected: None,
             under: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_the_bar_says_was_copied_is_shown_whole_and_cut_short() {
+        assert_eq!(shown_short("7e84c2e9"), "7e84c2e9");
+        assert_eq!(shown_short("a\u{202e}b c"), "a<U+202E>b<U+0020>c");
+        let long = "x".repeat(200);
+        let said = shown_short(&long);
+        assert_eq!(said.chars().count(), SAID);
+        assert!(said.ends_with('…'));
+        assert_eq!(shown_short(&"y".repeat(SAID)), "y".repeat(SAID));
     }
 }
