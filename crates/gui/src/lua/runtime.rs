@@ -400,6 +400,10 @@ impl Runtime {
             }
             ToLua::Closed { window } => {
                 self.state.worlds.borrow_mut().remove(&window);
+                // What was left to do for its events goes with it.
+                let of = |job: &Job| job.origin.window == Some(window);
+                self.background.retain(|job| !of(job));
+                self.waiting.retain(|_, job| !of(job));
                 (self.state.handlers.borrow_mut())
                     .retain(|_, (scope, _, _)| scope.window() != Some(window));
             }

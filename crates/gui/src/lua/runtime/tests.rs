@@ -271,3 +271,66 @@ fn requests_are_numbered_afresh_across_lua_run_again() {
     let (first, again) = (split(), split());
     assert!(again > first, "{first} then {again}");
 }
+
+/// A window that closes takes what was left to do for its events with it:
+/// handlers waiting on answers, and background work.
+#[test]
+fn a_window_that_closes_takes_its_handlers_work_with_it() {
+    let (mut runtime, said) = runtime();
+    runtime
+        .state
+        .worlds
+        .borrow_mut()
+        .insert(2, World::default());
+    load(
+        &mut runtime,
+        r#"
+        client.keys.map('n', 's', function(ev)
+            ev.pane:split('right', {kind = 'terminal'})
+            client.cmd('split')
+        end)
+        client.on('turnend', function() client.cmd('heard') end)
+        "#,
+    );
+    let key = |window| KeyInfo {
+        key: "s".into(),
+        keys: Some("s".into()),
+        text: None,
+        mode: KeyMode::Normal,
+        window,
+        guarded: false,
+        pane: Some(PaneId(1)),
+        count: None,
+    };
+    for window in [WINDOW, 2] {
+        runtime.handle(ToLua::Bound {
+            seq: 1,
+            key: key(window),
+            binding: 1,
+        });
+        runtime.handle(ToLua::TurnEnded(TurnEnd {
+            window,
+            ..match turn_ended() {
+                ToLua::TurnEnded(turn) => turn,
+                _ => unreachable!(),
+            }
+        }));
+    }
+    assert_eq!((runtime.waiting.len(), runtime.background.len()), (2, 2));
+    runtime.handle(ToLua::Closed { window: 2 });
+    assert_eq!((runtime.waiting.len(), runtime.background.len()), (1, 1));
+    let requests: Vec<u64> = runtime.waiting.keys().copied().collect();
+    drain(&mut runtime, |_| {});
+    for request in requests {
+        runtime.handle(ToLua::Answer {
+            request,
+            result: Ok(PaneId(3)),
+        });
+    }
+    drain(&mut runtime, |_| {});
+    assert_eq!(
+        commands(&said),
+        ["heard", "split"],
+        "the first window's alone"
+    );
+}
