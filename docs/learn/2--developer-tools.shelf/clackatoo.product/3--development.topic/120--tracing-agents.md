@@ -13,7 +13,9 @@ A chat talks to its agent through the agent's adapter, a program speaking ACP, t
 
 Start the daemon with `CLACKATOO_ACP_TRACE` set to a directory:
 
-    CLACKATOO_ACP_TRACE=~/acp-traces clackatoo daemon
+```sh
+CLACKATOO_ACP_TRACE=~/acp-traces clackatoo daemon
+```
 
 Every agent the daemon starts from then on writes to a new file of its own there, named for the agent and the adapter's process ID, as `claude-12345.log`. A chat whose agent stops and starts again gets a new file. A file is never added to: if the name is taken, as when a process ID comes round again, the trace goes to `claude-12345.log.2`, `.3` and so on.
 
@@ -21,7 +23,9 @@ The directory is made if it isn't there, readable by you only, and each file is 
 
 Each line is one message or one line the adapter wrote to stderr:
 
-    2026-10-28T22:08:42.021Z agent claude[12345] -> {"jsonrpc":"2.0","id":0,"method":"initialize",...}
+```text
+2026-10-28T22:08:42.021Z agent claude[12345] -> {"jsonrpc":"2.0","id":0,"method":"initialize",...}
+```
 
 The time is in UTC. `->` is what clackatoo sent, `<-` what the adapter sent, and `!!` a line of its stderr.
 
@@ -48,8 +52,10 @@ Past 16 MiB, a trace file is set aside as `….log.1`, replacing the one set asi
 
 The daemon's tests named `a_real_…` talk to a real Claude Code or Codex. Each is ignored unless asked for, uses the cheapest model, and traces to `$TMPDIR/acp-NAME`:
 
-    cargo build --workspace --examples
-    cd crates/daemon
-    CLACKATOO_DISPLAY=off cargo test --test daemon a_real_session_of_six_turns -- --ignored --nocapture
+```sh
+cargo build --workspace --examples
+cd crates/daemon
+CLACKATOO_DISPLAY=off cargo test --test daemon a_real_session_of_six_turns -- --ignored --nocapture
+```
 
 Run them one at a time. They use the accounts `claude` and `codex` are logged in to. Most run the adapter the daemon would run, unless `CLACKATOO_REAL_AGENT` (Claude Code) or `CLACKATOO_REAL_CODEX` (Codex) gives a command, and with none say they were skipped and pass; a few older ones need `CLACKATOO_REAL_AGENT`.

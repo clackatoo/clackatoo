@@ -13,30 +13,36 @@ The daemon can serve a web app: your chats by workspace, with those that need yo
 
 It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The daemon reads it when it starts or upgrades (`clackatoo upgrade`), and logs any key in it that isn't a setting.
 
-    mode = "tailscale"   # or "public", or "off"
-    login = "you@github" # tailscale: who's let in
-    origin = "https://desktop.example.ts.net"
-    expire_days = 90     # unpair devices unused this long
-    password_days = 0    # ask for the password again after this many days
-    ask = true           # devices may ask a window to let them in
-    lock_after = 50      # wrong passwords in a row before password pairing locks (1 to 10000)
+```toml
+mode = "tailscale"   # or "public", or "off"
+login = "you@github" # tailscale: who's let in
+origin = "https://desktop.example.ts.net"
+expire_days = 90     # unpair devices unused this long
+password_days = 0    # ask for the password again after this many days
+ask = true           # devices may ask a window to let them in
+lock_after = 50      # wrong passwords in a row before password pairing locks (1 to 10000)
+```
 
 ### Through Tailscale
 
 The daemon listens on a socket only you can open, `~/.local/share/clackatoo/web/web.sock`, or where `socket` says. Give it to your tailnet over HTTPS with
 
-    tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
+```sh
+tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
+```
 
 and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that login must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs. Connections are counted by the device sending each request, by its whole tailnet address (IPv6 too), as `tailscale serve` says: each may have eight open at once, and its password tries and asks to pair are its own. At most sixteen connections may wait to say whom they're from; past that, the oldest is closed. Past 64 in all, room is made as from the network (below).
 
 ### Straight from the network
 
-    mode = "public"
-    address = "0.0.0.0"
-    port = 8765
-    certificate = "/path/fullchain.pem"
-    key = "/path/privkey.pem"
-    origin = "https://example.com:8765"
+```toml
+mode = "public"
+address = "0.0.0.0"
+port = 8765
+certificate = "/path/fullchain.pem"
+key = "/path/privkey.pem"
+origin = "https://example.com:8765"
+```
 
 This needs a password and `origin`, and `ask` is off unless you turn it on. Getting certificates by ACME isn't built yet, so you bring your own; it's read again when its files change. Prefer an ECDSA key, as certbot, acme.sh and `tailscale cert` make by default: each new connection's TLS handshake is worked out by the daemon itself, and with an RSA key one costs about ten times as much.
 
@@ -89,11 +95,11 @@ Unsent photos stay with their chat across navigation and connection interruption
 
 ## Terminals
 
-The **Terminals** filter lists each workspace’s terminals, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.
+The **Terminals** filter lists each workspace's terminals, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.
 
 A workspace's [background tabs](~clackatoo/reference/window#background-tabs) are listed after its terminals, those of another machine's workspaces your daemon shows too: each with how it's getting on (Running, Idle, Ended, or Failed with its exit status), the ports its programs listen on, and ` ↻` if it's kept running. Tap one to follow its terminal; **Bring back** puts it back in its workspace's tab bar and shows it; **✕** dismisses it, closing its terminals, and one still running asks for a second tap, **Stop?**, within three seconds. A workspace's heading says how many of its background tabs are running, `⚙ 2`, red with the exit status of one that failed, `⚙ 1 ✗ 2`, as a window's icon after the tabs does; tap it to list them. Listing them counts as having seen a failure, as a window's list does, but the list goes on saying it while it's shown. The app doesn't mark a terminal to keep running (the daemon refuses that from a phone: it's for you at a window), nor offer starting a background tab.
 
-A terminal is shown at its own size, the one your windows gave it: with readable 14–16 pixel text by default, so a wider one pans sideways under your finger. Pinch to zoom, or open **⋯** for text size controls and Reset. These change only this browser’s view. Scroll up for its history, fetched as you go. A command that failed ends its prompt's line with a dim red `✗` and its exit status, as in a window, on the screen and in history.
+A terminal is shown at its own size, the one your windows gave it: with readable 14–16 pixel text by default, so a wider one pans sideways under your finger. Pinch to zoom, or open **⋯** for text size controls and Reset. These change only this browser's view. Scroll up for its history, fetched as you go. A command that failed ends its prompt's line with a dim red `✗` and its exit status, as in a window, on the screen and in history.
 
 **Fit**, in **⋯**, makes the terminal the phone's size instead, and says Fitted while it lasts; it's fitted again when the keyboard comes up or goes. It goes back when you tap Fitted, leave the terminal or put the phone away, or type into it from a window; windows' resizes wait till then, and it takes the latest they asked for. A phone that stops asking for the fit, as one asleep does, loses it within a minute. The phone never resizes a terminal any other way.
 

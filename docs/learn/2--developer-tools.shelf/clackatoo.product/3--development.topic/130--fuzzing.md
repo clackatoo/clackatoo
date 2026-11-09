@@ -28,13 +28,17 @@ Code a target can't reach otherwise is reached through a `fuzzing` feature of `c
 
 Install the nightly toolchain and cargo-fuzz once:
 
-    rustup toolchain install nightly --component rust-src
-    cargo install cargo-fuzz
+```sh
+rustup toolchain install nightly --component rust-src
+cargo install cargo-fuzz
+```
 
 Then, in `fuzz/`, fill the corpus with seeds from the repository's fixtures, and run a target:
 
-    ./seed
-    cargo +nightly fuzz run frames corpus/frames -- -max_total_time=1800 -timeout=5 -rss_limit_mb=1024 -malloc_limit_mb=512 -max_len=65536
+```sh
+./seed
+cargo +nightly fuzz run frames corpus/frames -- -max_total_time=1800 -timeout=5 -rss_limit_mb=1024 -malloc_limit_mb=512 -max_len=65536
+```
 
 The first build takes a while: it builds the daemon and everything it uses, with AddressSanitizer. `--codegen-units 16` after `run` builds faster, and the targets run a little slower.
 
@@ -48,6 +52,8 @@ The fuzz targets are a workspace of their own, so builds and tests of the rest n
 
 The input that failed is saved under `artifacts/TARGET/`. To run it again, with the panic's message:
 
-    cargo +nightly fuzz run frames artifacts/frames/crash-…
+```sh
+cargo +nightly fuzz run frames artifacts/frames/crash-…
+```
 
 Make it smaller with `cargo +nightly fuzz tmin frames artifacts/frames/crash-…`, then find the cause. Fix it in the product, and add an ordinary unit test with the smallest input, beside the code it tests, so the fix holds without the fuzzer. A failure in a target's own checks can be the check's fault: read what it asserts before changing the product.

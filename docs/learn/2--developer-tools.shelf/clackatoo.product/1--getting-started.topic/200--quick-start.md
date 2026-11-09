@@ -48,7 +48,12 @@ To watch the daemon's log, run it in the foreground instead. It logs to stderr; 
 From another terminal, start one. `new` prints the new terminal's ID:
 
 ```sh
-$ clackatoo new
+clackatoo new
+```
+
+The output is its ID:
+
+```text
 1
 ```
 

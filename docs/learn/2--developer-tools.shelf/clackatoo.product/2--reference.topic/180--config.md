@@ -33,7 +33,7 @@ end)
 
 ## Where it goes
 
-```
+```text
 ~/.config/clackatoo/        or $XDG_CONFIG_HOME/clackatoo/
   client/init.lua           the window's config
   client/lua/               modules for it to require
@@ -55,7 +55,9 @@ The config runs once for the client, the process that opens windows, so its bind
 
 `daemon/machine.toml` names this machine's daemon, as other machines show it:
 
-    name = "jack-desktop"
+```toml
+name = "jack-desktop"
+```
 
 Without it, the daemon takes the machine's hostname. It's read when the daemon starts or upgrades.
 

@@ -244,7 +244,7 @@ A chat keeps the settings you pick. If the agent stops, or the daemon is [upgrad
 
 ### Moving a chat to another agent
 
-The model menu lists every agent's models, with its provider below each model, after the chat's own agent's. Picking another of the same agent's models changes it in the chat, as before. Picking another provider stages it with your draft. A ruled “Context handoff pending” row shows the source and destination with their provider icons, and the model button shows your pending choice. Nothing switches until you send a message or image. Choose a different destination to replace it, or click × on the row or pick the current provider to cancel it. Sending switches providers and submits the message together; a refused handoff restores your draft instead of sending to the old provider. The completed handoff stays in the history as a matching divider. An agent clackatoo hasn't installed says "install to use", and sending its pending handoff offers to install it. An agent whose models aren't known yet is asked for them as the menu opens, which takes a moment.
+The model menu lists every agent's models, with its provider below each model, after the chat's own agent's. Picking another of the same agent's models changes it in the chat, as before. Picking another provider stages it with your draft. A ruled `Context handoff pending` row shows the source and destination with their provider icons, and the model button shows your pending choice. Nothing switches until you send a message or image. Choose a different destination to replace it, or click × on the row or pick the current provider to cancel it. Sending switches providers and submits the message together; a refused handoff restores your draft instead of sending to the old provider. The completed handoff stays in the history as a matching divider. An agent clackatoo hasn't installed says "install to use", and sending its pending handoff offers to install it. An agent whose models aren't known yet is asked for them as the menu opens, which takes a moment.
 
 The new agent hears the conversation with your next message, before it, fenced off as context carried over rather than as something to do: the newest turns whole, older ones a line each (what you asked, what it ran and changed, how it ended), the files changed, and the previous agent's plan if it has steps left, to ask you about rather than carry on with. Messages other agents sent the chat are marked as theirs, not yours. The `carryover` option sets about the most it takes, in tokens: 20000 unless set, never more than 50000 nor a quarter of the new agent's context, and never less than 1000. Moving back to an agent the chat had before opens its own session again, and it hears only what happened since.
 
@@ -256,13 +256,13 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | Key | Does |
 |---|---|
 | `h` `j` `k` `l`, arrows, `+` `-` | A character, or a line. |
-| `w` `b` `e` `ge`, `W` `B` `E` `gE` | By words, or by anything between blanks; `ge` and `gE` go to the previous word’s end. |
+| `w` `b` `e` `ge`, `W` `B` `E` `gE` | By words, or by anything between blanks; `ge` and `gE` go to the previous word's end. |
 | `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, back with `F` and `T`; `;` again, `,` the other way. |
-| `0` `^` `$`, `g0` `g$` | The visual row’s start, first non-blank, or end. |
+| `0` `^` `$`, `g0` `g$` | The visual row's start, first non-blank, or end. |
 | `_` `g_`, `N\|` | First or last non-blank on the row; column N, counting from 1. A count before `_` or `g_` takes that many rows, including this one. |
-| `%`, `(` `)` | Matching bracket or sentence, within the block. A count before `%` goes to that percentage of the block’s lines. |
+| `%`, `(` `)` | Matching bracket or sentence, within the block. A count before `%` goes to that percentage of the block's lines. |
 | `H` `M` `L` | Top, middle or bottom of the visible text, respecting `scrolloff`; a count before H or L moves inward from that edge. |
-| `zt` `zz` `zb` | Put the cursor’s row at the top, middle or bottom of the view. |
+| `zt` `zz` `zb` | Put the cursor's row at the top, middle or bottom of the view. |
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
 | `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](#mentioning-files)). |
@@ -304,7 +304,7 @@ All four are whole lines. `ic` and `ac` are a class, as in an editor, which a ch
 
 In visual mode, `iw`, `aw`, brackets, quotes, sentences, paragraphs and tags use the same selection rules as the editor; repeated objects extend the selection where Vim does. `ix` selects the visible code block, `im` the visible message or card, and `am` the visible turn. Visual selections contain the displayed text; use `yax` or `yim` directly to copy Markdown fences or source Markdown.
 
-Word motions and objects distinguish CJK scripts, Latin text and punctuation as Vim does. Code blocks use the daemon’s language word characters, including custom packs, once their metadata arrives with highlighting; older daemons use plain Vim word characters. Mouse double-clicks in prose follow Unicode word boundaries; terminal double-clicks retain whole paths and URLs.
+Word motions and objects distinguish CJK scripts, Latin text and punctuation as Vim does. Code blocks use the daemon's language word characters, including custom packs, once their metadata arrives with highlighting; older daemons use plain Vim word characters. Mouse double-clicks in prose follow Unicode word boundaries; terminal double-clicks retain whole paths and URLs.
 
 What's yanked goes into the window's registers as an editor's yank does: into the register named before it, with `"ayy`, or onto its end, with `"Ayy`; `"_` keeps nothing. With no register named, it goes into the unnamed register and `"0`, and onto the clipboard if the `clipboard` option says. `p` in an editor puts it, lines as lines. Keys typed after a yank or a search, by a macro, a binding or quickly by hand, wait for it, so `nn` goes twice and `/x<CR>yiw` yanks the word found.
 
@@ -489,7 +489,7 @@ An agent can ask you something rather than ask leave: Claude Code's multiple-cho
 - Esc never declines a form: it goes to normal mode, as it does from the message box, so what you've typed stays. Decline says no, and the agent goes on without. Ctrl+C stops the agent, which takes the form away.
 - As with other questions, Submit, Decline and Open don't answer within half a second of the form coming, or of you arriving at its chat; the bar says to press again.
 
-A link to open, such as an MCP server's sign-in, shows whole, with where it goes on a line of its own, as plain text apart from the agent's message, then Open the link, which hands it to your desktop's browser and tells the agent it's open, and Decline. Only a plain web link is shown: one that isn't `http` or `https`, isn't plain ASCII, names a user (`user@host`), holds a space, a control character or `%` in its host, names an address as a number other than a plain dotted quad (such as `0x7f.1`), or hides anything is declined, and each window checks it again before it opens it. If the agent says it's done with a link you never opened, it goes by itself. The browser opens on the window's machine; a sign-in whose page sends you back to `localhost` needs the window on the daemon's machine.
+A link to open, such as an MCP server's sign-in, shows whole, with where it goes on a line of its own, as plain text apart from the agent's message, then Open the link, which hands it to your desktop's browser and tells the agent it's open, and Decline. Only a plain web link is shown: one that isn't `http` or `https`, isn't plain ASCII, names a user (`user@host`), holds a space, a control character or `%` in its host, names an address as a number other than a plain dotted quad (such as `0x7F.1`), or hides anything is declined, and each window checks it again before it opens it. If the agent says it's done with a link you never opened, it goes by itself. The browser opens on the window's machine; a sign-in whose page sends you back to `localhost` needs the window on the daemon's machine.
 
 When the agent asks to leave Plan mode, as Claude Code's ExitPlanMode or Codex's plan review do, the plan shows above the question as Markdown, in a frame at most half the pane high that scrolls with the wheel over it, or `j` and `k` in normal mode. The question says "Go ahead with this plan?", and the answers are the agent's own, such as "Yes, and use auto mode" or "No, keep planning".
 

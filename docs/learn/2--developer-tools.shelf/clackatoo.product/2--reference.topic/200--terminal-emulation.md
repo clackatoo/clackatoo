@@ -57,7 +57,7 @@ A program you started from a shell is no different from one the daemon started: 
 - **Wrapping**: printing in the last column leaves the cursor there, and the line wraps only when the next character arrives.
 - **Background colour erase**: clearing part of the screen fills it with the current background colour.
 - **Wide characters** take two columns. A wide character that doesn't fit at the end of a line wraps to the next one.
-- **Combining characters** (accents, variation selectors) join the character before them. So do characters after a zero-width joiner, so emoji sequences such as 👩‍💻 stay one character.
+- **Combining characters** (accents, variation selectors) join the character before them. So do characters after a zero-width joiner, so emoji sequences such as 👩&#x200D;💻 stay one character.
 
 ## Supported sequences
 

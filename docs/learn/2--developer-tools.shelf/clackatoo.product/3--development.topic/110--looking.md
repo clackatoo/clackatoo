@@ -8,8 +8,10 @@ related:
 
 The `look` example runs the real window, drawn into a picture instead of onto the screen, against a daemon of its own in a temporary home, so it never touches yours.
 
-    cargo build -p clackatoo-daemon --example fake_agent --example fake_language_server --example daemon
-    cargo run -p clackatoo-gui --example look -- crates/gui/looks/*.look target/looks
+```sh
+cargo build -p clackatoo-daemon --example fake_agent --example fake_language_server --example daemon
+cargo run -p clackatoo-gui --example look -- crates/gui/looks/*.look target/looks
+```
 
 A script has a command a line: `size 1400x860`, `scale 2`, `file PATH`, `keys :Explore<CR>`, `type`, `shell`, `click X Y`, `drag`, `scroll`, `wait-for TEXT`, `sleep MS`, `shot NAME`. Chats talk to a fake agent, and `.fk` files have a fake language server. The full language is at the top of `crates/gui/examples/look.rs`, and `crates/gui/looks/` has a script for each of the window's main parts.
 

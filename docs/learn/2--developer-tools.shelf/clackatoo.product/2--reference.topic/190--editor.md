@@ -10,7 +10,7 @@ related:
 
 An editor pane edits one file, with Vim's keys. Its text lives in the daemon, in a buffer, as a terminal's screen does, and each window showing it keeps a copy that it changes as you type, so a key never waits for the daemon.
 
-```
+```text
 :e src/main.rs          edit a file in a new tab
 :|Editor src/main.rs    the same, beside the focused pane
 :w                      write it
@@ -70,7 +70,7 @@ A file in a language that's installed is coloured as the language's grammar read
 
 Opening a file in a language that isn't installed, but that clackatoo knows where to get, asks in the bottom bar:
 
-```
+```text
 Install toml's grammar and taplo? [Y/n]
 ```
 
@@ -80,7 +80,7 @@ The [option](~clackatoo/reference/config#options) `languageinstall` decides what
 
 [`clackatoo language`](~clackatoo/reference/cli#language) installs languages from the command line too:
 
-```
+```text
 clackatoo language list            what can be installed, and what is
 clackatoo language install rust    install one, or several, with their servers
 clackatoo language install --all   install every one
@@ -118,7 +118,7 @@ A query's names are coloured by the first part: `@function.method.call` as a fun
 
 A language server is a program that knows a language well enough to say what's wrong with a file as you write it, such as [rust-analyzer](https://rust-analyzer.github.io) for Rust. It speaks [LSP](https://microsoft.github.io/language-server-protocol/), the Language Server Protocol, which most editors share. When you open a file in an installed language whose server is installed, its mistakes are underlined with a wavy line: red for errors, yellow for warnings, blue for information and cyan for hints. With the cursor on a line with one, the bottom bar says what it is, after the cursor's place:
 
-```
+```text
 main.rs  12:9  error: mismatched types [E0308 rustc]
 ```
 
@@ -138,7 +138,7 @@ Once the cursor rests on a name in normal mode, the other places it's used in th
 
 A server that can also writes notes between the code, dim and italic: the type of a name bound without one written, as `: u32` after `let total`, and the name of the parameter an argument is for, as `count:` before it. They're never part of the text: the cursor steps over them, motions, searches and yanks don't see them, a click on one lands on the character after it, a long line wraps with them, each staying with its character, and `colorcolumn` runs straight past them. While you type, the cursor's line shows none; they come back once typing pauses. They're asked for the part of the file in view and a screenful either side. `<Space>th`, or the [option](~clackatoo/reference/config#options) `inlayhints`, turns them off.
 
-```
+```text
  12 let total = count + "1";  ■ cannot add `&str` to `u32`
 ```
 
@@ -146,7 +146,7 @@ A server that can also writes notes between the code, dim and italic: the type o
 
 A language server can run the code of the project it reads. rust-analyzer builds and runs a crate's build scripts and procedural macros; typescript-language-server loads the plugins `tsconfig.json` names from `node_modules`; gopls runs the `go` command, which can fetch and run another toolchain. So a server starts only for a folder you've trusted. The first time a file's server would start for a folder you haven't said anything about, the bottom bar asks:
 
-```
+```text
 Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 ```
 
@@ -387,7 +387,7 @@ A file keeps the kind of indent it has, whatever the options say. `>`, `<` and T
 
 A new line is indented as its language says, where its pack has the rules for it. It takes the indent of the line before at once, so typing never waits, and is put right a moment later, when the daemon has worked it out: usually within a millisecond or two. What you type meanwhile stays after the indent, but if you've typed in the indent itself, as a Tab or Backspace does, or made another change, it's left as you made it. A line where `}`, `]` or `)` is typed first is worked out again. So is a line that starts with `else`, `elif`, `elsif`, `elseif`, `except`, `finally`, `catch`, `rescue`, `ensure`, `case` or `default`, or with `end`, `fi`, `done` or `esac`, which end blocks, once you've typed the word: the key after it, such as a space, Tab, `{`, `:` or Enter, or Esc, finishes it. Only a word you type counts, not one that was there or was pasted, nor a longer word such as `elsewhere`. The rules decide the indent, so a word that isn't one of the language's gets what `=` would give the line. `:set nosi` turns this off, for new lines and these words, and a new line keeps the line before's indent. `=` indents by the rules either way.
 
-```
+```text
 :set ts=8 sw=4      tabs 8 wide, indenting by 4
 :set noet           indent new lines with tabs
 ```
