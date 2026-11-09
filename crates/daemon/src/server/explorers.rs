@@ -44,8 +44,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    BufferId, Error, Event, FileOp, FileOpError, FilesAction, FilesId, FilesUpdate, GitMark,
-    ListingChanges, MarksChanges, OpenFiles, PaneId, Response,
+    BufferId, Error, Event, FileOp, FileOpError, FilesAction, FilesId, FilesUpdate, ListingChanges,
+    MarksChanges, OpenFiles, PaneId, Response,
 };
 use mio::Token;
 use rustix::fs::inotify;
@@ -53,7 +53,7 @@ use rustix::io::Errno;
 
 use super::language::ServerId;
 use super::{Daemon, Source};
-use crate::explorer::{Changed, Done, Listing, Open, Workers};
+use crate::explorer::{Changed, Done, Listing, Marks, Open, Said, Workers};
 use crate::handover;
 
 /// The most directories watched at once: far more than anyone expands,
@@ -135,26 +135,19 @@ impl Explorers {
         id
     }
 
-    /// What git says of explorer `files`' files: what its root's
-    /// repository says, but for what's in the repositories inside it, and
-    /// what they say of themselves. `None` until git has said anything.
-    fn marks_of(&self, files: FilesId) -> Option<Vec<(String, GitMark)>> {
+    /// What explorer `files`' git marks are merged from: what its root's
+    /// repository says, and the repositories inside it. `None` until git
+    /// has said anything of any of them.
+    fn said_of(&self, files: FilesId) -> Option<Said> {
         let explorer = self.list.get(&files)?;
         let said = |top: &PathBuf| self.repos.get(top).and_then(|repo| repo.marks.clone());
-        let mut marks = Vec::new();
-        let mut any = false;
-        if let Some(outer) = explorer.repo.as_ref().and_then(said) {
-            any = true;
-            let inside =
-                |path: &str| (explorer.nested.iter()).any(|top| Path::new(path).starts_with(top));
-            marks.extend(outer.iter().filter(|(path, _)| !inside(path)).cloned());
-        }
-        for inner in explorer.nested.iter().filter_map(said) {
-            any = true;
-            marks.extend(inner.iter().cloned());
-        }
-        marks.sort();
-        any.then_some(marks)
+        let outer = explorer.repo.as_ref().and_then(said);
+        let inner: Vec<Arc<Marks>> = explorer.nested.iter().filter_map(said).collect();
+        (outer.is_some() || !inner.is_empty()).then(|| Said {
+            outer,
+            nested: explorer.nested.clone(),
+            inner,
+        })
     }
 }
 
@@ -194,10 +187,16 @@ struct Explorer {
     git_changes: Vec<Token>,
     /// What git said of its files, as it was last sent: what changes sent
     /// are changes to.
-    marks: Option<Vec<(String, GitMark)>>,
+    marks: Option<Arc<Marks>>,
     /// Those of its viewers that have been sent `marks`, so have what
     /// changes to it change.
     marks_sent: Vec<Token>,
+    /// What its repositories say is being merged, on the thread for git,
+    /// against `marks`.
+    merging: bool,
+    /// What they say changed while it was, so it's merged again once it's
+    /// done.
+    merge_again: bool,
     /// The top of the work tree its root is in, once found, if it's in one.
     repo: Option<PathBuf>,
     /// The tops of the repositories found inside folders expanded in it,
@@ -239,7 +238,7 @@ struct Dir {
 #[derive(Debug)]
 struct Repo {
     /// What git last said of its files, as absolute paths.
-    marks: Option<Arc<Vec<(String, GitMark)>>>,
+    marks: Option<Arc<Marks>>,
     /// git is being asked.
     asking: bool,
     last: Option<Instant>,
@@ -328,6 +327,8 @@ impl Daemon {
             git_changes: Vec::new(),
             marks: None,
             marks_sent: Vec::new(),
+            merging: false,
+            merge_again: false,
             repo: None,
             nested: Vec::new(),
         };
@@ -378,10 +379,18 @@ impl Daemon {
         if git_changes {
             explorer.git_changes.push(token);
         }
-        // Attached again, it's sent what git says whole again.
+        // Attached again, it's sent what git says whole again: what was
+        // last sent, which what's merged next changes.
         explorer.marks_sent.retain(|&viewer| viewer != token);
+        let marks = explorer.marks.clone();
+        if marks.is_some() {
+            explorer.marks_sent.push(token);
+        }
         let root = root_update(&explorer.root, &self.config.home);
         self.tell_files(token, files, root);
+        if let Some(marks) = marks {
+            self.tell_files(token, files, FilesUpdate::Git(marks.to_vec()));
+        }
         self.send_marks_to(files);
         if let Some(reason) = self.explorers.no_git {
             self.tell_files(token, files, FilesUpdate::NoGit(reason.to_owned()));
@@ -1054,6 +1063,11 @@ impl Daemon {
                     self.found_repository(&root, tree, no_git);
                 }
                 Done::Status { top, marks } => self.marked(&top, marks),
+                Done::Merged {
+                    files,
+                    marks,
+                    changes,
+                } => self.merged(files, marks, changes),
                 Done::Op {
                     ticket,
                     changed,
@@ -1089,7 +1103,7 @@ impl Daemon {
                 repo.asking = true;
                 repo.due = None;
                 repo.last = Some(now);
-                workers.status(top.clone());
+                workers.status(top.clone(), repo.marks.clone());
             }
         }
     }
@@ -1292,9 +1306,9 @@ impl Daemon {
         self.watch(&git_dir, Some(&top));
     }
 
-    /// Takes what git says of the repository whose top is `top`, and sends
-    /// it to every client following an explorer in it, if it's changed.
-    fn marked(&mut self, top: &Path, marks: Option<Vec<(String, GitMark)>>) {
+    /// Takes what git says of the repository whose top is `top`, if it's
+    /// changed, and has it merged for every explorer in it, to send.
+    fn marked(&mut self, top: &Path, marks: Option<Arc<Marks>>) {
         let Some(repo) = self.explorers.repos.get_mut(top) else {
             return;
         };
@@ -1302,20 +1316,14 @@ impl Daemon {
         // Its rate is from when git's done, so a slow repository isn't
         // asked back to back.
         repo.last = Some(Instant::now());
+        // Unchanged, or git couldn't say.
         let Some(marks) = marks else { return };
-        let mut marks: Vec<(String, GitMark)> = (marks.into_iter())
-            .map(|(path, mark)| (top.join(path).display().to_string(), mark))
-            .collect();
-        marks.sort();
-        if repo.marks.as_deref() == Some(&marks) {
-            return;
-        }
-        repo.marks = Some(Arc::new(marks));
+        repo.marks = Some(marks);
         self.send_marks(top);
     }
 
-    /// Sends what git last said of the repository whose top is `top` to
-    /// every client following an explorer in it, or with it inside.
+    /// Has what git last said of the repository whose top is `top` merged
+    /// and sent for every explorer in it, or with it inside.
     fn send_marks(&mut self, top: &Path) {
         let explorers: Vec<FilesId> = (self.explorers.list.iter())
             .filter(|(_, explorer)| {
@@ -1329,26 +1337,55 @@ impl Daemon {
         }
     }
 
-    /// Sends what git says of explorer `files`' files to every client
-    /// following it that hasn't had it: to one that was sent what it last
-    /// said and asked for changes, as what changed since, if that's less
-    /// to send than it whole.
+    /// Has what explorer `files`' repositories say merged, on the thread
+    /// for git, to send to the clients following it once it is (see
+    /// [`merged`](Self::merged)); or again once the merge going on is
+    /// done, as that was of what they said before.
     fn send_marks_to(&mut self, files: FilesId) {
-        let Some(marks) = self.explorers.marks_of(files) else {
+        let Some(said) = self.explorers.said_of(files) else {
             return;
         };
         let Some(explorer) = self.explorers.list.get_mut(&files) else {
             return;
         };
+        if explorer.merging {
+            explorer.merge_again = true;
+            return;
+        }
+        // What changed is worked out only for those who asked.
+        let changes =
+            (explorer.marks_sent.iter()).any(|token| explorer.git_changes.contains(token));
+        let before = explorer.marks.clone();
+        let merging = (self.explorers.workers.as_ref())
+            .is_some_and(|workers| workers.merge(files, said, before, changes));
+        if let Some(explorer) = self.explorers.list.get_mut(&files) {
+            explorer.merging = merging;
+        }
+    }
+
+    /// Sends what explorer `files`' repositories say, merged, `marks`, to
+    /// every client following it that hasn't had it: to one that was sent
+    /// the merge before and asked for changes, as what `changes` says
+    /// changed since, if it says.
+    fn merged(&mut self, files: FilesId, marks: Arc<Marks>, changes: Option<MarksChanges>) {
+        let Some(explorer) = self.explorers.list.get_mut(&files) else {
+            return;
+        };
+        explorer.merging = false;
+        let again = std::mem::take(&mut explorer.merge_again);
         // Those sent what it last said, who have what changes change.
         let had = std::mem::replace(&mut explorer.marks_sent, explorer.viewers.clone());
         let mut viewers = explorer.viewers.clone();
         let mut as_changes = None;
-        if explorer.marks.as_ref() == Some(&marks) {
+        // The thread hands back the merge it was against if it's the same.
+        let same = (explorer.marks.as_ref()).is_some_and(|before| Arc::ptr_eq(before, &marks));
+        if same {
             // Only those who haven't had it.
             viewers.retain(|viewer| !had.contains(viewer));
-        } else if let Some(before) = explorer.marks.replace(marks.clone()) {
-            as_changes = marks_changes(&before, &marks);
+        } else if let Some(before) = explorer.marks.replace(Arc::clone(&marks)) {
+            as_changes = (u32::try_from(before.len()).ok())
+                .zip(changes)
+                .map(|(was, changes)| FilesUpdate::GitChanged { was, changes });
         }
         // Those who have what it changes, and asked for changes, are sent
         // them.
@@ -1362,9 +1399,14 @@ impl Daemon {
                 self.tell_files(viewer, files, as_changes.clone());
             }
         }
-        let update = FilesUpdate::Git(marks);
-        for viewer in whole {
-            self.tell_files(viewer, files, update.clone());
+        if !whole.is_empty() {
+            let update = FilesUpdate::Git(marks.to_vec());
+            for viewer in whole {
+                self.tell_files(viewer, files, update.clone());
+            }
+        }
+        if again {
+            self.send_marks_to(files);
         }
     }
 
@@ -1589,16 +1631,6 @@ fn listed_update(dir: &Path, listing: &Listing) -> FilesUpdate {
         entries: listing.entries.clone(),
         cut_short: listing.cut_short,
     }
-}
-
-/// What git says, `marks`, as what changed in it since it said `before`,
-/// both in the order they're sent in, if that's less to send than it
-/// whole. It's worked out here, on the loop, as `marks` was just put
-/// together and sorted here: a walk of both, side by side.
-fn marks_changes(before: &[(String, GitMark)], marks: &[(String, GitMark)]) -> Option<FilesUpdate> {
-    let was = u32::try_from(before.len()).ok()?;
-    let changes = MarksChanges::between(before, marks, |(path, _)| path.clone())?;
-    (changes.len() < marks.len()).then_some(FilesUpdate::GitChanged { was, changes })
 }
 
 /// Whether two listings hold the same.

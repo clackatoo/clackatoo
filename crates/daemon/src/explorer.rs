@@ -1,6 +1,7 @@
 //! The threads file explorers' work is done on: listing directories, asking
-//! git what it says of their files, and making, moving, copying and
-//! deleting files. The event loop hands each a job and takes what it's
+//! git what it says of their files, and merging what it says of each
+//! explorer's repositories, and making, moving, copying and deleting
+//! files. The event loop hands each a job and takes what it's
 //! done, so a big directory, a slow disk or a big repository never holds up
 //! a keystroke.
 //!
@@ -27,7 +28,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use clackatoo_protocol::{Entry, EntryKind, FileOp, FileOpError, GitMark, ListingChanges};
+use clackatoo_protocol::{
+    Entry, EntryKind, FileOp, FileOpError, FilesId, GitMark, ListingChanges, MarksChanges,
+};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::buffer::{DiskStamp, Restamp};
@@ -65,11 +68,21 @@ pub(crate) enum Done {
         tree: Option<(PathBuf, PathBuf)>,
         no_git: Option<&'static str>,
     },
-    /// What git says of the files in the work tree whose top is `top`,
-    /// from the top, or `None` if it couldn't say.
+    /// What git says of the files in the work tree whose top is `top`, as
+    /// absolute paths, in order; or `None` if it couldn't say, or says
+    /// what it said before.
     Status {
         top: PathBuf,
-        marks: Option<Vec<(String, GitMark)>>,
+        marks: Option<Arc<Marks>>,
+    },
+    /// What git says of explorer `files`' files, merged from what its
+    /// repositories say: the merge it was worked out against itself, if
+    /// it's the same; and what changed since that, if that was asked for
+    /// and is less than it whole.
+    Merged {
+        files: FilesId,
+        marks: Arc<Marks>,
+        changes: Option<MarksChanges>,
     },
     /// How the file operation the loop numbered `ticket` went, and what
     /// it changed that buffers must follow, which it may have done even if
@@ -114,6 +127,40 @@ pub(crate) struct Follow {
     /// What the buffer knows of its file on disk now, so its next save
     /// isn't refused if it was copied from another file system.
     pub(crate) disk: Restamp,
+}
+
+/// What git says of files: each one it has something to say about, by its
+/// absolute path, in order.
+pub(crate) type Marks = Vec<(String, GitMark)>;
+
+/// What an explorer's git marks are merged from (see [`Workers::merge`]).
+#[derive(Debug)]
+pub(crate) struct Said {
+    /// What the repository its root is in says, if it's said anything.
+    pub(crate) outer: Option<Arc<Marks>>,
+    /// The tops of the repositories inside it, which say what's in them.
+    pub(crate) nested: Vec<PathBuf>,
+    /// What those of them that have said anything say.
+    pub(crate) inner: Vec<Arc<Marks>>,
+}
+
+impl Said {
+    /// What it comes to: what the outer repository says, but for what's in
+    /// the repositories inside it, and what they say of themselves; in
+    /// order.
+    fn merged(&self) -> Marks {
+        let inside = |path: &str| (self.nested.iter()).any(|top| Path::new(path).starts_with(top));
+        let mut marks = Marks::new();
+        if let Some(outer) = &self.outer {
+            marks.extend(outer.iter().filter(|(path, _)| !inside(path)).cloned());
+        }
+        for inner in &self.inner {
+            marks.extend(inner.iter().cloned());
+        }
+        // Already in order with none inside: a walk.
+        marks.sort();
+        marks
+    }
 }
 
 /// What's in a directory, in the order to show it.
@@ -222,12 +269,56 @@ impl Workers {
     }
 
     /// Asks git what it says of the files in the work tree whose top is
-    /// `top`.
-    pub(crate) fn status(&self, top: PathBuf) {
+    /// `top`, made absolute and put in order here, not on the loop, as a
+    /// big repository's are long; and whether that's what it said last,
+    /// `before`.
+    pub(crate) fn status(&self, top: PathBuf, before: Option<Arc<Marks>>) {
         send(&self.git, move || {
-            let marks = crate::git::status(&top);
+            let marks = crate::git::status(&top).map(|marks| {
+                let mut marks: Marks = (marks.into_iter())
+                    .map(|(path, mark)| (top.join(path).display().to_string(), mark))
+                    .collect();
+                marks.sort();
+                marks
+            });
+            let marks = marks
+                .filter(|marks| before.as_deref() != Some(marks))
+                .map(Arc::new);
             Done::Status { top, marks }
         });
+    }
+
+    /// Merges what explorer `files`' repositories say, `said`, and works
+    /// out whether it's the same as `before`, the last merge, and if
+    /// `changes`, what changed since: here, not on the loop, as a big
+    /// repository's marks are long. Returns whether the thread took it.
+    #[must_use]
+    pub(crate) fn merge(
+        &self,
+        files: FilesId,
+        said: Said,
+        before: Option<Arc<Marks>>,
+        changes: bool,
+    ) -> bool {
+        send(&self.git, move || {
+            let marks = said.merged();
+            let (marks, changes) = match before {
+                Some(before) if *before == marks => (before, None),
+                before => {
+                    let changes = (before.filter(|_| changes)).and_then(|before| {
+                        let changes =
+                            MarksChanges::between(&before, &marks, |(path, _)| path.clone())?;
+                        (changes.len() < marks.len()).then_some(changes)
+                    });
+                    (Arc::new(marks), changes)
+                }
+            };
+            Done::Merged {
+                files,
+                marks,
+                changes,
+            }
+        })
     }
 
     /// Does `op`, which the loop numbered `ticket`, with `trash` as the
@@ -508,6 +599,62 @@ pub(crate) fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the thread for git makes of merging `said` against `before`.
+    fn merge(said: Said, before: Option<Arc<Marks>>) -> (Arc<Marks>, Option<MarksChanges>) {
+        let workers = Workers::start(|| {}).unwrap();
+        assert!(workers.merge(FilesId(1), said, before, true));
+        loop {
+            for done in workers.take() {
+                if let Done::Merged { marks, changes, .. } = done {
+                    return (marks, changes);
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn an_explorers_marks_are_merged_and_what_changed_worked_out_off_the_loop() {
+        let mark = |path: &str, mark| (path.to_owned(), mark);
+        let outer = Arc::new(vec![
+            mark("/p/a", GitMark::Modified),
+            mark("/p/inner", GitMark::Untracked),
+            mark("/p/z", GitMark::Added),
+        ]);
+        let inner = Arc::new(vec![mark("/p/inner/b", GitMark::Modified)]);
+        let said = || Said {
+            outer: Some(Arc::clone(&outer)),
+            nested: vec![PathBuf::from("/p/inner")],
+            inner: vec![Arc::clone(&inner)],
+        };
+        // What the outer one says of the inner one gives way to what that
+        // says of itself, in order.
+        let (merged, changes) = merge(said(), None);
+        assert_eq!(
+            *merged,
+            [
+                mark("/p/a", GitMark::Modified),
+                mark("/p/inner/b", GitMark::Modified),
+                mark("/p/z", GitMark::Added),
+            ]
+        );
+        assert_eq!(changes, None, "nothing to change");
+        // The same again is the merge it was against, unchanged.
+        let (again, changes) = merge(said(), Some(Arc::clone(&merged)));
+        assert!(Arc::ptr_eq(&again, &merged) && changes.is_none());
+        // Changed, it says what changed, when that's less.
+        let before = Arc::new(vec![
+            mark("/p/a", GitMark::Modified),
+            mark("/p/inner/b", GitMark::Modified),
+            mark("/p/y", GitMark::Untracked),
+            mark("/p/z", GitMark::Added),
+        ]);
+        let (now, changes) = merge(said(), Some(Arc::clone(&before)));
+        let changes = changes.expect("what changed");
+        assert_eq!(changes.apply(&before).as_ref(), Some(&*now));
+        assert_eq!(changes.len(), 1, "y gone");
+    }
 
     #[test]
     fn names_are_ordered_by_letter_whatever_their_case() {
