@@ -20,8 +20,8 @@ const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
 
 /// The reply to DA2 (secondary device attributes): a VT220 (1), with
 /// clackatoo's year and month as the version, and no ROM cartridge (0).
-/// vim reads a version this high as a modern terminal's, one with
-/// coloured underlines and SGR mouse reports, as foot's is.
+/// vim reads a version this high as a modern terminal's rather than an
+/// old xterm's, as it reads foot's.
 fn secondary_device_attributes() -> String {
     let mut parts = env!("CARGO_PKG_VERSION").split('.');
     let mut number = || {
