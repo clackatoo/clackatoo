@@ -27,8 +27,19 @@ use crate::agents::CustomAgent;
 use crate::profiles::{Change, Limits};
 use crate::schema::{Info, Kind, Place, SetBy, Source, Value};
 
-/// The longest a run of the config may take.
+/// The longest a run of the config may take as the daemon starts.
 pub(crate) const TIME: Duration = Duration::from_millis(500);
+
+/// The longest it may take as the daemon upgrades, or as a build is asked
+/// what it takes: the build before waits on it, and the terminals with it.
+pub(crate) const UPGRADE_TIME: Duration = Duration::from_millis(200);
+
+/// What an agent's table, `daemon.agents.NAME`, may have.
+pub(crate) const AGENT_FIELDS: &[&str] = &["name", "command", "mode", "tasks"];
+
+/// What a profile's table, `daemon.profiles.NAME`, may have.
+pub(crate) const PROFILE_FIELDS: &[&str] =
+    &["about", "prompt", "limits", "agent", "model", "effort"];
 
 /// The most times a run may call a function or loop back, as Luau's
 /// interrupt counts them: far beyond any config's, and short of [`TIME`]
@@ -102,8 +113,9 @@ struct State {
     /// Whose file is running.
     source: Cell<Source>,
     files: RefCell<Vec<Arc<str>>>,
-    /// What went wrong in the API, as it's said, with where.
-    failed: RefCell<Option<Failure>>,
+    /// What went wrong in the API, as it's said, with where: each time,
+    /// as `pcall` may have caught some, and the run gone on.
+    failed: RefCell<Vec<Failure>>,
 }
 
 impl State {
@@ -161,14 +173,19 @@ impl State {
             None => said,
         };
         let error = mlua::Error::runtime(said.clone());
-        self.failed.borrow_mut().get_or_insert(Failure { said, at });
+        self.failed.borrow_mut().push(Failure { said, at });
         error
     }
 }
 
-/// Runs `chunks` in turn, each finding modules in `dirs`, for what they
-/// set: or what went wrong first, which stops it.
-pub(crate) fn run(chunks: &[Chunk], dirs: &[PathBuf]) -> Result<Settings, Failure> {
+/// Runs `chunks` in turn, each finding modules in `dirs`, taking `limit`
+/// at most in all, for what they set: or what went wrong, which stopped
+/// it.
+pub(crate) fn run(
+    chunks: &[Chunk],
+    dirs: &[PathBuf],
+    limit: Duration,
+) -> Result<Settings, Failure> {
     let state = Rc::new(State {
         options: RefCell::default(),
         agents: RefCell::default(),
@@ -177,7 +194,7 @@ pub(crate) fn run(chunks: &[Chunk], dirs: &[PathBuf]) -> Result<Settings, Failur
         files: RefCell::default(),
         failed: RefCell::default(),
     });
-    let (lua, store) = sandbox(&state, dirs).map_err(|err| Failure {
+    let (lua, store) = sandbox(&state, dirs, limit).map_err(|err| Failure {
         said: format!("the daemon's config couldn't start: {err}"),
         at: None,
     })?;
@@ -188,12 +205,23 @@ pub(crate) fn run(chunks: &[Chunk], dirs: &[PathBuf]) -> Result<Settings, Failur
             .set_mode(ChunkMode::Text)
             .exec();
         if let Err(err) = ran {
-            return Err(state.failed.take().unwrap_or_else(|| failure(&err)));
+            return Err(ended_by(&state, &err));
         }
     }
     let settings = gather(&state, &store);
     // What's checked once everything's set fails at the line that set it.
     settings.and_then(|settings| settings.checked().map(|()| settings))
+}
+
+/// What ended a run with `err`: what the API said of it, with where, if
+/// it was the API's, not one `pcall` caught before; or else what Luau
+/// says.
+fn ended_by(state: &State, err: &mlua::Error) -> Failure {
+    let text = err.to_string();
+    let failed = state.failed.take();
+    (failed.into_iter().rev())
+        .find(|failure| text.contains(&failure.said))
+        .unwrap_or_else(|| failure(err))
 }
 
 /// What `err`, from Luau, says, and where, if it says.
@@ -220,7 +248,7 @@ fn failure(err: &mlua::Error) -> Failure {
 
 /// A Luau in its sandbox, with the config's API, and the store the agents
 /// and profiles it sets are kept in.
-fn sandbox(state: &Rc<State>, dirs: &[PathBuf]) -> mlua::Result<(Lua, Table)> {
+fn sandbox(state: &Rc<State>, dirs: &[PathBuf], limit: Duration) -> mlua::Result<(Lua, Table)> {
     let libs = StdLib::COROUTINE
         | StdLib::TABLE
         | StdLib::STRING
@@ -239,10 +267,17 @@ fn sandbox(state: &Rc<State>, dirs: &[PathBuf]) -> mlua::Result<(Lua, Table)> {
     lua.set_memory_limit(MEMORY)?;
     let started = Instant::now();
     let steps = Cell::new(0u64);
+    let stopped = Cell::new(false);
     lua.set_interrupt(move |_| {
         let step = steps.get() + 1;
         steps.set(step);
-        if step > MOST_STEPS || (step.is_multiple_of(1024) && started.elapsed() > TIME) {
+        // Once stopped, stopped at every step after, so a `pcall` that
+        // caught the error can't carry on.
+        if stopped.get()
+            || step > MOST_STEPS
+            || (step.is_multiple_of(64) && started.elapsed() > limit)
+        {
+            stopped.set(true);
             return Err(mlua::Error::runtime("it ran too long, so it was stopped"));
         }
         Ok(VmState::Continue)
@@ -459,12 +494,7 @@ fn require(lua: &Lua, state: &Rc<State>, dirs: Vec<PathBuf>) -> mlua::Result<mlu
         if let Some(module) = loaded.raw_get::<Option<LuaValue>>(name.as_str())? {
             return Ok(module);
         }
-        let named = !name.is_empty()
-            && name.split('.').all(|part| {
-                !part.is_empty()
-                    && (part.bytes()).all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            });
-        if !named {
+        if !module_name(&name) {
             return Err(state.fail(
                 lua,
                 format!(
@@ -508,10 +538,33 @@ fn require(lua: &Lua, state: &Rc<State>, dirs: Vec<PathBuf>) -> mlua::Result<mlu
     })
 }
 
+/// Whether `text` compiles as Luau, or why not: nothing in it runs.
+pub(crate) fn compiles(text: &str) -> Result<(), String> {
+    (mlua::chunk::Compiler::new().compile(text))
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+/// Whether `name` is a module's name `require` takes: letters, digits,
+/// `_` and `-`, with dots for folders, so never a path of its own, nor
+/// one out of the config's folders.
+#[must_use]
+pub fn module_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            !part.is_empty()
+                && (part.bytes()).all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+}
+
 /// The text of the file of config at `path`, or `None` if it isn't
 /// there: never a FIFO or a device, which could keep the daemon waiting,
 /// nor more than [`MOST_FILE`].
-pub(crate) fn read(path: &Path) -> Result<Option<String>, String> {
+///
+/// # Errors
+///
+/// What's wrong with it, or reading it.
+pub fn read(path: &Path) -> Result<Option<String>, String> {
     let file = match crate::regular::open(path, crate::regular::Links::Follow) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -659,7 +712,7 @@ fn string(
 
 /// The agent `table`, `daemon.agents.NAME`, adds.
 fn agent_from(name: &str, table: &Table) -> Result<CustomAgent, String> {
-    let fields = fields("agents", name, table, &["name", "command", "mode", "tasks"])?;
+    let fields = fields("agents", name, table, AGENT_FIELDS)?;
     let text = |key: &str| {
         string(fields.get(key), || {
             format!("daemon.agents.{name}.{key} is a string")
@@ -694,12 +747,7 @@ fn agent_from(name: &str, table: &Table) -> Result<CustomAgent, String> {
 /// The profile `table`, `daemon.profiles.NAME`, adds, or changes of the
 /// built-in one of its name.
 fn profile_from(name: &str, table: &Table) -> Result<Change, String> {
-    let fields = fields(
-        "profiles",
-        name,
-        table,
-        &["about", "prompt", "limits", "agent", "model", "effort"],
-    )?;
+    let fields = fields("profiles", name, table, PROFILE_FIELDS)?;
     let text = |key: &str| {
         string(fields.get(key), || {
             format!("daemon.profiles.{name}.{key} is a string")

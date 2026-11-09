@@ -572,6 +572,30 @@ fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
         .unwrap();
     stdout(&unset);
     assert!(!settings.exists());
+    // Taken away before an old web.toml was moved, it's taken out of that
+    // too, or the move would bring it back. With a config folder of its
+    // own, the password is kept beside it, never in the user's.
+    let config = home.path().join("own");
+    std::fs::create_dir_all(config.join("daemon")).unwrap();
+    let old = config.join("daemon/web.toml");
+    std::fs::write(
+        &old,
+        "mode = \"tailscale\"\npassword = \"$argon2id$v=19$x\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(config.join("state")).unwrap();
+    std::fs::write(config.join("state/web-password"), "$argon2id$v=19$y\n").unwrap();
+    let unset = Command::new(BINARY)
+        .args(["web", "password", "--unset"])
+        .env("CLACKATOO_CONFIG", &config)
+        .env("XDG_STATE_HOME", home.path())
+        .output()
+        .unwrap();
+    stdout(&unset);
+    let kept = std::fs::read_to_string(&old).unwrap();
+    assert!(!kept.contains("password"), "{kept}");
+    assert!(kept.contains("mode = \"tailscale\""), "{kept}");
+    assert!(!config.join("state/web-password").exists());
 }
 
 /// The daemon's config is moved from its old TOML as the daemon starts,
@@ -594,7 +618,8 @@ fn the_daemons_config_is_moved_and_run_again_at_each_upgrade() {
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
         .env("CLACKATOO_CONFIG", &config)
-        .env("XDG_STATE_HOME", home.path().join("state"))
+        // Never this: a config folder of its own keeps its state beside it.
+        .env("XDG_STATE_HOME", home.path().join("elsewhere"))
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdout(std::process::Stdio::null())
@@ -611,6 +636,13 @@ fn the_daemons_config_is_moved_and_run_again_at_each_upgrade() {
     assert!(config.join("daemon/settings.lua").exists());
     assert!(config.join("daemon/machine.toml.bak").exists());
     assert!(!config.join("daemon/machine.toml").exists());
+    assert!(config.join("state/daemon-config.lua").exists());
+    assert!(
+        !home
+            .path()
+            .join("elsewhere/clackatoo/daemon-config.lua")
+            .exists()
+    );
     // Changed, then upgraded: run again.
     let init = config.join("daemon/init.lua");
     std::fs::write(&init, "daemon.machine.name = \"from-lua\"\n").unwrap();

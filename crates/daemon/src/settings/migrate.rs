@@ -6,9 +6,20 @@
 //! Each key becomes the line that sets it, `daemon.GROUP.KEY = VALUE`,
 //! with the comments it had. A line the config can't run, as a key that
 //! was never a setting or a value out of its range, is written commented
-//! out, with why: what's written always runs. The web app's password
-//! goes to the state directory, not the config (see
-//! [`super::PASSWORD`]).
+//! out, with why: what's written always runs. A field an agent or a
+//! profile never had is left out alone, as before, keeping the agent. Any
+//! of the web app's left out keeps the web app off, as a `web.toml` that
+//! went wrong did, until it's put right.
+//!
+//! Every comment written is a line comment of its own, `-- ` and text
+//! with no line breaks or other control characters in it, so nothing from
+//! the old files can end one, or open a block comment, and run.
+//!
+//! It goes in order, each step only once the one before has worked: the
+//! web app's password to the state directory, never the config (see
+//! [`super::PASSWORD`]); then `settings.lua`, once its text compiles; then
+//! the old files to `.bak`, `web.toml`'s without its password. What
+//! fails is said in the first window the user is at.
 //!
 //! Once `settings.lua` is there, a TOML file that's there too is passed
 //! over, and said so.
@@ -17,7 +28,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::literal::{self, Literal};
-use super::lua::{self, Chunk};
+use super::lua::{self, AGENT_FIELDS, Chunk, PROFILE_FIELDS};
 use super::{Dirs, HEADER};
 use crate::schema::Source;
 
@@ -29,28 +40,36 @@ const FILES: [(&str, Option<&str>); 3] = [
     ("web.toml", Some("web")),
 ];
 
+/// The most lines left out said in a window: the rest are in the file.
+const SAID: usize = 3;
+
 /// A line of the file to be: what it sets, with the comments before it.
 #[derive(Debug)]
 struct Statement {
+    /// Its comments' text, each written as line comments.
     comments: Vec<String>,
     code: String,
+    /// The key at the file's top it's of.
+    key: String,
     /// Why it's commented out, if it is.
     out: Option<String>,
 }
 
 impl Statement {
-    fn new(comments: Vec<String>, code: String) -> Self {
+    fn new(comments: Vec<String>, key: &str, code: String) -> Self {
         Self {
             comments,
             code,
+            key: key.to_owned(),
             out: None,
         }
     }
 
-    fn left_out(comments: Vec<String>, code: String, why: String) -> Self {
+    fn left_out(comments: Vec<String>, key: &str, code: String, why: String) -> Self {
         Self {
             comments,
             code,
+            key: key.to_owned(),
             out: Some(why),
         }
     }
@@ -65,14 +84,14 @@ pub(crate) struct Converted {
     pub(crate) files: Vec<PathBuf>,
     /// `web.toml`'s password's hash, if it had one.
     pub(crate) password: Option<String>,
-    /// What was left out, and why, to log.
+    /// What was left out, and why, a line each.
     pub(crate) left_out: Vec<String>,
 }
 
 /// Moves the old files into `settings.lua`, if they're there and it isn't,
-/// saying what it did in `notes`: or if it couldn't be written, its text,
-/// to run as it would have been. A TOML file there beside `settings.lua`
-/// is said, and passed over.
+/// saying what it did in `notes`: or if it couldn't, its text, to run as
+/// it would have been, the old files left as they are. A TOML file there
+/// beside `settings.lua` is said, and passed over.
 pub(crate) fn once(dirs: &Dirs, notes: &mut Vec<String>) -> Option<String> {
     let settings = dirs.daemon.join("settings.lua");
     if settings.exists() {
@@ -99,43 +118,96 @@ pub(crate) fn once(dirs: &Dirs, notes: &mut Vec<String>) -> Option<String> {
         .filter_map(|file| Some(file.file_name()?.to_string_lossy().into_owned()))
         .collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    if let Err(err) = super::write_private(&settings, &converted.text) {
+    let mut failed = |what: String| {
         let said = format!(
-            "{} couldn't be written, so {} were read as it would have said: {err}",
-            settings.display(),
+            "{} weren't moved into daemon/settings.lua, so they're read as they would have \
+             been, and kept: {what}",
             named(&names)
         );
         log::error!("{said}");
         notes.push(said);
-        return Some(converted.text);
+    };
+    // Never written unless it compiles, whatever was in the old files.
+    if let Err(why) = lua::compiles(&converted.text) {
+        failed(format!("what they came to doesn't compile ({why})"));
+        return None;
     }
-    if let (Some(hash), Some(state)) = (&converted.password, &dirs.state)
-        && let Ok(None) = super::password(state)
-        && let Err(err) = super::set_password(state, Some(hash))
-    {
-        log::error!(
-            "the web app's password couldn't be moved to {}: {err}",
-            state.display()
-        );
+    // The password first: with it nowhere, the old file keeps it.
+    if let Some(hash) = &converted.password {
+        let Some(state) = &dirs.state else {
+            failed("there's no state directory for the web app's password".to_owned());
+            return Some(converted.text);
+        };
+        match super::password(state) {
+            // `clackatoo web password` set one since: it stands.
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(err) = super::set_password(state, Some(hash)) {
+                    failed(format!("the web app's password couldn't be kept: {err}"));
+                    return Some(converted.text);
+                }
+            }
+            Err(why) => {
+                failed(why);
+                return Some(converted.text);
+            }
+        }
+    }
+    if let Err(err) = super::write_private(&settings, &converted.text) {
+        failed(format!("{} couldn't be written: {err}", settings.display()));
+        return Some(converted.text);
     }
     for file in &converted.files {
         let kept = backup(file);
-        match std::fs::rename(file, &kept) {
+        match keep(file, &kept) {
             Ok(()) => log::info!(
                 "moved {} into {}, keeping it as {}",
                 file.display(),
                 settings.display(),
                 kept.display()
             ),
-            Err(err) => log::warn!("{} couldn't be kept as .bak: {err}", file.display()),
+            Err(err) => {
+                let said = format!("{} couldn't be kept as .bak: {err}", file.display());
+                log::warn!("{said}");
+                notes.push(said);
+            }
         }
     }
-    notes.push(format!(
+    let mut said = format!(
         "the daemon's settings moved from {} into daemon/settings.lua; the old files are kept \
          as .bak",
         named(&names)
-    ));
+    );
+    if !converted.left_out.is_empty() {
+        let shown: Vec<&str> = (converted.left_out.iter())
+            .take(SAID)
+            .map(String::as_str)
+            .collect();
+        let _ = write!(said, ". Left out: {}", shown.join("; "));
+        if converted.left_out.len() > SAID {
+            let _ = write!(
+                said,
+                ", and {} more, as settings.lua says",
+                converted.left_out.len() - SAID
+            );
+        }
+    }
+    notes.push(said);
     None
+}
+
+/// Keeps `file` as `kept`: renamed, but for a `web.toml` with a password,
+/// whose copy is written without it, so no hash stays in the config.
+fn keep(file: &Path, kept: &Path) -> std::io::Result<()> {
+    if file.file_name().is_some_and(|name| name == "web.toml")
+        && let Ok(Some(text)) = lua::read(file)
+        && let Ok(mut document) = text.parse::<toml_edit::DocumentMut>()
+        && document.remove("password").is_some()
+    {
+        super::write_private(kept, &document.to_string())?;
+        return std::fs::remove_file(file);
+    }
+    std::fs::rename(file, kept)
 }
 
 /// What `settings.lua` would be, moved from the old files, if they're
@@ -181,7 +253,7 @@ pub(crate) fn convert(dirs: &Dirs) -> Option<Converted> {
             Ok(Some(text)) => text,
             Ok(None) => continue,
             Err(why) => {
-                converted.left_out.push(why.clone());
+                converted.left_out.push(one_line(&why));
                 converted.files.push(path);
                 sections.push((name, vec![unread(&why)]));
                 continue;
@@ -229,7 +301,8 @@ pub(crate) fn agents_text(text: &str) -> String {
 }
 
 /// The file `sections` make after `head`, with each line the config
-/// can't run commented out, saying why, in `left_out` too.
+/// can't run commented out, saying why, in `left_out` too; and with
+/// any of `web.toml`'s left out, its mode too, so the web app stays off.
 fn runnable(
     path: &Path,
     head: &str,
@@ -247,8 +320,8 @@ fn runnable(
             text: text.clone(),
             source: Source::Settings,
         };
-        let Err(failure) = lua::run(&[chunk], &[]) else {
-            return text;
+        let Err(failure) = lua::run(&[chunk], &[], lua::TIME) else {
+            break;
         };
         let line = (failure.at)
             .filter(|at| Path::new(&*at.file) == path)
@@ -260,7 +333,7 @@ fn runnable(
         });
         let Some((section, at)) = wrong else {
             // Nowhere to put it: said as the daemon runs it.
-            return text;
+            break;
         };
         let why = failure
             .said
@@ -269,10 +342,38 @@ fn runnable(
             .map_or(failure.said.as_str(), |(_, why)| why)
             .to_owned();
         let statement = &mut sections[section].1[at];
-        left_out.push(format!("{}: {why}", statement.code));
+        left_out.push(one_line(&format!("{}: {why}", statement.code)));
         statement.out = Some(why);
     }
+    keep_the_web_off(sections, left_out);
     render(head, sections).0
+}
+
+/// Leaves `web.toml`'s mode out too if any of its other lines was, so the
+/// web app stays off until they're put right, as it did when `web.toml`
+/// went wrong: never on with a default in place of what was meant.
+fn keep_the_web_off(sections: &mut [(&str, Vec<Statement>)], left_out: &mut Vec<String>) {
+    let Some((_, statements)) = sections.iter_mut().find(|(name, _)| *name == "web.toml") else {
+        return;
+    };
+    let wrong: Vec<String> = (statements.iter())
+        .filter(|statement| statement.out.is_some() && statement.key != "password")
+        .map(|statement| statement.key.clone())
+        .collect();
+    if wrong.is_empty() {
+        return;
+    }
+    if let Some(mode) =
+        (statements.iter_mut()).find(|statement| statement.key == "mode" && statement.out.is_none())
+    {
+        let why = format!(
+            "the web app stays off until daemon.web.{} {} put right",
+            wrong.join(", daemon.web."),
+            if wrong.len() == 1 { "is" } else { "are" }
+        );
+        left_out.push(one_line(&format!("{}: {why}", mode.code)));
+        mode.out = Some(why);
+    }
 }
 
 /// The file's text, and the lines each statement that runs is on, by
@@ -285,11 +386,11 @@ fn render(
     let mut text = head.to_owned();
     let mut lines = Vec::new();
     for (index, (name, statements)) in sections.iter().enumerate() {
-        let _ = write!(text, "\n-- From {name}:\n");
+        text.push('\n');
+        commented(&mut text, &format!("From {name}:"));
         for (at, statement) in statements.iter().enumerate() {
             for comment in &statement.comments {
-                text.push_str(comment);
-                text.push('\n');
+                commented(&mut text, comment);
             }
             match &statement.out {
                 // Comments alone.
@@ -301,15 +402,41 @@ fn render(
                     lines.push(((index, at), first..=line_of(&text) - 1));
                 }
                 Some(why) => {
-                    let _ = writeln!(text, "-- Left out: {why}");
-                    for line in statement.code.lines() {
-                        let _ = writeln!(text, "-- {line}");
-                    }
+                    commented(&mut text, &format!("Left out: {why}"));
+                    commented(&mut text, &statement.code);
                 }
             }
         }
     }
     (text, lines)
+}
+
+/// Writes `comment` as line comments, `-- ` and a line of it each, with
+/// every control character in it written out, as `\u{d}`: so it can't end
+/// its line and run, nor open a block comment.
+fn commented(text: &mut String, comment: &str) {
+    if comment.is_empty() {
+        return;
+    }
+    for line in comment.split('\n') {
+        text.push_str("-- ");
+        for ch in line.chars() {
+            if ch.is_control() {
+                let _ = write!(text, "\\u{{{:x}}}", u32::from(ch));
+            } else {
+                text.push(ch);
+            }
+        }
+        text.push('\n');
+    }
+}
+
+/// `text` on one line, for a window or the log: line breaks as spaces,
+/// other control characters as `\u{…}`.
+fn one_line(text: &str) -> String {
+    let mut line = String::new();
+    commented(&mut line, &text.replace('\n', " "));
+    line.trim_start_matches("-- ").trim_end().to_owned()
 }
 
 /// The line, from 1, that the end of `text` is on.
@@ -319,7 +446,7 @@ fn line_of(text: &str) -> u32 {
 
 /// What's written for a file that couldn't be read.
 fn unread(why: &str) -> Statement {
-    Statement::left_out(Vec::new(), String::new(), why.to_owned())
+    Statement::left_out(Vec::new(), "", String::new(), why.to_owned())
 }
 
 /// The statements `text`, the file called `name`, comes to, its top keys
@@ -353,17 +480,26 @@ fn statements(
                     .filter(|hash| !hash.is_empty());
                 statements.push(Statement::left_out(
                     comments,
+                    key,
                     String::new(),
                     "the password's hash, now kept in the state directory".to_owned(),
                 ));
             }
             (Some(group), key) => {
-                statements.push(set(comments, &format!("daemon.{group}"), key, item));
+                statements.push(set(
+                    comments,
+                    key,
+                    &format!("daemon.{group}"),
+                    key,
+                    item,
+                    None,
+                ));
             }
             (None, "agents" | "profiles" | "subagents" | "upgrade") => {
                 let Some(inner) = item.as_table_like() else {
                     statements.push(Statement::left_out(
                         comments,
+                        key,
                         format!("{key} = {}", item.to_string().trim()),
                         format!("{key} is a table"),
                     ));
@@ -372,8 +508,13 @@ fn statements(
                 statements.extend(
                     comments
                         .into_iter()
-                        .map(|comment| Statement::new(vec![comment], String::new())),
+                        .map(|comment| Statement::new(vec![comment], key, String::new())),
                 );
+                let fields = match key {
+                    "agents" => Some(("an agent", AGENT_FIELDS)),
+                    "profiles" => Some(("a profile", PROFILE_FIELDS)),
+                    _ => None,
+                };
                 for (inner_key, inner_item) in inner.iter() {
                     let comments = (inner.key(inner_key))
                         .map(|key| comments_in(key.leaf_decor()))
@@ -383,14 +524,17 @@ fn statements(
                         .collect();
                     statements.push(set(
                         comments,
+                        key,
                         &format!("daemon.{key}"),
                         inner_key,
                         inner_item,
+                        fields,
                     ));
                 }
             }
             (None, key) => statements.push(Statement::left_out(
                 comments,
+                key,
                 format!("{key} = {}", item.to_string().trim()),
                 format!("{name} has no {key}"),
             )),
@@ -399,34 +543,68 @@ fn statements(
     statements
 }
 
-/// `key` in `table` set to `item`, as a statement: a table's own
-/// comments, about its fields, go before it, as its literal has none.
-fn set(mut comments: Vec<String>, table: &str, key: &str, item: &toml_edit::Item) -> Statement {
-    if let Some(fields) = item.as_table() {
-        for (name, field) in fields {
+/// `key` in `table` set to `item`, as a statement, of `top`, the file's
+/// key it's in: a table's own comments, about its fields, go before it,
+/// as its literal has none. With `fields`, what a table of the kind named
+/// may have, any other field is left out of it alone, saying so.
+fn set(
+    mut comments: Vec<String>,
+    top: &str,
+    table: &str,
+    key: &str,
+    item: &toml_edit::Item,
+    fields: Option<(&str, &[&str])>,
+) -> Statement {
+    let path = literal::path(table, key);
+    let mut kept = None;
+    if let Some(inner) = item.as_table_like() {
+        let mut literal = Vec::new();
+        for (name, field) in inner.iter() {
             comments.extend(
-                fields
-                    .key(name)
+                (inner.key(name))
                     .map(|key| comments_in(key.leaf_decor()))
                     .unwrap_or_default(),
             );
             if let Some(after) = field.as_value().and_then(|value| suffix(value.decor())) {
                 comments.push(format!("{after} ({name})"));
             }
+            if let Some((kind, known)) = fields
+                && !known.contains(&name)
+            {
+                comments.push(format!(
+                    "Left out: {path}.{name} isn't something {kind} has: it has {}",
+                    known.join(", ")
+                ));
+                comments.push(format!("{name} = {}", field.to_string().trim()));
+                continue;
+            }
+            match literal_of(field) {
+                Some(value) => literal.push((name.to_owned(), value)),
+                None => {
+                    return Statement::left_out(
+                        comments,
+                        top,
+                        format!("{path} = {}", item.to_string().trim()),
+                        format!("{name} is a value Luau can't hold"),
+                    );
+                }
+            }
         }
+        kept = Some(Literal::Table(literal));
     }
-    let path = literal::path(table, key);
-    match literal_of(item) {
+    match kept.or_else(|| literal_of(item)) {
         Some(value) => {
             let before = path.len() + 3;
-            let mut code = format!("{path} = {}", value.written(before));
+            let code = format!("{path} = {}", value.written(before));
+            // On a line of its own, before: never after code.
             if let Some(after) = item.as_value().and_then(|value| suffix(value.decor())) {
-                let _ = write!(code, " {after}");
+                comments.push(after);
             }
-            Statement::new(comments, code)
+            Statement::new(comments, top, code)
         }
         None => Statement::left_out(
             comments,
+            top,
             format!("{path} = {}", item.to_string().trim()),
             "a value Luau can't hold".to_owned(),
         ),
@@ -489,7 +667,8 @@ fn table_comments(item: &toml_edit::Item) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The comment lines in what's before something, `#` as `--`.
+/// The text of the comments in what's before something, without their
+/// `#`, and a space after it.
 fn comments_in(decor: &toml_edit::Decor) -> Vec<String> {
     let prefix = (decor.prefix())
         .and_then(toml_edit::RawString::as_str)
@@ -497,14 +676,15 @@ fn comments_in(decor: &toml_edit::Decor) -> Vec<String> {
     (prefix.lines())
         .map(str::trim)
         .filter_map(|line| line.strip_prefix('#'))
-        .map(|comment| format!("--{comment}"))
+        .map(|comment| comment.strip_prefix(' ').unwrap_or(comment).to_owned())
         .collect()
 }
 
-/// The comment after a value, `#` as `--`.
+/// The text of the comment after a value, without its `#`.
 fn suffix(decor: &toml_edit::Decor) -> Option<String> {
     let suffix = decor.suffix()?.as_str()?.trim();
-    Some(format!("--{}", suffix.strip_prefix('#')?))
+    let comment = suffix.strip_prefix('#')?;
+    Some(comment.strip_prefix(' ').unwrap_or(comment).to_owned())
 }
 
 #[cfg(test)]
@@ -566,7 +746,7 @@ mod tests {
         assert!(text.starts_with(HEADER), "{text}");
         assert!(text.contains("-- My agents."), "{text}");
         assert!(text.contains("-- its ACP"), "{text}");
-        let settings = crate::settings::load(&dirs).settings;
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
         let configured = settings.agents();
         assert_eq!(configured.agents.len(), 2);
         let opencode = &configured.agents[0];
@@ -606,7 +786,7 @@ mod tests {
         );
         once(&dirs, &mut Vec::new());
         assert!(dirs.daemon.join("machine.toml.bak").exists());
-        let settings = crate::settings::load(&dirs).settings;
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
         assert_eq!(settings.machine_name().as_deref(), Some("jack-desktop"));
         assert!(!settings.priority());
     }
@@ -639,7 +819,7 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        let settings = crate::settings::load(&dirs).settings;
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
         let web = settings
             .web("/data".into(), super::super::password(state).unwrap())
             .unwrap()
@@ -649,6 +829,141 @@ mod tests {
         assert_eq!(web.lock_after, 5);
         assert!(!web.ask);
         assert_eq!(web.expire_after, std::time::Duration::from_hours(30 * 24));
+        // No hash stays in the config folder, the .bak included.
+        let kept = std::fs::read_to_string(dirs.daemon.join("web.toml.bak")).unwrap();
+        assert!(!kept.contains(&hash), "{kept}");
+        assert!(kept.contains("lock_after = 5"), "{kept}");
+    }
+
+    /// A key, or a comment, from the old files can never end its comment
+    /// and run: every comment is lines of its own, with no line breaks or
+    /// other control characters in them, and none opens a block comment.
+    #[test]
+    fn nothing_from_the_old_files_runs_as_code() {
+        let (_temp, dirs) = dirs();
+        write(
+            &dirs,
+            "machine.toml",
+            "\"x\\ndaemon.machine.name = 'pwned'\" = 1\n\
+             \"y\\rdaemon.machine.priority = false\" = 2\n\
+             #[[ a comment opening a block\n\
+             name = \"desk\" #]] closing it\n",
+        );
+        write(
+            &dirs,
+            "agents.toml",
+            "\"z\\ndaemon.web.mode = 'public'\" = 3\n\
+             [agents.\"a\\nb\"]\ncommand = [\"x\"]\n\"q\\ndaemon.web.mode = 'public'\" = 1\n",
+        );
+        let mut notes = Vec::new();
+        once(&dirs, &mut notes);
+        let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
+        for line in text.lines() {
+            for injected in [
+                "daemon.machine.name = 'pwned'",
+                "daemon.machine.priority = false",
+                "daemon.web.mode = 'public'",
+            ] {
+                assert!(
+                    !line.trim_start().starts_with(injected),
+                    "{line:?} in
+{text}"
+                );
+            }
+            assert!(!line.trim_start().starts_with("--["), "{line:?}");
+            assert!(!line.contains('\r'), "{line:?}");
+        }
+        assert!(text.contains("-- [[ a comment opening a block"), "{text}");
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
+        assert_eq!(settings.machine_name().as_deref(), Some("desk"));
+        assert!(settings.priority());
+        assert_eq!(
+            settings.value("web.mode"),
+            crate::schema::Value::Choice("off")
+        );
+        // The agent named with a line break is kept, by that name.
+        assert_eq!(settings.agents().agents[0].name, "a\nb");
+        for note in &notes {
+            assert!(!note.contains('\n') && !note.contains('\r'), "{note:?}");
+        }
+    }
+
+    /// A field an agent or profile never had is left out alone: the agent
+    /// stays, as before the Luau config.
+    #[test]
+    fn an_unknown_field_leaves_out_only_itself() {
+        let (_temp, dirs) = dirs();
+        write(
+            &dirs,
+            "agents.toml",
+            "[agents.mine]\ncommand = [\"mine-acp\"]\ncolour = \"red\"\n\n\
+             [profiles.review]\nabout = \"x\"\nwhen = 3\n",
+        );
+        once(&dirs, &mut Vec::new());
+        let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
+        assert!(
+            text.contains("-- Left out: daemon.agents.mine.colour isn't something an agent has"),
+            "{text}"
+        );
+        assert!(text.contains("-- colour = \"red\""), "{text}");
+        let configured = crate::settings::load(&dirs, crate::settings::When::Starting)
+            .settings
+            .agents();
+        assert_eq!(configured.agents[0].command, ["mine-acp"]);
+        assert_eq!(configured.profiles[0].about.as_deref(), Some("x"));
+    }
+
+    /// Any of web.toml left out keeps the web app off until it's put
+    /// right, never on with a default, and the window is told what.
+    #[test]
+    fn web_toml_that_cant_move_whole_keeps_the_web_app_off() {
+        let (_temp, dirs) = dirs();
+        write(
+            &dirs,
+            "web.toml",
+            "mode = \"tailscale\"\nlogin = \"me@github\"\nlock_after = 0\n",
+        );
+        let mut notes = Vec::new();
+        once(&dirs, &mut notes);
+        let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
+        assert!(
+            text.contains("-- daemon.web.mode = \"tailscale\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("the web app stays off until daemon.web.lock_after"),
+            "{text}"
+        );
+        let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
+        assert!(settings.web("/data".into(), None).unwrap().is_none());
+        assert!(
+            notes[0].contains("Left out: daemon.web.lock_after = 0"),
+            "{notes:?}"
+        );
+    }
+
+    /// The password first, then settings.lua, then the old files: when one
+    /// can't, nothing after it is done, the old files stay, and it's said.
+    #[test]
+    fn a_step_that_fails_leaves_the_old_files_as_they_are() {
+        let (temp, mut dirs) = dirs();
+        let hash = crate::web::hash_password("correct horse");
+        write(
+            &dirs,
+            "web.toml",
+            &format!("mode = \"tailscale\"\npassword = \"{hash}\"\n"),
+        );
+        // A state directory that can't be made: a file is in its way.
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        dirs.state = Some(blocked.join("state"));
+        let mut notes = Vec::new();
+        let ran = once(&dirs, &mut notes);
+        assert!(ran.is_some(), "run as it would have been");
+        assert!(!dirs.daemon.join("settings.lua").exists());
+        assert!(dirs.daemon.join("web.toml").exists());
+        assert!(!dirs.daemon.join("web.toml.bak").exists());
+        assert!(notes[0].contains("weren't moved"), "{notes:?}");
     }
 
     /// What the config can't run is kept, commented out, saying why, and
@@ -673,7 +988,7 @@ mod tests {
         assert!(text.contains("-- daemon.subagents.working = 999"), "{text}");
         assert!(text.contains("-- daemon.web.lock_afer = 3"), "{text}");
         assert!(text.contains("-- daemon.web.mode = \"public\""), "{text}");
-        let loaded = crate::settings::load(&dirs);
+        let loaded = crate::settings::load(&dirs, crate::settings::When::Starting);
         assert_eq!(loaded.notes, Vec::<String>::new(), "it runs");
         let configured = loaded.settings.agents();
         assert_eq!(configured.agents.len(), 1);
@@ -687,7 +1002,7 @@ mod tests {
         let (_temp, dirs) = dirs();
         write(&dirs, "settings.lua", "daemon.machine.name = \"lua\"\n");
         write(&dirs, "machine.toml", "name = \"toml\"\n");
-        let loaded = crate::settings::load(&dirs);
+        let loaded = crate::settings::load(&dirs, crate::settings::When::Starting);
         assert_eq!(loaded.settings.machine_name().as_deref(), Some("lua"));
         assert!(
             loaded.notes[0].contains("passes over daemon/machine.toml"),
@@ -701,7 +1016,7 @@ mod tests {
     #[test]
     fn nothing_moves_without_the_old_files() {
         let (_temp, dirs) = dirs();
-        let loaded = crate::settings::load(&dirs);
+        let loaded = crate::settings::load(&dirs, crate::settings::When::Starting);
         assert!(loaded.notes.is_empty());
         assert!(!dirs.daemon.join("settings.lua").exists());
         assert_eq!(loaded.settings, crate::settings::Settings::default());

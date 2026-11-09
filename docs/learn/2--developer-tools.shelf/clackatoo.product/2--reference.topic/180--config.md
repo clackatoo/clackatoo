@@ -715,7 +715,11 @@ upgrade`, which keeps every terminal and agent running, runs it again at once.
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is
 never run, only text. A run may take half a second and 64 MB, or it's stopped
-where it is: a loop that never ends can't hold up the daemon.
+where it is, and stays stopped, so a `pcall` can't carry it on: a loop that
+never ends can't hold up the daemon. As the daemon upgrades, its terminals
+waiting, a run may take a fifth of a second. The build an upgrade is to is
+asked first whether agents go on through it; it answers from what last ran,
+never running your `init.lua` for it.
 
 ### When it goes wrong
 
@@ -723,9 +727,11 @@ A mistake never stops the daemon. A value a setting can't hold, a name that
 isn't a setting, a Lua error, or a run stopped for taking too long, stops the
 config there, and none of what it set is used. Instead the daemon keeps what
 the config set the last time it ran without a mistake, kept in
-`daemon-config.lua` in clackatoo's state directory (`~/.local/state/clackatoo`),
-or with none kept, its defaults. It writes why in its log, and the first
-window you're at says so in its bar, with the file and line:
+`daemon-config.lua` in clackatoo's state directory (`~/.local/state/clackatoo`).
+With none kept, as when no config has run yet, it goes by its defaults, but
+with terminals' history and the web app off until one has. It writes why in
+its log, and the first window you're at says so in its bar, with the file and
+line of the mistake that stopped it:
 
 ```text
 the daemon's config went wrong, so it kept its settings from the last time it ran: daemon/init.lua:4: daemon.history.lines is a whole number from 1 to 1000000
@@ -745,9 +751,20 @@ finds them there and no `settings.lua`, it moves every value they set into
 `settings.lua`, a line each, with their comments, and keeps the old files
 beside it as `agents.toml.bak` and so on. A value the config can't hold, or a
 key that was never a setting, is written commented out, saying why, so the
-rest still runs. The web app's password goes to the state directory instead
-(see [the phone](~clackatoo/reference/phone)). The first window you're at
-says what was moved.
+rest still runs. A field an agent or profile never had is left out alone,
+keeping the agent, as before. If any of `web.toml` is left out, so is its
+`mode`: the web app stays off until it's put right, as it did when `web.toml`
+went wrong. Every comment written is a line comment of its own, with nothing
+in it that could end it or open a block comment.
+
+It goes in order, each step only once the one before has worked: the web
+app's password to the state directory (see
+[the phone](~clackatoo/reference/phone)); then `settings.lua`, once it
+compiles; then the old files to `.bak`, `web.toml`'s without its password, so
+no password stays in the config folder. If a step fails, the old files stay
+as they are and are read as they would have been, and the first window you're
+at says why. When it works, that window says what was moved, and what was left
+out.
 
 That happens once. A TOML file there after it is passed over: the daemon's log
 and the first window you're at say so, and it can be deleted.
@@ -759,8 +776,9 @@ As for the window, the environment outdoes the config, for tests and CI:
 `CLACKATOO_HISTORY_EVERY` and `CLACKATOO_IMAGE_MEMORY` (as `64,256`) over the
 settings below, and `CLACKATOO_AGENT` over the command of the agent a chat
 gets when it asks for none. `CLACKATOO_CONFIG` names a folder to take the
-config from in place of `~/.config/clackatoo`, or `off` for none, as tests'
-daemons run.
+config from in place of `~/.config/clackatoo`, keeping the web app's password
+and the last settings that ran in `state` in it, never in your own state
+directory; or it's `off` for none, as tests' daemons run.
 
 ### The daemon's name
 

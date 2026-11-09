@@ -86,7 +86,7 @@ fn a_module_required_sets_what_it_sets_at_the_users_line() {
         &dirs.daemon.join("init.lua"),
         "local machines = require(\"machines\")\n\nmachines.name(\"desk\")\nrequire(\"web.home\")\n",
     );
-    let loaded = load(&dirs);
+    let loaded = load(&dirs, When::Starting);
     assert_eq!(loaded.notes, Vec::<String>::new());
     let by = loaded.settings.set_by("machine.name");
     let at = by.at.unwrap();
@@ -117,7 +117,7 @@ fn init_lua_outdoes_settings_lua() {
         &dirs.daemon.join("init.lua"),
         "daemon.machine.name = \"mine\"\n",
     );
-    let settings = load(&dirs).settings;
+    let settings = load(&dirs, When::Starting).settings;
     assert_eq!(settings.machine_name().as_deref(), Some("mine"));
     assert_eq!(settings.set_by("machine.name").source, Source::Config);
     assert_eq!(settings.value("history.lines"), Value::Number(5));
@@ -159,7 +159,7 @@ fn the_sandbox_refuses_what_would_escape_it() {
         "daemon.machine.name = \"escaped\"\n",
     );
     write(&dirs.daemon.join("init.lua"), "require(\"outside\")\n");
-    let loaded = load(&dirs);
+    let loaded = load(&dirs, When::Starting);
     assert_eq!(loaded.settings.machine_name(), None);
     assert!(
         loaded.notes[0].contains("there's no module `outside`"),
@@ -192,13 +192,13 @@ fn bytecode_is_refused() {
         .unwrap();
     let (_temp, dirs) = dirs();
     std::fs::write(dirs.daemon.join("init.lua"), &bytecode).unwrap();
-    let loaded = load(&dirs);
+    let loaded = load(&dirs, When::Starting);
     assert_eq!(loaded.settings.machine_name(), None);
     assert!(!loaded.notes.is_empty());
     std::fs::write(dirs.daemon.join("init.lua"), "require(\"compiled\")").unwrap();
     std::fs::create_dir_all(dirs.daemon.join("lua")).unwrap();
     std::fs::write(dirs.daemon.join("lua/compiled.lua"), &bytecode).unwrap();
-    assert_eq!(load(&dirs).settings.machine_name(), None);
+    assert_eq!(load(&dirs, When::Starting).settings.machine_name(), None);
 }
 
 /// A loop that never ends, a call that never returns, and memory that
@@ -224,9 +224,9 @@ fn a_runaway_config_is_stopped() {
         "daemon.machine.name = \"x\"\nwhile true do end\n",
     );
     let started = Instant::now();
-    let loaded = load(&dirs);
-    assert!(started.elapsed() < WAIT + Duration::from_secs(1));
-    assert_eq!(loaded.settings, Settings::default());
+    let loaded = load(&dirs, When::Starting);
+    assert!(started.elapsed() < When::Starting.wait() + Duration::from_secs(1));
+    assert_eq!(loaded.settings, Settings::fallback());
     assert!(
         loaded.notes[0].contains("ran too long"),
         "{:?}",
@@ -246,7 +246,7 @@ fn a_broken_config_keeps_the_last_good_values_and_says_so() {
          daemon.agents.mine = { command = { \"mine-acp\" }, tasks = false }\n\
          daemon.profiles.review = { model = { claude = \"haiku\" }, limits = \"read-only\" }\n",
     );
-    let good = load(&dirs);
+    let good = load(&dirs, When::Starting);
     assert!(good.notes.is_empty(), "{:?}", good.notes);
     let state = dirs.state.as_ref().unwrap();
     assert!(state.join(LAST_GOOD).exists());
@@ -254,7 +254,7 @@ fn a_broken_config_keeps_the_last_good_values_and_says_so() {
         &init,
         "daemon.machine.name = \"broken\"\ndaemon.history.lines = \"many\"\n",
     );
-    let broken = load(&dirs);
+    let broken = load(&dirs, When::Starting);
     assert_eq!(broken.settings.machine_name().as_deref(), Some("good"));
     assert_eq!(broken.settings.agents(), good.settings.agents());
     let note = &broken.notes[0];
@@ -272,27 +272,132 @@ fn a_broken_config_keeps_the_last_good_values_and_says_so() {
     );
     // A syntax error, too.
     write(&init, "daemon.machine.name = \n");
-    assert_eq!(load(&dirs).settings.machine_name().as_deref(), Some("good"));
+    assert_eq!(
+        load(&dirs, When::Starting)
+            .settings
+            .machine_name()
+            .as_deref(),
+        Some("good")
+    );
     // Fixed, it's what runs, and what's kept.
     write(&init, "daemon.machine.name = \"fixed\"\n");
     assert_eq!(
-        load(&dirs).settings.machine_name().as_deref(),
+        load(&dirs, When::Starting)
+            .settings
+            .machine_name()
+            .as_deref(),
         Some("fixed")
     );
     write(&init, "error(\"no\")\n");
     assert_eq!(
-        load(&dirs).settings.machine_name().as_deref(),
+        load(&dirs, When::Starting)
+            .settings
+            .machine_name()
+            .as_deref(),
         Some("fixed")
     );
-    // With nothing kept, the defaults.
+    // With nothing kept, the defaults, with history and the web app off
+    // until a config has run.
     std::fs::remove_file(state.join(LAST_GOOD)).unwrap();
-    let defaults = load(&dirs);
-    assert_eq!(defaults.settings, Settings::default());
+    let defaults = load(&dirs, When::Starting);
+    assert_eq!(defaults.settings, Settings::fallback());
+    assert!(defaults.settings.history(PathBuf::from("/h")).is_none());
+    assert_eq!(defaults.settings.value("web.mode"), Value::Choice("off"));
     assert!(
-        defaults.notes[0].contains("went by its defaults"),
+        defaults.notes[0]
+            .contains("went by its defaults, with terminals' history and the web app off"),
         "{:?}",
         defaults.notes
     );
+}
+
+/// Once a run has gone on too long, every step after stops it, so a
+/// `pcall` that caught it can't carry on.
+#[test]
+fn a_run_stopped_for_time_stays_stopped() {
+    for runaway in [
+        "while true do pcall(string.rep, \"x\", 1e9) end",
+        "while true do pcall(function() while true do end end) end",
+        "for _ = 1, 1e12 do pcall(error, \"no\") end",
+    ] {
+        let started = Instant::now();
+        let failure = run(runaway).unwrap_err();
+        assert!(
+            failure.said.contains("ran too long"),
+            "{runaway}: {failure:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(3), "{runaway}");
+    }
+}
+
+/// What's said is what ended the run, not a mistake a `pcall` caught on
+/// the way.
+#[test]
+fn the_mistake_said_is_the_one_that_ended_it() {
+    let failure = run("pcall(function() daemon.history.lines = 0 end)
+\
+         daemon.machine.nmae = \"x\"\n")
+    .unwrap_err();
+    assert!(failure.said.contains("nmae"), "{failure:?}");
+    assert_eq!(failure.at.unwrap().line, 2);
+    let failure =
+        run("pcall(function() daemon.history.lines = 0 end)\nerror(\"its own\")\n").unwrap_err();
+    assert!(failure.said.contains("its own"), "{failure:?}");
+    assert!(!failure.said.contains("history"), "{failure:?}");
+    // Caught and gone on from, it's no mistake at all.
+    assert!(run("pcall(function() daemon.history.lines = 0 end)").is_ok());
+}
+
+/// The build an upgrade is to is answered from what last ran, never the
+/// user's own `init.lua`, which may be slow.
+#[test]
+fn peeking_never_runs_the_users_own_config() {
+    let (_temp, dirs) = dirs();
+    write(
+        &dirs.daemon.join("init.lua"),
+        "daemon.upgrade.keep_agents = false
+",
+    );
+    assert!(peek(&dirs).agents().keep_agents, "not run");
+    load(&dirs, When::Starting);
+    assert!(!peek(&dirs).agents().keep_agents, "what last ran");
+    write(
+        &dirs.daemon.join("init.lua"),
+        "while true do end
+",
+    );
+    let started = Instant::now();
+    assert!(!peek(&dirs).agents().keep_agents);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    // Before anything has run, what the old file would be moved to.
+    let (_temp, dirs) = super::tests::dirs();
+    write(
+        &dirs.daemon.join("agents.toml"),
+        "[upgrade]\nkeep_agents = false\n",
+    );
+    assert!(!peek(&dirs).agents().keep_agents);
+    assert!(
+        !dirs.daemon.join("settings.lua").exists(),
+        "nothing written"
+    );
+}
+
+/// A file is written whole, only for the user, never through a link left
+/// where its partial copy goes.
+#[test]
+fn a_private_file_is_written_whole_and_never_through_a_link() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("elsewhere");
+    std::fs::write(&target, "theirs").unwrap();
+    let path = temp.path().join("web-password");
+    std::os::unix::fs::symlink(&target, temp.path().join("web-password.partial")).unwrap();
+    write_private(&path, "mine\n").unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "theirs");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(!temp.path().join("web-password.partial").exists());
 }
 
 /// What's kept as last good sets the same again.
@@ -364,7 +469,7 @@ fn a_fifo_for_a_config_is_refused_without_waiting() {
     )
     .unwrap();
     let started = Instant::now();
-    let loaded = load(&dirs);
+    let loaded = load(&dirs, When::Starting);
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(!loaded.notes.is_empty());
 }

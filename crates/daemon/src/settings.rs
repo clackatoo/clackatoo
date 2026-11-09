@@ -27,6 +27,8 @@ mod lua;
 mod migrate;
 pub mod options;
 
+pub use lua::{module_name, read as read_file};
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -79,10 +81,6 @@ pub(crate) const HEADER: &str = "\
 -- Your own config goes in init.lua, which runs after this and outdoes it.
 ";
 
-/// How long the daemon waits for its config: past it, what's still
-/// running is left to stop by itself.
-const WAIT: Duration = Duration::from_secs(1);
-
 impl Settings {
     /// What `text` sets, run as the daemon's `init.lua` alone, with no
     /// modules: for tests, and tools.
@@ -96,7 +94,18 @@ impl Settings {
             text: text.to_owned(),
             source: Source::Config,
         };
-        lua::run(&[chunk], &[])
+        lua::run(&[chunk], &[], lua::TIME)
+    }
+
+    /// What the daemon goes by when its config has never run without a
+    /// mistake: the defaults, but with terminals' history off, as the
+    /// web app is, until it has.
+    fn fallback() -> Self {
+        let mut settings = Self::default();
+        settings
+            .options
+            .insert("history.keep", (Value::Bool(false), SetBy::DEFAULT));
+        settings
     }
 
     /// The value of the option called `name`: what the config set, or its
@@ -468,30 +477,51 @@ pub struct Dirs {
     pub state: Option<PathBuf>,
 }
 
+/// `$CLACKATOO_CONFIG`, as it's set: `None` if it isn't, `Some(None)` for
+/// `off`, or the folder it names.
+fn config_override() -> Option<Option<PathBuf>> {
+    let dir = std::env::var_os("CLACKATOO_CONFIG").filter(|dir| !dir.is_empty())?;
+    if dir == "off" {
+        return Some(None);
+    }
+    if !Path::new(&dir).is_absolute() {
+        log::warn!(
+            "CLACKATOO_CONFIG isn't an absolute path or `off`: {}",
+            dir.display()
+        );
+        return Some(None);
+    }
+    Some(Some(PathBuf::from(dir)))
+}
+
+/// Where the daemon keeps what its config needs between runs, the web
+/// app's password and [`LAST_GOOD`]: [`crate::state_dir`], or with
+/// `$CLACKATOO_CONFIG` a folder, `state` in it, so a config of its own
+/// never reads or writes the user's.
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    match config_override() {
+        Some(Some(config)) => Some(config.join("state")),
+        _ => crate::state_dir(),
+    }
+}
+
 impl Dirs {
-    /// As the environment says: in [`crate::config_dir`], or
-    /// `$CLACKATOO_CONFIG`, a folder in its place, and
-    /// [`crate::state_dir`]. `None` if there's no config directory, or
-    /// `$CLACKATOO_CONFIG` is `off`, as for tests, whose daemons must never
-    /// read, nor move, the user's own.
+    /// As the environment says: in [`crate::config_dir`] and
+    /// [`crate::state_dir`], or `$CLACKATOO_CONFIG`, a folder in their
+    /// place (see [`state_dir`]). `None` if there's no config directory,
+    /// or `$CLACKATOO_CONFIG` is `off`, as for tests, whose daemons must
+    /// never read, nor move, the user's own.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let config = match std::env::var_os("CLACKATOO_CONFIG").filter(|dir| !dir.is_empty()) {
-            Some(off) if off == "off" => return None,
-            Some(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir),
-            Some(dir) => {
-                log::warn!(
-                    "CLACKATOO_CONFIG isn't an absolute path or `off`: {}",
-                    dir.display()
-                );
-                return None;
-            }
+        let config = match config_override() {
+            Some(config) => config?,
             None => crate::config_dir()?,
         };
         Some(Self {
             daemon: config.join("daemon"),
             shared: config.join("lua"),
-            state: crate::state_dir(),
+            state: state_dir(),
         })
     }
 
@@ -518,13 +548,42 @@ impl Dirs {
     }
 }
 
-/// Runs `chunks` on a thread of their own, waiting [`WAIT`] at most.
-fn run_apart(chunks: Vec<lua::Chunk>, modules: Vec<PathBuf>) -> Result<Settings, Failure> {
+/// When the daemon's config runs, which says how long it may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    /// As the daemon starts afresh.
+    Starting,
+    /// As it upgrades, its terminals waiting; or as a build is asked what
+    /// it takes, the build before waiting on it.
+    Upgrading,
+}
+
+impl When {
+    /// The longest a run may take.
+    fn limit(self) -> Duration {
+        match self {
+            Self::Starting => lua::TIME,
+            Self::Upgrading => lua::UPGRADE_TIME,
+        }
+    }
+
+    /// The longest it's waited for: past it, it's left to stop by itself.
+    fn wait(self) -> Duration {
+        self.limit() + self.limit() / 2
+    }
+}
+
+/// Runs `chunks` on a thread of their own, as `when` lets them.
+fn run_apart(
+    chunks: Vec<lua::Chunk>,
+    modules: Vec<PathBuf>,
+    when: When,
+) -> Result<Settings, Failure> {
     let (sender, receiver) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("daemon-config".into())
         .spawn(move || {
-            let _ = sender.send(lua::run(&chunks, &modules));
+            let _ = sender.send(lua::run(&chunks, &modules, when.limit()));
         });
     if let Err(err) = spawned {
         return Err(Failure {
@@ -532,7 +591,7 @@ fn run_apart(chunks: Vec<lua::Chunk>, modules: Vec<PathBuf>) -> Result<Settings,
             at: None,
         });
     }
-    receiver.recv_timeout(WAIT).unwrap_or_else(|_| {
+    receiver.recv_timeout(when.wait()).unwrap_or_else(|_| {
         Err(Failure {
             said: "the daemon's config ran too long, so it was stopped".to_owned(),
             at: None,
@@ -542,14 +601,16 @@ fn run_apart(chunks: Vec<lua::Chunk>, modules: Vec<PathBuf>) -> Result<Settings,
 
 /// The daemon's config, as the daemon starts or upgrades: moving what the
 /// old TOML files set into `settings.lua` first, if they're there and it
-/// isn't, then running it. What it couldn't run is said, and what last
-/// ran without a mistake is used, or the defaults.
+/// isn't, then running it, once, as `when` lets it. What it couldn't run
+/// is said, and what last ran without a mistake is used, or else the
+/// defaults, with terminals' history and the web app off until a config
+/// has run.
 #[must_use]
-pub fn load(dirs: &Dirs) -> Loaded {
+pub fn load(dirs: &Dirs, when: When) -> Loaded {
     let mut notes = Vec::new();
     let migrated = migrate::once(dirs, &mut notes);
     let chunks = match migrated {
-        // What couldn't be written is run as it would have been.
+        // What couldn't be moved is run as it would have been.
         Some(text) => Ok(vec![lua::Chunk {
             path: dirs.daemon.join("settings.lua"),
             text,
@@ -557,7 +618,7 @@ pub fn load(dirs: &Dirs) -> Loaded {
         }]),
         None => dirs.chunks(),
     };
-    let ran = chunks.and_then(|chunks| run_apart(chunks, dirs.modules()));
+    let ran = chunks.and_then(|chunks| run_apart(chunks, dirs.modules(), when));
     let settings = match ran {
         Ok(settings) => {
             keep_good(dirs, &settings);
@@ -566,14 +627,16 @@ pub fn load(dirs: &Dirs) -> Loaded {
         Err(failure) => {
             let said = failure.said.replace(&format!("{}/", config(dirs)), "");
             log::error!("the daemon's config: {said}");
-            let (settings, kept) = last_good(dirs);
+            let (settings, kept) = match last_good(dirs) {
+                Some(settings) => (settings, "kept its settings from the last time it ran"),
+                None => (
+                    Settings::fallback(),
+                    "went by its defaults, with terminals' history and the web app off until \
+                     it runs",
+                ),
+            };
             notes.push(format!(
-                "the daemon's config went wrong, so it {kept}: {said}",
-                kept = if kept {
-                    "kept its settings from the last time it ran"
-                } else {
-                    "went by its defaults"
-                },
+                "the daemon's config went wrong, so it {kept}: {said}"
             ));
             settings
         }
@@ -581,22 +644,25 @@ pub fn load(dirs: &Dirs) -> Loaded {
     Loaded { settings, notes }
 }
 
-/// The daemon's config as it would be loaded now, writing nothing: for
-/// the build an upgrade is to, asked what it takes, before it's started.
+/// What the daemon's config last came to, cheaply, writing nothing: for
+/// the build an upgrade is to, asked what it takes, which mustn't keep
+/// the build before waiting. That's what last ran without a mistake, or
+/// before any has, what the old TOML files would be moved to; never the
+/// user's own `init.lua`, which the upgrade itself runs.
 #[must_use]
 pub fn peek(dirs: &Dirs) -> Settings {
-    let chunks = match migrate::text(dirs) {
-        Some(text) => Ok(vec![lua::Chunk {
-            path: dirs.daemon.join("settings.lua"),
-            text,
-            source: Source::Settings,
-        }]),
-        None => dirs.chunks(),
-    };
-    match chunks.and_then(|chunks| run_apart(chunks, dirs.modules())) {
-        Ok(settings) => settings,
-        Err(_) => last_good(dirs).0,
+    if let Some(settings) = last_good(dirs) {
+        return settings;
     }
+    let Some(text) = migrate::text(dirs) else {
+        return Settings::default();
+    };
+    let chunk = lua::Chunk {
+        path: dirs.daemon.join("settings.lua"),
+        text,
+        source: Source::Settings,
+    };
+    run_apart(vec![chunk], Vec::new(), When::Upgrading).unwrap_or_default()
 }
 
 /// The config directory `dirs` is in, as a path's text.
@@ -619,48 +685,47 @@ fn keep_good(dirs: &Dirs, settings: &Settings) {
     }
 }
 
-/// What [`LAST_GOOD`] keeps, and whether it kept anything: else the
-/// defaults.
-fn last_good(dirs: &Dirs) -> (Settings, bool) {
-    let Some(path) = dirs.state.as_ref().map(|state| state.join(LAST_GOOD)) else {
-        return (Settings::default(), false);
-    };
-    let Ok(Some(text)) = lua::read(&path) else {
-        return (Settings::default(), false);
-    };
+/// What [`LAST_GOOD`] keeps, if it keeps anything that runs.
+fn last_good(dirs: &Dirs) -> Option<Settings> {
+    let path = dirs.state.as_ref()?.join(LAST_GOOD);
+    let text = lua::read(&path).ok()??;
     let chunk = lua::Chunk {
         path: path.clone(),
         text,
         source: Source::Settings,
     };
-    match run_apart(vec![chunk], Vec::new()) {
-        Ok(settings) => (settings, true),
-        Err(failure) => {
-            log::warn!("{}: {}", path.display(), failure.said);
-            (Settings::default(), false)
-        }
-    }
+    run_apart(vec![chunk], Vec::new(), When::Upgrading)
+        .inspect_err(|failure| log::warn!("{}: {}", path.display(), failure.said))
+        .ok()
 }
 
 /// Writes `text` to `path`, which only the user may read, whole or not
-/// at all: through a file beside it, renamed over it.
+/// at all: through a file beside it, made afresh, never through a link,
+/// and renamed over it, the folder synced after.
 pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".partial");
+    let partial = dir.join(name);
+    // One a write that died left: never written through.
+    match std::fs::remove_file(&partial) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
     }
-    let partial = path.with_extension("partial");
     let written = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&partial)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&partial, path)
+        std::fs::rename(&partial, path)?;
+        std::fs::File::open(dir)?.sync_all()
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&partial);
@@ -685,6 +750,31 @@ pub fn password(state: &Path) -> Result<Option<String>, String> {
     Ok(text
         .map(|text| text.trim().to_owned())
         .filter(|hash| !hash.is_empty()))
+}
+
+/// Takes the web app's password out of the old `daemon/web.toml`, if it's
+/// there and has one, so moving it into `settings.lua` later doesn't
+/// bring back a password taken away: its path, if it did.
+///
+/// # Errors
+///
+/// If it can't be read, isn't TOML, or can't be written.
+pub fn forget_old_password() -> Result<Option<PathBuf>, String> {
+    let Some(dirs) = Dirs::from_env() else {
+        return Ok(None);
+    };
+    let path = dirs.daemon.join("web.toml");
+    let Some(text) = lua::read(&path)? else {
+        return Ok(None);
+    };
+    let mut document: toml_edit::DocumentMut =
+        (text.parse()).map_err(|err| format!("{} isn't TOML: {err}", path.display()))?;
+    if document.remove("password").is_none() {
+        return Ok(None);
+    }
+    write_private(&path, &document.to_string())
+        .map_err(|err| format!("{} couldn't be written: {err}", path.display()))?;
+    Ok(Some(path))
 }
 
 /// Keeps `hash` as the web app's password's in `state`'s [`PASSWORD`], or

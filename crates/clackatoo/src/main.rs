@@ -752,8 +752,14 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     logs::daemon();
     let runtime = RuntimeDir::for_current_user();
     // The daemon's config, moved from the old TOML files first if they're
-    // there, run off any loop, before the loop starts.
-    let (mut config, settings) = DaemonConfig::configured();
+    // there, run off any loop, before the loop starts: once, and as an
+    // upgrade, in no longer than the build before waits for an answer.
+    let when = if args.resume {
+        clackatoo_daemon::settings::When::Upgrading
+    } else {
+        clackatoo_daemon::settings::When::Starting
+    };
+    let (mut config, settings) = DaemonConfig::configured(when);
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
     config.mcp = agent_tools();
     // ssh asks its questions, connecting to other daemons, through this

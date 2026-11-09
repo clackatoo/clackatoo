@@ -57,12 +57,18 @@ enum DevicesCommand {
 /// Runs `clackatoo web`.
 pub(crate) fn run(command: &WebCommand) -> anyhow::Result<()> {
     let WebCommand::Password { unset } = command;
-    let state = clackatoo_daemon::state_dir()
+    let state = clackatoo_daemon::settings::state_dir()
         .context("no state directory: set $HOME or $XDG_STATE_HOME")?;
     let path = state.join(clackatoo_daemon::settings::PASSWORD);
     if *unset {
         clackatoo_daemon::settings::set_password(&state, None)
             .with_context(|| format!("couldn't remove {}", path.display()))?;
+        // An old web.toml not moved yet would bring its password back.
+        if let Some(old) =
+            clackatoo_daemon::settings::forget_old_password().map_err(anyhow::Error::msg)?
+        {
+            println!("The password is gone from {} too.", old.display());
+        }
         println!("The password is gone from {}.", path.display());
     } else {
         let password = read_password()?;

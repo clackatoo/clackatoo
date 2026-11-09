@@ -553,9 +553,9 @@ impl DaemonConfig {
     /// [`from_settings`](Self::from_settings) says; and what the config
     /// set, for what's read of it beyond, as the daemon's priority.
     #[must_use]
-    pub fn configured() -> (Self, settings::Settings) {
+    pub fn configured(when: settings::When) -> (Self, settings::Settings) {
         let loaded = (settings::Dirs::from_env())
-            .map(|dirs| settings::load(&dirs))
+            .map(|dirs| settings::load(&dirs, when))
             .unwrap_or_default();
         let mut config = Self::from_settings(&loaded.settings);
         config.notes.splice(0..0, loaded.notes);
@@ -755,7 +755,7 @@ fn web_from(settings: &settings::Settings, notes: &mut Vec<String>) -> Option<we
         return None;
     }
     let data = data_dir()?.join("clackatoo/web");
-    let password = match state_dir().map(|state| settings::password(&state)) {
+    let password = match settings::state_dir().map(|state| settings::password(&state)) {
         Some(Ok(password)) => password,
         Some(Err(why)) => {
             log::error!("{why}; the web app is off");
