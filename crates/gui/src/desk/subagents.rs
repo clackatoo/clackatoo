@@ -188,7 +188,7 @@ impl Desk {
 
     /// Shows the pane of chat `chat`, in whichever tab it's in; or if it's
     /// in none, being in the background itself, says where it is.
-    fn go_to_chat(&mut self, chat: TerminalId) {
+    pub(crate) fn go_to_chat(&mut self, chat: TerminalId) {
         match self.workspaces.pane_showing(chat) {
             Some(pane) => self.show_pane(pane),
             None => self.say(format!(

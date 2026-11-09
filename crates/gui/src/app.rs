@@ -670,6 +670,7 @@ impl App {
                 bottom_shown: false,
                 menu: None,
                 alert: None,
+                grant: self.native.grant_badge(),
                 rounded,
                 finder: self.composing_in(picker),
                 scrolls: self.scrolls,
@@ -680,13 +681,6 @@ impl App {
             }
         } else {
             let mut status = self.desk.status();
-            if let Some((chat, access)) = self.native.grant
-                && let Status::Tabs { note, .. } = &mut status
-            {
-                *note = Some(format!(
-                    "Agent {access:?} · chat {chat} · :agentaccess off to revoke"
-                ));
-            }
             // Whatever the bar says, `:Messages` says again later.
             self.desk.remember();
             // What the input method is composing shows at the caret, where
@@ -711,14 +705,8 @@ impl App {
                 menu: self
                     .menu
                     .map(|menu| (menu.at, self.menu_items(menu.target))),
-                alert: self
-                    .reconnecting()
-                    .or_else(|| self.out_of_contact())
-                    .or_else(|| {
-                        self.native
-                            .grant
-                            .map(|(_, access)| format!("Agent {access:?} · Revoke"))
-                    }),
+                alert: self.reconnecting().or_else(|| self.out_of_contact()),
+                grant: self.native.grant_badge(),
                 rounded,
                 finder,
                 scrolls: self.scrolls,
@@ -851,6 +839,8 @@ impl App {
             | Hit::NewWorkspace
             | Hit::NewTab
             | Hit::Background
+            | Hit::Grant
+            | Hit::Revoke
             | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
@@ -895,6 +885,8 @@ impl App {
                     | Hit::NewWorkspace
                     | Hit::NewTab
                     | Hit::Background
+                    | Hit::Grant
+                    | Hit::Revoke
                     | Hit::Hidden(..)
                     | Hit::Note
                     | Hit::Menu(_)
@@ -1102,9 +1094,6 @@ impl App {
     }
 
     fn clicked(&mut self, button: MouseButton) {
-        if self.revoke_native_click(button) {
-            return;
-        }
         if self.click_shortcut_help() {
             return;
         }
@@ -1198,6 +1187,14 @@ impl App {
                 self.desk.open_background_list();
                 Ok(())
             }
+            Hit::Grant => {
+                self.go_to_granted_chat();
+                Ok(())
+            }
+            Hit::Revoke => {
+                self.revoke_native();
+                Ok(())
+            }
             // A count of names hidden scrolls its strip that way.
             Hit::Hidden(..) => {
                 if let Some(scrolls) = self.chrome().and_then(|chrome| chrome.scrolled(hit)) {
@@ -1253,11 +1250,11 @@ impl App {
     }
 
     /// Titles the window after the focused pane, and the daemon's machine.
+    /// Access a chat holds to the window is shown in the top bar instead,
+    /// where no program's title can pass for it.
     fn update_title(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let grant =
-            (self.native.grant).map(|(chat, access)| format!("[{access:?} access · chat {chat}]"));
-        let title = window_title(self.desk.title(), self.session.host(), grant.as_deref());
+        let title = window_title(self.desk.title(), self.session.host());
         if title != self.title {
             if let Some(window) = frame.window() {
                 window.set_title(&title);
@@ -2777,6 +2774,8 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::NewWorkspace
         | Hit::NewTab
         | Hit::Background
+        | Hit::Grant
+        | Hit::Revoke
         | Hit::Hidden(..)
         | Hit::Note
         | Hit::Menu(_)
@@ -3738,7 +3737,6 @@ impl App {
                 self.native.pending = None;
                 self.native.snapshot = None;
                 self.desk.say(reason);
-                self.update_title();
                 self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::NativeRequest {
@@ -3963,18 +3961,14 @@ fn shown_title(title: &str) -> String {
 
 /// The window's title: the focused pane's, `title`, as [`shown_title`]
 /// shows it, set apart (FSI … PDI) so that it can't turn round what
-/// follows, then the daemon's machine, `host`, if it's another, after any
-/// native access a chat holds, `grant`.
-fn window_title(title: Option<&str>, host: Option<&str>, grant: Option<&str>) -> String {
-    let mut window = match title.map(shown_title).filter(|title| !title.is_empty()) {
+/// follows, then the daemon's machine, `host`, if it's another.
+fn window_title(title: Option<&str>, host: Option<&str>) -> String {
+    let window = match title.map(shown_title).filter(|title| !title.is_empty()) {
         Some(title) => format!("\u{2068}{title}\u{2069}"),
         None => "clackatoo".to_owned(),
     };
-    if let Some(host) = host {
-        window = format!("{window} — {host}");
-    }
-    match grant {
-        Some(grant) => format!("{grant} {window}"),
+    match host {
+        Some(host) => format!("{window} — {host}"),
         None => window,
     }
 }
@@ -3999,15 +3993,12 @@ mod tests {
 
     #[test]
     fn the_window_title_sets_the_programs_apart_from_what_clackatoo_adds() {
+        assert_eq!(window_title(Some("htop"), None), "\u{2068}htop\u{2069}");
+        assert_eq!(window_title(Some("\x1b"), None), "clackatoo");
+        assert_eq!(window_title(None, None), "clackatoo");
         assert_eq!(
-            window_title(Some("htop"), None, None),
-            "\u{2068}htop\u{2069}"
-        );
-        assert_eq!(window_title(Some("\x1b"), None, None), "clackatoo");
-        assert_eq!(window_title(None, None, None), "clackatoo");
-        assert_eq!(
-            window_title(Some("vim"), Some("desk"), Some("[Full access · chat 3]")),
-            "[Full access · chat 3] \u{2068}vim\u{2069} — desk"
+            window_title(Some("vim"), Some("desk")),
+            "\u{2068}vim\u{2069} — desk"
         );
     }
 
@@ -4191,6 +4182,7 @@ mod tests {
                     bottom_shown: true,
                     menu: None,
                     alert: None,
+                    grant: None,
                     rounded: false,
                     finder: None,
                     scrolls: Scrolls::default(),
@@ -4235,6 +4227,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),

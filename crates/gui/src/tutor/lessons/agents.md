@@ -310,8 +310,12 @@ Native access starts **Off**. Focus the chat in the window you want to share,
 then run `:agentaccess inspect` for screenshots and visible controls, or
 `:agentaccess control` to also allow clicks, text and keys throughout that
 window. This is broad access to what the window can display and operate.
-The title and top bar identify the grant. Click the top bar's **Revoke** badge
-or use `:agentaccess off` from any pane. Closing the window, disconnecting or upgrading also clears it.
+While a chat holds access, a teal badge at the right of the top bar says
+which chat and how much, as `Agent Control · chat 3`. It's drawn by clackatoo
+itself, where no program can draw, so a program's title can't pass for it; the
+window's own title says nothing of the grant. Click the badge to go to the
+chat, and its gold `×` to revoke the access, or use `:agentaccess off` from
+any pane. Closing the window, disconnecting or upgrading also clears it.
 Control lets the agent act as you: it can edit and save files, your config
 included, and what those files run later runs as you. Grant it only as you'd
 lend your keyboard. The window refuses some things from it, such as answering

@@ -475,8 +475,11 @@ pub(crate) struct Chrome {
     /// A menu, if one is open: its box, and its items.
     pub(crate) menu: Option<(Rect, Vec<(String, Rect)>)>,
     /// Something gone wrong, such as the daemon being out of contact, and
-    /// where it's shown: at the top bar's right, before the buttons.
+    /// where it's shown: at the top bar's right, before the grant's badge.
     pub(crate) alert: Option<(String, Rect)>,
+    /// The badge of the access a chat holds to this window, at the top
+    /// bar's right, before the buttons.
+    pub(crate) grant: Option<GrantBadge>,
     /// Whether to draw the bottom bar: notices take its place.
     pub(crate) bottom_shown: bool,
     /// Whether the window's corners are rounded, which what's drawn in the
@@ -501,6 +504,9 @@ pub(crate) struct Contents<'a> {
     pub(crate) menu: Option<([f32; 2], Vec<String>)>,
     /// Something gone wrong, to show in the top bar.
     pub(crate) alert: Option<String>,
+    /// What the badge of the access a chat holds to this window says, as
+    /// `Agent Control · chat 3`.
+    pub(crate) grant: Option<String>,
     /// Whether the window's corners are rounded.
     pub(crate) rounded: bool,
     /// What the finder shows, if it's open, laid out as
@@ -541,6 +547,19 @@ impl BackgroundIcon {
             None => format!("⚙ {}", self.running),
         }
     }
+}
+
+/// The badge in the top bar saying which chat has access to this window,
+/// and how much: where only clackatoo draws, so no program's title can
+/// pass for it. A click on it goes to the chat; one on its `×` revokes
+/// the access.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GrantBadge {
+    pub(crate) text: String,
+    /// The whole badge, its `×` included.
+    pub(crate) rect: Rect,
+    /// Its `×`, at its right end.
+    pub(crate) revoke: Rect,
 }
 
 /// Where the strips of workspaces and of tabs are scrolled to, which the
@@ -635,6 +654,26 @@ impl Chrome {
         let pill_y = top.y + (top.height - pill_height) / 2.0;
         let (buttons, workspaces_start, mut workspaces_end) =
             place_buttons(&geometry, contents.buttons);
+        // The grant's badge nearest the buttons, as it stays while alerts
+        // come and go.
+        let grant = contents.grant.map(|text| {
+            let body = (measure(&text, false) + 5.0 * padding).round();
+            let rect = Rect {
+                x: (workspaces_end - body - pill_height)
+                    .max(workspaces_start)
+                    .round(),
+                y: pill_y,
+                width: body + pill_height,
+                height: pill_height,
+            };
+            workspaces_end = rect.x - padding;
+            let revoke = Rect {
+                x: rect.x + body,
+                width: pill_height,
+                ..rect
+            };
+            GrantBadge { text, rect, revoke }
+        });
         let alert = contents.alert.map(|text| {
             let width = (measure(&text, false) + 6.0 * padding).round();
             let rect = Rect {
@@ -753,6 +792,7 @@ impl Chrome {
             background: bottom.background,
             menu,
             alert,
+            grant,
             bottom_shown: contents.bottom_shown,
             rounded: contents.rounded,
             finder: (contents.finder).map(|view| place_finder(&geometry, view, measure)),
@@ -800,6 +840,15 @@ impl Chrome {
         }
         if let Some(&(button, _)) = self.buttons.iter().find(|(_, rect)| rect.contains(point)) {
             return Hit::Button(button);
+        }
+        if let Some(badge) = &self.grant
+            && badge.rect.contains(point)
+        {
+            return if badge.revoke.contains(point) {
+                Hit::Revoke
+            } else {
+                Hit::Grant
+            };
         }
         if let Some(item) = self
             .workspaces
@@ -892,6 +941,9 @@ impl Chrome {
         }
         if let Some((text, rect)) = &self.alert {
             paint_alert(text, *rect, &self.geometry, &mut painted);
+        }
+        if let Some(badge) = &self.grant {
+            paint_grant(badge, hover, &self.geometry, &mut painted);
         }
         if let Some(rect) = self.new_workspace {
             paint_plus(rect, hover == Hit::NewWorkspace, metrics, &mut painted);
@@ -1981,6 +2033,50 @@ fn paint_alert<'a>(text: &'a str, rect: Rect, geometry: &Geometry, painted: &mut
     });
 }
 
+/// Draws the badge of a chat's access to the window: in the agents' teal,
+/// on a faint wash of it, with its `×` in gold, as what to act on is.
+fn paint_grant<'a>(
+    badge: &'a GrantBadge,
+    hover: Hit,
+    geometry: &Geometry,
+    painted: &mut Painted<'a>,
+) {
+    let metrics = geometry.metrics;
+    let radius = (1.5 * metrics.padding).round();
+    let hovered = match hover {
+        Hit::Grant => Some(badge.rect),
+        Hit::Revoke => Some(badge.revoke),
+        _ => None,
+    };
+    if let Some(rect) = hovered {
+        painted
+            .fills
+            .push(Fill::rounded(rect.to_array(), Paint::Hover, radius));
+    }
+    painted.fills.push(
+        Fill::rounded(badge.rect.to_array(), Paint::Subagent, radius)
+            .bordered(geometry.edge, Paint::SubagentEdge),
+    );
+    let text_y = (badge.rect.y + (badge.rect.height - metrics.ui_line) / 2.0).round();
+    painted.texts.push(Text {
+        origin: [badge.rect.x + 3.0 * metrics.padding, text_y],
+        content: &badge.text,
+        ink: Ink::Subagent,
+        font: TextFont::Ui,
+    });
+    // As the window's own close button draws its `×`.
+    let revoke = badge.revoke;
+    painted.texts.push(Text {
+        origin: [
+            (revoke.x + revoke.width / 2.0 - metrics.ui_line * 0.27).round(),
+            text_y,
+        ],
+        content: "×",
+        ink: Ink::Accent,
+        font: TextFont::Ui,
+    });
+}
+
 /// Draws a workspace: its dot in its colour, its name, and how many tabs
 /// it has, on an edged pill if it's the one shown, a soft one if the mouse
 /// is over it, and in quieter text otherwise.
@@ -2565,6 +2661,11 @@ pub(crate) enum Hit {
     NewTab,
     /// The background tabs' icon, which lists them.
     Background,
+    /// The badge of a chat's access to the window, which goes to the
+    /// chat...
+    Grant,
+    /// ...and its `×`, which revokes the access.
+    Revoke,
     /// The count of workspaces or tabs hidden at one end of their strip,
     /// which scrolls it that way.
     Hidden(Bar, End),
@@ -2637,6 +2738,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -2665,6 +2767,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: Some("no contact with box for 4 s".into()),
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -2695,6 +2798,59 @@ mod tests {
     }
 
     #[test]
+    fn a_grants_badge_goes_nearest_the_buttons_and_its_cross_revokes() {
+        let buttons = ButtonLayout::default();
+        let workspaces: Vec<_> = (1..=12)
+            .map(|id| WorkspaceName::plain(id, &format!("workspace {id}"), 1, id == 1))
+            .collect();
+        let chrome = Chrome::new(
+            Geometry::new([800, 600], METRICS),
+            Contents {
+                workspaces,
+                tabs: Vec::new(),
+                status: Status::tabs(),
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: Some("no contact with box for 4 s".into()),
+                grant: Some("Agent Control · chat 3".into()),
+                rounded: false,
+                finder: None,
+                scrolls: Scrolls::default(),
+                messages: None,
+                waiting: None,
+                which_keys: None,
+                background: None,
+            },
+            &mut measure,
+        );
+        let badge = chrome.grant.clone().expect("a badge");
+        let (_, alert) = chrome.alert.clone().expect("an alert");
+        let first_button = chrome
+            .buttons
+            .iter()
+            .map(|(_, rect)| rect.x)
+            .fold(f32::INFINITY, f32::min);
+        // 22 characters of 8, three paddings before and two after, then
+        // the `×` in a square as high as a name.
+        assert_eq!(badge.rect.width, 22.0 * 8.0 + 20.0 + 24.0);
+        assert_eq!(badge.revoke.width, 24.0);
+        assert_eq!(badge.revoke.x + 24.0, badge.rect.x + badge.rect.width);
+        // Nearest the buttons, with an alert before it, both shown at once.
+        assert!(badge.rect.x + badge.rect.width <= first_button - METRICS.padding);
+        assert!(alert.x + alert.width <= badge.rect.x - METRICS.padding);
+        let last = chrome.workspaces.last().expect("some workspaces fit");
+        assert!(last.rect.x + last.rect.width < alert.x);
+        // The badge goes to the chat, and its `×` revokes the access.
+        let middle = badge.rect.y + 12.0;
+        assert_eq!(chrome.hit([badge.rect.x + 2.0, middle], false), Hit::Grant);
+        assert_eq!(
+            chrome.hit([badge.revoke.x + 12.0, middle], false),
+            Hit::Revoke
+        );
+    }
+
+    #[test]
     fn a_workspace_from_another_machine_has_a_ring_and_says_where_it_is_under_the_mouse() {
         let buttons = ButtonLayout::default();
         let away = Away {
@@ -2717,6 +2873,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -2885,6 +3042,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -2940,6 +3098,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -3165,6 +3324,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls,
@@ -3395,6 +3555,7 @@ mod tests {
                     bottom_shown: true,
                     menu: None,
                     alert: None,
+                    grant: None,
                     rounded: false,
                     finder: None,
                     scrolls: Scrolls::default(),
@@ -3572,6 +3733,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),
@@ -3606,6 +3768,7 @@ mod tests {
                     bottom_shown: true,
                     menu: None,
                     alert: None,
+                    grant: None,
                     rounded: false,
                     finder: None,
                     scrolls,
@@ -3656,6 +3819,7 @@ mod tests {
                         menu: None,
                         // Where there's room for one beside the workspaces.
                         alert: (width >= 600).then(|| "no contact with box for 4 s".into()),
+                        grant: None,
                         rounded: false,
                         finder: None,
                         scrolls: Scrolls::default(),
@@ -3717,6 +3881,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                grant: None,
                 rounded: false,
                 finder: None,
                 scrolls: Scrolls::default(),

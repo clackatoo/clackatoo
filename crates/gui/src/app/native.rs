@@ -119,32 +119,42 @@ fn starts(terminal: &PaneTerminal) -> bool {
     }
 }
 
+impl Native {
+    /// What the top bar's badge says of the access a chat holds to this
+    /// window, if one does.
+    pub(super) fn grant_badge(&self) -> Option<String> {
+        let (chat, access) = self
+            .grant
+            .filter(|(_, access)| *access != NativeAccess::Off)?;
+        Some(format!("Agent {access:?} · chat {chat}"))
+    }
+}
+
 impl App {
-    pub(super) fn revoke_native_click(&mut self, button: MouseButton) -> bool {
-        if button == MouseButton::Left
-            && !self.native.automating
-            && let (Some((chat, _)), Some(point)) = (self.native.grant, self.pointer)
-            && self.reconnecting().is_none()
-            && self.out_of_contact().is_none()
-            && self
-                .chrome()
-                .and_then(|c| c.alert)
-                .is_some_and(|(_, rect)| rect.contains(point))
-        {
-            self.native.grant = None;
-            self.native.snapshot = None;
-            self.native.pending = Some((chat, clackatoo_protocol::NativeAccess::Off));
-            if let Some(sender) = &mut self.sender {
-                let _ = sender.send(&ClientMessage::NativeGrant {
-                    chat,
-                    access: clackatoo_protocol::NativeAccess::Off,
-                });
-            }
-            self.update_title();
-            self.request_redraw();
-            return true;
+    /// A click on the grant's badge: shows the chat that holds the access.
+    /// Never for the agent's own clicks.
+    pub(super) fn go_to_granted_chat(&mut self) {
+        if let Some((chat, _)) = self.native.grant.filter(|_| !self.native.automating) {
+            self.desk.go_to_chat(chat);
         }
-        false
+    }
+
+    /// A click on the `×` of the grant's badge: revokes the access at once
+    /// in this window, then tells the daemon. Never for the agent's own
+    /// clicks.
+    pub(super) fn revoke_native(&mut self) {
+        let Some((chat, _)) = self.native.grant.filter(|_| !self.native.automating) else {
+            return;
+        };
+        self.native.grant = None;
+        self.native.snapshot = None;
+        self.native.pending = Some((chat, NativeAccess::Off));
+        if let Some(sender) = &mut self.sender {
+            let _ = sender.send(&ClientMessage::NativeGrant {
+                chat,
+                access: NativeAccess::Off,
+            });
+        }
     }
 
     pub(super) fn native_request(&mut self, id: u64, chat: TerminalId, action: NativeAction) {
@@ -291,6 +301,10 @@ impl App {
                     super::Hit::Button(_) | super::Hit::Resize(_) | super::Hit::TopBar
                 ) {
                     return Err("Native control does not operate desktop window controls.".into());
+                }
+                // Nor the badge of its own access.
+                if matches!(self.hover, super::Hit::Grant | super::Hit::Revoke) {
+                    return Err("Native control does not operate the access badge.".into());
                 }
                 self.clicked(MouseButton::Left);
                 self.released(MouseButton::Left);

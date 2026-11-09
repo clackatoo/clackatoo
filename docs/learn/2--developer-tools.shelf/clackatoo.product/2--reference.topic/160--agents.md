@@ -845,8 +845,12 @@ Native access starts **Off**. Focus the chat in the window you want to share,
 then run `:agentaccess inspect` for screenshots and visible controls, or
 `:agentaccess control` to also allow clicks, text and keys throughout that
 window. This is broad access to what the window can display and operate.
-The title and top bar identify the grant. Click the top bar's **Revoke** badge
-or use `:agentaccess off` from any pane. Closing the window or the chat, disconnecting or upgrading also clears it.
+While a chat holds access, a teal badge at the right of the top bar says
+which chat and how much, as `Agent Control · chat 3`. It's drawn by clackatoo
+itself, where no program can draw, so a program's title can't pass for it; the
+window's own title says nothing of the grant. Click the badge to go to the
+chat, and its gold `×` to revoke the access, or use `:agentaccess off` from
+any pane. Closing the window or the chat, disconnecting or upgrading also clears it.
 **Control lets the agent act as you.** It can edit and save any file the
 window can, its config included: your shell's startup files, Claude Code's or
 Codex's settings and hooks, `agents.toml`, `init.lua`. What those run later
@@ -856,7 +860,7 @@ and revoke it when it's done. `:agentaccess control` says so as it asks.
 The window has speed bumps on top, not a boundary. While automation's input is
 handled, it refuses what only you may do: answering a question or a form;
 changing any chat's settings, agent or provider, or forking one; granting window
-access; typing into a terminal; starting a terminal with a command, a
+access or using its badge; typing into a terminal; starting a terminal with a command, a
 background command or a chat; sending, drafting, stopping, undoing or rewinding
 in another chat; keeping, rejecting or commenting on agents' changes in a
 review, or sending its comments; posting on a board; closing panes, tabs,
