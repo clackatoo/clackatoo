@@ -92,6 +92,10 @@ const DIFF_TEXT: usize = 256 * 1024;
 /// to the agent, which has no such setting.
 const TOOLS_SETTING: &str = "clackatoo.tools";
 
+/// How the notice that messages wait for the user, who stopped the chat,
+/// begins (see `HostedChat::say_held`).
+const HELD: &str = "Stopped: ";
+
 /// The values the tools setting takes: each one's ID, what it's called,
 /// and what it means.
 const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
@@ -1592,10 +1596,14 @@ impl HostedChat {
     }
 
     /// Says what waits for the user to write, while the chat is held as
-    /// they stopped it.
+    /// they stopped it: unless the chat says something else, which it
+    /// goes on saying.
     fn say_held(&mut self) {
         let waiting = self.relations.inbox.len();
         if !self.held_by_stop() || waiting == 0 {
+            return;
+        }
+        if (self.node.notice.as_deref()).is_some_and(|notice| !notice.starts_with(HELD)) {
             return;
         }
         let (plural, wait, them) = if waiting == 1 {
@@ -1604,7 +1612,7 @@ impl HostedChat {
             ("s", "wait", "them")
         };
         let said = format!(
-            "Stopped: {waiting} message{plural} from other agents {wait} until you write here. \
+            "{HELD}{waiting} message{plural} from other agents {wait} until you write here. \
              Stop again drops {them}."
         );
         if self.node.notice.as_deref() != Some(said.as_str()) {
@@ -8372,6 +8380,27 @@ mod tests {
         send(&mut chat, "mine");
         assert_eq!(chat.relations().hops, 0);
         assert_eq!(chat.node.turns.last().unwrap().from, None);
+    }
+
+    /// What waits for the user is counted in the chat's notice, unless it
+    /// says something else, which stays (CLACKA-220).
+    #[test]
+    fn what_waits_for_the_user_says_so_over_no_other_notice() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        drop(chat.act(ChatAction::Stop));
+        chat.deliver(message(7, "one", 1)).unwrap();
+        let said = chat.node.notice.clone().unwrap_or_default();
+        assert!(said.starts_with("Stopped: 1 message"), "{said}");
+        chat.deliver(message(7, "two", 1)).unwrap();
+        let said = chat.node.notice.clone().unwrap_or_default();
+        assert!(said.starts_with("Stopped: 2 messages"), "{said}");
+        chat.set_notice(Some(
+            "The agent stopped. The next message starts it again.".into(),
+        ));
+        chat.deliver(message(7, "three", 1)).unwrap();
+        let said = chat.node.notice.clone().unwrap_or_default();
+        assert!(said.starts_with("The agent stopped"), "{said}");
     }
 
     /// Only the user's own Stop, again with no turn begun since, drops what

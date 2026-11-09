@@ -1080,6 +1080,11 @@ impl Worker {
     }
 
     fn close(&mut self, chat: TerminalId) {
+        // Every act asked for before the page closes came before this, in
+        // order: what was dropped of them needn't be kept.
+        (self.running.dropped.lock())
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&chat);
         let Some(page) = self.pages.remove(&chat) else {
             return;
         };

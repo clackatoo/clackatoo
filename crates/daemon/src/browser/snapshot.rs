@@ -228,8 +228,6 @@ fn states(node: &Value) -> Vec<String> {
     states
 }
 
-/// `text` on one line, cut to [`MAX_NAME`] characters, with quotes
-/// escaped.
 /// The first `most` characters of `text`, or all of it.
 fn first_chars(text: &str, most: usize) -> &str {
     match text.char_indices().nth(most) {
@@ -238,6 +236,8 @@ fn first_chars(text: &str, most: usize) -> &str {
     }
 }
 
+/// `text` on one line, cut to [`MAX_NAME`] characters, with quotes
+/// escaped.
 fn clipped(text: &str) -> String {
     let mut clipped: String = (text.chars().take(MAX_NAME))
         .map(|ch| if ch.is_control() { ' ' } else { ch })

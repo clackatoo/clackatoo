@@ -868,7 +868,9 @@ impl Daemon {
     fn wakes_too_many(&self, to: TerminalId) -> Option<String> {
         let target = self.chat_ref(to)?;
         let parent = target.relations().parent?;
-        if !idle(target) {
+        // A chat the user stopped holds a message for them: it would wait,
+        // not wake.
+        if !idle(target) || target.held_by_stop() {
             return None;
         }
         let root = target.relations().root.unwrap_or(parent);
@@ -3969,6 +3971,24 @@ mod tests {
             "{:?}",
             turns[2].prompt
         );
+    }
+
+    /// A message to a chat the user stopped waits for them, so it's held
+    /// to no budget of chats working at once, as waking one would be.
+    #[test]
+    fn a_message_to_a_held_chat_wakes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        daemon.set_subagents(a, "off");
+        assert!(daemon.wakes_too_many(b).is_some());
+        drop(
+            daemon
+                .chat(b)
+                .unwrap()
+                .act(clackatoo_protocol::ChatAction::Stop),
+        );
+        assert_eq!(daemon.wakes_too_many(b), None);
     }
 
     /// A chat the user stopped may still go on by itself, as its own
