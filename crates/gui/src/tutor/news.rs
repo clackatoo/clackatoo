@@ -1231,13 +1231,13 @@ pub(crate) const NEWS: &[News] = &[
     },
     News {
         id: "subagents-budget",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "agents",
         what: "Agents are told how many more subagents your Subagents setting lets them start, each time they start or list chats",
     },
     News {
         id: "access-badge",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "agents",
         what: "A chat's access to the window shows as a teal badge in the top bar: click to go to the chat, × to revoke",
     },
