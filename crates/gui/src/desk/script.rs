@@ -120,6 +120,13 @@ impl Desk {
         });
     }
 
+    /// The config's files changed, so it's been run again from the start,
+    /// for every window: this one follows, and says so.
+    pub(crate) fn config_ran_again(&mut self) {
+        self.follow_client();
+        self.say("ran the config again, as its files changed".into());
+    }
+
     /// Follows what's changed in the client since the window last looked:
     /// a reload, the bindings, and the options. Returns whether anything
     /// had, so the window must be redrawn.

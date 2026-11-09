@@ -4502,6 +4502,11 @@ impl App {
                 }
                 self.forward_ports();
             }
+            SessionEvent::ConfigRan => {
+                self.desk.config_ran_again();
+                self.update_title();
+                self.request_redraw();
+            }
             SessionEvent::Forwards => {
                 let machine = self.session.host().unwrap_or("the daemon's machine");
                 for report in self.forwards.take_reports() {

@@ -81,7 +81,12 @@ impl Source {
                 let path = dir.join(file);
                 // Never from a FIFO or a device, which would hold Lua up,
                 // nor more than 1 MiB, as the daemon reads its config.
-                let text = match clackatoo_daemon::settings::read_text(&path) {
+                let read = clackatoo_daemon::settings::read_text(&path);
+                // What it read, to tell changes to the file from it.
+                if let Ok(text) = &read {
+                    crate::config_watch::read(&path, text.as_deref());
+                }
+                let text = match read {
                     Ok(Some(text)) => Ok(text),
                     Ok(None) => return None,
                     Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {

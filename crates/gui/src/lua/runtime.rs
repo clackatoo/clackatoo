@@ -1328,6 +1328,8 @@ fn require(lua: &Lua, source: &Source) -> mlua::Result<Function> {
                 "there's no module `{name}` in client/lua/ or lua/"
             )));
         };
+        // Watched, as the config's own files are.
+        crate::config_watch::read(&path, Some(&text));
         let module: Value = (lua.load(text))
             .set_name(format!("@{}", path.display()))
             .set_mode(mlua::chunk::ChunkMode::Text)

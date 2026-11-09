@@ -207,7 +207,11 @@ fn settings_lua(
     if text.as_deref() == Some(rendered.as_str()) {
         return Ok(());
     }
-    replace(path, &rendered, PRIVATE)
+    replace(path, &rendered, PRIVATE)?;
+    // The windows go by what they saved already: it's no change to run the
+    // config again for.
+    crate::config_watch::wrote(path, text.as_deref(), &rendered);
+    Ok(())
 }
 
 /// Who may read and write a new settings.lua: only its owner.

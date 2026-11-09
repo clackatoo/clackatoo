@@ -98,6 +98,8 @@ pub(crate) enum Wake {
     GpuLost,
     /// The config's Lua has something for the windows.
     Lua,
+    /// The config's files changed (see `crate::config_watch`).
+    Config,
     /// The desktop's preferences, read again for the next window.
     Desktop(Desktop),
 }
@@ -432,12 +434,20 @@ impl Host {
         };
         let waker = self.waker.clone();
         client.start(
-            lua::Source::Dir(dir),
+            lua::Source::Dir(dir.clone()),
             Box::new(move || -> lua::Wake {
                 let waker = waker.clone();
                 Box::new(move || {
                     let _ = waker.wake(Wake::Lua);
                 })
+            }),
+        );
+        // Run again as its files change, so `:reload` needn't be.
+        let waker = self.waker.clone();
+        crate::config_watch::watch(
+            dir,
+            Box::new(move || {
+                let _ = waker.wake(Wake::Config);
             }),
         );
     }
@@ -736,6 +746,21 @@ impl Host {
                 for key in keys {
                     self.on_window(key, |app| {
                         if app.session_event(SessionEvent::Lua) {
+                            app.closing = true;
+                        }
+                    });
+                }
+            }
+            // Run again from the start, once for every window, which each
+            // follow.
+            Wake::Config => {
+                if let Some(client) = &self.client {
+                    client.reload();
+                }
+                let keys: Vec<WindowKey> = self.windows.keys().copied().collect();
+                for key in keys {
+                    self.on_window(key, |app| {
+                        if app.session_event(SessionEvent::ConfigRan) {
                             app.closing = true;
                         }
                     });

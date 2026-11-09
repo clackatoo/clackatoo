@@ -27,6 +27,7 @@ mod cmdline;
 mod colors;
 mod command;
 mod complete;
+mod config_watch;
 mod connect;
 mod desk;
 mod desktop;
