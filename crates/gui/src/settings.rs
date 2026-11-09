@@ -122,6 +122,14 @@ impl Facts<'_> {
             .find(SetBy::config_loading)
     }
 
+    /// What bound `bound`'s keys, if one thing bound them in every one of
+    /// its modes.
+    fn bound_by(&self, bound: &Bound) -> Option<SetBy> {
+        let mut each = (bound.modes.iter()).map(|&mode| self.keys.bound_by(mode, &bound.keys));
+        let first = each.next()?;
+        each.all(|by| by == first).then_some(first)
+    }
+
     /// `by`, as the menu says it.
     fn said(&self, by: &SetBy) -> String {
         by.said(self.dir)
@@ -734,7 +742,10 @@ impl SettingsMenu {
     fn open(&mut self, facts: &Facts) -> Outcome {
         let by = match self.picked() {
             Some(Entry::Option(info)) => facts.store.set_by_in(facts.window, info),
-            Some(Entry::Keys(bound)) => facts.keys.bound_by(bound.modes[0], &bound.keys),
+            Some(Entry::Keys(bound)) => (bound.modes.iter())
+                .map(|&mode| facts.keys.bound_by(mode, &bound.keys))
+                .find(|by| by.at.is_some())
+                .unwrap_or(SetBy::DEFAULT),
             _ => return Outcome::Nothing,
         };
         if by.at.is_none() {
@@ -900,8 +911,10 @@ impl SettingsMenu {
         if facts.automating {
             return self.refuse(AGENTS_SAVE_NO_KEYS);
         }
-        let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
-        let (Binding::Keys(to), Source::Settings) = (&bound.binding, by.source) else {
+        // Every one of its modes saved there, or it isn't the menu's to take
+        // out.
+        let saved = facts.bound_by(&bound).map(|by| by.source);
+        let (Binding::Keys(to), Some(Source::Settings)) = (&bound.binding, saved) else {
             return self.refuse(&format!(
                 "{} isn't saved in settings.lua: only keys the menu saved can be taken out here",
                 display(&bound.keys)
@@ -1245,10 +1258,11 @@ impl SettingsMenu {
                 lit.resize(name.chars().count(), false);
                 pieces.push((name, Ink::Plain));
                 pieces.push((bound.does(), Ink::Plain));
-                let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
-                tag = Some(match by.source {
-                    Source::Config if by.loading => (short_place(&by), Ink::Muted),
-                    Source::Settings => ("settings.lua".into(), Ink::Muted),
+                tag = Some(match facts.bound_by(bound) {
+                    Some(by) if by.config_loading() => (short_place(&by), Ink::Muted),
+                    Some(by) if by.source == Source::Settings => {
+                        ("settings.lua".into(), Ink::Muted)
+                    }
                     _ => (KeyMode::letters(&bound.modes), Ink::Muted),
                 });
             }
@@ -1511,7 +1525,7 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
 /// What the preview says of `bound`'s keys.
 fn keys_detail(bound: &Bound, facts: &Facts) -> Vec<Said> {
     let spoken: Vec<String> = bound.keys.iter().map(Chord::spoken).collect();
-    let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
+    let by = facts.bound_by(bound).unwrap_or_else(|| bound.by.clone());
     let from = match by.source {
         Source::Settings => "saved in client/settings.lua".to_owned(),
         _ => facts.said(&by),
@@ -1770,5 +1784,46 @@ mod tests {
                 ("i".to_owned(), Source::Default)
             ]
         );
+    }
+
+    #[test]
+    fn keys_are_taken_out_only_if_settings_lua_bound_them_in_every_mode() {
+        let store = Store::default();
+        let mut keys = Keys::default();
+        let alt_t = parse_keys("<A-t>").unwrap();
+        let both = parse_modes("ni").unwrap();
+        keys.bind(&both, &alt_t, Binding::Keys(parse_keys("x").unwrap()), None);
+        keys.set_by(&both, &alt_t, &SetBy::SAVED);
+        fn facts<'a>(store: &'a Store, keys: &'a Keys) -> Facts<'a> {
+            Facts {
+                store,
+                window: 1,
+                keys,
+                dir: None,
+                automating: false,
+            }
+        }
+        let mut menu = SettingsMenu::new("<A-t>", Case::default(), &facts(&store, &keys), 0);
+        assert!(
+            menu.picked()
+                .is_some_and(|entry| matches!(entry, Entry::Keys(bound) if bound.keys == alt_t))
+        );
+        // Bound again in one mode since the rows were made: the row isn't
+        // all settings.lua's now.
+        keys.set_by(&[KeyMode::Insert], &alt_t, &SetBy::RUNTIME);
+        let mut history = History::default();
+        menu.stroke(
+            Stroke::char('d'),
+            false,
+            &facts(&store, &keys),
+            &mut history,
+        );
+        assert!(
+            (menu.said.as_ref())
+                .is_some_and(|(said, _)| said.contains("isn't saved in settings.lua")),
+            "{:?}",
+            menu.said
+        );
+        assert!(history.0.is_empty());
     }
 }
