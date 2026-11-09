@@ -2586,6 +2586,18 @@ impl HostedChat {
         self.mcp_tokens.push_back((None, token));
     }
 
+    /// The secrets its MCP servers were given, the newest last, each with
+    /// its session, once that opened: to hand over.
+    pub(crate) fn mcp_tokens(&self) -> impl Iterator<Item = (Option<String>, String)> + '_ {
+        self.mcp_tokens.iter().cloned()
+    }
+
+    /// Takes back `token`, a secret its MCP server was given, for
+    /// `session`, after an upgrade.
+    pub(crate) fn resume_mcp_token(&mut self, session: Option<String>, token: String) {
+        self.mcp_tokens.push_back((session, token));
+    }
+
     /// The secret its current session's MCP server was given, if known.
     pub(crate) fn session_mcp_token(&self) -> Option<&str> {
         let session = self.session.as_deref()?;

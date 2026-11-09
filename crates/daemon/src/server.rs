@@ -1023,6 +1023,10 @@ pub struct Daemon {
     machine: Machine,
     /// The key that proves it, which signs the QUIC certificate.
     signer: crate::machine::Signer,
+    /// This run's own part of the key the secrets given chats' MCP
+    /// servers are signed with: random as the daemon starts afresh, and
+    /// handed on through upgrades, never written anywhere.
+    mcp_run: [u8; 32],
     /// The directory the daemon's socket is in, where ssh's askpass
     /// sockets go.
     runtime: Option<PathBuf>,
@@ -1180,6 +1184,7 @@ impl Daemon {
             keeping,
             machine,
             signer,
+            mcp_run: tools::run_key(),
             runtime,
             links,
             display,
@@ -1449,6 +1454,9 @@ impl Daemon {
         } else {
             daemon.connect_kept(links::Kept::taken_over(state));
         }
+        if let Some(mcp) = &state.mcp {
+            daemon.resume_mcp(mcp);
+        }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1525,6 +1533,7 @@ impl Daemon {
     ) -> io::Result<Handover> {
         // Capture before ending links or dropping their client receipts.
         let federation = Some(self.hand_over_federation()?);
+        let mcp = Some(self.hand_over_mcp());
         self.close_remotes("the daemon is upgrading to a new build");
         let kept_names = self.agent_names(keep);
         let kept_chats = self.chats_of(&kept_names);
@@ -1672,6 +1681,7 @@ impl Daemon {
                 forks,
                 agent_terminals,
                 federation,
+                mcp,
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),

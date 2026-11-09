@@ -468,11 +468,38 @@ impl Daemon {
     /// given before an upgrade is still known after it.
     fn mcp_key(&self) -> ring::hmac::Key {
         let seed = self.signer.seed();
+        let label = b"clackatoo: MCP servers' secrets\0".as_slice();
         let made = ring::digest::digest(
             &ring::digest::SHA256,
-            &[b"clackatoo: MCP servers' secrets\0".as_slice(), &seed.0].concat(),
+            &[label, &seed.0, &self.mcp_run].concat(),
         );
         ring::hmac::Key::new(ring::hmac::HMAC_SHA256, made.as_ref())
+    }
+
+    /// What the next build needs to know the secrets given chats' MCP
+    /// servers by, and which session each went with.
+    pub(super) fn hand_over_mcp(&self) -> crate::handover::Mcp {
+        let sessions = (self.terminals.iter())
+            .filter_map(|(&id, slot)| Some((id, slot.terminal.chat_ref()?)))
+            .flat_map(|(id, chat)| {
+                (chat.mcp_tokens()).map(move |(session, token)| (id.0, session, token))
+            })
+            .collect();
+        crate::handover::Mcp {
+            key: self.mcp_run,
+            sessions,
+        }
+    }
+
+    /// Takes on `mcp`, the last build's knowledge of its secrets: one
+    /// given before the upgrade is still good, and still its session's.
+    pub(super) fn resume_mcp(&mut self, mcp: &crate::handover::Mcp) {
+        self.mcp_run = mcp.key;
+        for (chat, session, token) in &mcp.sessions {
+            if let Some(chat) = self.chat(TerminalId(*chat)) {
+                chat.resume_mcp_token(session.clone(), token.clone());
+            }
+        }
     }
 
     /// A new secret for the chat `chat`'s MCP server: a random nonce, and
@@ -492,12 +519,13 @@ impl Daemon {
         let Some((nonce, signature)) = shown.split_once('.') else {
             return false;
         };
-        let Some(signature) = unhex(signature) else {
+        // Exactly as `mcp_secret` writes them: a nonce of 16 bytes, and
+        // a SHA-256 signature, in lowercase hex.
+        let (Some(_), Some(signature)) = (unhex(nonce, 16), unhex(signature, 32)) else {
             return false;
         };
         let signed = format!("{chat}:{nonce}");
-        nonce.len() == 32
-            && ring::hmac::verify(&self.mcp_key(), signed.as_bytes(), &signature).is_ok()
+        ring::hmac::verify(&self.mcp_key(), signed.as_bytes(), &signature).is_ok()
     }
 
     /// Turns the client at `token`, which asked to serve a chat's tools
@@ -2627,6 +2655,22 @@ fn shows_itself(ch: char) -> bool {
     !(ch.is_control() || bidi_control(ch) || hidden_letter(ch) || zero_width(ch))
 }
 
+/// A run's own part of the key the secrets given chats' MCP servers are
+/// signed with (see `Daemon::mcp_key`): random, or if the system's
+/// random source fails, which it does only before it's ready, the time,
+/// which still differs from any run before.
+pub(super) fn run_key() -> [u8; 32] {
+    use ring::rand::SecureRandom as _;
+    let mut key = [0; 32];
+    if ring::rand::SystemRandom::new().fill(&mut key).is_err() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        key[..16].copy_from_slice(&now.as_nanos().to_le_bytes());
+    }
+    key
+}
+
 /// `bytes` in lowercase hex.
 fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -2637,8 +2681,10 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The bytes `text`, in hex, says, if it's hex.
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+/// The `bytes` bytes `text` says in lowercase hex, if that's all it is.
+fn unhex(text: &str, bytes: usize) -> Option<Vec<u8>> {
+    let lower = |byte: u8| matches!(byte, b'0'..=b'9' | b'a'..=b'f');
+    if text.len() != bytes * 2 || !text.bytes().all(lower) {
         return None;
     }
     (0..text.len())
@@ -3356,6 +3402,47 @@ mod tests {
     /// showing the secret given as that session opened: one of an older
     /// session's, still open, doesn't serve the next.
     #[test]
+    fn secrets_last_through_an_upgrade_but_not_a_fresh_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = super::super::agent_files::tests::daemon_with_chat(dir.path());
+        let secret = daemon.mcp_secret(chat).unwrap();
+        daemon.chat(chat).unwrap().gave_mcp_token(secret.clone());
+        // The chat's session, s1, opened before: this is the next's.
+        daemon.chat(chat).unwrap().connected(crate::agent::Opened {
+            session: "s2".into(),
+            settings: None,
+        });
+        let handed = daemon.hand_over_mcp();
+        assert_eq!(
+            handed.sessions,
+            [(chat.0, Some("s2".to_owned()), secret.clone())]
+        );
+        // A fresh start makes a key of its own: nothing given before is
+        // good.
+        daemon.mcp_run = run_key();
+        assert!(!daemon.mcp_secret_valid(chat, &secret));
+        // An upgrade hands it on, with the machine's key, and which
+        // session each went with, to a chat that knows none yet, as the
+        // next build's does.
+        let other = tempfile::tempdir().unwrap();
+        let (mut next, same) = super::super::agent_files::tests::daemon_with_chat(other.path());
+        assert_eq!(same, chat);
+        let handed_key = Some((daemon.machine.id, Some(daemon.signer.seed())));
+        next.signer = crate::machine::identity(None, None, handed_key, 0).1;
+        assert!(!next.mcp_secret_valid(chat, &secret));
+        next.chat(chat).unwrap().connected(crate::agent::Opened {
+            session: "s2".into(),
+            settings: None,
+        });
+        next.resume_mcp(&handed);
+        assert!(next.mcp_secret_valid(chat, &secret));
+        assert_eq!(
+            next.chat_ref(chat).unwrap().session_mcp_token(),
+            Some(secret.as_str())
+        );
+    }
+
+    #[test]
     fn tools_are_served_to_a_session_by_its_own_secret() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, chat) = super::super::agent_files::tests::daemon_with_chat(dir.path());
@@ -3371,6 +3458,10 @@ mod tests {
         );
         let forged = format!("{}.{}", &first[..32], "0".repeat(64));
         assert!(!daemon.mcp_secret_valid(chat, &forged));
+        // Only as it was written: lowercase, and not a byte more or less.
+        assert!(!daemon.mcp_secret_valid(chat, &first.to_uppercase()));
+        assert!(!daemon.mcp_secret_valid(chat, &format!("{first}00")));
+        assert!(!daemon.mcp_secret_valid(chat, &format!("0{}", &first[1..])));
         daemon.chat(chat).unwrap().gave_mcp_token(first.clone());
         daemon.chat(chat).unwrap().connected(opened("s2"));
         assert!(!daemon.serves_tools(chat), "nothing connected");
