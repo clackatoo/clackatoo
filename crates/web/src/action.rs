@@ -27,6 +27,8 @@ pub enum Action {
     RemovePhoto(u64),
     /// Asks for notifications.
     Notify,
+    /// Shows the numbers that place the page over it, or stops.
+    Measures,
     /// Pairs with the password typed.
     Pair,
     /// Asks a window to allow the device.
@@ -201,6 +203,7 @@ impl Action {
             Self::AttachPhotos => "attach-photos".to_owned(),
             Self::RemovePhoto(id) => format!("remove-photo:{id}"),
             Self::Notify => "notify".to_owned(),
+            Self::Measures => "measures".to_owned(),
             Self::Pair => "pair".to_owned(),
             Self::Ask => "ask".to_owned(),
             Self::Renew => "renew".to_owned(),
@@ -253,6 +256,7 @@ impl Action {
             ("attach-photos", "") => Self::AttachPhotos,
             ("remove-photo", id) => Self::RemovePhoto(id.parse().ok()?),
             ("notify", "") => Self::Notify,
+            ("measures", "") => Self::Measures,
             ("pair", "") => Self::Pair,
             ("ask", "") => Self::Ask,
             ("renew", "") => Self::Renew,
@@ -352,6 +356,7 @@ mod tests {
             Action::Stop,
             Action::Send,
             Action::Notify,
+            Action::Measures,
             Action::Pair,
             Action::Ask,
             Action::Renew,

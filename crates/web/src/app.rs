@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 
+mod measures;
 mod photos;
 mod terminal;
 mod viewport;
@@ -428,6 +429,7 @@ pub(crate) fn start() {
     });
     listen_to_page(&window, &document, &root);
     listen_for_typing(&root);
+    with_app(App::restore_measures);
     let tick = Closure::<dyn FnMut()>::new(|| {
         with_app(App::tick);
     });
@@ -2087,6 +2089,7 @@ impl App {
                 self.state.submit(action == Action::Steer);
             }
             Action::Notify => self.enable_notifications(),
+            Action::Measures => self.toggle_measures(),
             Action::Pair | Action::Renew => {
                 let name = self
                     .input("device-name")
@@ -2544,7 +2547,7 @@ impl App {
         }
         // Seen again: drawn, so an agent's seconds count on from now.
         if here {
-            self.viewport_settling();
+            self.viewport_settling("shown");
             self.draw_soon();
         }
         self.send();

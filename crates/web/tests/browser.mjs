@@ -45,6 +45,14 @@ try {
   const noOverflow=async()=>assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'horizontal page overflow');
   await noOverflow();
   await page.screenshot({path:`${output}/phone-home.png`,fullPage:true});
+  // The measurements, asked for from the list, show over the page and
+  // take no taps; asked for again, they go.
+  await page.getByRole('button',{name:'Screen measurements',exact:true}).click();
+  await page.locator('.measures').waitFor();
+  assert.equal(await page.locator('.measures').evaluate(e=>getComputedStyle(e).pointerEvents),'none');
+  assert(/visual {2}h /.test(await page.locator('.measures').textContent()),'measurements should list the visual viewport');
+  await page.getByRole('button',{name:'Screen measurements',exact:true}).click();
+  await page.locator('.measures').waitFor({state:'detached'});
   await page.getByRole('button',{name:/Needs you/}).click();
   await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).waitFor({state:'hidden'});
   await page.getByLabel('Search agents and workspaces').fill('authentication');
@@ -261,7 +269,7 @@ try {
   // Focus/tap/restore may precede the new measurement, without a subsequent
   // resize event. These are event-order simulations, not an iOS keyboard.
   for (const trigger of ['focusin','pointerup','pageshow','visibilitychange']) {
-    await page.waitForTimeout(1200); // Previous transition checks must be spent.
+    await page.waitForTimeout(1600); // The previous transition's frames must be spent.
     await page.locator('.conversation').evaluate(el=>el.scrollTop=400);
     const reading=await page.locator('.conversation').evaluate(el=>el.scrollTop);
     await page.evaluate(async trigger=>{
@@ -282,6 +290,23 @@ try {
     await tightComposer();
     assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'keyboard inset survived dismissal');
   }
+  // A measurement arriving well after its transition, with no event of its
+  // own, is still applied while the transition is followed; once it's
+  // over, nothing reads the page.
+  await page.waitForTimeout(1600);
+  await page.evaluate(async()=>{
+    document.querySelector('#message').dispatchEvent(new Event('focusin',{bubbles:true}));
+    await new Promise(resolve=>setTimeout(resolve,1250));
+    Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
+  });
+  await page.waitForFunction(()=>Math.abs(parseFloat(document.querySelector('.chat-page').style.height)-420)<1);
+  await tightComposer();
+  await page.waitForTimeout(1600);
+  await page.evaluate(()=>{delete visualViewport.height;});
+  await page.waitForTimeout(300);
+  assert(await page.locator('.chat-page').evaluate(e=>Math.abs(parseFloat(e.style.height)-420)<1),'an idle page was still read');
+  await page.evaluate(()=>visualViewport.dispatchEvent(new Event('resize')));
+  await tightComposer();
   // Home Screen CSS vh can extend beyond the drawable web view. Never expand
   // into that clipped area, even if the difference matches safe-area padding.
   await page.evaluate(()=>{

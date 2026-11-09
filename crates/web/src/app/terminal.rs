@@ -445,7 +445,7 @@ impl super::App {
                 if let Some(page) = &self.term_page {
                     let _ = page.input.blur();
                 }
-                self.viewport_settling();
+                self.viewport_settling("hide keyboard");
             }
             Action::TerminalControls => {
                 if let Some(page) = &mut self.term_page {
