@@ -96,7 +96,8 @@ whose shell a signal ended (SIGTERM, SIGHUP or SIGKILL, which a shutdown or
 `systemctl stop` sends) keeps its pane for 2 seconds. If the daemon is asked
 to stop in that time, the pane is kept and comes back like any other, in the
 folder its shell was in. Otherwise it closes. A shell that exits by itself,
-with `exit` or <kbd>Ctrl</kbd>+<kbd>D</kbd>, still closes its pane at once.
+with `exit` or <kbd>Ctrl</kbd>+<kbd>D</kbd>, still closes its pane at once,
+even as the daemon stops, and so does a terminal an agent started.
 Signing out stops nothing while you
 [linger](~clackatoo/reference/cli#lingering), and a daemon that isn't in a
 scope of its own outlives your sign-outs too.

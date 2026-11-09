@@ -19,11 +19,13 @@
 //!   the pane stays, and is kept as a pane like any other: it comes back
 //!   at the next start, as at any restart, as a new shell in the directory
 //!   it was in. A program that exits by itself, or that another signal
-//!   ended (Ctrl+C's SIGINT), closes its pane at once, as ever.
+//!   ended (Ctrl+C's SIGINT), closes its pane at once, as ever, even as
+//!   the daemon stops; so does a terminal an agent asked for, whose
+//!   commands are its own.
 //! - **The daemon's own signal first.** Once a signal asking the daemon
-//!   to stop has come, or the daemon is stopping, no pane closes as its
-//!   program ends, and the loop takes the signals before anything else in
-//!   each turn.
+//!   to stop has come, or the daemon is stopping, a pane kept as above
+//!   stays until it stops, and the loop takes the signals before anything
+//!   else in each turn.
 
 use std::time::{Duration, Instant};
 
@@ -57,19 +59,21 @@ impl Daemon {
     /// pane for now rather than closing it, as the daemon is stopping, or
     /// may be about to: see the module's docs.
     pub(super) fn keeps_pane_as_it_ended(&mut self, id: TerminalId) -> bool {
-        let status = match self.terminals.get(&id).map(|slot| &slot.terminal) {
-            Some(Hosted::Pty(terminal)) => terminal.status(),
+        let (status, for_agents) = match self.terminals.get(&id).map(|slot| &slot.terminal) {
+            Some(Hosted::Pty(terminal)) => (terminal.status(), terminal.for_agents()),
             _ => return false,
         };
+        // An agent's commands are its own, not the user's to come back.
+        if for_agents || !ended_with_everything(status) {
+            return false;
+        }
         if self.stopping_soon() {
             log::info!("terminal {id}: its pane is kept, as the daemon is stopping");
-        } else if ended_with_everything(status) {
+        } else {
             log::info!(
                 "terminal {id}: its pane closes in {} s, unless the daemon stops first",
                 GRACE.as_secs()
             );
-        } else {
-            return false;
         }
         self.graced.insert(id, Instant::now() + GRACE);
         true
@@ -218,6 +222,73 @@ mod tests {
         daemon.keep_last();
         daemon.kept_last();
         assert!(kept().contains("\"kept\""), "{}", kept());
+    }
+
+    /// Reaps terminal `id` once its program has ended, as the loop does.
+    fn reaped(daemon: &mut Daemon, id: TerminalId) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            daemon.reap(id);
+            let ended = match daemon.terminals.get(&id).map(|slot| &slot.terminal) {
+                Some(Hosted::Pty(terminal)) => terminal.status() != TerminalStatus::Running,
+                _ => true,
+            };
+            if ended {
+                return;
+            }
+            assert!(Instant::now() < deadline, "terminal {id} never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Only the user's terminals a signal ended keep their panes, and only
+    /// those, even as the daemon stops: a program that exited by itself
+    /// closes its pane then too, and so does a terminal an agent asked for.
+    #[test]
+    fn only_the_users_terminals_a_signal_ended_keep_their_panes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let running = |command: &[&str]| NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(command.iter().map(|&word| word.to_owned()).collect()),
+            cwd: None,
+            record_to: None,
+        };
+        let sleep = running(&["sleep", "1000"]);
+        let users = daemon.new_terminal(&sleep).unwrap();
+        let agents = (daemon.new_terminal_in(&sleep, crate::priority::Leaf::Agents)).unwrap();
+        for (name, terminal) in [("users", users), ("agents", agents)] {
+            daemon.workspaces.new_workspace(name.to_owned(), terminal);
+        }
+        let pid = |daemon: &Daemon, id: TerminalId| {
+            let pid = daemon.terminals[&id].terminal.info().pid.unwrap();
+            rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap()
+        };
+        for terminal in [users, agents] {
+            rustix::process::kill_process(pid(&daemon, terminal), rustix::process::Signal::TERM)
+                .unwrap();
+            reaped(&mut daemon, terminal);
+        }
+        let shown = |daemon: &Daemon, id| daemon.workspaces.get().pane_showing(id).is_some();
+        assert!(shown(&daemon, users) && daemon.in_grace(users));
+        assert!(!shown(&daemon, agents));
+
+        // As the daemon stops: one exiting by itself closes, one killed is
+        // kept, as one running.
+        daemon
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        let exits = daemon.new_terminal(&running(&["true"])).unwrap();
+        let killed = daemon.new_terminal(&sleep).unwrap();
+        for (name, terminal) in [("exits", exits), ("killed", killed)] {
+            daemon.workspaces.new_workspace(name.to_owned(), terminal);
+        }
+        rustix::process::kill_process(pid(&daemon, killed), rustix::process::Signal::TERM).unwrap();
+        for terminal in [exits, killed] {
+            reaped(&mut daemon, terminal);
+        }
+        assert!(!shown(&daemon, exits));
+        assert!(shown(&daemon, killed) && daemon.in_grace(killed));
     }
 
     /// A shutdown called off has the workspaces kept as they change again.

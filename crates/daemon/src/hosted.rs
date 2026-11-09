@@ -75,6 +75,10 @@ pub(crate) struct HostedTerminal {
     /// The directory its program was last found in, kept for once it has
     /// ended, when `/proc` has none (see [`HostedTerminal::own_directory`]).
     directory: std::cell::RefCell<Option<String>>,
+    /// Whether an agent asked for it, its program in the agents' leaf (see
+    /// [`crate::priority`]). Not handed over: one carried through an
+    /// upgrade counts as the user's.
+    for_agents: bool,
 }
 
 /// Where a terminal the daemon writes an agent's command's output into
@@ -226,6 +230,7 @@ impl HostedTerminal {
             secret,
             exe,
             directory: std::cell::RefCell::default(),
+            for_agents: leaf == crate::priority::Leaf::Agents,
             fed: None,
         })
     }
@@ -260,8 +265,15 @@ impl HostedTerminal {
             secret: None,
             exe: None,
             directory: std::cell::RefCell::default(),
+            for_agents: false,
             fed: Some(Fed { ended: false }),
         }
+    }
+
+    /// Whether an agent asked for it, as `run_in_terminal` and
+    /// `run_in_background` do.
+    pub(crate) fn for_agents(&self) -> bool {
+        self.for_agents
     }
 
     /// Whether no program runs in it, and the daemon writes into it what
@@ -437,6 +449,7 @@ impl HostedTerminal {
             secret,
             exe: None,
             directory: std::cell::RefCell::default(),
+            for_agents: false,
             fed: fed.then_some(Fed { ended: true }),
         })
     }
