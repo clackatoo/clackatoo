@@ -211,9 +211,11 @@ impl WorkspaceState {
                         picture: picture.0,
                     },
                     // Only what a newer daemon sends a client is Other,
-                    // and a borrowed pane, handed over above: no request
-                    // makes another, so no daemon's workspaces hold one.
-                    Content::Other { kind } => {
+                    // and a borrowed pane, handed over above; and only
+                    // what a daemon relaying is sent is NotShared: no
+                    // request makes another, so no daemon's workspaces
+                    // hold one.
+                    Content::Other { kind } | Content::NotShared { kind } => {
                         unreachable!(
                             "the daemon's workspaces hold a {kind} pane, of no kind it has"
                         )

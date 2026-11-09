@@ -2902,8 +2902,9 @@ mod tests {
         assert_eq!(civil(11_016), (2000, 2, 29));
     }
 
-    #[test]
-    fn terminals_are_listed_beside_the_chats_saying_what_and_where() {
+    /// Workspace `clackatoo`, its one tab laid out as `layout`, and its
+    /// terminal 2, listed by the terminals.
+    fn listing_terminals(layout: clackatoo_protocol::Layout) -> State {
         let mut state = State::default();
         state.workspaces = Workspaces {
             home: None,
@@ -2913,12 +2914,7 @@ mod tests {
                 name: "clackatoo".into(),
                 tabs: vec![clackatoo_protocol::Tab {
                     id: clackatoo_protocol::TabId(1),
-                    layout: clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
-                        id: clackatoo_protocol::PaneId(1),
-                        content: clackatoo_protocol::Content::Terminal(TerminalId(2)),
-                        home: None,
-                        key: None,
-                    }),
+                    layout,
                     focused: clackatoo_protocol::PaneId(1),
                     name: None,
                 }],
@@ -2946,6 +2942,21 @@ mod tests {
         }];
         state.online = Online::Open;
         state.home_filter = crate::state::HomeFilter::Terminals;
+        state
+    }
+
+    fn terminal_pane(id: u32) -> clackatoo_protocol::Pane {
+        clackatoo_protocol::Pane {
+            id: clackatoo_protocol::PaneId(id),
+            content: clackatoo_protocol::Content::Terminal(TerminalId(2)),
+            home: None,
+            key: None,
+        }
+    }
+
+    #[test]
+    fn terminals_are_listed_beside_the_chats_saying_what_and_where() {
+        let state = listing_terminals(clackatoo_protocol::Layout::Pane(terminal_pane(1)));
         let page = home(&state, Notifications::On, 0);
         let opened: Vec<&str> = (page.find_all("data-action").into_iter())
             .filter_map(|row| row.get("data-action"))
@@ -2964,6 +2975,43 @@ mod tests {
         let text = page.all_text();
         assert!(text.contains("cargo test"), "{text}");
         assert!(text.contains("/home/jack/clackatoo · 80×24"), "{text}");
+    }
+
+    /// A pane on a machine not shared with this one is listed among the
+    /// terminals as a window shows it, saying so and nothing more, with
+    /// nothing to open.
+    #[test]
+    fn a_pane_not_shared_is_listed_saying_so() {
+        use clackatoo_protocol::{Content, Layout, NOT_SHARED_SAID, PaneKind};
+        let not_shared = clackatoo_protocol::Pane {
+            id: clackatoo_protocol::PaneId(3),
+            content: Content::NotShared {
+                kind: PaneKind::new("editor"),
+            },
+            home: None,
+            key: None,
+        };
+        let state = listing_terminals(Layout::Split {
+            axis: clackatoo_protocol::Axis::LeftToRight,
+            parts: vec![Layout::Pane(terminal_pane(1)), Layout::Pane(not_shared)],
+            shares: vec![1, 1],
+        });
+        let page = home(&state, Notifications::On, 0);
+        let rows = page.find_all("class");
+        let said: Vec<String> = (rows.into_iter())
+            .filter(|row| {
+                row.get("class")
+                    .is_some_and(|class| class.contains("not-shared"))
+            })
+            .map(Element::all_text)
+            .collect();
+        assert_eq!(said, [format!("⊘{NOT_SHARED_SAID}")]);
+        assert!(!said[0].contains("editor"), "{said:?}");
+        let opened = (page.find_all("data-action").into_iter())
+            .filter_map(|row| row.get("data-action"))
+            .filter(|action| action.starts_with("term:"))
+            .count();
+        assert_eq!(opened, 1, "only the terminal opens");
     }
 
     #[test]

@@ -3088,7 +3088,7 @@ impl Daemon {
             Content::Files(files) | Content::Folder(files) => {
                 Some(self.files_root(files)?.display().to_string())
             }
-            Content::Board(_) | Content::Other { .. } => None,
+            Content::Board(_) | Content::Other { .. } | Content::NotShared { .. } => None,
             Content::Picture(picture) => {
                 Some(self.picture_path(picture)?.parent()?.display().to_string())
             }
@@ -3137,7 +3137,10 @@ impl Daemon {
                 Content::Files(files) | Content::Folder(files) => {
                     self.close_files_pane(pane.id, files);
                 }
-                Content::Board(_) | Content::Browser(_) | Content::Other { .. } => {
+                Content::Board(_)
+                | Content::Browser(_)
+                | Content::Other { .. }
+                | Content::NotShared { .. } => {
                     self.close_board_pane(pane.id);
                 }
                 Content::Picture(picture) => self.close_picture_pane(pane.id, picture),
@@ -4107,7 +4110,10 @@ impl Daemon {
                     self.close_files_pane(pane, files);
                     Ok(Response::Done)
                 }
-                Content::Board(_) | Content::Browser(_) | Content::Other { .. } => {
+                Content::Board(_)
+                | Content::Browser(_)
+                | Content::Other { .. }
+                | Content::NotShared { .. } => {
                     self.close_board_pane(pane);
                     Ok(Response::Done)
                 }

@@ -3168,7 +3168,7 @@ fn drawings<'a>(
                 }
                 continue;
             }
-            Content::Other { .. } => {
+            Content::Other { .. } | Content::NotShared { .. } => {
                 if let Some(other) = desk.other(id) {
                     let shown = ((other.scene(), None), Vec::new());
                     drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));

@@ -706,7 +706,7 @@ window, are equal.
 | A window | `workspace`, `tab`, `pane` | `on` |
 | A workspace | `name`, `tabs` | `on` |
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
-| A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know), `title`, `tab` | `on`, `split`, `close`, `focus` |
+| A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know, or one on a machine not shared with it), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
 `pane:split(side)` puts a new pane on that side, `"right"`, `"left"`,
 `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }`

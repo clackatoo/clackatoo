@@ -444,6 +444,11 @@ gates! {
     /// sent as `Sgr`. And `GridState`'s `pointer`, the mouse pointer's
     /// shape a program asks for (OSC 22).
     TERMINAL_STANDARDS_2 = 147,
+    /// A pane on a machine kept from a daemon relaying, as it's shown one
+    /// (CLACKA-118): `Content::NotShared`, which says the pane isn't
+    /// shared, where an older peer is sent a pane to come of its kind, as
+    /// it was before.
+    NOT_SHARED = 148,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -583,6 +588,7 @@ impl Since for Content {
             | Self::Folder(_) => EARLIER,
             Self::Other { .. } => FALLBACKS,
             Self::Picture(_) => IMAGES,
+            Self::NotShared { .. } => NOT_SHARED,
         }
     }
 }
@@ -1030,9 +1036,14 @@ fn without_lent(message: &ServerMessage) -> Option<ServerMessage> {
 
 /// Whether `pane` is on another machine than the daemon's, and shows what
 /// only a peer of the relay's version or later asks about as it should:
-/// anything but a terminal, or a pane already shown as one to come.
+/// anything but a terminal, or a pane already shown as one to come, or as
+/// not shared.
 fn relayed_elsewhere(pane: &crate::Pane) -> bool {
-    pane.home.is_some() && !matches!(pane.content, Content::Terminal(_) | Content::Other { .. })
+    pane.home.is_some()
+        && !matches!(
+            pane.content,
+            Content::Terminal(_) | Content::Other { .. } | Content::NotShared { .. }
+        )
 }
 
 /// `message`, if it's the workspaces and some of their panes from other
@@ -2873,6 +2884,10 @@ mod tests {
             kind: crate::PaneKind::new("x"),
         };
         assert_eq!(other.since(), FALLBACKS);
+        let not_shared = Content::NotShared {
+            kind: crate::PaneKind::new("x"),
+        };
+        assert_eq!(not_shared.since(), NOT_SHARED);
         assert_eq!(BufferUpdate::ChangedOnDisk.since(), EARLIER);
         assert_eq!(FilesUpdate::NoGit(String::new()).since(), EARLIER);
         let git_changed = FilesUpdate::GitChanged {
@@ -3555,6 +3570,22 @@ mod image_tests {
             picture.downgrade(FALLBACKS - 1),
             Downgraded::AsIs | Downgraded::To(_)
         ));
+    }
+
+    /// An older client is sent a pane that isn't shared as a pane to come
+    /// of its kind, as it was before there was a word for it.
+    #[test]
+    fn a_pane_not_shared_is_a_pane_to_come_to_an_older_client() {
+        let kind = crate::PaneKind::new("terminal");
+        let not_shared = workspaces_with(Content::NotShared { kind });
+        assert_eq!(not_shared.downgrade(NOT_SHARED), Downgraded::AsIs);
+        assert_eq!(
+            not_shared.downgrade(NOT_SHARED - 1),
+            Downgraded::To(workspaces_with(Content::Other { kind }))
+        );
+        // It goes and comes back as it was.
+        let sent = encode(NOT_SHARED, &not_shared);
+        assert_eq!(read::<ServerMessage>(NOT_SHARED, &sent), not_shared);
     }
 
     /// What answers only a newer client's asking is never sent to an older

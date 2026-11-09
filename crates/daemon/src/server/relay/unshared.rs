@@ -23,7 +23,7 @@
 //!   drops or leaves out whatever is on a machine kept from it, or names
 //!   one: IDs, machine IDs, the ways to machines, names, ports, notices.
 //!   A pane of this daemon's own layout showing one of theirs is shown it
-//!   as a pane it can't show, on no machine. What's relayed as it came
+//!   as a pane not shared, on no machine, which says only that. What's relayed as it came
 //!   from such a machine never reaches it ([`frame_for`](Daemon::frame_for)).
 //! - **Names nothing.** A refusal says only "that machine isn't shared
 //!   with other machines", ahead of any other error that would say what's
@@ -324,7 +324,10 @@ impl Daemon {
     /// from it: the workspaces of the connections kept, what's said of their
     /// panes, the machines passed on that are kept, and every machine kept,
     /// as another machine a pane is on, a home, a way to one passed on, or a
-    /// pane's own, which is shown as a pane it can't show, on no machine.
+    /// pane's own, which is shown as a pane not shared, on no machine: one
+    /// of the kind it is to a peer from before
+    /// [`NOT_SHARED`](clackatoo_protocol::wire::NOT_SHARED), which takes it
+    /// as a pane to come, as it was shown before.
     pub(super) fn leave_out_unshared(&self, shown: &mut Workspaces, kept: &Kept) {
         if !kept.any() {
             return;
@@ -362,7 +365,7 @@ impl Daemon {
             tab.layout.for_each_pane_mut(&mut |pane| {
                 if pane.home.is_some_and(|home| kept.machine(home)) {
                     let kind = PaneKind::new(pane.content.kind_name());
-                    pane.content = Content::Other { kind };
+                    pane.content = Content::NotShared { kind };
                     pane.home = None;
                     pane.key = None;
                 }
@@ -537,7 +540,7 @@ impl Daemon {
             Content::Board(board) => Named::Board(board),
             Content::Review(review) => Named::Review(review),
             Content::Picture(picture) => Named::Picture(picture),
-            Content::Other { .. } => return false,
+            Content::Other { .. } | Content::NotShared { .. } => return false,
         };
         self.unshared_named(kept, named)
     }
@@ -563,7 +566,7 @@ impl Daemon {
             Content::Picture(picture) => {
                 self.detach_picture(token, picture);
             }
-            Content::Other { .. } => {}
+            Content::Other { .. } | Content::NotShared { .. } => {}
         }
     }
 
@@ -597,7 +600,7 @@ impl Daemon {
                 .then(|| self.relayed_terminal(local))
                 .flatten()
                 .map(|(_, chat)| Ask::DetachBrowser { chat }),
-            Content::Picture(_) | Content::Other { .. } => None,
+            Content::Picture(_) | Content::Other { .. } | Content::NotShared { .. } => None,
         };
         if let Some(detach) = detach {
             let _ = self.send_upstream(at, &ClientMessage::Request(detach), super::Expect::Nothing);

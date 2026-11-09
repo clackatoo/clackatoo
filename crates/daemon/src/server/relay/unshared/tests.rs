@@ -440,11 +440,8 @@ fn lending(daemon: &Daemon, key: u64) -> ServerMessage {
     }))
 }
 
-#[test]
-fn a_daemon_relaying_reaches_no_chat_in_a_pane_borrowed_from_there() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut world = world(dir.path(), true);
-    // A window here borrows a pane of desk's, for a workspace here.
+/// A pane of desk's a window here borrows, for a workspace here.
+fn borrowed_from_desk(world: &mut World) -> PaneId {
     let own = (world.daemon.workspaces).new_workspace("home".into(), TerminalId(1));
     let (home, ..) = world.daemon.workspaces.get().find_pane(own).unwrap();
     let tab = Request::NewTab {
@@ -466,6 +463,14 @@ fn a_daemon_relaying_reaches_no_chat_in_a_pane_borrowed_from_there() {
     let [Response::PaneCreated(pane)] = answers(&mut world.from_window)[..] else {
         panic!("no pane");
     };
+    pane
+}
+
+#[test]
+fn a_daemon_relaying_reaches_no_chat_in_a_pane_borrowed_from_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut world = world(dir.path(), true);
+    let pane = borrowed_from_desk(&mut world);
     let shown = world.daemon.shown_workspaces();
     let (.., borrowed) = shown.find_pane(pane).unwrap();
     let chat = borrowed.content.terminal().expect("a terminal");
@@ -512,7 +517,7 @@ fn a_daemon_relaying_reaches_no_chat_in_a_pane_borrowed_from_there() {
     let (_, _, placeholder) = told.find_pane(pane).unwrap();
     assert_eq!((placeholder.home, placeholder.key), (None, None));
     assert!(
-        matches!(placeholder.content, Content::Other { kind } if kind.as_str() == "terminal"),
+        matches!(placeholder.content, Content::NotShared { kind } if kind.as_str() == "terminal"),
         "{placeholder:?}"
     );
     // Nor bring back or say seen a shell desk lends, by the token.
@@ -530,6 +535,45 @@ fn a_daemon_relaying_reaches_no_chat_in_a_pane_borrowed_from_there() {
             .is_ok()
     );
     assert!(heard(&mut world.there).is_empty());
+}
+
+/// A daemon relaying is told a pane of its layout on a machine kept from
+/// it as a pane not shared, which says only that; or, from before there
+/// was one, as a pane to come of its kind, as it was told before.
+#[test]
+fn a_pane_on_a_machine_kept_is_not_shared_to_a_daemon_relaying_or_one_to_come() {
+    use clackatoo_protocol::frame::FrameDecoder;
+    use clackatoo_protocol::wire::NOT_SHARED;
+    use std::io::Read as _;
+    let dir = tempfile::tempdir().unwrap();
+    let mut world = world(dir.path(), true);
+    let pane = borrowed_from_desk(&mut world);
+    let mut told_at = |wire: u32| {
+        let Some(Source::Client(client)) = world.daemon.sources.get_mut(world.peer.0) else {
+            panic!("no daemon relaying");
+        };
+        client.wire = wire;
+        client.watching_workspaces = true;
+        world.daemon.tell_workspaces();
+        let mut decoder = FrameDecoder::new();
+        let mut buffer = vec![0; 1 << 16];
+        while let Ok(n @ 1..) = world.from_peer.read(&mut buffer) {
+            decoder.push(&buffer[..n]);
+        }
+        let told = std::iter::from_fn(|| decoder.decode::<ServerMessage>(wire).unwrap())
+            .filter_map(|message| match message {
+                ServerMessage::Event(Event::Workspaces(told)) => Some(told),
+                _ => None,
+            })
+            .last()
+            .expect("told the workspaces");
+        let (.., shown) = told.find_pane(pane).expect("the pane");
+        assert_eq!((shown.home, shown.key), (None, None));
+        shown.content
+    };
+    let kind = PaneKind::new("terminal");
+    assert_eq!(told_at(NOT_SHARED), Content::NotShared { kind });
+    assert_eq!(told_at(NOT_SHARED - 1), Content::Other { kind });
 }
 
 #[test]

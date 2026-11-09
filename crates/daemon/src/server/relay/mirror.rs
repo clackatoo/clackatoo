@@ -881,6 +881,11 @@ impl Mirror {
                     .local_or_fresh(terminal.0, || fresh.terminal());
                 Content::Terminal(TerminalId(local))
             }
+            // A pane on a machine kept from this daemon, which names
+            // nothing to renumber, says so here too.
+            content @ Content::NotShared { .. } if pane.home.is_none() => Content::NotShared {
+                kind: PaneKind::new(content.kind_name()),
+            },
             content if shown.relays && pane.home.is_none() => {
                 self.renumber_content(content, fresh, kept)
             }
@@ -957,7 +962,10 @@ impl Mirror {
             }
             // Another machine's picture panes aren't followed through this
             // daemon: they show as panes to come.
-            Content::Terminal(_) | Content::Picture(_) | Content::Other { .. } => Content::Other {
+            Content::Terminal(_)
+            | Content::Picture(_)
+            | Content::Other { .. }
+            | Content::NotShared { .. } => Content::Other {
                 kind: PaneKind::new(content.kind_name()),
             },
         }
@@ -1084,14 +1092,34 @@ pub(super) struct Snapshot {
     told_chats: Vec<ChatSummary>,
 }
 impl From<&Mirror> for Snapshot {
+    /// Frozen at protocol 125, which has no pane not shared: one goes as
+    /// the pane to come it was then, until the daemon there, connected
+    /// again, says what it is.
     fn from(m: &Mirror) -> Self {
+        let mut workspaces = m.workspaces.clone();
+        let mut lent = m.lent.clone();
+        let as_before = |content: &mut Content| {
+            if let Content::NotShared { kind } = *content {
+                *content = Content::Other { kind };
+            }
+        };
+        for tab in (workspaces.iter_mut()).flat_map(|workspace| {
+            let background = workspace.background.iter_mut().map(|one| &mut one.tab);
+            workspace.tabs.iter_mut().chain(background)
+        }) {
+            tab.layout
+                .for_each_pane_mut(&mut |pane| as_before(&mut pane.content));
+        }
+        for lent in lent.values_mut() {
+            as_before(&mut lent.content);
+        }
         Self {
             run: m.run,
-            workspaces: m.workspaces.clone(),
+            workspaces,
             restored: m.restored.clone(),
             kept: m.kept.clone(),
             chats: m.chats.clone(),
-            lent: m.lent.clone(),
+            lent,
             lent_cut: m.lent_cut,
             held_for: m.held_for.clone(),
             held: m.held.clone(),
@@ -1828,6 +1856,41 @@ mod tests {
             true,
         );
         assert!(mirror.held.is_empty() && mirror.held_keys.is_empty());
+    }
+
+    /// A pane on a machine the daemon there keeps from this one stays one
+    /// not shared, as it's shown; but goes to the next build as the pane
+    /// to come the frozen view had then.
+    #[test]
+    fn a_pane_not_shared_is_kept_so_and_handed_over_as_one_to_come() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let kind = PaneKind::new("editor");
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(1, Content::Terminal(TerminalId(1))),
+                pane(2, Content::NotShared { kind }),
+            ],
+            shares: vec![1, 1],
+        };
+        let remote = workspaces(vec![workspace(1, "main", split, 1)]);
+        mirror.take(
+            &remote,
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        let panes = mirror.workspaces[0].tabs[0].layout.panes();
+        assert_eq!(panes[1].content, Content::NotShared { kind });
+        let handed: Snapshot = (&mirror).into();
+        let panes = handed.workspaces[0].tabs[0].layout.panes();
+        assert_eq!(panes[1].content, Content::Other { kind });
+        // The mirror itself is as it was.
+        let panes = mirror.workspaces[0].tabs[0].layout.panes();
+        assert_eq!(panes[1].content, Content::NotShared { kind });
     }
 
     #[test]

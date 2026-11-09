@@ -572,6 +572,30 @@ fn a_pane_not_relayed_says_where_it_is() {
 }
 
 #[test]
+fn a_pane_on_a_machine_not_shared_says_so_and_nothing_more() {
+    // Desk's `work`, holding a pane on a machine desk keeps from this
+    // one: desk sent it on no machine, and the daemon here, mirroring
+    // desk's workspaces, said it's on desk, as all of them are.
+    let not_shared = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::NotShared {
+            kind: PaneKind::new("terminal"),
+        },
+        home: Some(DESK),
+        key: None,
+    });
+    let mut workspaces = here(three());
+    workspaces.list[2].tabs[0] = tab(3, side_by_side(vec![pane(3), not_shared]));
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    desk.show_pane(PaneId(9));
+    let other = desk.other(PaneId(9)).expect("a pane in its place");
+    // Not "on desk", nor as one whose clackatoo there is too old.
+    assert_eq!(other.reason(), &crate::other::Why::NotShared);
+    assert_eq!(other.title(), "Not shared");
+}
+
+#[test]
 fn connect_says_how_it_went() {
     let mut desk = desk(three());
     normal_mode(&mut desk);

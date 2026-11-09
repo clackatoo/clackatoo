@@ -1947,6 +1947,20 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         .map(|sample| (crate::wire::TUTOR_FILES, sample)),
     );
     samples.extend(images(terminal));
+    // A pane on a machine kept from a daemon relaying (CLACKA-118).
+    let mut not_shared = workspaces();
+    not_shared.list[0].tabs[0].layout = Layout::Pane(Pane {
+        id: PaneId(9),
+        content: Content::NotShared {
+            kind: PaneKind::new("terminal"),
+        },
+        home: None,
+        key: None,
+    });
+    samples.push((
+        crate::wire::NOT_SHARED,
+        Sample::Server(ServerMessage::Event(Event::Workspaces(not_shared))),
+    ));
     samples
 }
 

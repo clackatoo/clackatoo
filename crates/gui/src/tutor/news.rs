@@ -1505,6 +1505,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":connect HOST --no-share also refuses what other daemons ask of HOST through yours, and hides its chats",
     },
+    News {
+        id: "not-shared-pane",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "A pane on a machine kept with --no-share now says \"Not shared\" to other machines, naming nothing",
+    },
 ];
 
 impl News {

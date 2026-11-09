@@ -273,7 +273,9 @@ impl Daemon {
                 let dir = pane.and_then(|pane| self.working_directory(pane));
                 Project::Dir(dir.map_or_else(|| home.clone(), PathBuf::from))
             }
-            Some(Content::Board(_) | Content::Other { .. }) | None => Project::Dir(home.clone()),
+            Some(Content::Board(_) | Content::Other { .. } | Content::NotShared { .. }) | None => {
+                Project::Dir(home.clone())
+            }
         }
     }
 }

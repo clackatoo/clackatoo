@@ -2,7 +2,9 @@
 //! remains the authority for status, attention and workspace membership.
 use std::fmt::Write as _;
 
-use clackatoo_protocol::{Background, BackgroundState, ChatState, TerminalStatus, WorkspaceId};
+use clackatoo_protocol::{
+    Background, BackgroundState, ChatState, NOT_SHARED_SAID, TerminalStatus, WorkspaceId,
+};
 
 use crate::action::Action;
 use crate::state::{HomeFilter, State};
@@ -85,27 +87,7 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
     for (id, name) in workspaces {
         let mut rows = Vec::new();
         if state.home_filter == HomeFilter::Terminals {
-            rows.extend(
-                state
-                    .terminals_of(id)
-                    .into_iter()
-                    .filter(|t| {
-                        matches(&format!(
-                            "{name} {} {}",
-                            t.title,
-                            t.cwd.as_deref().unwrap_or_default()
-                        ))
-                    })
-                    .map(view::terminal_row),
-            );
-            // Its background tabs, after its terminals.
-            let background = id.and_then(|id| state.workspaces.get(id));
-            rows.extend(
-                (background.into_iter())
-                    .flat_map(|workspace| &workspace.background)
-                    .filter(|background| matches(&format!("{name} {}", background.name)))
-                    .map(|background| background_row(state, background)),
-            );
+            rows = terminal_rows(state, id, &name, &matches);
         } else {
             let mut chats: Vec<_> = state
                 .chats
@@ -245,6 +227,56 @@ fn background_pill(state: &State, workspace: WorkspaceId) -> Option<Element> {
             .attr("aria-label", said)
             .text(text),
     )
+}
+
+/// The rows of workspace `id`, called `name`, listing its terminals,
+/// those of them `matches` the search.
+fn terminal_rows(
+    state: &State,
+    id: Option<WorkspaceId>,
+    name: &str,
+    matches: &dyn Fn(&str) -> bool,
+) -> Vec<Element> {
+    let mut rows: Vec<Element> = (state.terminals_of(id).into_iter())
+        .filter(|t| {
+            matches(&format!(
+                "{name} {} {}",
+                t.title,
+                t.cwd.as_deref().unwrap_or_default()
+            ))
+        })
+        .map(view::terminal_row)
+        .collect();
+    // Its panes on a machine not shared with this one, which say only
+    // that.
+    if matches(&format!("{name} {NOT_SHARED_SAID}")) {
+        rows.extend((0..state.not_shared_of(id)).map(|_| not_shared_row()));
+    }
+    // Its background tabs, after its terminals.
+    let background = id.and_then(|id| state.workspaces.get(id));
+    rows.extend(
+        (background.into_iter())
+            .flat_map(|workspace| &workspace.background)
+            .filter(|background| matches(&format!("{name} {}", background.name)))
+            .map(|background| background_row(state, background)),
+    );
+    rows
+}
+
+/// A pane on a machine not shared with this one, as a window shows it:
+/// saying so, and nothing of which machine or what kind of pane; nothing
+/// to open.
+fn not_shared_row() -> Element {
+    el("li")
+        .class("chat")
+        .class("terminal")
+        .class("not-shared")
+        .child(
+            el("div")
+                .class("top")
+                .child(el("span").class("prompt-mark").text("⊘"))
+                .child(el("span").class("title").text(NOT_SHARED_SAID)),
+        )
 }
 
 /// A background tab, as a row of the list of terminals: how it's getting

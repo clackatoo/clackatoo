@@ -353,6 +353,7 @@ img.image-preview.dropped { width: auto; height: auto; border: none; background:
 .dock .question { margin: 0; padding: 12px; border-radius: 14px; background: #17150f; border-color: #f2c14e66; box-shadow: none; }
 .dock .question p { margin-bottom: 10px; font-size: 13px; font-weight: 550; }.dock .choices { gap: 6px; }.dock .choices button { font-size: 12px; padding: 8px; border-radius: 10px; }
 .terminal { display: block; }.terminal .top { display: flex; gap: 10px; align-items: center; }.terminal .title { flex: 1; }.terminal .meta { display: block; padding-left: 28px; }
+.not-shared { cursor: default; }.not-shared .title { color: var(--muted); font-weight: 450; white-space: normal; }
 .key { min-height: 44px; }
 @media (max-height: 500px) { .dock .footer-slot { max-height: 120px; } }
 .context-card { padding: 14px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 22px; }.context-card h3, .allowances-heading { font-size: 12px; font-weight: 550; color: var(--muted); margin: 0 0 8px; }.context-total { margin-right: 6px; font-size: 28px; letter-spacing: -.03em; font-weight: 600; }.context-card > .muted { font-size: 12px; }.context-card .usage { margin: 12px 0 0; font-size: 12px; gap: 8px; }.provider-usage h3 { display: flex; align-items: center; gap: 8px; }.provider-default { display: block; margin: 0 auto; background: var(--raised); color: var(--text); font-size: 13px; }

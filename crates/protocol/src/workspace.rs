@@ -592,7 +592,23 @@ pub enum Content {
     /// ([`wire::IMAGES`](crate::wire::IMAGES)): an older peer is sent a
     /// pane to come ([`Content::Other`]) in its place.
     Picture(crate::PictureId),
+    /// A pane on a machine kept from the client: one connected to the
+    /// daemon with `--no-share`, or passed on by one, which a daemon
+    /// relaying isn't shown. The client says it isn't shared, and nothing
+    /// more: not the machine, nor the kind. New in protocol 148
+    /// ([`wire::NOT_SHARED`](crate::wire::NOT_SHARED)): an older peer is
+    /// sent a pane to come ([`Content::Other`]) of the kind in its place,
+    /// as it was before.
+    NotShared {
+        /// What kind of pane it is, only for an older peer's pane to come.
+        kind: PaneKind,
+    },
 }
+
+/// What a pane not shared ([`Content::NotShared`]) says, in a window and
+/// on the phone alike: never which machine it's on, nor what kind of pane.
+pub const NOT_SHARED_SAID: &str =
+    "Not shared — this pane is on a machine that isn't shared with you";
 
 /// What a pane of a kind the client doesn't know is called, such as
 /// `browser`, for [`Content::Other`].
@@ -708,7 +724,8 @@ impl Content {
             | Self::Browser(_)
             | Self::Folder(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
@@ -724,7 +741,8 @@ impl Content {
             | Self::Browser(_)
             | Self::Folder(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
@@ -740,7 +758,8 @@ impl Content {
             | Self::Review(_)
             | Self::Browser(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
@@ -762,7 +781,8 @@ impl Content {
             | Self::Browser(_)
             | Self::Folder(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
@@ -778,7 +798,8 @@ impl Content {
             | Self::Browser(_)
             | Self::Folder(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
     /// The chat whose page it is, if it's a browser's.
@@ -793,7 +814,8 @@ impl Content {
             | Self::Review(_)
             | Self::Folder(_)
             | Self::Picture(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
@@ -809,13 +831,15 @@ impl Content {
             | Self::Review(_)
             | Self::Browser(_)
             | Self::Folder(_)
-            | Self::Other { .. } => None,
+            | Self::Other { .. }
+            | Self::NotShared { .. } => None,
         }
     }
 
     /// What a window calls a pane showing it, for one shown as a pane to
     /// come ([`Content::Other`]): `editor`, `explorer`, and so on, or the
-    /// name an `Other` gives, as far as it's one of those words.
+    /// name an `Other` or a `NotShared` gives, as far as it's one of those
+    /// words.
     #[must_use]
     pub fn kind_name(self) -> &'static str {
         match self {
@@ -826,7 +850,7 @@ impl Content {
             Self::Review(_) => "review",
             Self::Browser(_) => "browser",
             Self::Picture(_) => "image",
-            Self::Other { kind } => match kind.as_str() {
+            Self::Other { kind } | Self::NotShared { kind } => match kind.as_str() {
                 "terminal" => "terminal",
                 "editor" => "editor",
                 "explorer" => "explorer",

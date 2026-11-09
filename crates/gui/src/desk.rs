@@ -1060,7 +1060,9 @@ impl Desk {
                 Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
                 Content::Browser(_) => self.browser(pane.id).map(BrowserPane::title),
                 Content::Picture(_) => self.picture(pane.id).map(PicturePane::title),
-                Content::Other { .. } => self.other(pane.id).map(OtherPane::title),
+                Content::Other { .. } | Content::NotShared { .. } => {
+                    self.other(pane.id).map(OtherPane::title)
+                }
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -1394,7 +1396,8 @@ impl Desk {
     }
 
     /// Makes a pane saying it needs a newer clackatoo for every pane of
-    /// the tab shown of a kind this window doesn't know, and forgets those
+    /// the tab shown of a kind this window doesn't know, or that it isn't
+    /// shared for one on a machine kept from this one, and forgets those
     /// gone.
     fn show_others(&mut self) {
         // On another machine, one of a kind not relayed yet, which says
@@ -1412,8 +1415,15 @@ impl Desk {
             .map(|tab| {
                 (tab.layout.panes().iter())
                     .filter_map(|pane| {
-                        let Content::Other { kind } = pane.content else {
-                            return None;
+                        let kind = match pane.content {
+                            Content::Other { kind } => kind,
+                            // Whatever machine it says it's on: the
+                            // daemon here says each pane of another's
+                            // workspace is on that machine.
+                            Content::NotShared { kind } => {
+                                return Some((pane.id, kind, Why::NotShared));
+                            }
+                            _ => return None,
                         };
                         let why = match self.pane_elsewhere(pane.id) {
                             _ if pane.home.is_some() && pane.home == own_machine => {
@@ -1513,7 +1523,7 @@ impl Desk {
                     self.fit_picture(id, tile);
                     continue;
                 }
-                Content::Other { .. } => {
+                Content::Other { .. } | Content::NotShared { .. } => {
                     if let (Some(other), Ok(size)) =
                         (self.others.get_mut(&id), Size::new(tile.cols, tile.rows))
                     {

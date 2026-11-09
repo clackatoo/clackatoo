@@ -1390,7 +1390,9 @@ impl Daemon {
             Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
             Content::Browser(_) => Err(format!("pane {pane} shows a browser, not a terminal")),
             Content::Picture(_) => Err(format!("pane {pane} shows an image, not a terminal")),
-            Content::Other { kind } => Err(format!("pane {pane} shows a {kind}, not a terminal")),
+            Content::Other { kind } | Content::NotShared { kind } => {
+                Err(format!("pane {pane} shows a {kind}, not a terminal"))
+            }
         }
     }
 
@@ -1650,7 +1652,7 @@ impl Daemon {
                     (None, _) => "image".to_owned(),
                 }
             }
-            Content::Other { kind } => kind.to_string(),
+            Content::Other { kind } | Content::NotShared { kind } => kind.to_string(),
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {
                     return "terminal".to_owned();

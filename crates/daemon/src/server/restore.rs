@@ -688,7 +688,7 @@ impl Daemon {
                     root: root.to_str()?.to_owned(),
                 })
             }
-            Content::Browser(_) | Content::Other { .. } => None,
+            Content::Browser(_) | Content::Other { .. } | Content::NotShared { .. } => None,
         }
     }
 

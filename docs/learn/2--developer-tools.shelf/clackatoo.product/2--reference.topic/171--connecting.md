@@ -155,8 +155,11 @@ connected to yours, all these machines are treated the same way:
   way already open.
 - Your daemon tells them nothing of these machines: not their workspaces,
   chats, home folders, notices, ports, names or machine IDs. A pane of yours
-  borrowed from one shows to them as a pane they can't show, on no machine.
-  A pane of yours lent to one isn't shown to them at all. They can't watch or
+  borrowed from one shows in their windows and phones as "Not shared — this
+  pane is on a machine that isn't shared with you", on no machine and not
+  saying what kind of pane it is. A clackatoo from before protocol 148 shows
+  it as a pane that needs a newer clackatoo instead. A pane of yours lent to
+  one isn't shown to them at all. They can't watch or
   end your daemon's connections, or list what it lends.
 - Nothing they ask goes through your daemon to these machines: keys, a
   terminal's screen, files, the finder, the editor, forwarded ports, agents'

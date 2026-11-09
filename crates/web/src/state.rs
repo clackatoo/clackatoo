@@ -1003,6 +1003,19 @@ impl State {
         }
     }
 
+    /// How many panes of workspace `workspace`'s tabs are on a machine not
+    /// shared with this one ([`Content::NotShared`]): none in no workspace.
+    #[must_use]
+    pub fn not_shared_of(&self, workspace: Option<WorkspaceId>) -> usize {
+        (workspace
+            .and_then(|workspace| self.workspaces.get(workspace))
+            .into_iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .filter(|pane| matches!(pane.content, Content::NotShared { .. }))
+        .count()
+    }
+
     /// Asks for the list of terminals again, unless it's being asked for.
     pub fn list_terminals(&mut self) {
         if self.listing || self.online != Online::Open {

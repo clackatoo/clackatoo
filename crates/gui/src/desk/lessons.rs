@@ -1085,7 +1085,8 @@ impl Desk {
                 Content::Board(_)
                 | Content::Review(_)
                 | Content::Browser(_)
-                | Content::Other { .. } => (false, false),
+                | Content::Other { .. }
+                | Content::NotShared { .. } => (false, false),
             };
             if discard && let Content::Buffer(buffer) = pane.content {
                 self.request(Request::Discard { buffer }, Asked::Quiet);
@@ -1264,7 +1265,7 @@ impl DeskFacts<'_> {
             Content::Review(_) => Kind::Review,
             Content::Browser(_) => Kind::Browser,
             Content::Picture(_) => Kind::Image,
-            Content::Other { .. } => Kind::Other,
+            Content::Other { .. } | Content::NotShared { .. } => Kind::Other,
         }
     }
 }

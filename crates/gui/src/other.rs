@@ -7,8 +7,12 @@
 //! so does one on a machine the daemon can't reach at all, which another
 //! machine put in one of its workspaces; and so does one of the daemon's
 //! own machine, in a workspace of a machine that's away, as it's parked
-//! meanwhile. The pane says which, and what to do, if anything; the rest
-//! of the window goes on as usual.
+//! meanwhile. And one on a machine kept from this one, connected with
+//! `--no-share` to the machine whose workspace it's in, which the daemon
+//! sends as [`Content::NotShared`](clackatoo_protocol::Content::NotShared):
+//! that says only that, never which machine, nor what kind of pane. The
+//! pane says which, and what to do, if anything; the rest of the window
+//! goes on as usual.
 
 use clackatoo_protocol::{Attributes, PaneKind, Size, Style};
 use clackatoo_term::{Row, RowBuilder};
@@ -33,6 +37,8 @@ pub(crate) enum Why {
     /// another, which is away: it's parked meanwhile, in a workspace of
     /// the daemon's own named after that machine.
     Parked(String),
+    /// It's on a machine kept from this one: which, the window isn't told.
+    NotShared,
 }
 
 /// A pane saying it needs a newer clackatoo, here or on the machine it's
@@ -57,6 +63,7 @@ impl OtherPane {
                 format!("{}, not reachable from here", said_waiting(kind, host))
             }
             Why::Parked(host) => format!("{}, parked while ‘{host}’ is away", what(kind)),
+            Why::NotShared => "Not shared".to_owned(),
         };
         Self {
             kind,
@@ -123,6 +130,12 @@ impl OtherPane {
                     "clackatoo on {host} is from before it passed these on: `clackatoo update` \
                      there updates it."
                 ),
+            ),
+            Why::NotShared => (
+                clackatoo_protocol::NOT_SHARED_SAID.to_owned(),
+                "Its machine was connected to this workspace's with `--no-share`, which keeps \
+                 it from other machines."
+                    .to_owned(),
             ),
             Why::Newer => (
                 said(kind),
@@ -285,6 +298,22 @@ mod tests {
             "an editor of this machine's, parked while ‘desk’ is away"
         );
         assert!(rows[1].contains("‘from-desk’"), "{rows:?}");
+    }
+
+    #[test]
+    fn one_not_shared_says_so_and_names_neither_machine_nor_kind() {
+        for kind in ["terminal", "editor", "browser"] {
+            let mut pane = OtherPane::why(PaneKind::new(kind), Why::NotShared);
+            pane.resize(Size::new(200, 10).unwrap());
+            let rows: Vec<String> = pane.scene().iter().map(|row| row.text()).collect();
+            assert_eq!(
+                rows[0].trim_end(),
+                "Not shared — this pane is on a machine that isn't shared with you"
+            );
+            assert!(rows[1].contains("--no-share"), "{rows:?}");
+            assert_eq!(pane.title(), "Not shared");
+            assert!(!rows.concat().contains(kind), "{rows:?}");
+        }
     }
 
     #[test]

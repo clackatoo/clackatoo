@@ -1274,7 +1274,7 @@ fn info(lua: &Lua, world: &World, kind: &str, window: u32, id: u32) -> mlua::Res
                 Content::Review(_) => "review",
                 Content::Browser(_) => "browser",
                 Content::Picture(_) => "image",
-                Content::Other { .. } => "other",
+                Content::Other { .. } | Content::NotShared { .. } => "other",
                 Content::Terminal(_) if known.is_some_and(|known| known.chat) => "chat",
                 Content::Terminal(_) => "terminal",
             };
