@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026.11.24 (2026-11-09)
+
+### Features
+
+- **layout:** zoom a pane, and reopen what was closed (63348c38)
+- **gui:** hints mode labels what's worth picking in any pane (c034b8a1)
+
+### Fixes
+
+- **layout:** arriving at a zoomed tab keeps it zoomed, and hints go with their pane (5305a3f5)
+- **layout:** a phone's switch relayed to another machine leaves its tab zoomed (447566d3)
+- **daemon:** a session waits for what was left of its stopped agent to go (f28f8efb)
+- **daemon:** a review opened again is of its chat (d7f77f87)
+- **gui:** what hints copied is said as links are shown, cut short (59fd6c60)
+- **daemon:** a subagent closed with its parent's tab is kept, and comes back under it (721437d3)
+- **daemon:** programs a shutdown ends come back in their folders after an upgrade, or as the daemon stops (83bb73af)
+- **agents:** notices keep their subagents' cards through an upgrade (0ab3a450)
+- **agents:** a notice handed over without its cards reads them from its text (baff1bfc)
+- **chat:** a finished chat's line says no agent when none is known (8264a8e4)
+- **bench:** the keystroke gate is built whole, never incrementally, as its baseline was (0734a03a)
+
 ## 2026.11.23 (2026-11-09)
 
 ### Fixes
