@@ -15,8 +15,10 @@ use crate::grid::Grid;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::parser::Parser;
+use crate::requests::{self, Request};
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
+use crate::sgr;
 use crate::size::Size;
 use crate::snapshot::{BlocksSnapshot, LineLinks, LinksSnapshot, RestoreError, Snapshot, position};
 use crate::style::Style;
@@ -89,6 +91,14 @@ const LONGEST_COMMAND: usize = 1024;
 /// The longest working directory taken from OSC 7, in bytes: Linux's
 /// `PATH_MAX`.
 const LONGEST_PATH: usize = 4096;
+
+/// How many titles a program may push (`CSI 22 t`) to pop again later
+/// (`CSI 23 t`), as xterm keeps. Pushing more drops the oldest.
+const MOST_TITLES: usize = 10;
+
+/// The longest title kept on that stack, in bytes. A title can be as long
+/// as an OSC string, and a stack of them would hold ten times that.
+const LONGEST_PUSHED_TITLE: usize = 4096;
 
 /// A terminal emulator, minus everything that touches the outside world.
 ///
@@ -195,6 +205,16 @@ impl Terminal {
     #[must_use]
     pub fn is_alternate_screen(&self) -> bool {
         self.emulator.screen == Screen::Alternate
+    }
+
+    /// Whether the program is part way through drawing its screen, and
+    /// asked for none of it to be shown until it's done (mode 2026,
+    /// synchronized output). The owner holds back what it shows while
+    /// this is so, for long enough to look like one frame, but not for a
+    /// program that never says it's done.
+    #[must_use]
+    pub fn is_synchronized(&self) -> bool {
+        self.emulator.modes.contains(Modes::SYNCHRONIZED)
     }
 
     /// The cursor.
@@ -581,6 +601,9 @@ bitflags! {
         /// Mode 1004: the program is told when the terminal gains or loses
         /// focus.
         const FOCUS_EVENTS = 1 << 8;
+        /// Mode 2026: the program is drawing a frame, to be shown whole
+        /// once it resets this.
+        const SYNCHRONIZED = 1 << 9;
     }
 }
 
@@ -750,6 +773,12 @@ pub(crate) struct Emulator {
     scroll_region: Range<usize>,
     tabs: TabStops,
     pub(crate) title: String,
+    /// Titles pushed to be popped again (XTWINOPS 22 and 23), oldest
+    /// first.
+    titles: Vec<String>,
+    /// The device control string being collected, if it's a request this
+    /// terminal answers (see [`crate::requests`]).
+    pub(crate) request: Option<Request>,
     /// The working directory the shell last reported, shared with the
     /// blocks that ran in it.
     cwd: Option<Arc<str>>,
@@ -802,6 +831,8 @@ impl Emulator {
             scroll_region: 0..height,
             tabs: TabStops::new(width),
             title: String::new(),
+            titles: Vec::new(),
+            request: None,
             cwd: None,
             blocks: Blocks::default(),
             secret: None,
@@ -1417,6 +1448,7 @@ impl Emulator {
             1004 => self.modes.set(Modes::FOCUS_EVENTS, on),
             66 => self.modes.set(Modes::APP_KEYPAD, on),
             2004 => self.modes.set(Modes::BRACKETED_PASTE, on),
+            2026 => self.modes.set(Modes::SYNCHRONIZED, on),
             6 => {
                 self.modes.set(Modes::ORIGIN, on);
                 self.move_to_origin(0, 0);
@@ -1452,6 +1484,59 @@ impl Emulator {
             }
             _ => log::trace!("unhandled DEC private mode {mode}"),
         }
+    }
+
+    /// DECRQM: whether mode `mode`, a DEC private mode if `dec`, is set,
+    /// as DECRPM answers it: 1 for set, 2 for reset, and 0 for a mode this
+    /// terminal doesn't know. Programs ask before they rely on a mode, as
+    /// for synchronized output.
+    pub(crate) fn report_mode(&mut self, mode: u16, dec: bool) {
+        let state = if dec {
+            self.dec_mode(mode)
+        } else {
+            self.ansi_mode(mode)
+        };
+        let answer = match state {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        let marker = if dec { "?" } else { "" };
+        self.reply(format!("\x1b[{marker}{mode};{answer}$y").as_bytes());
+    }
+
+    /// Whether ANSI mode `mode` is set, if it's one this terminal knows.
+    fn ansi_mode(&self, mode: u16) -> Option<bool> {
+        let flag = match mode {
+            4 => Modes::INSERT,
+            20 => Modes::LINEFEED_NEWLINE,
+            _ => return None,
+        };
+        Some(self.modes.contains(flag))
+    }
+
+    /// Whether DEC private mode `mode` is set, if it's one this terminal
+    /// knows: one [`set_dec_mode`](Self::set_dec_mode) sets.
+    fn dec_mode(&self, mode: u16) -> Option<bool> {
+        if let Some(tracking) = MouseTracking::from_mode(mode) {
+            return Some(self.mouse_tracking == tracking);
+        }
+        if let Some(encoding) = MouseEncoding::from_mode(mode) {
+            return Some(self.mouse_encoding == encoding);
+        }
+        let flag = match mode {
+            1 => Modes::APP_CURSOR_KEYS,
+            6 => Modes::ORIGIN,
+            7 => Modes::AUTOWRAP,
+            25 => Modes::CURSOR_VISIBLE,
+            66 => Modes::APP_KEYPAD,
+            1004 => Modes::FOCUS_EVENTS,
+            2004 => Modes::BRACKETED_PASTE,
+            2026 => Modes::SYNCHRONIZED,
+            47 | 1047 | 1049 => return Some(self.screen == Screen::Alternate),
+            _ => return None,
+        };
+        Some(self.modes.contains(flag))
     }
 
     fn switch_screen(&mut self, alternate: bool) {
@@ -1514,6 +1599,86 @@ impl Emulator {
             5 | 6 => CursorShape::Bar,
             _ => return,
         };
+    }
+
+    /// XTWINOPS (`CSI t`): `op` asks about the window, or changes it, of
+    /// `which`, its second parameter. Only the title's stack and the size
+    /// of the text in cells are this terminal's to answer; the window's
+    /// place, and its size in pixels, are the window's own.
+    pub(crate) fn window_op(&mut self, op: u16, which: Option<u16>) {
+        // 0 is the icon's name and the title, 2 the title alone, and 1
+        // the icon's name alone, which there's none of.
+        let title = matches!(which.unwrap_or(0), 0 | 2);
+        match op {
+            18 => {
+                let reply = format!("\x1b[8;{};{}t", self.height(), self.width());
+                self.reply(reply.as_bytes());
+            }
+            22 if title => self.push_title(),
+            23 if title => {
+                if let Some(title) = self.titles.pop() {
+                    self.title = title;
+                }
+            }
+            _ => log::trace!("unhandled window operation {op}"),
+        }
+    }
+
+    /// Keeps the title to put back later, as vim does as it starts.
+    fn push_title(&mut self) {
+        if self.titles.len() == MOST_TITLES {
+            self.titles.remove(0);
+        }
+        let mut end = self.title.len().min(LONGEST_PUSHED_TITLE);
+        while !self.title.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.titles.push(self.title[..end].to_owned());
+    }
+
+    /// Answers `request`, a device control string that has ended, unless
+    /// it was too long.
+    pub(crate) fn answer_request(&mut self, request: &Request) {
+        match request.finished() {
+            Some((requests::Kind::Capabilities, names)) => {
+                let answer = requests::capabilities(names);
+                self.reply(&answer);
+            }
+            Some((requests::Kind::Setting, setting)) => self.answer_setting(setting),
+            None => {}
+        }
+    }
+
+    /// DECRQSS: how the setting `setting` names, by its sequence's final
+    /// characters, is set: `DCS 1 $ r`, and the sequence that would set it
+    /// so; or `DCS 0 $ r` for one this terminal doesn't say. Programs ask
+    /// for the pen (`m`), the cursor's shape (` q`) and the scroll region
+    /// (`r`).
+    fn answer_setting(&mut self, setting: &[u8]) {
+        let value = match setting {
+            b"m" => Some(format!("{}m", sgr::describe(&self.cursor.pen))),
+            // Steady, as blinking isn't drawn, but for the user's own.
+            b" q" => {
+                let style = match self.cursor_shape {
+                    CursorShape::Default => 0,
+                    CursorShape::Block => 2,
+                    CursorShape::Underline => 4,
+                    CursorShape::Bar => 6,
+                };
+                Some(format!("{style} q"))
+            }
+            b"r" => Some(format!(
+                "{};{}r",
+                self.scroll_region.start + 1,
+                self.scroll_region.end
+            )),
+            _ => None,
+        };
+        let reply = match value {
+            Some(value) => format!("\x1bP1$r{value}\x1b\\"),
+            None => "\x1bP0$r\x1b\\".to_owned(),
+        };
+        self.reply(reply.as_bytes());
     }
 
     /// DECKPAM and DECKPNM: the keypad sends application sequences, or

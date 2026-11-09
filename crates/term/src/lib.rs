@@ -27,6 +27,7 @@ pub mod mouse;
 mod parser;
 mod paste;
 pub mod recording;
+mod requests;
 mod row;
 mod scrollback;
 mod sgr;

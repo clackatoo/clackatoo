@@ -8,6 +8,7 @@
 
 use crate::charset::{Charset, Slot};
 use crate::parser::{Params, Perform};
+use crate::requests::{Kind, Request};
 use crate::sgr;
 use crate::terminal::Emulator;
 
@@ -15,6 +16,21 @@ use crate::terminal::Emulator;
 /// colour (22). fish 4 sends this query at startup and waits for the answer,
 /// so it must always be sent.
 const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+
+/// The reply to DA2 (secondary device attributes): a VT220 (1), with
+/// clackatoo's year and month as the version, and no ROM cartridge (0).
+/// vim reads a version this high as a modern terminal's, one with
+/// coloured underlines and SGR mouse reports, as foot's is.
+fn secondary_device_attributes() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    let mut number = || {
+        (parts.next())
+            .and_then(|part| part.parse::<u32>().ok())
+            .unwrap_or(0)
+    };
+    let version = number() * 100 + number();
+    format!("\x1b[>1;{version};0c")
+}
 
 impl Perform for Emulator {
     fn print(&mut self, text: &str) {
@@ -98,6 +114,7 @@ impl Perform for Emulator {
                 let edge = |i: usize| arg(i).filter(|&n| n != 0).map(usize::from);
                 self.set_scroll_region(edge(0), edge(1));
             }
+            ([], 't') => self.window_op(arg(0).unwrap_or(0), arg(1)),
             // SCOSC and SCORC: the SCO spellings of save and restore cursor.
             // With parameters, `CSI s` sets left and right margins instead.
             ([], 's') if no_params(params) => self.save_cursor(),
@@ -108,6 +125,11 @@ impl Perform for Emulator {
                 }
             }
             ([b'?'], 'n') => self.device_status_report(arg(0).unwrap_or(0), true),
+            ([b'$'], 'p') => self.report_mode(arg(0).unwrap_or(0), false),
+            ([b'?', b'$'], 'p') => self.report_mode(arg(0).unwrap_or(0), true),
+            ([b'>'], 'c') if arg(0).unwrap_or(0) == 0 => {
+                self.reply(secondary_device_attributes().as_bytes());
+            }
             ([b'>'], 'q') if arg(0).unwrap_or(0) == 0 => self.report_version(),
             ([b'!'], 'p') => self.soft_reset(),
             ([b' '], 'q') => self.set_cursor_shape(arg(0).unwrap_or(0)),
@@ -167,6 +189,30 @@ impl Perform for Emulator {
                 "unhandled OSC {:?}",
                 params.first().map(|p| String::from_utf8_lossy(p))
             ),
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        let kind = match (intermediates, action) {
+            ([b'+'], 'q') => Some(Kind::Capabilities),
+            ([b'$'], 'q') => Some(Kind::Setting),
+            _ => None,
+        };
+        self.request = kind.filter(|_| !ignore).map(Request::new);
+        if self.request.is_none() {
+            log::trace!("unhandled DCS {intermediates:?} {action}");
+        }
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        if let Some(request) = &mut self.request {
+            request.put(bytes);
+        }
+    }
+
+    fn unhook(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.answer_request(&request);
         }
     }
 }

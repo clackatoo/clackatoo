@@ -64,6 +64,52 @@ pub(crate) fn apply<'a>(style: &mut Style, params: impl IntoIterator<Item = &'a 
     }
 }
 
+/// The SGR parameters that set `style` from nothing, as DECRQSS answers
+/// what the pen is: `0`, then each attribute, the underline and the
+/// colours, in the `:` spelling. The link isn't SGR's to say.
+pub(crate) fn describe(style: &Style) -> String {
+    use std::fmt::Write;
+
+    const ATTRIBUTES: [(Attributes, u8); 7] = [
+        (Attributes::BOLD, 1),
+        (Attributes::DIM, 2),
+        (Attributes::ITALIC, 3),
+        (Attributes::BLINK, 5),
+        (Attributes::INVERSE, 7),
+        (Attributes::HIDDEN, 8),
+        (Attributes::STRIKETHROUGH, 9),
+    ];
+    let mut out = String::from("0");
+    for (attribute, number) in ATTRIBUTES {
+        if style.attributes.contains(attribute) {
+            write!(out, ";{number}").expect("writing to a string never fails");
+        }
+    }
+    let underline = match style.underline {
+        Underline::None => None,
+        Underline::Single => Some(1),
+        Underline::Double => Some(2),
+        Underline::Curly => Some(3),
+        Underline::Dotted => Some(4),
+        Underline::Dashed => Some(5),
+    };
+    if let Some(kind) = underline {
+        write!(out, ";4:{kind}").expect("writing to a string never fails");
+    }
+    for (number, color) in [(38, style.fg), (48, style.bg), (58, style.underline_color)] {
+        match color {
+            Color::Default => {}
+            Color::Indexed(index) => {
+                write!(out, ";{number}:5:{index}").expect("writing to a string never fails");
+            }
+            Color::Rgb(r, g, b) => {
+                write!(out, ";{number}:2::{r}:{g}:{b}").expect("writing to a string never fails");
+            }
+        }
+    }
+    out
+}
+
 /// SGR 0: everything back to the default, but the link. OSC 8 links are
 /// set apart from SGR, and programs reset SGR inside a link's text.
 fn reset(style: &mut Style) {
@@ -196,6 +242,22 @@ mod tests {
         assert_eq!(sgr("38;2;1;2").fg, Color::Default);
         assert_eq!(sgr("38;7").fg, Color::Default);
         assert_eq!(sgr("38").fg, Color::Default);
+    }
+
+    #[test]
+    fn a_style_described_sets_the_same_style_again() {
+        let styles = [
+            Style::DEFAULT,
+            sgr("1;3;9;4:3;38;5;208;48;2;1;2;3;58:2::9:8:7"),
+            sgr("2;5;7;8;21;31;102"),
+            sgr("4:5;59;39;49"),
+        ];
+        for style in styles {
+            let described = describe(&style);
+            assert!(described.starts_with('0'), "{described}");
+            assert_eq!(sgr(&described), style, "{described}");
+        }
+        assert_eq!(describe(&sgr("1;4:3;38;5;1")), "0;1;4:3;38:5:1");
     }
 
     #[test]

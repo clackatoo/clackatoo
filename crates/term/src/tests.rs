@@ -450,6 +450,76 @@ mod queries {
     }
 
     #[test]
+    fn secondary_device_attributes() {
+        let reply = replies("\x1b[>c");
+        let version = (reply.strip_prefix("\x1b[>1;"))
+            .and_then(|rest| rest.strip_suffix(";0c"))
+            .and_then(|version| version.parse::<u32>().ok());
+        // vim takes a version below 2500 for an older terminal's.
+        assert!(version.is_some_and(|version| version >= 2500), "{reply:?}");
+        assert_eq!(replies("\x1b[>0c"), reply);
+    }
+
+    #[test]
+    fn modes_are_reported_as_set_reset_or_unknown() {
+        assert_eq!(replies("\x1b[?2026$p"), "\x1b[?2026;2$y");
+        assert_eq!(replies("\x1b[?2026h\x1b[?2026$p"), "\x1b[?2026;1$y");
+        assert_eq!(
+            replies("\x1b[?2004h\x1b[?2004$p\x1b[?7$p"),
+            "\x1b[?2004;1$y\x1b[?7;1$y"
+        );
+        assert_eq!(
+            replies("\x1b[?1006h\x1b[?1006$p\x1b[?1015$p\x1b[?1000$p"),
+            "\x1b[?1006;1$y\x1b[?1015;2$y\x1b[?1000;2$y"
+        );
+        assert_eq!(replies("\x1b[?1049h\x1b[?1049$p"), "\x1b[?1049;1$y");
+        assert_eq!(replies("\x1b[4h\x1b[4$p\x1b[20$p"), "\x1b[4;1$y\x1b[20;2$y");
+        // Grapheme clustering (2027) isn't claimed: not every width is
+        // as Unicode's segmentation would have it.
+        assert_eq!(
+            replies("\x1b[?2027$p\x1b[?12$p"),
+            "\x1b[?2027;0$y\x1b[?12;0$y"
+        );
+    }
+
+    #[test]
+    fn the_text_area_is_reported_in_cells_and_nothing_in_pixels() {
+        assert_eq!(replies("\x1b[18t"), "\x1b[8;5;10t");
+        // Nor is the title read back, which a program could be made to
+        // type.
+        assert_eq!(replies("\x1b[14t\x1b[16t\x1b[21t"), "");
+    }
+
+    #[test]
+    fn capabilities_are_answered_by_name() {
+        // "TN", the terminal's name, then "Ms", the clipboard.
+        let reply = replies("\x1bP+q544E;4D73\x1b\\");
+        assert!(
+            reply.starts_with("\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\\x1bP1+r4D73="),
+            "{reply:?}"
+        );
+        // Split anywhere, it's read whole.
+        let mut t = terminal(10, 5);
+        for byte in b"\x1bP+q436F\x1b\\" {
+            t.advance(&[*byte]);
+        }
+        assert_eq!(t.take_replies(), b"\x1bP1+r436F=323536\x1b\\");
+    }
+
+    #[test]
+    fn settings_are_answered_as_the_sequences_that_set_them() {
+        assert_eq!(
+            replies("\x1b[1;31m\x1bP$qm\x1b\\"),
+            "\x1bP1$r0;1;38:5:1m\x1b\\"
+        );
+        assert_eq!(replies("\x1b[5 q\x1bP$q q\x1b\\"), "\x1bP1$r6 q\x1b\\");
+        assert_eq!(replies("\x1b[2;4r\x1bP$qr\x1b\\"), "\x1bP1$r2;4r\x1b\\");
+        assert_eq!(replies("\x1bP$qs\x1b\\"), "\x1bP0$r\x1b\\");
+        // Other device control strings, such as sixels, ask nothing.
+        assert_eq!(replies("\x1bPq#0;2;0;0;0\x1b\\"), "");
+    }
+
+    #[test]
     fn unsupported_queries_get_no_reply() {
         // The kitty keyboard query: fish follows it with DA1 and treats a
         // DA1-only answer as "unsupported".
@@ -991,6 +1061,44 @@ mod other_sequences {
     }
 
     #[test]
+    fn titles_pushed_are_popped_again() {
+        let t = after(5, 1, "\x1b]2;shell\x07\x1b[22;0t\x1b]2;vim\x07");
+        assert_eq!(t.title(), "vim");
+        let t = after(5, 1, "\x1b]2;shell\x07\x1b[22;0t\x1b]2;vim\x07\x1b[23;0t");
+        assert_eq!(t.title(), "shell");
+        // The icon's name alone is none of the title's, and popping
+        // nothing changes nothing.
+        let t = after(5, 1, "\x1b]2;a\x07\x1b[22;1t\x1b]2;b\x07\x1b[23;1t\x1b[23t");
+        assert_eq!(t.title(), "b");
+    }
+
+    #[test]
+    fn the_stack_of_titles_is_bounded() {
+        let mut t = terminal(5, 1);
+        for i in 0..12 {
+            t.advance(format!("\x1b]2;t{i}\x07\x1b[22t").as_bytes());
+        }
+        t.advance("\x1b[23t".repeat(12).as_bytes());
+        assert_eq!(t.title(), "t2", "the oldest two were dropped");
+        let long = "é".repeat(5000);
+        t.advance(format!("\x1b]2;{long}\x07\x1b[22t\x1b]2;x\x07\x1b[23t").as_bytes());
+        assert_eq!(t.title().len(), 4096);
+        assert!(long.starts_with(t.title()));
+    }
+
+    #[test]
+    fn programs_say_when_a_frame_is_drawn_whole() {
+        let mut t = after(5, 1, "\x1b[?2026h");
+        assert!(t.is_synchronized());
+        t.advance(b"\x1b[?2026l");
+        assert!(!t.is_synchronized());
+        // A reset ends it, so a program that dies part way through a
+        // frame is shown again.
+        assert!(!after(5, 1, "\x1b[?2026h\x1b[!p").is_synchronized());
+        assert!(!after(5, 1, "\x1b[?2026h\x1bc").is_synchronized());
+    }
+
+    #[test]
     fn hiding_the_cursor() {
         assert!(!after(5, 1, "\x1b[?25l").cursor().visible);
         assert!(after(5, 1, "\x1b[?25l\x1b[?25h").cursor().visible);
@@ -1054,7 +1162,7 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
     let modes = (
         prop::sample::select(vec![
             4u16, 6, 7, 20, 25, 47, 1047, 1048, 1049, 1, 66, 9, 1000, 1002, 1003, 1004, 1005, 1006,
-            1015, 2004,
+            1015, 2004, 2026,
         ]),
         any::<bool>(),
     )
