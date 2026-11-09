@@ -19,6 +19,7 @@ use crate::editor::{BufferCopy, Editor};
 use crate::explorer::Explorer;
 use crate::other::OtherPane;
 use crate::pane::Pane;
+use crate::picture::PicturePane;
 use crate::review::Review;
 use crate::vim::Mode;
 
@@ -29,6 +30,7 @@ pub(super) enum PaneView<'a> {
     Board(PaneId, &'a BoardPane),
     Review(PaneId, &'a Review),
     Browser(&'a BrowserPane),
+    Picture(PaneId, &'a PicturePane),
     Chat(TerminalId, &'a ChatPane),
     Terminal(TerminalId, &'a Pane),
     Other(&'a OtherPane),
@@ -41,6 +43,7 @@ pub(super) enum Focus {
     Board(PaneId),
     Review(PaneId),
     Browser,
+    Picture(PaneId),
     Chat(TerminalId),
     Terminal(TerminalId),
     Other,
@@ -82,6 +85,9 @@ impl Desk {
         if let Some(view) = self.browser(pane) {
             return Some(PaneView::Browser(view));
         }
+        if let Some(view) = self.picture(pane) {
+            return Some(PaneView::Picture(pane, view));
+        }
         if let Some(view) = self.other(pane) {
             return Some(PaneView::Other(view));
         }
@@ -106,6 +112,7 @@ impl<'a> PaneView<'a> {
             Self::Review(_, review) => Some(review.scene().0),
             Self::Browser(browser) => Some(browser.scene()),
             Self::Other(other) => Some(other.scene()),
+            Self::Picture(_, picture) => Some(picture.scene()),
             Self::Terminal(_, terminal) => Some(terminal.scene(rows).0),
             Self::Chat(..) => None,
         }
@@ -122,6 +129,7 @@ impl PaneView<'_> {
             Self::Chat(id, _) => Focus::Chat(id),
             Self::Terminal(id, _) => Focus::Terminal(id),
             Self::Browser(..) => Focus::Browser,
+            Self::Picture(id, _) => Focus::Picture(id),
             Self::Other(..) => Focus::Other,
         }
     }
@@ -135,6 +143,7 @@ impl PaneView<'_> {
             | Self::Board(..)
             | Self::Review(..)
             | Self::Browser(..)
+            | Self::Picture(..)
             | Self::Other(..) => ModeName::Normal,
         }
     }
@@ -152,6 +161,7 @@ impl PaneView<'_> {
             | Self::Board(..)
             | Self::Review(..)
             | Self::Browser(..)
+            | Self::Picture(..)
             | Self::Other(..) => None,
         }
     }
@@ -178,6 +188,7 @@ impl PaneView<'_> {
                 Some(review.label())
             }
             Self::Browser(browser) => Some(browser.label()),
+            Self::Picture(_, picture) => Some(picture.label()),
             Self::Other(other) => Some(other.title().to_owned()),
             Self::Chat(_, chat) => {
                 let prompt = chat.prompt_label();
@@ -224,7 +235,7 @@ impl Focus {
                 .leave(),
             Focus::Chat(id) => desk.chats.get_mut(&id).expect("resolved chat").leave(),
             Focus::Terminal(id) => desk.panes.get_mut(&id).expect("resolved terminal").leave(),
-            Focus::Browser | Focus::Other => {}
+            Focus::Browser | Focus::Picture(_) | Focus::Other => {}
         }
     }
 
@@ -256,6 +267,7 @@ impl Focus {
             | Focus::Board(_)
             | Focus::Review(_)
             | Focus::Browser
+            | Focus::Picture(_)
             | Focus::Other => {}
         }
         false
@@ -265,7 +277,7 @@ impl Focus {
 impl Focus {
     /// Display-only panes can take focus without requesting clipboard data.
     pub(super) fn takes_paste(self) -> bool {
-        !matches!(self, Self::Browser | Self::Other)
+        !matches!(self, Self::Browser | Self::Picture(_) | Self::Other)
     }
 
     pub(super) fn paste(self, desk: &mut Desk, text: &str) {
@@ -307,7 +319,7 @@ impl Focus {
                     pane.paste(text);
                 }
             }
-            Self::Browser | Self::Other => {}
+            Self::Browser | Self::Picture(_) | Self::Other => {}
         }
     }
 
@@ -359,6 +371,7 @@ impl Focus {
                     .expect("resolved terminal")
                     .wheel(lines, cell, modifiers)
             }
+            Self::Picture(id) => desk.picture_wheel(id, lines),
             Self::Browser | Self::Other => false,
         }
     }
@@ -380,7 +393,9 @@ impl Focus {
             }
             Self::Board(id) => desk.acting_from_list(|desk| desk.board_click(id, cell, clicks)),
             Self::Review(id) => desk.acting_from_list(|desk| desk.review_click(id, cell, clicks)),
-            Self::Chat(_) | Self::Terminal(_) | Self::Browser | Self::Other => false,
+            Self::Chat(_) | Self::Terminal(_) | Self::Browser | Self::Picture(_) | Self::Other => {
+                false
+            }
         }
     }
 }
@@ -394,7 +409,7 @@ impl<'a> PaneView<'a> {
             Self::Review(_, pane) => pane,
             Self::Chat(_, pane) => pane,
             Self::Terminal(_, pane) => pane,
-            Self::Browser(_) | Self::Other(_) => return None,
+            Self::Browser(_) | Self::Picture(..) | Self::Other(_) => return None,
         })
     }
 
@@ -407,6 +422,7 @@ impl<'a> PaneView<'a> {
             Self::Chat(_, pane) => pane.shortcut_context(),
             Self::Terminal(_, pane) => pane.shortcut_context(),
             Self::Browser(pane) => pane.shortcut_context(),
+            Self::Picture(_, pane) => pane.shortcut_context(),
             Self::Other(_) => crate::shortcuts::Context::new("Window", &[]),
         }
     }
@@ -420,7 +436,7 @@ impl<'a> PaneView<'a> {
             Self::Review(_, pane) => (pane.prompting(), false),
             Self::Chat(_, pane) => (pane.prompting(), pane.takes_text()),
             Self::Terminal(_, pane) => (pane.prompting(), pane.mode == Mode::Insert),
-            Self::Browser(_) | Self::Other(_) => return None,
+            Self::Browser(_) | Self::Picture(..) | Self::Other(_) => return None,
         };
         if prompting {
             Some(TextTarget::Bar)
@@ -439,7 +455,7 @@ impl Focus {
             Self::Review(id) => desk.reviews.panes.get_mut(&id)?,
             Self::Chat(id) => desk.chats.get_mut(&id)?,
             Self::Terminal(id) => desk.panes.get_mut(&id)?,
-            Self::Browser | Self::Other => return None,
+            Self::Browser | Self::Picture(_) | Self::Other => return None,
         })
     }
 }

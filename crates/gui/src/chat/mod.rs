@@ -610,6 +610,16 @@ impl ChatView {
         self.finds = finds.clone();
     }
 
+    /// Draws the images the chat `chat` shows that name theirs from
+    /// `images`, the window's.
+    pub(crate) fn share_images(
+        &mut self,
+        images: crate::images::Images,
+        chat: clackatoo_protocol::TerminalId,
+    ) {
+        self.previews.share(images, chat);
+    }
+
     #[allow(clippy::too_many_lines, reason = "one field a line")]
     pub(crate) fn new(title: String, node: ChatNode) -> Self {
         let mut view = Self {

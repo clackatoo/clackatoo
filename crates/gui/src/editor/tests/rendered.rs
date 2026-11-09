@@ -46,7 +46,12 @@ fn toggle(setup: &mut Setup) {
 
 /// Draws the rendered view, as the window does each frame.
 fn paint(setup: &mut Setup, fonts: &mut Fonts) {
-    let painted = (setup.editor).paint_rendered(fonts, [0.0; 2], SIZE, &setup.copy);
+    let painted = (setup.editor).paint_rendered(
+        fonts,
+        ([0.0; 2], SIZE),
+        &setup.copy,
+        &crate::images::Images::default(),
+    );
     assert!(painted.is_some(), "it's rendered");
 }
 
@@ -393,7 +398,12 @@ fn a_new_size_forgets_how_far_a_count_set_ctrl_d_to_go() {
     );
     // Taller, half the view again.
     let taller = [SIZE[0], SIZE[1] + 10.0 * line];
-    (setup.editor).paint_rendered(&mut fonts, [0.0; 2], taller, &setup.copy);
+    (setup.editor).paint_rendered(
+        &mut fonts,
+        ([0.0; 2], taller),
+        &setup.copy,
+        &crate::images::Images::default(),
+    );
     setup.keys("<C-d>");
     assert!(scrolled(&setup) > 4.0 * line, "{}", scrolled(&setup));
 }
@@ -447,7 +457,12 @@ fn a_link_in_a_tables_cell_cut_off_at_the_columns_edge_isnt_clicked() {
     let text = format!("| One | Two |\n|---|---|\n| {wide} | [hidden](https://x.org) |\n");
     let mut setup = markdown(&text);
     toggle(&mut setup);
-    let painted = (setup.editor).paint_rendered(&mut fonts, [0.0; 2], [300.0, 480.0], &setup.copy);
+    let painted = (setup.editor).paint_rendered(
+        &mut fonts,
+        ([0.0; 2], [300.0, 480.0]),
+        &setup.copy,
+        &crate::images::Images::default(),
+    );
     assert!(painted.is_some());
     let rendered = setup.editor.rendered.as_ref().unwrap();
     let found = (0..200_u16)
@@ -496,4 +511,63 @@ fn the_views_keys_are_read_by_the_grammar_and_its_help_comes_from_it() {
     assert!(!setup.editor.rendered());
     // At the line the top block starts on.
     assert_eq!(setup.held('a').as_deref(), Some("## Part 1\n"));
+}
+
+/// An image the Markdown names, from the file's folder, is asked of the
+/// daemon once, and once it's read, has room made for it below its block,
+/// where it's drawn through the window's images, a box until it's come.
+/// One from the web, or an absolute path, is never asked for: its
+/// description stays.
+#[test]
+#[allow(clippy::float_cmp, reason = "the same layout twice")]
+fn images_from_the_files_folder_are_asked_for_and_shown_below_their_block() {
+    use clackatoo_protocol::{ImageFormat, ImageId, ImageInfo};
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(
+        "# Plan\n\n![the plan](img/plan.png)\n\n![web](https://a.example/x.png) \
+         ![root](/etc/x.png)\n\nAfter.\n",
+    );
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    let height = |setup: &Setup| {
+        let rendered = setup.editor.rendered.as_ref().unwrap();
+        rendered.page_height().unwrap()
+    };
+    let before = height(&setup);
+    assert_eq!(
+        setup.editor.take_image_asks(),
+        vec!["img/plan.png".to_owned()]
+    );
+    paint(&mut setup, &mut fonts);
+    assert!(setup.editor.take_image_asks().is_empty(), "asked once");
+    let info = ImageInfo {
+        id: ImageId([5; 16]),
+        width: 200,
+        height: 100,
+        format: ImageFormat::Png,
+        bytes: 10,
+    };
+    assert!(
+        setup
+            .editor
+            .rendered_image_found("img/plan.png", Some(info))
+    );
+    let images = crate::images::Images::default();
+    let painted = (setup.editor)
+        .paint_rendered(&mut fonts, ([0.0; 2], SIZE), &setup.copy, &images)
+        .unwrap();
+    assert!(height(&setup) >= before + 100.0, "room made for it");
+    // Not come yet: a box where it goes, and it's wanted.
+    assert!(painted.images.is_empty());
+    let wanted = images.take_wanted();
+    assert_eq!(wanted.len(), 1);
+    assert_eq!(wanted[0].0.0, info.id);
+    assert_eq!(
+        wanted[0].1,
+        clackatoo_protocol::ImageFrom::Buffer(setup.editor.buffer())
+    );
+    // One that can't be read leaves its description, and no room.
+    assert!(setup.editor.rendered_image_found("img/plan.png", None));
+    paint(&mut setup, &mut fonts);
+    assert_eq!(height(&setup), before);
 }

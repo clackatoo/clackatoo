@@ -390,16 +390,17 @@ Selecting elsewhere doesn't close it. While it's open, typing, pasting,
 scrolling, and the mouse's buttons on the chat behind it do nothing. The × on
 a thumbnail in the box still removes that image.
 
-The viewer fetches the original image as it opens, and says its size in pixels
-once it has it. An image in the box is the window's own; one in a message or a
-tool's result comes from the daemon, for a chat on another machine too. What
-the chat sends the window as it changes still carries only small thumbnails.
-Each chat keeps the originals of its newest images, up to 128 of them and 32
-MiB encoded, through reconnects and upgrades. An older image whose original
-was never kept, or has been let go, says
+The viewer shows the image whole, and says its size in pixels once it has
+it. An image in the box is the window's own; one in a message or a tool's
+result comes from the daemon, for a chat on another machine too, through the
+same [image layer](~clackatoo/reference/images) as every image clackatoo
+shows: kept once, fetched once, and drawn at the size it's shown. Each chat
+keeps its images within the [image limits](~clackatoo/reference/images#limits),
+through reconnects and upgrades, the oldest let go first; an image let go
+shows a box in its place, and the viewer says
 `Original unavailable · thumbnail only`. A full daemon restart keeps no
-originals. Images are decoded in the background, at most 16 million pixels,
-and 8192 on a side.
+images. Images are decoded in the background, at most 64 million pixels, and
+drawn at most 8192 on a side.
 
 ## Images returned by tools
 
@@ -409,8 +410,9 @@ preview more room. This works with Codex's View Image and other agents,
 including Claude, when their adapter returns inline image data or a link to a
 local image file.
 
-PNG, JPEG and BMP results are supported, up to four per result, with files
-limited to 8 MiB and images to 16 million pixels. The daemon reads local files
+PNG, JPEG, GIF, WebP and BMP results are supported (a BMP is kept as a PNG),
+up to four per result, with files limited to 8 MiB and images to 16 million
+pixels. The daemon reads local files
 on its own machine and sends small previews to the window, so remote chats
 work too. Web URLs are not fetched. Previews share the chat's 4 MiB history
 allowance with pasted images; older results keep their labels. Newly received

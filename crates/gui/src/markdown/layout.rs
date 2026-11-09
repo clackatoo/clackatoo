@@ -554,6 +554,7 @@ pub(crate) fn lay_out_message(
             .map(|mention| markdown::Link {
                 range: mention.range.clone(),
                 to: mention.path.to_owned(),
+                image: false,
             })
             .collect(),
         starts_list: false,

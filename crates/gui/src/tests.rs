@@ -2572,7 +2572,7 @@ fn a_turn_is_undone_by_its_number_which_skips_where_the_chat_moved() {
 
 #[test]
 fn modal_images_are_drawn_above_the_backdrop_using_the_same_texture() {
-    use crate::render::{Fill, Image, Paint, PlacedImage};
+    use crate::render::{Fill, Image, Layer, Paint, PlacedImage, TextureKey};
     let Some(gpu) = gpu() else {
         return;
     };
@@ -2586,15 +2586,17 @@ fn modal_images_are_drawn_above_the_backdrop_using_the_same_texture() {
     };
     let images = [
         PlacedImage {
-            over: false,
-            slot: 7,
+            layer: Layer::UnderText,
+            crop: None,
+            key: TextureKey::Slot(7),
             rect: [0.0, 0.0, 20.0, 20.0],
             image: &image,
             clip: None,
         },
         PlacedImage {
-            over: true,
-            slot: 7,
+            layer: Layer::Modal,
+            crop: None,
+            key: TextureKey::Slot(7),
             rect: [20.0, 0.0, 20.0, 20.0],
             image: &image,
             clip: None,
@@ -2619,7 +2621,7 @@ fn modal_images_are_drawn_above_the_backdrop_using_the_same_texture() {
 
 #[test]
 fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
-    use crate::render::{Image, PlacedImage};
+    use crate::render::{Image, Layer, PlacedImage, TextureKey};
     let Some(gpu) = gpu() else {
         return;
     };
@@ -2640,9 +2642,10 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     };
     let first = image(1, [255, 0, 0, 255], [0, 0, 255, 255]);
     let placed = [PlacedImage {
-        over: false,
+        layer: Layer::UnderText,
+        crop: None,
         clip: None,
-        slot: 7,
+        key: TextureKey::Slot(7),
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &first,
     }];
@@ -2667,9 +2670,10 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     // The next picture in the same slot replaces it.
     let second = image(2, [0, 255, 0, 255], [0, 255, 0, 255]);
     let placed = [PlacedImage {
-        over: false,
+        layer: Layer::UnderText,
+        crop: None,
         clip: None,
-        slot: 7,
+        key: TextureKey::Slot(7),
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &second,
     }];
@@ -2678,8 +2682,9 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     assert_eq!(pixel(&pixels, [2, 10]), [0, 255, 0, 255]);
     // A scrolled picture is clipped without squeezing its UV coordinates.
     let clipped = [PlacedImage {
-        over: false,
-        slot: 7,
+        layer: Layer::UnderText,
+        crop: None,
+        key: TextureKey::Slot(7),
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &first,
         clip: Some([10.0, 0.0, 10.0, 20.0]),
@@ -2690,8 +2695,9 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     assert_eq!(pixel(&pixels, [17, 10]), [0, 0, 255, 255]);
     let translucent = image(4, [0, 255, 0, 128], [0, 255, 0, 128]);
     let placed = [PlacedImage {
-        over: false,
-        slot: 7,
+        layer: Layer::UnderText,
+        crop: None,
+        key: TextureKey::Slot(7),
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &translucent,
         clip: None,
@@ -2707,15 +2713,129 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
         rgba: [255, 0, 0, 255].repeat(crate::render::MAX_IMAGE_SIDE as usize + 1),
     };
     let placed = [PlacedImage {
-        over: false,
+        layer: Layer::UnderText,
+        crop: None,
         clip: None,
-        slot: 8,
+        key: TextureKey::Slot(8),
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &wide,
     }];
     picture.images = &placed;
     let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
     assert_eq!(pixel(&pixels, [2, 10])[3], 0, "nothing drawn");
+}
+
+/// What a terminal's program places (CLACKA-239): a part of a picture,
+/// stretched over cells, under the text or over it, but always under
+/// what's over the panes.
+#[test]
+fn a_placed_picture_is_cropped_and_layered_under_or_over_the_text() {
+    use crate::render::{Fill, Image, Layer, Paint, PlacedImage, TextureKey};
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut fonts = fonts(1.0);
+    let mut renderer = Renderer::new(&gpu.0, FORMAT);
+    let size = [40, 20];
+    let pixel = |pixels: &[u8], [x, y]: [usize; 2]| -> [u8; 4] {
+        let at = (y * size[0] as usize + x) * 4;
+        pixels[at..at + 4].try_into().unwrap()
+    };
+    // Red, then blue: only its right half, blue, is placed.
+    let (red, blue) = ([255, 0, 0, 255], [0, 0, 255, 255]);
+    let image = Image {
+        id: 1,
+        width: 4,
+        height: 1,
+        rgba: [red, red, blue, blue].concat(),
+    };
+    let key = TextureKey::Slot(1);
+    let placed = [
+        PlacedImage {
+            crop: Some([2.0, 0.0, 2.0, 1.0]),
+            ..PlacedImage::at(key, &image, [0.0, 0.0, 20.0, 20.0])
+        },
+        PlacedImage {
+            layer: Layer::OverText,
+            ..PlacedImage::at(key, &image, [20.0, 0.0, 20.0, 20.0])
+        },
+    ];
+    // What's over the panes covers the top half of the right one.
+    let over = [Fill::solid([20.0, 0.0, 20.0, 10.0], Paint::Palette)];
+    let picture = Picture {
+        scenes: &[],
+        fills: &[],
+        over: &over,
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        images: &placed,
+        transparent: true,
+    };
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [10, 10]), blue, "cropped to blue");
+    assert_eq!(pixel(&pixels, [22, 15]), [255, 0, 0, 255], "over the text");
+    assert_ne!(
+        pixel(&pixels, [22, 5]),
+        [255, 0, 0, 255],
+        "under the palette"
+    );
+}
+
+/// The process's windows share the pictures on the GPU: each is uploaded
+/// once, kept from frame to frame while there's room, and a slot's let go
+/// as soon as it isn't drawn.
+#[test]
+fn windows_share_pictures_on_the_gpu_and_keep_them_between_frames() {
+    use crate::render::{Image, PlacedImage, TextureKey};
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut fonts = fonts(1.0);
+    let mut first = Renderer::new(&gpu.0, FORMAT);
+    let mut second = Renderer::new(&gpu.0, FORMAT);
+    second.share_textures(std::sync::Arc::clone(first.textures()));
+    let image = Image {
+        id: 1,
+        width: 1,
+        height: 1,
+        rgba: vec![0, 255, 0, 255],
+    };
+    let kept = TextureKey::Image(clackatoo_protocol::ImageId([1; 16]), 64);
+    let slot = TextureKey::Slot(9);
+    let placed = [
+        PlacedImage::at(kept, &image, [0.0, 0.0, 10.0, 10.0]),
+        PlacedImage::at(slot, &image, [10.0, 0.0, 10.0, 10.0]),
+    ];
+    let mut picture = Picture {
+        scenes: &[],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        images: &placed,
+        transparent: true,
+    };
+    draw_with(&gpu, &mut first, [20, 10], &picture, &mut fonts);
+    let textures = std::sync::Arc::clone(first.textures());
+    let lock = || textures.lock().unwrap();
+    assert!(lock().has(kept) && lock().has(slot));
+    assert_eq!(lock().bytes(), 8, "each once");
+    // The other window draws the same picture from the same texture.
+    let pixels = draw_with(&gpu, &mut second, [20, 10], &picture, &mut fonts);
+    assert_eq!(&pixels[..4], &[0, 255, 0, 255]);
+    assert_eq!(lock().bytes(), 8, "not uploaded again");
+    // Frames drawing neither keep the image's, and the slot's only a few:
+    // another window's frame doesn't let it go at once.
+    picture.images = &[];
+    draw_with(&gpu, &mut first, [20, 10], &picture, &mut fonts);
+    assert!(lock().has(kept) && lock().has(slot));
+    for _ in 0..16 {
+        draw_with(&gpu, &mut first, [20, 10], &picture, &mut fonts);
+    }
+    assert!(lock().has(kept));
+    assert!(!lock().has(slot));
 }
 
 #[test]

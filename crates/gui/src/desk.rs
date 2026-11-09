@@ -34,6 +34,7 @@ use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
 use crate::other::{OtherPane, Why};
 use crate::pane::{Copy, Pane, PaneMouse};
+use crate::picture::PicturePane;
 use crate::vim::{self, Mode, Selection};
 use bindings::Binding;
 pub(crate) use updating::UpdateAsked;
@@ -142,6 +143,12 @@ enum Asked {
     /// `:trust`, `:untrust`, `:trusted` or an answer to whether to trust
     /// a folder, whose answer is said in the bar.
     Trusted,
+    /// A part of an image, or a copy of one (see `desk/pictures.rs`).
+    Image(pictures::Fetch),
+    /// What a picture pane shows.
+    Picture(clackatoo_protocol::PictureId),
+    /// An image a buffer's Markdown shows, read from its folder.
+    MarkdownImage(BufferId, String),
 }
 
 /// What the window attaches to again, or asks for again, when a newer
@@ -192,6 +199,7 @@ mod mode;
 mod notices;
 mod offers;
 mod pasting;
+mod pictures;
 mod places;
 mod restored;
 mod scrolling;
@@ -448,6 +456,8 @@ pub(crate) struct Desk {
     boards: boards::Boards,
     /// Panes showing chats' pages.
     browsers: browsers::Browsers,
+    /// The images panes show, and the panes showing image files.
+    pictures: pictures::Pictures,
     /// Panes of kinds this window doesn't know, which a newer daemon has.
     others: HashMap<PaneId, OtherPane>,
     /// Reviews of what agents changed.
@@ -771,6 +781,9 @@ impl Desk {
         if let Some(browser) = self.focused_browser() {
             return Some(browser.title());
         }
+        if let Some(picture) = self.picture(self.shown?.pane) {
+            return Some(picture.title());
+        }
         let terminal = self.focused_terminal()?;
         let title = match self.chats.get(&terminal) {
             Some(chat) => chat.title(),
@@ -1009,6 +1022,7 @@ impl Desk {
                 Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
                 Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
                 Content::Browser(_) => self.browser(pane.id).map(BrowserPane::title),
+                Content::Picture(_) => self.picture(pane.id).map(PicturePane::title),
                 Content::Other { .. } => self.other(pane.id).map(OtherPane::title),
             })
             .map(str::trim)
@@ -1320,6 +1334,7 @@ impl Desk {
         self.attach_shown_boards();
         self.attach_shown_reviews();
         self.attach_shown_browsers();
+        self.attach_shown_pictures();
         self.show_others();
         if !self.connected {
             return;
@@ -1439,6 +1454,10 @@ impl Desk {
                     self.fit_browser(id, tile);
                     continue;
                 }
+                Content::Picture(_) => {
+                    self.fit_picture(id, tile);
+                    continue;
+                }
                 Content::Other { .. } => {
                     if let (Some(other), Ok(size)) =
                         (self.others.get_mut(&id), Size::new(tile.cols, tile.rows))
@@ -1540,6 +1559,7 @@ impl Desk {
         self.boards_reconnected();
         self.reviews_reconnected();
         self.browsers_reconnected();
+        self.pictures_reconnected();
         self.asked.clear();
         self.asks_heard = self.asks_sent;
         self.closes_asked.clear();
@@ -1837,6 +1857,13 @@ impl Desk {
                 true
             }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
+            Some(Asker::Window(Asked::Image(fetch))) => self.image_answered(fetch, response),
+            Some(Asker::Window(Asked::Picture(picture))) => {
+                self.picture_answered(picture, response)
+            }
+            Some(Asker::Window(Asked::MarkdownImage(buffer, path))) => {
+                self.markdown_image_answered(buffer, &path, response)
+            }
             Some(Asker::Window(Asked::BackgroundPreview(tab))) => {
                 self.background_preview_came(tab, response)
             }
@@ -2278,6 +2305,9 @@ impl Desk {
         let view = self.focused_view()?.focus();
         if matches!(view, view::Focus::Browser) {
             return Some(self.browser_key(press));
+        }
+        if matches!(view, view::Focus::Picture(_)) {
+            return Some(self.picture_key(press));
         }
         if !matches!(
             view,
@@ -12180,6 +12210,133 @@ mod tests {
         // Q closes it; q starts recording a macro.
         type_keys(&mut desk, "Q");
         assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    // --- Pictures --------------------------------------------------------
+
+    /// A picture pane attaches to its picture while its tab's shown, asks
+    /// the daemon for its image a part at a time once it's drawn, has it
+    /// decoded, and draws it below its words, fitted; its keys zoom it.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        clippy::too_many_lines,
+        reason = "places are whole pixels; one pane's life"
+    )]
+    fn a_picture_pane_fetches_its_image_and_draws_it_fitted_below_its_words() {
+        use clackatoo_protocol::{
+            ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, Picture, PictureId,
+            PictureState,
+        };
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(200, 100, image::Rgba([9, 8, 7, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let info = ImageInfo {
+            id: ImageId([3; 16]),
+            width: 200,
+            height: 100,
+            format: ImageFormat::Png,
+            bytes: png.len() as u64,
+        };
+        let picture = Layout::Pane(LayoutPane {
+            id: PaneId(4),
+            content: Content::Picture(PictureId(2)),
+            home: None,
+            key: None,
+        });
+        let mut desk = Desk::default();
+        desk.set_area(Some(Area {
+            rect: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 810.0,
+                height: 480.0,
+            },
+            cell: [10.0, 20.0],
+            gap: 10.0,
+            inset: 5.0,
+        }));
+        desk.connected(one_tab(picture), false);
+        let take = |desk: &mut Desk| -> Vec<Request> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Request(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Attached as it's shown: answered with what it shows.
+        let asked = take(&mut desk);
+        assert!(asked.contains(&Request::AttachPicture {
+            picture: PictureId(2)
+        }));
+        for request in asked {
+            desk.answered(match request {
+                Request::AttachPicture { .. } => Response::Picture(Picture {
+                    path: "~/plan.png".into(),
+                    state: PictureState::Shown(info),
+                }),
+                _ => Response::Done,
+            });
+        }
+        desk.settle_pictures();
+        assert!(
+            desk.picture(PaneId(4))
+                .unwrap()
+                .title()
+                .contains("plan.png")
+        );
+        let tiles = desk.placement().unwrap().panes;
+        assert!(desk.paint_pictures(&tiles, [10.0, 20.0]).is_empty());
+        // Drawn, its image is asked for, a part at a time.
+        assert!(desk.settle_images());
+        let asked = take(&mut desk);
+        assert_eq!(
+            asked,
+            vec![Request::Image {
+                from: ImageFrom::Picture(PictureId(2)),
+                image: info.id,
+                fit: None,
+                at: 0,
+            }]
+        );
+        desk.answered(Response::Image(ImageAnswer::Part {
+            info,
+            total: info.bytes,
+            at: 0,
+            bytes: png,
+        }));
+        // Decoded on a thread of its own, then drawn.
+        let mut painted = Vec::new();
+        for _ in 0..500 {
+            painted = desk.paint_pictures(&tiles, [10.0, 20.0]);
+            if !painted.is_empty() {
+                break;
+            }
+            desk.settle_images();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(painted.len(), 1, "drawn once decoded");
+        let tile = tiles[0].1;
+        let rect = painted[0].rect;
+        assert!(
+            rect[1] >= tile.origin[1] + 20.0,
+            "below its words: {rect:?}"
+        );
+        assert_eq!(
+            (rect[2], rect[3]),
+            (200.0, 100.0),
+            "never bigger than it is"
+        );
+        // `+` zooms in.
+        normal_mode(&mut desk);
+        type_keys(&mut desk, "+");
+        let zoomed = desk.paint_pictures(&tiles, [10.0, 20.0]);
+        assert_eq!(zoomed[0].rect[2], 250.0);
+        // `q` closes it.
+        type_keys(&mut desk, "q");
+        assert!(take(&mut desk).contains(&Request::ClosePane { pane: PaneId(4) }));
     }
 
     // --- Browsers --------------------------------------------------------

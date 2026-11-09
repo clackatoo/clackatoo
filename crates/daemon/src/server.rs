@@ -82,6 +82,7 @@ mod links;
 mod mentions;
 mod offers;
 mod pastes;
+mod pictures;
 mod pieces;
 mod recovery;
 mod relay;
@@ -975,6 +976,10 @@ pub struct Daemon {
     pastes: pastes::Pastes,
     /// Lessons' folders made for windows on other machines.
     tutor: tutor::Tutor,
+    /// The images panes show (see `crate::images`), each kept once.
+    images: crate::images::Images<Token>,
+    /// Picture panes, and the images buffers' Markdown asked for.
+    pictures: pictures::Pictures,
     /// The finder's searches going on.
     finds: Finds,
     /// What agents' tools are waiting for, and the panes and terminals
@@ -1201,9 +1206,12 @@ impl Daemon {
                 }
             })
         });
+        let images = crate::images::Images::new(config.images, Some(Arc::clone(&waker)));
         Ok(Self {
             poll,
             listener,
+            images,
+            pictures: pictures::Pictures::default(),
             parser: crate::rpc::Parser::new(
                 &waker,
                 config
@@ -1308,6 +1316,8 @@ impl Daemon {
         let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
         let nested = std::mem::take(&mut handover.state.nested);
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
+        let images = handover.state.images.take();
+        let chat_images = images.as_ref().map(|images| images.chats.clone());
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let mut drafts = std::mem::take(&mut handover.state.drafts);
         let mut uids = std::mem::take(&mut handover.state.uids);
@@ -1364,6 +1374,9 @@ impl Daemon {
             daemon.resume_closed(&layout.closed);
         }
         daemon.resume_machines(state);
+        if let Some(images) = images {
+            daemon.resume_images(images);
+        }
 
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
@@ -1431,7 +1444,7 @@ impl Daemon {
                 chat.resume_previews(images);
             }
             chat.resume_tool_previews(&mut tool_previews);
-            chat.resume_originals(&mut image_originals);
+            chat.resume_originals(&mut image_originals, chat_images.as_deref());
             chat.resume_queue(&mut chat_queues);
             chat.resume_draft(&mut drafts);
             let id = chat.info().id;
@@ -1657,6 +1670,11 @@ impl Daemon {
         let kept_chats = self.chats_of(&kept_names);
         let agent_terminals = Some(self.hand_over_agent_terminals());
         let mut live_chats = Vec::new();
+        // Images on their way into the store are kept first, so their
+        // chats name them.
+        self.keep_chat_images();
+        self.take_images(true);
+        let mut chat_images = Vec::new();
         // Agents' changes to big files still being worked out go into the
         // edit log first, so the next build has them.
         self.settle_all_pending();
@@ -1732,7 +1750,9 @@ impl Daemon {
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
                     nested.extend(chat.hand_over_nesting());
-                    image_originals.push(chat.hand_over_originals());
+                    let (originals, images) = chat.hand_over_originals();
+                    image_originals.push(originals);
+                    chat_images.push(images);
                     chat_queues.push(chat.hand_over_queue());
                     drafts.extend(chat.hand_over_draft());
                     uids.extend(chat.hand_over_uids());
@@ -1798,6 +1818,7 @@ impl Daemon {
             .collect();
         // Their ssh processes end with them, rather than outlive the exec.
         let (connections, sharing) = links::Kept::handed_over(self.end_links());
+        let images = Some(self.hand_over_images(chat_images));
         Ok(Handover {
             state: handover::State {
                 listener,
@@ -1874,6 +1895,7 @@ impl Daemon {
                     zoomed: self.workspaces.hand_over_zoomed(),
                     closed: self.hand_over_closed(),
                 }),
+                images,
             },
             fds,
             version: handover::VERSION,
@@ -2044,6 +2066,8 @@ impl Daemon {
             self.agent_chores();
             self.take_renames();
             self.take_pastes();
+            self.keep_chat_images();
+            self.take_images(false);
             if self.take_boards() {
                 self.boards_read();
                 self.close_missing_boards();
@@ -2840,6 +2864,7 @@ impl Daemon {
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         self.tools_closed(id);
+        self.forget_terminal_images(id);
         self.graced.remove(&id);
         self.unread.retain(|&unread| unread != Flood::Terminal(id));
         self.compactions.remove(&id);
@@ -2981,6 +3006,9 @@ impl Daemon {
                 Some(self.files_root(files)?.display().to_string())
             }
             Content::Board(_) | Content::Other { .. } => None,
+            Content::Picture(picture) => {
+                Some(self.picture_path(picture)?.parent()?.display().to_string())
+            }
             Content::Review(review) => Some(self.review_root_of(review)?.display().to_string()),
             Content::Browser(chat) => Some(self.chat_ref(chat)?.working_directory().to_owned()),
         }
@@ -3029,6 +3057,7 @@ impl Daemon {
                 Content::Board(_) | Content::Browser(_) | Content::Other { .. } => {
                     self.close_board_pane(pane.id);
                 }
+                Content::Picture(picture) => self.close_picture_pane(pane.id, picture),
                 Content::Review(review) => self.close_review_pane(pane.id, review),
             }
         }
@@ -3689,11 +3718,18 @@ impl Daemon {
             } => self
                 .grid(terminal)
                 .map(|grid| Response::Block(grid.block(line, which))),
-            Request::ChatOriginal { terminal, original } => self
-                .chat(terminal)
-                .and_then(|chat| chat.originals.get(original))
-                .map(Response::Text)
-                .ok_or_else(|| Error::Other("Original image is no longer available".into())),
+            Request::ChatOriginal { terminal, original } => (self
+                .chat_original(terminal, original))
+            .map(Response::Text)
+            .ok_or_else(|| Error::Other("Original image is no longer available".into())),
+            Request::Image {
+                from,
+                image,
+                fit,
+                at,
+            } => Ok(self.serve_image(token, from, image, fit, at)),
+            Request::ImageAt { buffer, path } => Ok(self.image_at(token, buffer, path)),
+            Request::AttachPicture { picture } => Ok(self.attach_picture(token, picture)),
             Request::Chat { terminal, action } => {
                 self.note_device_action(token, terminal, &action);
                 // Answered with the message's text, for the box asking.
@@ -3969,6 +4005,10 @@ impl Daemon {
                 }
                 Content::Review(review) => {
                     self.close_review_pane(pane, review);
+                    Ok(Response::Done)
+                }
+                Content::Picture(picture) => {
+                    self.close_picture_pane(pane, picture);
                     Ok(Response::Done)
                 }
             },
@@ -4418,6 +4458,7 @@ impl Daemon {
             self.forget_board_viewer(token);
             self.forget_review_viewer(token);
             self.forget_browser_viewer(token);
+            self.forget_image_asker(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             self.forget_listings(token);

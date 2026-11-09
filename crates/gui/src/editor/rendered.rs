@@ -38,8 +38,12 @@ use clackatoo_protocol::{Code, Span};
 use clackatoo_text::Rope;
 use parley::LayoutContext;
 
+use clackatoo_protocol::{ImageFrom, ImageInfo};
+
+use super::page_images::{self, PageImages, Placed};
 use super::{BufferCopy, Done, Editor, Shared};
 use crate::fonts::Fonts;
+use crate::images::Images;
 use crate::markdown::colours::Colours;
 use crate::markdown::layout::{
     Brush, Canvas, LINE, Laid, Look, Measures, TextPaint, draw_laid, lay_out_blocks, text_size,
@@ -80,6 +84,8 @@ pub(crate) struct Rendered {
     /// left, top, width and height, as a table's cells are cut off at the
     /// column's edge, for clicks.
     shown: Vec<(usize, [f32; 2], [f32; 4])>,
+    /// The images the page shows (see `page_images.rs`).
+    images: PageImages,
     /// How many blocks it last laid out afresh, rather than kept.
     #[cfg(test)]
     pub(super) fresh: usize,
@@ -94,6 +100,8 @@ struct Page {
     size: f32,
     fonts: u32,
     laid: Laid,
+    /// Where its images go.
+    placed: Vec<Placed>,
 }
 
 /// What a key typed in the view did.
@@ -133,6 +141,7 @@ impl Rendered {
             most: f32::INFINITY,
             paging: vim::Paging::default(),
             shown: Vec::new(),
+            images: PageImages::default(),
             #[cfg(test)]
             fresh: 0,
         }
@@ -350,9 +359,9 @@ impl Rendered {
     pub(super) fn paint(
         &mut self,
         fonts: &mut Fonts,
-        origin: [f32; 2],
-        size: [f32; 2],
+        (origin, size): ([f32; 2], [f32; 2]),
         copy: &BufferCopy,
+        images: (&Images, ImageFrom),
     ) -> TextPaint {
         let em = text_size(fonts);
         let m = Measures::of(em);
@@ -393,6 +402,7 @@ impl Rendered {
             over: false,
         };
         draw_laid(&mut canvas, m, &page.laid, top, column);
+        page_images::draw(&mut canvas, m, images, &page.placed, top);
         // What has links, and is in view, for clicks.
         let (from, to) = (
             self.scroll - self.margin,
@@ -428,7 +438,10 @@ impl Rendered {
                 && page.size.to_bits() == m.em.to_bits()
                 && page.fonts == fonts.generation
         };
-        if !std::mem::take(&mut self.recoloured) && self.page.as_ref().is_some_and(laid_for) {
+        if !std::mem::take(&mut self.recoloured)
+            && !self.images.changed
+            && self.page.as_ref().is_some_and(laid_for)
+        {
             return;
         }
         // The block at the top of the view, and how far into it the view
@@ -444,7 +457,7 @@ impl Rendered {
         };
         let text = copy.text().to_string();
         let blocks = markdown::blocks(&text);
-        let laid = lay_out_blocks(
+        let mut laid = lay_out_blocks(
             &mut self.layout_cx,
             fonts,
             m,
@@ -452,6 +465,7 @@ impl Rendered {
             (column, &mut cells),
             Some(&mut self.colours),
         );
+        let placed = self.images.make_room(&mut laid, m, column);
         #[cfg(test)]
         {
             self.fresh = laid.fresh;
@@ -465,7 +479,31 @@ impl Rendered {
             size: m.em,
             fonts: fonts.generation,
             laid,
+            placed,
         });
+    }
+
+    /// How tall the page is, as last laid out.
+    #[cfg(test)]
+    pub(super) fn page_height(&self) -> Option<f32> {
+        self.page.as_ref().map(|page| page.laid.height)
+    }
+
+    /// The paths of the images the page names to ask the daemon for.
+    pub(super) fn take_image_asks(&mut self) -> Vec<String> {
+        self.images.take_asks()
+    }
+
+    /// The daemon read the image at `path`, or couldn't. Returns whether
+    /// the page must be laid out and drawn again.
+    pub(super) fn image_found(&mut self, path: &str, found: Option<ImageInfo>) -> bool {
+        self.images.found(path, found)
+    }
+
+    /// Asks again for the images asked for and not answered, as a new
+    /// connection does.
+    pub(super) fn images_reconnected(&mut self) {
+        self.images.reconnected();
     }
 
     /// The code laid out whose colours are wanted from the daemon, in asks
@@ -635,12 +673,33 @@ impl Editor {
     pub(crate) fn paint_rendered(
         &mut self,
         fonts: &mut Fonts,
-        origin: [f32; 2],
-        size: [f32; 2],
+        (origin, size): ([f32; 2], [f32; 2]),
         copy: &BufferCopy,
+        images: &Images,
     ) -> Option<TextPaint> {
+        let from = ImageFrom::Buffer(self.buffer());
         let rendered = self.rendered.as_mut()?;
-        Some(rendered.paint(fonts, origin, size, copy))
+        Some(rendered.paint(fonts, (origin, size), copy, (images, from)))
+    }
+
+    /// The paths of the images its rendered Markdown names, to ask the
+    /// daemon for.
+    pub(crate) fn take_image_asks(&mut self) -> Vec<String> {
+        (self.rendered.as_mut()).map_or_else(Vec::new, |rendered| rendered.take_image_asks())
+    }
+
+    /// The daemon read the image at `path` its rendered Markdown names, or
+    /// couldn't. Returns whether it must be drawn again.
+    pub(crate) fn rendered_image_found(&mut self, path: &str, found: Option<ImageInfo>) -> bool {
+        (self.rendered.as_mut()).is_some_and(|rendered| rendered.image_found(path, found))
+    }
+
+    /// Asks again for the images its rendered Markdown names that weren't
+    /// answered, as a new connection does.
+    pub(crate) fn rendered_images_reconnected(&mut self) {
+        if let Some(rendered) = self.rendered.as_mut() {
+            rendered.images_reconnected();
+        }
     }
 
     /// Has a key typed while the text is rendered do what it does: scroll

@@ -81,6 +81,8 @@ pub(crate) enum Io {
     MakeDir(PathBuf),
     /// Writes a file, making the directories it's in.
     Write { path: PathBuf, text: String },
+    /// Writes a file of bytes, as an image, making the directories it's in.
+    WriteBytes { path: PathBuf, bytes: Vec<u8> },
     /// Removes a file, or a directory and everything in it, if it's there.
     Remove(PathBuf),
     /// Writes what the tutor remembers to the file at `path`, with what
@@ -100,6 +102,9 @@ impl Io {
             Self::Write { path, text } => (path.parent())
                 .map_or(Ok(()), std::fs::create_dir_all)
                 .and_then(|()| std::fs::write(path, text)),
+            Self::WriteBytes { path, bytes } => (path.parent())
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(path, bytes)),
             Self::Remove(path) => remove(path),
             Self::Save { path, state } => save(path, state),
         };

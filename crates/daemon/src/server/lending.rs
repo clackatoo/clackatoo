@@ -353,6 +353,10 @@ impl Daemon {
             Request::SendInput { terminal: id, .. }
             | Request::Resize { terminal: id, .. }
             | Request::ChatOriginal { terminal: id, .. }
+            | Request::Image {
+                from: clackatoo_protocol::ImageFrom::Terminal(id),
+                ..
+            }
             | Request::Capture { terminal: id }
             | Request::Attach { terminal: id }
             | Request::AttachRecent { terminal: id, .. }

@@ -110,6 +110,11 @@
 //!     (CLACKA-244), with the turns they started and the messages waiting
 //!     to. Before, an upgrade showed each such turn as the words its agent
 //!     was told, rather than the chats' cards.
+//! 49. The image layer's store (CLACKA-239): each image's owners and
+//!     what it is, its bytes in a file of its own in the runtime
+//!     directory; which image each chat's thumbnail handles name, whose
+//!     originals the chat kept itself before; and picture panes, with
+//!     their files. Before, chats' originals came in the handover itself.
 
 pub(crate) mod relay;
 
@@ -124,7 +129,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 48;
+pub(crate) const VERSION: u32 = 49;
 
 /// The first version written by a build that asks before a folder's
 /// language servers run (CLACKA-224): a build handing over an older one
@@ -134,7 +139,8 @@ pub(crate) const ASKS_TRUST: u32 = 45;
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+    VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -334,6 +340,72 @@ pub(crate) struct State {
     /// chats that have any: see [`ChatNotices`]. Since version 48; before,
     /// none was kept.
     pub(crate) notices: Vec<ChatNotices>,
+    /// The image layer's store (see [`Images`]), whose images' bytes are
+    /// in files of their own. Since version 49; `None` before, from a
+    /// build whose chats kept their images themselves.
+    pub(crate) images: Option<Images>,
+}
+
+/// The image layer's store (see `crate::images`). Since version 49.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Images {
+    /// The folder the images' bytes are in, a file each, named by the
+    /// image's ID in hex, as bytes: private to the user, in the runtime
+    /// directory, and taken away once read.
+    pub(crate) dir: Vec<u8>,
+    /// The images kept.
+    pub(crate) kept: Vec<KeptImage>,
+    /// The images let go to keep within the limits, and the limit each
+    /// was let go for, oldest first, so what showed them still says so.
+    pub(crate) dropped: Vec<([u8; 16], u64)>,
+    /// Which image each chat's thumbnail handles name.
+    pub(crate) chats: Vec<ChatImages>,
+    /// The picture panes.
+    pub(crate) pictures: Vec<PictureShown>,
+}
+
+/// An image the store keeps (see [`Images`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct KeptImage {
+    /// Its ID: the first 16 bytes of its bytes' SHA-256.
+    pub(crate) id: [u8; 16],
+    /// How its bytes are encoded: 0 PNG, 1 JPEG, 2 GIF, 3 WebP.
+    pub(crate) format: u8,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// How many bytes it is.
+    pub(crate) bytes: u64,
+    /// What holds it.
+    pub(crate) owners: Vec<ImageOwner>,
+}
+
+/// What holds an image (see `clackatoo_protocol::ImageFrom`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ImageOwner {
+    /// A terminal, or a chat, by its ID.
+    Terminal(u32),
+    /// A picture pane, by its picture's ID.
+    Picture(u32),
+    /// A buffer, by its ID.
+    Buffer(u32),
+}
+
+/// Which image in the store each of chat `chat`'s thumbnail handles
+/// names (see `tool_images::Originals`). Since version 49.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct ChatImages {
+    pub(crate) chat: u32,
+    pub(crate) handles: Vec<(u64, [u8; 16])>,
+}
+
+/// A picture pane's picture: its file, and the image it showed, if it was
+/// read. Since version 49.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PictureShown {
+    pub(crate) id: u32,
+    /// The file, as bytes.
+    pub(crate) path: Vec<u8>,
+    pub(crate) image: Option<[u8; 16]>,
 }
 
 /// What the notices of the chat `chat` said of the chats that finished
@@ -1648,6 +1720,9 @@ pub(crate) enum Layout {
         key: u64,
         kind: String,
     },
+    /// A pane showing an image file, by its picture's ID (see
+    /// [`Images::pictures`]). Since version 49.
+    Picture { id: u32, picture: u32 },
 }
 
 /// A file explorer: the directory at its root. What's expanded in it is
@@ -1820,6 +1895,7 @@ impl State {
             44 | 45 => Ok(postcard::from_bytes::<v45::State>(body)?.into()),
             46 => Ok(postcard::from_bytes::<v46::State>(body)?.into()),
             47 => Ok(postcard::from_bytes::<v47::State>(body)?.into()),
+            48 => Ok(postcard::from_bytes::<v48::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         };
@@ -1927,6 +2003,7 @@ mod v31 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2031,6 +2108,7 @@ mod v30 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2134,6 +2212,7 @@ mod v29 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2236,6 +2315,7 @@ mod v28 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2336,6 +2416,7 @@ mod v27 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2439,6 +2520,7 @@ mod v26 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2539,6 +2621,7 @@ mod v25 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2637,6 +2720,7 @@ mod v24 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2733,6 +2817,7 @@ mod v23 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2842,6 +2927,7 @@ mod v22 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -2934,6 +3020,7 @@ mod v21 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3024,6 +3111,7 @@ mod v20 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3110,6 +3198,7 @@ mod v19 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3196,6 +3285,7 @@ mod v18 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3747,6 +3837,7 @@ mod v7 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3857,6 +3948,7 @@ mod v8 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -3937,6 +4029,7 @@ mod v9 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4019,6 +4112,7 @@ mod v11 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4150,6 +4244,7 @@ mod v15 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4235,6 +4330,7 @@ mod v14 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4318,6 +4414,7 @@ mod v13 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4443,6 +4540,7 @@ mod v12 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4566,6 +4664,7 @@ mod v10 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -4575,12 +4674,44 @@ mod v10 {
 mod tests {
     use super::*;
 
+    /// The image layer's store, as handed over: an image held by a chat
+    /// and a picture pane, one let go, which image a chat's thumbnail
+    /// handle names, and the picture pane.
+    fn images() -> Images {
+        Images {
+            dir: b"/run/user/1000/clackatoo/images".to_vec(),
+            kept: vec![KeptImage {
+                id: [2; 16],
+                format: 3,
+                width: 640,
+                height: 480,
+                bytes: 4096,
+                owners: vec![
+                    ImageOwner::Terminal(2),
+                    ImageOwner::Picture(1),
+                    ImageOwner::Buffer(3),
+                ],
+            }],
+            dropped: vec![([3; 16], 64 << 20)],
+            chats: vec![ChatImages {
+                chat: 2,
+                handles: vec![(1, [2; 16])],
+            }],
+            pictures: vec![PictureShown {
+                id: 1,
+                path: b"/home/me/plan.png".to_vec(),
+                image: Some([2; 16]),
+            }],
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one state, whole, each part of it filled"
     )]
     fn state() -> State {
         State {
+            images: Some(images()),
             notices: vec![ChatNotices {
                 chat: 2,
                 turns: vec![(1, 1_792_000_000_000, vec![FINISHED.into()])],
@@ -6000,14 +6131,43 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v48.bin"]
+    #[ignore = "writes tests/fixtures/handover-v49.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v48.bin"
+            "/tests/fixtures/handover-v49.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
+    }
+
+    #[test]
+    fn version_49_keeps_the_image_layers_store() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v49.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let store = read.images.expect("the store");
+        let expected = images();
+        assert_eq!(store.dir, expected.dir);
+        assert_eq!(store.kept.len(), 1);
+        let kept = &store.kept[0];
+        assert_eq!(
+            (kept.id, kept.format, kept.width, kept.height, kept.bytes),
+            ([2; 16], 3, 640, 480, 4096)
+        );
+        assert_eq!(kept.owners, expected.kept[0].owners);
+        assert_eq!(store.dropped, expected.dropped);
+        assert_eq!(store.chats[0].handles, vec![(1, [2; 16])]);
+        assert_eq!(store.pictures[0].path, b"/home/me/plan.png");
+        assert_eq!(store.pictures[0].image, Some([2; 16]));
+        // Version 48 had none: its chats kept their images themselves.
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v48.bin"))
+            .unwrap();
+        let old = State::read(&mut file).unwrap();
+        assert!(old.images.is_none());
+        assert_eq!(old.notices.len(), 1);
     }
 
     #[test]
@@ -6708,6 +6868,7 @@ mod v32 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -6877,6 +7038,7 @@ mod v33 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7049,6 +7211,7 @@ mod v34 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7224,6 +7387,7 @@ mod v35 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7402,6 +7566,7 @@ mod v36 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7583,6 +7748,7 @@ mod v37 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7764,6 +7930,7 @@ mod v38 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -7945,6 +8112,7 @@ mod v39 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -8128,6 +8296,7 @@ mod v40 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -8343,6 +8512,7 @@ mod v41 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -8552,6 +8722,7 @@ mod v42 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -8763,6 +8934,7 @@ mod v43 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -8977,6 +9149,7 @@ mod v45 {
                 asked: Vec::new(),
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -9195,6 +9368,7 @@ mod v46 {
                 asked: s.asked,
                 layout: None,
                 notices: Vec::new(),
+                images: None,
             }
         }
     }
@@ -9413,6 +9587,229 @@ mod v47 {
                 asked: s.asked,
                 layout: s.layout,
                 notices: Vec::new(),
+                images: None,
+            }
+        }
+    }
+}
+
+/// Version 48, before the image layer's store was handed over.
+mod v48 {
+    use super::{
+        AgentCommand, Applied, Asked, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches,
+        ChatContinuation, ChatDraft, ChatForks, ChatNotices, ChatPreviews, ChatQueue, ChatUids,
+        Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known, LayoutExtras,
+        Lender, Lent, LentBackground, Live, Mcp, NestedItem, Process, Restored, Reviews, Sharing,
+        Shell, Talk, Terminal, ToolPreviews, Trusted, Undelivered, Workspaces, relay,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        pub(super) listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        pub(super) lock: Option<u32>,
+        /// The ID the next terminal gets.
+        pub(super) next_terminal: u32,
+        pub(super) terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        pub(super) chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        pub(super) orphans: Vec<Process>,
+        pub(super) workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        pub(super) next_buffer: u32,
+        /// Files being edited.
+        pub(super) buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        pub(super) next_files: u32,
+        /// File explorers.
+        pub(super) explorers: Vec<Files>,
+        /// What agents changed in files.
+        pub(super) edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        pub(super) applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        pub(super) daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        pub(super) reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        pub(super) recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        pub(super) shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        pub(super) machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        pub(super) connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        pub(super) lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        pub(super) borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        pub(super) lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        pub(super) sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        pub(super) key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        pub(super) keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        pub(super) background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        pub(super) kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        pub(super) trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        pub(super) exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        pub(super) restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        pub(super) chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        pub(super) tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        pub(super) image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        pub(super) chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        pub(super) chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        pub(super) activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34; before, they
+        /// kept nothing, and none changed nothing.
+        pub(super) undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs of the daemons they're lent
+        /// to, and the failure of each not seen there yet. Since version 35;
+        /// before, none was.
+        pub(super) lent_background: Vec<LentBackground>,
+        /// Messages chats sent others that waited their turns and were
+        /// dropped as they came, so each sender is still told why. Since
+        /// version 36; before, none was.
+        pub(super) undelivered: Vec<Undelivered>,
+        /// Where chats stand among the others: see [`Talk`]. Since version
+        /// 37; `None` before, from a build that couldn't hand it over.
+        pub(super) talk: Option<Talk>,
+        /// The agents' processes that go on through the upgrade, and what
+        /// goes on with them: see [`Live`]. Since version 38; `None` before,
+        /// and from a build that stopped its agents, as it was told to, or as
+        /// the build it upgraded to couldn't take them.
+        pub(super) live: Option<Live>,
+        /// The items of chats' turns that an agent's own subagents did: see
+        /// [`NestedItem`]. Since version 39; before, none was.
+        pub(super) nested: Vec<NestedItem>,
+        /// The messages being typed in chats' boxes and not sent yet. Since
+        /// version 40; before, none was kept.
+        pub(super) drafts: Vec<ChatDraft>,
+        /// The numbers that stay with chats' turns, of the chats whose turns
+        /// aren't each numbered by their index: see [`ChatUids`]. Since
+        /// version 41; before, every turn was.
+        pub(super) uids: Vec<ChatUids>,
+        /// The branches of chats' conversations, of the chats that have been
+        /// cut back: see [`ChatBranches`]. Since version 41.
+        pub(super) branches: Vec<ChatBranches>,
+        /// Where chats' agent sessions can be forked: see [`ChatForks`].
+        /// Since version 41; before, none was known.
+        pub(super) forks: Vec<ChatForks>,
+        /// Command ownership and permanent selection protection, since 42.
+        /// None from older builds: selection history is unknown, so retain all.
+        pub(super) agent_terminals: Option<Vec<AgentCommand>>,
+        /// Federated views and edit receipts, since version 43.
+        pub(super) federation: Option<relay::Federation>,
+        /// What the secrets given chats' MCP servers are checked against,
+        /// since version 44.
+        pub(super) mcp: Option<Mcp>,
+        /// What programs asked of the terminals that asked anything beyond
+        /// their modes, since version 46.
+        pub(super) asked: Vec<Asked>,
+        /// What tabs' layouts keep beside their splits, since version 47.
+        pub(super) layout: Option<LayoutExtras>,
+        /// What notices said of the chats that finished, since version 48.
+        pub(super) notices: Vec<ChatNotices>,
+    }
+    impl From<State> for super::State {
+        fn from(s: State) -> Self {
+            Self {
+                listener: s.listener,
+                lock: s.lock,
+                next_terminal: s.next_terminal,
+                terminals: s.terminals,
+                chats: s.chats,
+                orphans: s.orphans,
+                workspaces: s.workspaces,
+                next_buffer: s.next_buffer,
+                buffers: s.buffers,
+                next_files: s.next_files,
+                explorers: s.explorers,
+                edits: s.edits,
+                applied: s.applied,
+                daemon: s.daemon,
+                reviews: s.reviews,
+                recovery_lock: s.recovery_lock,
+                shells: s.shells,
+                machine: s.machine,
+                connections: s.connections,
+                lent: s.lent,
+                borrowers: s.borrowers,
+                lenders: s.lenders,
+                sharing: s.sharing,
+                key: s.key,
+                keys: s.keys,
+                background: s.background,
+                kept: s.kept,
+                trusted: s.trusted,
+                exes: s.exes,
+                restored: s.restored,
+                chat_previews: s.chat_previews,
+                tool_previews: s.tool_previews,
+                image_originals: s.image_originals,
+                chat_queues: s.chat_queues,
+                chat_continuations: s.chat_continuations,
+                activities: s.activities,
+                undo_states: s.undo_states,
+                lent_background: s.lent_background,
+                undelivered: s.undelivered,
+                talk: s.talk,
+                live: s.live,
+                nested: s.nested,
+                drafts: s.drafts,
+                uids: s.uids,
+                branches: s.branches,
+                forks: s.forks,
+                agent_terminals: s.agent_terminals,
+                federation: s.federation,
+                mcp: s.mcp,
+                asked: s.asked,
+                layout: s.layout,
+                notices: s.notices,
+                images: None,
             }
         }
     }

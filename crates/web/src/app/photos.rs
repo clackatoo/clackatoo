@@ -277,6 +277,7 @@ fn encode(bitmap: &ImageBitmap) -> Result<ChatImage, JsValue> {
             height: small.height(),
             rgba: rgba.into(),
             original: 0,
+            image: None,
         }),
     };
     full.set_width(0);

@@ -1397,6 +1397,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Ctrl+B f labels links, paths, addresses and hashes in any pane, to open, copy or type by key",
     },
+    News {
+        id: "image-layer",
+        date: "2026-11-09",
+        lesson: "markdown",
+        what: "Images: :e plan.png opens one to zoom and pan, Markdown shows its images, chats fetch theirs whole",
+    },
 ];
 
 impl News {

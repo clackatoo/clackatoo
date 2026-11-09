@@ -214,6 +214,7 @@ impl World {
                 lies: Lies::default(),
             }),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
+            images: clackatoo_daemon::ImageLimits::default(),
         };
         configure(&mut config);
         let socket = dir.join("clackatoo/daemon.sock");
@@ -3031,6 +3032,7 @@ fn a_lessons_panes_are_made_on_the_window_daemons_machine_in_another_machines_wo
         lesson: "basics".into(),
         text: "# Basics\n".into(),
         files: vec![("notes.txt".into(), "one\n".into())],
+        images: Vec::new(),
     };
     let Response::Text(folder) = pair.window.request(&Request::Tutor(make)).unwrap() else {
         panic!("no folder made");
@@ -6299,6 +6301,7 @@ fn original_images_are_fetched_on_demand_through_the_federated_chat() {
                         height: 1,
                         rgba: vec![20, 40, 60, 255].into(),
                         original: 0,
+                        image: None,
                     }),
                 }],
             },
@@ -6322,9 +6325,13 @@ fn original_images_are_fetched_on_demand_through_the_federated_chat() {
                 _ => None,
             })
             .flatten()
-            .filter(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_)))
+            .filter(|content| {
+                matches!(content, clackatoo_protocol::ToolContent::Image(preview)
+                    if preview.image.is_some())
+            })
             .count();
-        if images == 2 {
+        // And each kept in the daemon's images, which its thumbnail names.
+        if images == 2 && node.turns[0].previews[0].image.is_some() {
             break node;
         }
         assert!(Instant::now() < deadline, "tool images never arrived");
@@ -6341,6 +6348,28 @@ fn original_images_are_fetched_on_demand_through_the_federated_chat() {
         Response::Text(data.clone())
     );
     assert!(!format!("{node:?}").contains(&data));
+    // The image itself comes through the daemon passing the chat on, a
+    // part at a time, as it was sent.
+    let image = prompt.image.unwrap();
+    let mut fetched = Vec::new();
+    loop {
+        let request = Request::Image {
+            from: clackatoo_protocol::ImageFrom::Terminal(terminal),
+            image,
+            fit: None,
+            at: fetched.len() as u64,
+        };
+        let Response::Image(clackatoo_protocol::ImageAnswer::Part { total, bytes, .. }) =
+            pair.window.request(&request).unwrap()
+        else {
+            panic!("no part of the image");
+        };
+        fetched.extend(bytes);
+        if fetched.len() as u64 == total {
+            break;
+        }
+    }
+    assert_eq!(fetched, png.get_ref().as_slice());
     let mut originals = Vec::new();
     for item in &node.turns[0].items {
         if let Item::Tool(tool) = item {

@@ -1,7 +1,7 @@
 ---
 title: The Editor's View
 type: reference
-description: Git signs, the marks for agents' changes, line numbers, tabs and indenting, wrapping and the view, and rendered Markdown.
+description: Git signs, the marks for agents' changes, line numbers, tabs and indenting, wrapping and the view, and rendered Markdown with its images.
 related:
   - clackatoo/reference/editor
 ---
@@ -154,7 +154,13 @@ terminal's links open, asking first, with where it goes shown whole, if it
 isn't a plain `http://` or `https://` address or a mail address; a file in the
 editor, in place of this one, as `:e` would, written from the Markdown file's
 folder; and `#` and a heading scrolls to that heading, named as GitHub names
-them. An image shows its text, after `▣`.
+them.
+
+An image a relative path names, from the Markdown file's folder, shows below
+the block naming it, as wide as it is or as the column; its description stays
+in its place, after `▣`. An image from the web, or an absolute path, shows only
+its description: nothing is fetched from the web. See
+[Images](~clackatoo/reference/images#images-in-markdown).
 
 The [option](~clackatoo/reference/config#options) `markdownview` says how a
 Markdown file opens: as its text, `raw`, to begin with, or `rendered`.

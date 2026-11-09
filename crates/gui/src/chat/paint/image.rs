@@ -16,7 +16,7 @@ impl ChatView {
         };
         let image = viewer.preview.clone();
         let original = viewer.picture.clone();
-        let status = viewer.status.clone();
+        let mut status = viewer.status.clone();
         let dimensions = original
             .as_ref()
             .map_or([image.width, image.height], |image| {
@@ -61,10 +61,17 @@ impl ChatView {
         if let Some(original) = original {
             canvas.paint.images.push(crate::render::PaintedImage {
                 over: true,
+                key: crate::render::TextureKey::Pixels(original.id),
                 image: original,
                 rect: picture,
                 clip: canvas.clip,
             });
+        } else if image.image.is_some() {
+            // Drawn from the image itself, at the size it's shown.
+            status = match self.previews.draw_whole(&mut canvas, &image, picture) {
+                Some([width, height]) => format!("{width} × {height}"),
+                None => "Loading…".to_owned(),
+            };
         } else {
             self.previews.draw(&mut canvas, &image, picture);
         }

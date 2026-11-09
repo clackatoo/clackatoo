@@ -47,8 +47,8 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
     BackgroundAction, BoardId, BufferId, ChatAction, ChatSummary, ClientMessage, Error, Event,
-    FilesId, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId, ServerMessage,
-    TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
+    FilesId, ImageFrom, PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId,
+    ServerMessage, TabId, TerminalId, TrustAction, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -1182,6 +1182,49 @@ impl Daemon {
                     at,
                     Ok((Request::ChatOriginal { terminal, original }, Then::Pass)),
                 )
+            }),
+            // Images belong to what holds them, which says on which
+            // machine: a chat's, or a buffer's Markdown's, there. (Another
+            // machine's picture panes aren't followed through this daemon.)
+            &Request::Image {
+                from,
+                image,
+                fit,
+                at: from_byte,
+            } => {
+                let found = match from {
+                    ImageFrom::Terminal(local) => {
+                        terminal(self, local).map(|(at, remote)| (at, ImageFrom::Terminal(remote)))
+                    }
+                    ImageFrom::Buffer(local) => (self.relayed_buffer(local))
+                        .map(|(at, remote)| (at, ImageFrom::Buffer(remote))),
+                    ImageFrom::Picture(_) => None,
+                };
+                found.map(|(at, from)| {
+                    if self.link_wire(at) < wire::IMAGES {
+                        return (at, Err(self.too_old(at, "an image")));
+                    }
+                    let request = Request::Image {
+                        from,
+                        image,
+                        fit,
+                        at: from_byte,
+                    };
+                    (at, Ok((request, Then::Pass)))
+                })
+            }
+            Request::ImageAt {
+                buffer: local,
+                path,
+            } => self.relayed_buffer(*local).map(|(at, buffer)| {
+                if self.link_wire(at) < wire::IMAGES {
+                    return (at, Err(self.too_old(at, "a Markdown file's images")));
+                }
+                let request = Request::ImageAt {
+                    buffer,
+                    path: path.clone(),
+                };
+                (at, Ok((request, Then::Pass)))
             }),
             &Request::HarnessCapabilities { terminal: local } => {
                 terminal(self, local).map(|(at, terminal)| {
@@ -2965,7 +3008,8 @@ impl Daemon {
                 | Response::Text(_)
                 | Response::Found(_)
                 | Response::Searched { .. }
-                | Response::Block(_)),
+                | Response::Block(_)
+                | Response::Image(_)),
             )
             | (Then::Recovered, response @ (Response::Done | Response::Text(_)))
             | (Then::Reviewed, response @ Response::Reviewed(_))

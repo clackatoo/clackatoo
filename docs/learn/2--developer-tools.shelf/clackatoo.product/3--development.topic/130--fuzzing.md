@@ -26,6 +26,7 @@ libFuzzer and needs a nightly Rust.
 | `workspaces` | the saved workspaces file | what's read writes back the same |
 | `agents_toml` | `agents.toml` | its limits on subagents stay in their ranges |
 | `json_rpc` | what agents and language servers write, framed either way | read in pieces, or handed over midway, the messages are the same as read whole; the walkers keep to their caps |
+| `images` | what programs, agents and files send as an image | its header is read or refused; what's kept is of a size that may be; a small one decodes without panicking |
 
 Code a target can't reach otherwise is reached through a `fuzzing` feature of
 `clackatoo-term` and `clackatoo-daemon`. The feature is only for the fuzzer.

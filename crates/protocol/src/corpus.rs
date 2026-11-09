@@ -961,6 +961,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             width: 1,
             height: 1,
             rgba: vec![25, 50, 75, 255].into(),
+            image: None,
         }),
     };
     samples.extend([
@@ -1325,6 +1326,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
+                        image: None,
                     }),
                 }],
             },
@@ -1351,6 +1353,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
+                        image: None,
                     }],
                 }),
             })]),
@@ -1369,6 +1372,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
+                        image: None,
                     })],
                     ..tool()
                 }),
@@ -1838,6 +1842,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     lesson: "basics".into(),
                     text: "# Basics\n".into(),
                     files: vec![("notes.txt".into(), "one\ntwo\n".into())],
+                    images: Vec::new(),
                 },
             ))),
             Server(ServerMessage::Response(Response::Text(dir.into()))),
@@ -1854,6 +1859,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::TUTOR_FILES, sample)),
     );
+    samples.extend(images(terminal));
     samples
 }
 
@@ -3910,6 +3916,172 @@ fn new_terminal() -> NewTerminal {
 }
 
 /// Workspaces with a pane of every kind.
+/// The image layer (CLACKA-239): an image fetched by its ID in parts, a
+/// copy at a size, a picture pane, Markdown's images, and a chat's
+/// thumbnail that names its image.
+#[allow(clippy::too_many_lines, reason = "a sample after another")]
+fn images(terminal: TerminalId) -> Vec<(u32, Sample)> {
+    use crate::wire::IMAGES;
+    use crate::{
+        ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, ImageNews, Picture, PictureId,
+        PictureState,
+    };
+    use Sample::{Client, Server};
+    let id = ImageId([7; 16]);
+    let info = |format| ImageInfo {
+        id,
+        width: 640,
+        height: 480,
+        format,
+        bytes: 3,
+    };
+    let answer = |answer| {
+        (
+            IMAGES,
+            Server(ServerMessage::Response(Response::Image(answer))),
+        )
+    };
+    let picture = PictureId(4);
+    let mut panes = workspaces();
+    panes.list[0].tabs[0].layout = Layout::Pane(Pane {
+        id: PaneId(9),
+        content: Content::Picture(picture),
+        home: None,
+        key: None,
+    });
+    vec![
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::Image {
+                from: ImageFrom::Terminal(terminal),
+                image: id,
+                fit: Some([320, 240]),
+                at: 1,
+            })),
+        ),
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::Image {
+                from: ImageFrom::Picture(picture),
+                image: id,
+                fit: None,
+                at: 0,
+            })),
+        ),
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::ImageAt {
+                buffer: BufferId(3),
+                path: "docs/plan.png".into(),
+            })),
+        ),
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::AttachPicture { picture })),
+        ),
+        answer(ImageAnswer::Part {
+            info: info(ImageFormat::Png),
+            total: 3,
+            at: 0,
+            bytes: vec![1, 2, 3],
+        }),
+        answer(ImageAnswer::Found(info(ImageFormat::Jpeg))),
+        answer(ImageAnswer::Found(info(ImageFormat::Gif))),
+        answer(ImageAnswer::Found(info(ImageFormat::Webp))),
+        answer(ImageAnswer::Scaling),
+        answer(ImageAnswer::Dropped { limit: 64 << 20 }),
+        answer(ImageAnswer::Missing),
+        answer(ImageAnswer::Loading),
+        answer(ImageAnswer::Failed("it isn't an image".into())),
+        (
+            IMAGES,
+            Server(ServerMessage::Response(Response::Picture(Picture {
+                path: "~/plan.png".into(),
+                state: PictureState::Loading,
+            }))),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Picture {
+                picture,
+                shown: Picture {
+                    path: "~/plan.png".into(),
+                    state: PictureState::Shown(info(ImageFormat::Png)),
+                },
+            })),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Picture {
+                picture,
+                shown: Picture {
+                    path: "~/notes.txt".into(),
+                    state: PictureState::Failed("it isn't an image".into()),
+                },
+            })),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Image(ImageNews::Scaled {
+                from: ImageFrom::Buffer(BufferId(3)),
+                image: id,
+                fit: [320, 240],
+            }))),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Image(ImageNews::Found {
+                buffer: BufferId(3),
+                path: "docs/plan.png".into(),
+                found: Ok(info(ImageFormat::Png)),
+            }))),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Image(ImageNews::Found {
+                buffer: BufferId(3),
+                path: "gone.png".into(),
+                found: Err("there's no such file".into()),
+            }))),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::Workspaces(panes))),
+        ),
+        // A lesson's image, made by the daemon with its other files.
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::Tutor(
+                crate::TutorFiles::Make {
+                    lesson: "markdown".into(),
+                    text: "# Rendered Markdown\n".into(),
+                    files: vec![("notes.md".into(), "![plan](plan.png)\n".into())],
+                    images: vec![("plan.png".into(), vec![137, 80, 78, 71])],
+                },
+            ))),
+        ),
+        (
+            IMAGES,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                    index: 4,
+                    turn: Box::new(Turn {
+                        previews: vec![crate::ChatPreview {
+                            width: 2,
+                            height: 1,
+                            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255].into(),
+                            original: 3,
+                            image: Some(id),
+                        }],
+                        ..turn()
+                    }),
+                })]),
+            })),
+        ),
+    ]
+}
+
 fn workspaces() -> Workspaces {
     let pane = |id, content| {
         Layout::Pane(Pane {

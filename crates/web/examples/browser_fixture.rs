@@ -16,6 +16,18 @@ use clackatoo_protocol::{
     TerminalStatus,
 };
 
+/// The image turn 38 shows from the daemon's images.
+const IMAGE: clackatoo_protocol::ImageId = clackatoo_protocol::ImageId([0x38; 16]);
+
+/// A 2×2 PNG, sent whatever fit is asked for.
+const PNG: [u8; 73] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a,
+    0x73, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x30, 0x4e, 0x9b, 0x09,
+    0x44, 0x0c, 0x10, 0x0a, 0x00, 0x1f, 0xee, 0x04, 0xc9, 0xfe, 0xa6, 0x43, 0x52, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 fn terminal_info() -> TerminalInfo {
     TerminalInfo {
         id: TerminalId(5),
@@ -298,7 +310,7 @@ fn node(id: TerminalId) -> ChatNode {
         notice: None,
         prompt: if i == 39 { "Make the remote experience feel as good as the desktop, especially on my phone.".into() } else { format!("Check the behavior in case {i}.") },
         sent: now().saturating_sub(30_000), items: vec![Item::Words("The layout now keeps the conversation readable and the controls within reach.\n\n- Review changes without losing your place\n- Keep drafts when you switch chats\n- Respond to an approval from your phone\n\n```rust\nlet message = queue.submit(draft);\n```".into())],
-        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done, raw: None, spent: None, remedy: None }), files: None, from: None, switch: None, previews: if i == 39 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0 }] } else { vec![] },
+        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done, raw: None, spent: None, remedy: None }), files: None, from: None, switch: None, previews: if i == 39 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0, image: None,  }] } else if i == 38 { vec![ChatPreview { width: 64, height: 64, rgba: Vec::new().into(), original: 0, image: Some(IMAGE) }] } else { vec![] },
     }
     };
     let mut node = ChatNode {
@@ -467,6 +479,26 @@ fn main() {
                         );
                     }
 
+                    Request::Image {
+                        image: IMAGE, fit, ..
+                    } => {
+                        eprintln!("Image {fit:?}");
+                        let info = clackatoo_protocol::ImageInfo {
+                            id: IMAGE,
+                            width: 2,
+                            height: 2,
+                            format: clackatoo_protocol::ImageFormat::Png,
+                            bytes: PNG.len() as u64,
+                        };
+                        reply(&ServerMessage::Response(Response::Image(
+                            clackatoo_protocol::ImageAnswer::Part {
+                                info,
+                                total: info.bytes,
+                                at: 0,
+                                bytes: PNG.to_vec(),
+                            },
+                        )));
+                    }
                     Request::WatchWorkspaces => {
                         reply(&ServerMessage::Response(Response::Workspaces(
                             shown.clone(),

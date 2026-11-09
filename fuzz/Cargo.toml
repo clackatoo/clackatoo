@@ -87,3 +87,10 @@ path = "fuzz_targets/json_rpc.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
+test = false
+doc = false
+bench = false

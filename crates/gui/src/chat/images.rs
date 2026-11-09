@@ -1,5 +1,8 @@
-//! Small chat previews use the existing image pass. Only pictures painted
-//! recently are cached; scrolling doesn't keep every GPU texture alive.
+//! A chat's images, drawn through the window's image layer (see
+//! [`crate::images`]): a thumbnail naming its image in the daemon's images
+//! is drawn from the image itself, fetched and decoded at the size it's
+//! shown; one from a daemon before that, or a draft's own, from the pixels
+//! that came with it, kept on the GPU by their own number.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{
@@ -7,9 +10,10 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::images::{Images, Shown};
 use crate::markdown::layout::{Canvas, intersection};
-use crate::render::{Image, PaintedImage};
-use clackatoo_protocol::ChatPreview;
+use crate::render::{Fill, Image, Paint, PaintedImage, TextureKey};
+use clackatoo_protocol::{ChatPreview, ImageFrom, TerminalId};
 
 struct Cached {
     // Keep the source alive: its allocation identifies this cached image.
@@ -23,9 +27,18 @@ pub(super) struct Cache {
     entries: RefCell<HashMap<(usize, u32, u32), Cached>>,
     hits: RefCell<Vec<(ChatPreview, [f32; 4])>>,
     origin: [f32; 2],
+    /// The window's images, and the chat whose they are.
+    images: Images,
+    chat: Option<TerminalId>,
 }
 
 impl Cache {
+    /// Draws the images that name theirs from `images`, as chat `chat`'s.
+    pub(super) fn share(&mut self, images: Images, chat: TerminalId) {
+        self.images = images;
+        self.chat = Some(chat);
+    }
+
     pub(super) fn begin(&mut self, origin: [f32; 2]) {
         self.origin = origin;
         self.hits.get_mut().clear();
@@ -60,6 +73,56 @@ impl Cache {
         if !canvas.over {
             self.hits.borrow_mut().push((preview.clone(), clipped));
         }
+        self.paint(canvas, preview, rect);
+    }
+
+    /// Draws `preview`'s image whole in `rect`, as the viewer does: from
+    /// the image itself, if it names one, at the size drawn. Returns its
+    /// size, as drawn from, if it's ready.
+    pub(super) fn draw_whole(
+        &self,
+        canvas: &mut Canvas<'_>,
+        preview: &ChatPreview,
+        rect: [f32; 4],
+    ) -> Option<[u32; 2]> {
+        self.paint(canvas, preview, rect)
+    }
+
+    /// Paints `preview` in `rect`: its image, through the window's images,
+    /// if it names one and the chat's known; else its pixels. While the
+    /// image comes, its pixels stand in, if they came, or a box. Returns
+    /// the size of what's drawn.
+    fn paint(
+        &self,
+        canvas: &mut Canvas<'_>,
+        preview: &ChatPreview,
+        rect: [f32; 4],
+    ) -> Option<[u32; 2]> {
+        if let (Some(id), Some(chat)) = (preview.image, self.chat) {
+            let from = ImageFrom::Terminal(chat);
+            match self.images.show(from, id, rect[2].max(rect[3])) {
+                Shown::Ready(image, key) => {
+                    let size = [image.width, image.height];
+                    canvas.paint.images.push(PaintedImage {
+                        over: canvas.over,
+                        key,
+                        image,
+                        rect,
+                        clip: canvas.clip,
+                    });
+                    return Some(size);
+                }
+                Shown::Loading | Shown::Dropped(_) | Shown::Failed(_) if !preview.has_pixels() => {
+                    let shown = intersection(rect, canvas.clip);
+                    canvas.fill(Fill::rounded(shown, Paint::Code, 4.0));
+                    return None;
+                }
+                Shown::Loading | Shown::Dropped(_) | Shown::Failed(_) => {}
+            }
+        }
+        if !preview.has_pixels() {
+            return None;
+        }
         let key = (
             preview.rgba.as_ptr() as usize,
             preview.width,
@@ -67,8 +130,7 @@ impl Cache {
         );
         let mut cache = self.entries.borrow_mut();
         let entry = cache.entry(key).or_insert_with(|| {
-            // Browser slots are pane IDs (u32); chat images use the upper
-            // half, unique across all chat panes in this window.
+            // Numbered as no picture before them, in any chat.
             static NEXT: AtomicU64 = AtomicU64::new(1_u64 << 63);
             Cached {
                 source: preview.rgba.clone(),
@@ -85,10 +147,12 @@ impl Cache {
         entry.used = true;
         canvas.paint.images.push(PaintedImage {
             over: canvas.over,
+            key: TextureKey::Pixels(entry.image.id),
             image: entry.image.clone(),
             rect,
             clip: canvas.clip,
         });
+        Some([preview.width, preview.height])
     }
 }
 

@@ -135,6 +135,16 @@ pub(crate) fn dir_below(root: &Path, below: &Path, make: bool) -> io::Result<Own
     Ok(at)
 }
 
+/// Opens the directory at `path` to open files from with [`open_at`],
+/// following links to it, as the folder a file the user opened is in.
+pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+    Ok(rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
 /// The text of the small file at `path`, if it's a regular file, not a
 /// link, of no more than `most` bytes, as a file a folder from anyone
 /// holds is read: never followed, waited on or read whole.

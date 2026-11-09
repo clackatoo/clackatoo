@@ -134,6 +134,10 @@ editor in the tab, the file opens in a new one beside the explorer.
 split beside or below that editor, and <kbd>Ctrl</kbd>+<kbd>T</kbd> in a new
 tab.
 
+An image file (PNG, JPEG, GIF or WebP) opens the same ways, in an [image
+pane](~clackatoo/reference/images#opening-an-image-file) rather than the
+editor.
+
 ## Making and moving files
 
 | Key | Does |

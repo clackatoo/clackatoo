@@ -2108,7 +2108,12 @@ pub enum ChatPatch {
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
 /// caches without copying pixels. Originals are fetched separately by handle.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Since protocol 145 ([`wire::IMAGES`]) a preview names the image itself
+/// in the daemon's images (`image`), which a client shows through them as
+/// it does every image: to such a client, a preview with an image is sent
+/// without its pixels.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ChatPreview {
     /// Width in pixels, at most `SIDE`.
     pub width: u32,
@@ -2123,6 +2128,37 @@ pub struct ChatPreview {
         deserialize_with = "wire::since::<{ wire::CHAT_ORIGINALS }, _, _>"
     )]
     pub original: u64,
+    /// The image in the daemon's images, once it's kept there: `None` from
+    /// an older daemon, and while it's being kept. Requires
+    /// [`wire::IMAGES`].
+    #[serde(default, deserialize_with = "wire::since::<{ wire::IMAGES }, _, _>")]
+    pub image: Option<crate::ImageId>,
+}
+
+impl Serialize for ChatPreview {
+    /// As derived, but for the pixels, which a client of [`wire::IMAGES`]
+    /// isn't sent with an image it fetches by its ID; and for the gated
+    /// fields, left out for an older peer.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let wire = wire::current();
+        let pixels = wire < wire::IMAGES || self.image.is_none();
+        let mut fields = serializer.serialize_struct("ChatPreview", 6)?;
+        fields.serialize_field("width", &self.width)?;
+        fields.serialize_field("height", &self.height)?;
+        if pixels {
+            fields.serialize_field("rgba", &self.rgba)?;
+        } else {
+            fields.serialize_field("rgba", &[0u8; 0][..])?;
+        }
+        if wire >= wire::CHAT_ORIGINALS {
+            fields.serialize_field("original", &self.original)?;
+        }
+        if wire >= wire::IMAGES {
+            fields.serialize_field("image", &self.image)?;
+        }
+        fields.end()
+    }
 }
 
 impl ChatPreview {
@@ -2139,7 +2175,14 @@ impl ChatPreview {
             && self.height > 0
             && self.width <= Self::SIDE
             && self.height <= Self::SIDE
-            && self.rgba.len() == (self.width as usize) * (self.height as usize) * 4
+            && (self.has_pixels() || (self.rgba.is_empty() && self.image.is_some()))
+    }
+
+    /// Whether its pixels came with it, as they all do from a daemon
+    /// before [`wire::IMAGES`]: else it's shown by its `image`.
+    #[must_use]
+    pub fn has_pixels(&self) -> bool {
+        self.rgba.len() == (self.width as usize) * (self.height as usize) * 4
     }
 }
 

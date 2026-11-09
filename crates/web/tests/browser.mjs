@@ -63,6 +63,15 @@ try {
   await page.locator('#message').waitFor();
   await page.getByText('Up next · 1',{exact:true}).waitFor();
   assert.deepEqual(await page.locator('canvas.image-preview').first().evaluate(c=>Array.from(c.getContext('2d').getImageData(0,0,1,1).data)),[35,90,65,255]);
+  // An image sent without its pixels is asked for from the daemon's images
+  // once it's on the screen, at its size there in 64px steps, and shown
+  // from a data: URL, which the page's policy allows.
+  const fetched=page.locator('img.image-preview[data-image]');
+  await fetched.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=>document.querySelector('img.image-preview[data-image]').src.startsWith('data:image/png;base64,'));
+  assert(await fetched.evaluate(e=>e.complete&&e.naturalWidth===2),'the fetched image should decode');
+  assert(actions.some(line=>/^Image Some\(\[\d+, \d+\]\)$/.test(line)&&line.match(/\d+/g).every(n=>n%64===0)),`image asked for at a fit: ${actions.filter(line=>line.startsWith('Image'))}`);
+  await page.locator('.conversation').evaluate(e=>{e.scrollTop=e.scrollHeight;});
   await noOverflow();
   await page.screenshot({path:`${output}/phone-chat.png`});
   assert.equal(await page.locator('.composer-bar button').count(),2,'composer should only expose model/settings and usage');

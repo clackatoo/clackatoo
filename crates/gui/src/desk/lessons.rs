@@ -429,6 +429,7 @@ impl Desk {
                 lesson: open.lesson.id.to_owned(),
                 text: open.rendered.text.clone(),
                 files,
+                images: open.lesson.bytes.clone(),
             };
             self.request(Request::Tutor(make), self.lesson_asked(LessonAsked::Files));
             return;
@@ -442,6 +443,11 @@ impl Desk {
         for (name, text) in files {
             let path = open.dir.join(name);
             io.push(Io::Write { path, text });
+        }
+        for (name, bytes) in &open.lesson.bytes {
+            let path = open.dir.join(name);
+            let bytes = bytes.clone();
+            io.push(Io::WriteBytes { path, bytes });
         }
         io.push(Io::Write {
             path: open.lesson_file.clone(),
@@ -1074,6 +1080,8 @@ impl Desk {
                     (root.is_some_and(in_scratch), false)
                 }
                 Content::Terminal(_) => (Some(pane.id) == open.practice, false),
+                // Only a lesson's image is opened in its tab.
+                Content::Picture(_) => (true, false),
                 Content::Board(_)
                 | Content::Review(_)
                 | Content::Browser(_)
@@ -1255,6 +1263,7 @@ impl DeskFacts<'_> {
             Content::Board(_) => Kind::Board,
             Content::Review(_) => Kind::Review,
             Content::Browser(_) => Kind::Browser,
+            Content::Picture(_) => Kind::Image,
             Content::Other { .. } => Kind::Other,
         }
     }

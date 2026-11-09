@@ -16,8 +16,10 @@ use crate::term::{Fit, OpenTerminal};
 
 mod background;
 mod images;
+mod layer;
 pub use background::DISMISS_FOR;
 pub use images::Attachment;
+pub use layer::{Fit as ImageFit, Look, fit_of, image_id};
 
 /// How long what was last sent may go unanswered, in milliseconds,
 /// before keys for a terminal are turned down rather than sent: a key
@@ -121,6 +123,8 @@ pub struct Dirty {
     pub all_turns: bool,
     /// Older turns inserted before existing DOM nodes.
     pub prepended: usize,
+    /// An image came, or won't, or one on the screen is here already.
+    pub images: bool,
 }
 
 /// The chat shown.
@@ -172,6 +176,11 @@ enum Asked {
     /// Keeping the fit of the terminal shown, which the daemon may have
     /// put back meanwhile.
     Renew,
+    /// Part of an image, at a fit.
+    Image {
+        image: clackatoo_protocol::ImageId,
+        fit: layer::Fit,
+    },
 }
 
 /// What the app knows.
@@ -236,6 +245,8 @@ pub struct State {
     /// nothing is done to a chat, terminal or tab by its number: no
     /// message, key, draft, fit or focus.
     run_confirmed: bool,
+    /// The images the chats show, from the daemon's images.
+    layer: layer::Layer,
 }
 
 /// What the page's storage keys for drafts begin with: then the daemon's
@@ -327,6 +338,7 @@ impl Default for State {
             run: None,
             run_news: None,
             run_confirmed: false,
+            layer: layer::Layer::default(),
         }
     }
 }
@@ -342,6 +354,7 @@ impl State {
             protocol_version: PROTOCOL_VERSION,
         });
         self.listing = false;
+        self.images_unasked();
         self.request(Request::WatchWorkspaces, Asked::Quiet);
         self.request(Request::WatchChats, Asked::Quiet);
         self.list_terminals();
@@ -388,6 +401,7 @@ impl State {
             );
         }
         self.tell_draft();
+        self.images_ask_waiting();
     }
 
     /// The connection was lost, and is tried again in `retry` seconds.
@@ -490,6 +504,9 @@ impl State {
                     term.dirty.header = true;
                 }
             }
+            (Response::Image(answer), Some(Asked::Image { image, fit })) => {
+                self.image_answered(image, fit, answer);
+            }
             (Response::Error(err), Some(asked)) => self.failed(&err, &asked),
             _ => {}
         }
@@ -541,6 +558,11 @@ impl State {
                 }
                 None
             }
+            // Shown as missing, as what the page says of it.
+            Asked::Image { image, fit } => {
+                self.image_failed(*image, *fit);
+                None
+            }
         };
         if let Some(note) = note {
             self.note = Some(note);
@@ -577,6 +599,9 @@ impl State {
             }
             Event::View { terminal, update } => self.view_changed(terminal, update),
             Event::Listening(listening) => self.listening(listening),
+            Event::Image(clackatoo_protocol::ImageNews::Scaled { image, fit, .. }) => {
+                self.image_scaled(image, fit);
+            }
             _ => {}
         }
     }
@@ -643,6 +668,7 @@ impl State {
         self.drafts_changed.clear();
         self.images.clear();
         self.loading_images.clear();
+        self.images_let_go();
         self.submitting.clear();
         self.dismissing = None;
         self.seen_failures.clear();

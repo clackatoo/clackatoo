@@ -8,7 +8,9 @@
 //! palette or 24-bit, is set as a property of its run, as the page's
 //! policy refuses `style` attributes.
 
-use clackatoo_protocol::{Attributes, Color, CursorShape, Line, Style, Underline};
+use clackatoo_protocol::{
+    Attributes, Color, CursorShape, ImageId, Line, Style, TerminalId, Underline,
+};
 use clackatoo_term::CellFlags;
 
 use crate::ui::{Element, Node, el};
@@ -193,6 +195,68 @@ fn css(ink: Ink) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// An image a program placed over a terminal's cells (CLACKA-239).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// The image, and the terminal whose it is.
+    pub image: ImageId,
+    pub terminal: TerminalId,
+    /// Its size in pixels, which `crop` is of.
+    pub size: [u32; 2],
+    /// Its first row and column, from the grid's top left.
+    pub row: u32,
+    pub col: u32,
+    /// How many rows and columns it covers.
+    pub rows: u32,
+    pub cols: u32,
+    /// Where in its first cell it starts, in pixels of a cell `cell`
+    /// pixels in size, as the program was told cells are.
+    pub offset: [u32; 2],
+    pub cell: [u32; 2],
+    /// The part of it shown, in its pixels: left, top, width and height.
+    /// `None` for all of it.
+    pub crop: Option<[u32; 4]>,
+    /// Over the rows' text, or under it.
+    pub above: bool,
+}
+
+/// `placed`, as an element over its cells, in the grid's own units: a
+/// cell is `1ch` wide and a row `1.45em` tall, as `.grid .r` is, so it
+/// grows and shrinks with the rows. The image inside is shown as the
+/// chats' are (see `app::images`), stretched so its crop fills it.
+#[must_use]
+pub fn placement(placed: &Placement) -> Element {
+    let part = |at: u32, of: u32| {
+        if of == 0 {
+            0.0
+        } else {
+            f64::from(at) / f64::from(of)
+        }
+    };
+    let left = f64::from(placed.col) + part(placed.offset[0], placed.cell[0]);
+    let top = f64::from(placed.row) + part(placed.offset[1], placed.cell[1]);
+    let [width, height] = placed.size;
+    let [x, y, shown_w, shown_h] = placed.crop.unwrap_or([0, 0, width, height]);
+    // As percentages of the cells it covers.
+    let scale = |at: u32, of: u32| 100.0 * part(at, of.max(1));
+    let image = el("img")
+        .attr("alt", "")
+        .attr("data-image", placed.image.to_string())
+        .attr("data-terminal", placed.terminal.to_string())
+        .style("width", format!("{}%", scale(width, shown_w)))
+        .style("height", format!("{}%", scale(height, shown_h)))
+        .style("left", format!("{}%", 0.0 - scale(x, shown_w)))
+        .style("top", format!("{}%", 0.0 - scale(y, shown_h)));
+    el("div")
+        .class("placed")
+        .style("left", format!("{left}ch"))
+        .style("top", format!("calc({top} * 1.45em)"))
+        .style("width", format!("{}ch", placed.cols))
+        .style("height", format!("calc({} * 1.45em)", placed.rows))
+        .style("z-index", if placed.above { "1" } else { "-1" })
+        .child(image)
+}
+
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::Run;
@@ -359,5 +423,60 @@ mod tests {
     fn a_blank_row_is_empty() {
         let row = row(&Line::default(), 80, None, None);
         assert!(row.children.is_empty());
+    }
+
+    #[test]
+    fn a_placed_image_covers_its_cells_showing_its_crop() {
+        let mut placed = Placement {
+            image: ImageId([1; 16]),
+            terminal: TerminalId(3),
+            size: [400, 200],
+            row: 2,
+            col: 5,
+            rows: 4,
+            cols: 10,
+            offset: [4, 10],
+            cell: [8, 20],
+            crop: Some([100, 50, 200, 100]),
+            above: false,
+        };
+        let shown = placement(&placed);
+        assert_eq!(shown.get("class"), Some("placed"));
+        assert_eq!(
+            shown.styles,
+            [
+                ("left", "5.5ch".to_owned()),
+                ("top", "calc(2.5 * 1.45em)".to_owned()),
+                ("width", "10ch".to_owned()),
+                ("height", "calc(4 * 1.45em)".to_owned()),
+                ("z-index", "-1".to_owned()),
+            ]
+        );
+        let Node::Element(img) = &shown.children[0] else {
+            panic!("an image");
+        };
+        assert_eq!(img.tag, "img");
+        assert_eq!(img.get("data-image"), Some("01".repeat(16).as_str()));
+        assert_eq!(img.get("data-terminal"), Some("3"));
+        assert_eq!(img.get("src"), None);
+        // Twice the cells' size, from half a crop to the left and above.
+        assert_eq!(
+            img.styles,
+            [
+                ("width", "200%".to_owned()),
+                ("height", "200%".to_owned()),
+                ("left", "-50%".to_owned()),
+                ("top", "-50%".to_owned()),
+            ]
+        );
+        placed.crop = None;
+        placed.above = true;
+        let shown = placement(&placed);
+        assert!(shown.styles.contains(&("z-index", "1".to_owned())));
+        let Node::Element(img) = &shown.children[0] else {
+            panic!("an image");
+        };
+        assert_eq!(img.styles[0], ("width", "100%".to_owned()));
+        assert_eq!(img.styles[2], ("left", "0%".to_owned()));
     }
 }

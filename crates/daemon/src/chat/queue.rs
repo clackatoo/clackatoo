@@ -325,6 +325,7 @@ impl HostedChat {
                         height: p.height,
                         rgba: p.rgba.into(),
                         original: 0,
+                        image: None,
                     }),
                 })
                 .collect();

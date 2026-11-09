@@ -1176,6 +1176,7 @@ fn a_daemon_on_another_machine_makes_the_lessons_files_and_its_panes_open_on_the
             lesson: "text-objects".into(),
             text: rendered("text-objects"),
             files: vec![(name.clone(), practice.clone())],
+            images: Vec::new(),
         })]
     );
     // Nothing written here.

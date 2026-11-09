@@ -187,6 +187,7 @@ fn what(kind: PaneKind) -> &'static str {
         "board" => "a board",
         "review" => "a review",
         "browser" => "a chat's browser",
+        "image" => "an image",
         _ => "a pane",
     }
 }
@@ -207,6 +208,7 @@ pub(crate) fn said_elsewhere(kind: PaneKind, host: &str) -> String {
         "board" => "a board",
         "review" => "a review",
         "browser" => "a chat's browser",
+        "image" => "an image",
         "terminal" => {
             return format!(
                 "a terminal from yet another machine, in a workspace on {host}: not reachable \

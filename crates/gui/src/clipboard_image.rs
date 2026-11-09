@@ -89,6 +89,7 @@ fn preview(image: &arboard::ImageData<'_>, width: u32, height: u32) -> ChatPrevi
         width: w,
         height: h,
         rgba: rgba.into(),
+        image: None,
     }
 }
 

@@ -171,7 +171,10 @@ stays beside the conversation. The composer follows the phone's visible screen
 when the keyboard opens and expands back when it closes. It sits close to the
 bottom, reserving the home-indicator area only while that area is visible.
 Long tool output and code scroll sideways inside their own blocks. Message
-attachments and tool images show their retained thumbnails.
+attachments and tool images show through the [image
+layer](~clackatoo/reference/images#on-the-phone): each is fetched only as it
+scrolls into view, as a copy only as big as the screen shows it. With an older
+daemon, they show their retained thumbnails.
 
 Links in an agent's words open in a new tab; only web and mail links do, and a
 link's text, written by the agent, might not be where it goes. Press and hold

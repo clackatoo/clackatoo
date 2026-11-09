@@ -64,6 +64,7 @@ mod find;
 mod form;
 mod forward;
 pub mod frame;
+mod image;
 mod machines;
 mod mention;
 mod native;
@@ -127,6 +128,10 @@ pub use form::{
     MOST_LABEL, MOST_MESSAGE, MOST_OPTIONS, MOST_URL, parse_number, plain_web_link, url_host,
 };
 pub use forward::{Forward, ForwardFailure, Forwarding};
+pub use image::{
+    ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, ImageNews, Picture, PictureId,
+    PictureState, dropped_words, image_words,
+};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
 pub use mention::{
     MOST_MENTIONS, Mention, lines_suffix, may_mention_files, mention, mention_lines, mentions,
@@ -149,7 +154,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 144;
+pub const PROTOCOL_VERSION: u32 = 145;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -685,6 +690,20 @@ pub enum Event {
         device: u64,
         /// What the bar is to say.
         said: String,
+    },
+    /// What became of image work the client asked for that took a while.
+    /// Only to a client of protocol 145 or later ([`wire::IMAGES`]), as
+    /// only it asks.
+    Image(ImageNews),
+    /// A picture pane the client attached to ([`Request::AttachPicture`])
+    /// shows something else: its file was read, or read again. Only to a
+    /// client of protocol 145 or later ([`wire::IMAGES`]), as only it
+    /// attaches.
+    Picture {
+        /// The picture pane.
+        picture: PictureId,
+        /// What it shows now.
+        shown: Picture,
     },
 }
 
@@ -1674,6 +1693,42 @@ pub enum Request {
         /// own place is gone: `None` puts it in a tab of its own.
         beside: Option<PaneId>,
     },
+    /// Fetches part of an image `from` holds: its bytes from `at`, of the
+    /// image as it was sent, or with `fit`, of a copy no wider or taller
+    /// than that, made if it's bigger. Answered with [`Response::Image`]:
+    /// a part, or [`ImageAnswer::Scaling`] while a copy is made. Only to a
+    /// daemon of protocol 145 or later ([`wire::IMAGES`]).
+    Image {
+        /// What the image belongs to, which the daemon checks.
+        from: ImageFrom,
+        /// The image.
+        image: ImageId,
+        /// The most it's to be wide and tall, in pixels, or `None` for the
+        /// image as it was sent.
+        fit: Option<[u32; 2]>,
+        /// Where the bytes asked for start.
+        at: u64,
+    },
+    /// Reads the image at `path`, from the folder `buffer`'s file is in,
+    /// for its Markdown to show: only a relative path, read from below that
+    /// folder as any file a folder from anyone holds is, never through a
+    /// link. Answered with [`Response::Image`]: the image, if it's read
+    /// already, or [`ImageAnswer::Loading`], and an [`Event::Image`] once
+    /// it is. Only to a daemon of protocol 145 or later ([`wire::IMAGES`]).
+    ImageAt {
+        /// The buffer.
+        buffer: BufferId,
+        /// The path, as the Markdown gives it.
+        path: String,
+    },
+    /// Starts sending what the picture pane `picture` shows: answered with
+    /// [`Response::Picture`], then an [`Event::Picture`] each time that
+    /// changes. Only to a daemon of protocol 145 or later
+    /// ([`wire::IMAGES`]).
+    AttachPicture {
+        /// The picture pane.
+        picture: PictureId,
+    },
 }
 
 /// What [`Request::Tutor`] does. The daemon chooses each lesson's folder,
@@ -1692,6 +1747,14 @@ pub enum TutorFiles {
         text: String,
         /// The practice folder's files, each a name and its text.
         files: Vec<(String, String)>,
+        /// The practice folder's files of bytes, as images, each a name
+        /// and its bytes, within the same limits. Empty to and from an
+        /// older peer ([`wire::IMAGES`]), whose lessons show no image.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::IMAGES }, _>",
+            deserialize_with = "wire::since::<{ wire::IMAGES }, _, _>"
+        )]
+        images: Vec<(String, Vec<u8>)>,
     },
     /// Writes a lesson's text again, as it's put back after a change.
     Rewrite {
@@ -1880,6 +1943,10 @@ pub enum Response {
         /// Whether it went round an end to get there.
         wrapped: bool,
     },
+    /// Answers [`Request::Image`] and [`Request::ImageAt`].
+    Image(ImageAnswer),
+    /// Answers [`Request::AttachPicture`]: what it shows.
+    Picture(Picture),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

@@ -183,6 +183,7 @@ impl TestDaemon {
             pastes: None,
             logind: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
+            images: clackatoo_daemon::ImageLimits::default(),
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let shutdown = daemon.shutdown_handle();

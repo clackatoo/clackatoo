@@ -193,12 +193,13 @@ impl Daemon {
                 lesson,
                 text,
                 files,
+                images,
             } => {
                 self.tutor
                     .remove(&lessons.folder, Removing::Pruned(SystemTime::now()));
                 // Its maker's from the first, so it's never pruned.
                 let mut makers = self.tutor.makers();
-                lessons.make(&lesson, &text, &files).map(|(name, path)| {
+                (lessons.make_with(&lesson, &text, &files, &images)).map(|(name, path)| {
                     makers.insert(name, token);
                     Response::Text(path)
                 })
@@ -241,20 +242,38 @@ impl Lessons {
     /// Makes a new folder for the lesson `lesson`, with its text and its
     /// practice files, and returns its name and path. Nothing's made if
     /// anything's refused, or can't be.
+    #[cfg(test)]
     fn make(
         &self,
         lesson: &str,
         text: &str,
         files: &[(String, String)],
     ) -> Result<(String, String), String> {
+        self.make_with(lesson, text, files, &[])
+    }
+
+    /// As [`make`](Self::make), with `images` too, practice files of bytes,
+    /// as an image is.
+    fn make_with(
+        &self,
+        lesson: &str,
+        text: &str,
+        files: &[(String, String)],
+        images: &[(String, Vec<u8>)],
+    ) -> Result<(String, String), String> {
         plain(lesson)?;
         for (name, _) in files {
             plain(name)?;
         }
-        if files.len() > MOST_FILES {
+        for (name, _) in images {
+            plain(name)?;
+        }
+        if files.len() + images.len() > MOST_FILES {
             return Err(format!("more than {MOST_FILES} practice files"));
         }
-        let bytes = text.len() + (files.iter()).map(|(_, text)| text.len()).sum::<usize>();
+        let bytes = text.len()
+            + (files.iter()).map(|(_, text)| text.len()).sum::<usize>()
+            + (images.iter()).map(|(_, bytes)| bytes.len()).sum::<usize>();
         if bytes > MOST_BYTES {
             return Err("more than a MiB of text".into());
         }
@@ -264,9 +283,12 @@ impl Lessons {
             rustix::fs::mkdirat(&made, lesson, Mode::RWXU)?;
             let practice = open_dir(&made, lesson)?;
             for (name, text) in files {
-                write_new(&practice, name, text)?;
+                write_new(&practice, name, text.as_bytes())?;
             }
-            write_new(&made, &format!("{lesson}.txt"), text)
+            for (name, bytes) in images {
+                write_new(&practice, name, bytes)?;
+            }
+            write_new(&made, &format!("{lesson}.txt"), text.as_bytes())
         })();
         if let Err(err) = written {
             let _ = remove_named(self.folder.as_fd(), &name);
@@ -298,7 +320,7 @@ impl Lessons {
                 Ok(()) | Err(Errno::NOENT) => {}
                 Err(err) => return Err(err.into()),
             }
-            write_new(&folder, &new, text)?;
+            write_new(&folder, &new, text.as_bytes())?;
             rustix::fs::renameat(&folder, new.as_str(), &folder, file.as_str())?;
             Ok(())
         })();
@@ -503,10 +525,10 @@ fn open_dir(dir: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
 
 /// Writes `text` to a new file `name` in `dir`, for the user alone: never
 /// over anything there, nor through a link.
-fn write_new(dir: &OwnedFd, name: &str, text: &str) -> io::Result<()> {
+fn write_new(dir: &OwnedFd, name: &str, bytes: &[u8]) -> io::Result<()> {
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let made = rustix::fs::openat(dir, name, flags, Mode::RUSR | Mode::WUSR)?;
-    File::from(made).write_all(text.as_bytes())
+    File::from(made).write_all(bytes)
 }
 
 #[cfg(test)]
@@ -551,6 +573,7 @@ mod tests {
             lesson: "basics".into(),
             text: "# Basics\n".into(),
             files: Vec::new(),
+            images: Vec::new(),
         };
         daemon.tutor_files(token, make)
     }

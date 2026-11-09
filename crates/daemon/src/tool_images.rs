@@ -8,7 +8,7 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, EmbeddedResourceResource, SessionUpdate, ToolCallContent,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use clackatoo_protocol::{ChatImage, ChatPreview, TerminalId, ToolContent};
+use clackatoo_protocol::{ChatImage, ChatPreview, ImageId, TerminalId, ToolContent};
 
 const BYTES: usize = 8 * 1024 * 1024;
 const COUNT: usize = 4;
@@ -42,7 +42,8 @@ pub(crate) struct Job {
 #[derive(Debug)]
 pub(crate) struct Done {
     pub target: Target,
-    pub images: Vec<(ChatPreview, String)>,
+    /// Each thumbnail, with the image's bytes.
+    pub images: Vec<(ChatPreview, Vec<u8>)>,
 }
 
 #[derive(Debug, Default)]
@@ -174,7 +175,7 @@ fn image_path(path: &Path) -> bool {
         .is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "bmp"
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
             )
         })
 }
@@ -229,18 +230,12 @@ fn local_path(uri: &str) -> Option<PathBuf> {
     Some(std::ffi::OsString::from_vec(decoded).into())
 }
 
-fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, Vec<u8>)> {
     let bytes = match source {
         Source::Inline(data) => STANDARD.decode(data).ok()?,
         Source::File(path) => {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(cwd.join(path))
-                .ok()?;
-            let meta = file.metadata().ok()?;
-            if !meta.is_file() || meta.len() > BYTES as u64 {
+            let file = crate::regular::open(&cwd.join(path), crate::regular::Links::Follow).ok()?;
+            if file.metadata().ok()?.len() > BYTES as u64 {
                 return None;
             }
             let mut bytes = Vec::new();
@@ -251,10 +246,15 @@ fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
     if bytes.len() > BYTES {
         return None;
     }
+    // What the image layer keeps, and BMP, kept as a PNG.
     let format = image::guess_format(&bytes).ok()?;
     if !matches!(
         format,
-        image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Bmp
+        image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::Gif
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Bmp
     ) {
         return None;
     }
@@ -270,9 +270,14 @@ fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
     limits.max_image_width = most;
     limits.max_image_height = most;
     reader.limits(limits);
-    let image = reader
-        .decode()
-        .ok()?
+    let decoded = reader.decode().ok()?;
+    let bytes = if format == image::ImageFormat::Bmp {
+        let rgba = decoded.to_rgba8();
+        crate::images::png_of(rgba.width(), rgba.height(), rgba.as_raw()).ok()?
+    } else {
+        bytes
+    };
+    let image = decoded
         .thumbnail(ChatPreview::SIDE, ChatPreview::SIDE)
         .to_rgba8();
     Some((
@@ -281,8 +286,9 @@ fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
             width: image.width(),
             height: image.height(),
             rgba: image.into_raw().into(),
+            image: None,
         },
-        STANDARD.encode(bytes),
+        bytes,
     ))
 }
 
@@ -364,74 +370,117 @@ mod tests {
     }
 }
 
-/// Compressed originals are separate from snapshots. A chat retains at most
-/// 32 MiB / 128 originals; fetching never touches the filesystem or decodes.
+/// The handles chats' thumbnails name their originals by, each with the
+/// image once the daemon's store keeps it (CLACKA-239), whose bytes are
+/// the store's. A chat names at most 128; the store lets the images
+/// themselves go as its limits say.
 #[derive(Debug, Default)]
 pub(crate) struct Originals {
     next: u64,
-    bytes: usize,
-    images: std::collections::VecDeque<(u64, String)>,
+    images: std::collections::VecDeque<(u64, Option<ImageId>)>,
+    /// Images given handles and not yet sent to the store.
+    waiting: Vec<(u64, crate::images::Source)>,
 }
 
 impl Originals {
-    pub(crate) fn insert(&mut self, data: String) -> u64 {
-        if data.is_empty() || data.len() > BYTES * 4 / 3 + 4 {
-            return 0;
-        }
+    /// Most handles kept.
+    const MOST: usize = 128;
+
+    /// A handle for the image `source` holds, which is to be kept in the
+    /// store: 0, none, for one that can't be.
+    pub(crate) fn insert(&mut self, source: crate::images::Source) -> u64 {
         let Some(next) = self.next.checked_add(1) else {
             return 0;
         };
         self.next = next;
-        while self.bytes + data.len() > 32 * 1024 * 1024 || self.images.len() >= 128 {
-            let Some((_, old)) = self.images.pop_front() else {
-                break;
-            };
-            self.bytes -= old.len();
+        while self.images.len() >= Self::MOST {
+            self.images.pop_front();
         }
-        self.bytes += data.len();
-        self.images.push_back((next, data));
+        self.images.push_back((next, None));
+        self.waiting.push((next, source));
         next
     }
 
-    pub(crate) fn get(&self, id: u64) -> Option<String> {
-        self.images
-            .iter()
-            .find(|(key, _)| *key == id)
-            .map(|(_, data)| data.clone())
+    /// The images given handles and not yet sent to the store, to send.
+    pub(crate) fn take_waiting(&mut self) -> Vec<(u64, crate::images::Source)> {
+        std::mem::take(&mut self.waiting)
     }
 
+    /// The store keeps the image with handle `original` as `image`: false
+    /// if the handle's gone.
+    pub(crate) fn kept(&mut self, original: u64, image: ImageId) -> bool {
+        match self
+            .images
+            .iter_mut()
+            .find(|(handle, _)| *handle == original)
+        {
+            Some((_, kept)) => {
+                *kept = Some(image);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The image with handle `id`, if the store keeps it.
+    pub(crate) fn get(&self, id: u64) -> Option<ImageId> {
+        (self.images.iter())
+            .find(|(key, _)| *key == id)
+            .and_then(|(_, image)| *image)
+    }
+
+    /// The handles, for the handover, with the images the store keeps for
+    /// them: the bytes are the store's, handed over on their own.
     pub(crate) fn hand_over(
         &self,
         chat: u32,
         references: Vec<(u32, Option<String>, u32, u64)>,
-    ) -> crate::handover::ImageOriginals {
-        crate::handover::ImageOriginals {
-            chat,
-            next: self.next,
-            images: self.images.iter().cloned().collect(),
-            references,
-        }
+    ) -> (crate::handover::ImageOriginals, crate::handover::ChatImages) {
+        let handles = (self.images.iter())
+            .filter_map(|&(handle, image)| Some((handle, image?.0)))
+            .collect();
+        (
+            crate::handover::ImageOriginals {
+                chat,
+                next: self.next,
+                images: Vec::new(),
+                references,
+            },
+            crate::handover::ChatImages { chat, handles },
+        )
     }
 
-    pub(crate) fn resume(record: &mut crate::handover::ImageOriginals) -> Self {
+    /// The handles handed over in `record`, with the images `handles`
+    /// says the store keeps for them, from a build of version 47 or later;
+    /// or, from an earlier one, the originals `record` holds, to be kept.
+    pub(crate) fn resume(
+        record: &mut crate::handover::ImageOriginals,
+        handles: Option<&crate::handover::ChatImages>,
+    ) -> Self {
         let mut store = Self {
             next: record.next,
             ..Self::default()
         };
+        if let Some(handles) = handles {
+            for &(id, image) in handles.handles.iter().rev().take(Self::MOST) {
+                if id != 0 && id <= store.next {
+                    store.images.push_front((id, Some(ImageId(image))));
+                }
+            }
+            return store;
+        }
         for (id, data) in std::mem::take(&mut record.images)
             .into_iter()
             .rev()
-            .take(128)
+            .take(Self::MOST)
         {
-            if id == 0
-                || id > store.next
-                || data.len() > BYTES * 4 / 3 + 4
-                || store.bytes + data.len() > 32 * 1024 * 1024
-            {
+            if id == 0 || id > store.next || data.len() > BYTES * 4 / 3 + 4 {
                 continue;
             }
-            store.bytes += data.len();
-            store.images.push_front((id, data));
+            store.images.push_front((id, None));
+            store
+                .waiting
+                .push((id, crate::images::Source::Base64(data)));
         }
         store
     }
@@ -440,20 +489,41 @@ impl Originals {
 #[cfg(test)]
 mod original_tests {
     use super::*;
+    use crate::images::Source;
+
     #[test]
-    fn retained_originals_are_bounded_and_ids_never_alias_evicted_images() {
+    fn handles_are_bounded_and_never_alias_images_let_go() {
         let mut originals = Originals::default();
-        let first = originals.insert("a".repeat(8 * 1024 * 1024));
-        for _ in 0..4 {
-            originals.insert("b".repeat(8 * 1024 * 1024));
+        let first = originals.insert(Source::Bytes(vec![1]));
+        for _ in 0..Originals::MOST {
+            originals.insert(Source::Bytes(vec![2]));
         }
-        assert!(originals.get(first).is_none());
-        assert_eq!(originals.bytes, 32 * 1024 * 1024);
-        let mut saved = originals.hand_over(1, Vec::new());
-        let mut resumed = Originals::resume(&mut saved);
-        assert_eq!(resumed.bytes, originals.bytes);
-        assert_eq!(resumed.get(5), originals.get(5));
-        assert_eq!(resumed.insert("c".into()), 6);
+        assert_eq!(originals.take_waiting().len(), Originals::MOST + 1);
+        assert!(!originals.kept(first, ImageId([1; 16])));
+        let last = originals.next;
+        assert!(originals.kept(last, ImageId([2; 16])));
+        assert_eq!(originals.get(last), Some(ImageId([2; 16])));
+        assert_eq!(originals.get(first), None);
+        let (mut saved, handles) = originals.hand_over(1, Vec::new());
+        assert!(saved.images.is_empty(), "the bytes are the store's");
+        let mut resumed = Originals::resume(&mut saved, Some(&handles));
+        assert_eq!(resumed.get(last), Some(ImageId([2; 16])));
+        assert_eq!(resumed.insert(Source::Bytes(vec![3])), last + 1);
         assert!(resumed.get(0).is_none());
+    }
+
+    #[test]
+    fn originals_handed_over_by_an_older_build_are_kept_again() {
+        let mut record = crate::handover::ImageOriginals {
+            chat: 1,
+            next: 3,
+            images: vec![(2, "cG5n".into()), (9, "bm8=".into())],
+            references: Vec::new(),
+        };
+        let mut resumed = Originals::resume(&mut record, None);
+        let waiting = resumed.take_waiting();
+        assert_eq!(waiting.len(), 1, "a handle past `next` is no handle");
+        assert_eq!(waiting[0].0, 2);
+        assert!(matches!(&waiting[0].1, Source::Base64(data) if data == "cG5n"));
     }
 }

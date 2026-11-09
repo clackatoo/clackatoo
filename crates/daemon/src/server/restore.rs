@@ -645,6 +645,17 @@ impl Daemon {
                 root: self.files_root(files)?.to_str()?.to_owned(),
             }),
             Content::Board(board) => Some(Pane::Board { id: board.0 }),
+            // As an editor of its file, which opens as a picture again: a
+            // build from before pictures leaves it out.
+            Content::Picture(picture) => {
+                let path = self.picture_path(picture)?;
+                Some(Pane::Editor {
+                    path: path.to_str()?.to_owned(),
+                    recovery: None,
+                    dir: path.parent()?.to_str().map(str::to_owned),
+                    place: None,
+                })
+            }
             Content::Review(review) => {
                 let (chat, scope, root) = self.review_of(review)?;
                 Some(Pane::Review {

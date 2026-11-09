@@ -21,13 +21,17 @@ pub(super) struct Viewer {
 impl Viewer {
     pub(super) fn new(preview: ChatPreview, local: Option<String>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let request = (local.is_none() && preview.original != 0).then_some(preview.original);
+        // One naming its image is drawn from it, through the window's
+        // images: only an older daemon's original is asked for.
+        let request = (local.is_none() && preview.original != 0 && preview.image.is_none())
+            .then_some(preview.original);
+        let layered = preview.image.is_some();
         let mut viewer = Self {
             preview,
             picture: None,
             serial: NEXT.fetch_add(1, Ordering::Relaxed),
             request,
-            status: if local.is_some() || request.is_some() {
+            status: if local.is_some() || request.is_some() || layered {
                 "Loading original…"
             } else {
                 "Original unavailable · thumbnail only"

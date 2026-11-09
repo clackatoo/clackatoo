@@ -27,6 +27,12 @@ A file with **bold**, *italic* and `code` in it, and a [link](https://commonmark
 | Ctrl+D | Half a view |
 
 Back to [the top](#notes).
+
+![The plan, as a picture](plan.png)
+```
+
+```practice plan.png base64
+iVBORw0KGgoAAAANSUhEUgAAABgAAAAQCAIAAACDRijCAAAAJUlEQVR42mN4sMEBKzJIWIAV4VLPMGrQiDaIVA241I8aNKINAgAYQEAfH2Ys+QAAAABJRU5ErkJggg==
 ```
 
 ## Render it
@@ -57,4 +63,12 @@ Go to normal mode with Ctrl+;, and render it again with `<Space>tm`. What anyone
 
 ```check
 rendered
+```
+
+## Open an image
+
+At its end, the file names an image beside it, `plan.png`, which the rendered view shows below its description. Open the image itself in a pane of its own: `:e plan.png`, as for any file, or pick it in an explorer. It opens fitted to the pane. `+` and `-` zoom it, `0` shows it at its own size, `h` `j` `k` `l` move about in it, `=` fits it again, and `q` closes it. PNG, JPEG, GIF and WebP files open this way, on any machine.
+
+```check
+focused image
 ```

@@ -955,7 +955,9 @@ impl Mirror {
                 let local = (self.terminal_numbers).local_or_fresh(chat.0, || fresh.terminal());
                 Content::Browser(TerminalId(local))
             }
-            Content::Terminal(_) | Content::Other { .. } => Content::Other {
+            // Another machine's picture panes aren't followed through this
+            // daemon: they show as panes to come.
+            Content::Terminal(_) | Content::Picture(_) | Content::Other { .. } => Content::Other {
                 kind: PaneKind::new(content.kind_name()),
             },
         }

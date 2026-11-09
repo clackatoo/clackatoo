@@ -19,6 +19,10 @@ every window showing the file edits together.
 | `:\|Editor PATH`, `:\|<Editor PATH`, `:-Editor PATH`, `:-^Editor PATH` | Opens it beside the focused pane: right, left, below or above, as the [split marks](~clackatoo/reference/workspaces#the-command-line) do for terminals. |
 | `clackatoo edit [PATH]` | From a shell: opens it, a folder too, in a new tab of the workspace last used; with no path, the current directory. See [the CLI](~clackatoo/reference/cli#edit). |
 
+An image file opens in an [image
+pane](~clackatoo/reference/images#opening-an-image-file), fitted, to zoom
+and move about in, rather than as text.
+
 A relative path is from the focused pane's directory: for a terminal, the
 directory of the program in front, as for a new terminal; for an editor, the
 directory its file was opened from. `~/` is your home directory.

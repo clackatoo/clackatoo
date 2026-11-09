@@ -16,6 +16,8 @@ bench = false
 
 [dependencies]
 clackatoo-protocol.workspace = true
+# Writes the images fetched as `data:` URLs, which the page's policy lets images load from.
+base64.workspace = true
 serde_json.workspace = true
 # Lays a terminal's lines out cell by cell, as the emulator does.
 clackatoo-term.workspace = true
@@ -56,6 +58,8 @@ web-sys = { version = "0.3.106", features = [
     "HtmlInputElement",
     "HtmlTextAreaElement",
     "InputEvent",
+    "IntersectionObserver",
+    "IntersectionObserverEntry",
     "KeyboardEvent",
     "Location",
     "MediaQueryList",

@@ -129,6 +129,7 @@ impl TestDaemon {
             pastes: None,
             logind: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
+            images: clackatoo_daemon::ImageLimits::default(),
         };
         change(dir.path(), &mut config);
         // A turn's uid is never its index here, so nothing that should
@@ -2709,6 +2710,7 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
         width: 1,
         height: 1,
         rgba: vec![255; 4].into(),
+        image: None,
     };
     for text in ["look at this", ""] {
         client
@@ -2736,8 +2738,13 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
                 .prompt
                 .contains("[Image · 1 × 1]")
         );
+        // Kept in the daemon's images, which its thumbnail names: sent
+        // without its pixels to a client that fetches the image by them.
+        let node = wait_for_chat(&mut client, chat, |node| {
+            node.turns.last().unwrap().previews[0].image.is_some()
+        });
         let retained = node.turns.last().unwrap().previews[0].clone();
-        assert_eq!(retained.rgba, preview.rgba);
+        assert!(retained.rgba.is_empty() && retained.valid());
         assert_ne!(retained.original, 0);
         assert_eq!(
             client
@@ -6617,6 +6624,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Forwarded(_)
             | Event::Said(_)
             | Event::Paired { .. }
+            | Event::Image(_)
+            | Event::Picture { .. }
             | Event::NativeRequest { .. }
             | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {

@@ -253,6 +253,7 @@ pub(super) fn restore_image(image: QueuedImage) -> ChatImage {
             width: p.width,
             height: p.height,
             rgba: p.rgba.into(),
+            image: None,
         }),
     }
 }

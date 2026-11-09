@@ -9,7 +9,7 @@
 use clackatoo_protocol::{
     ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Field, FieldInput, FieldValue, Form,
     FormAsk, Fullness, Item, Outcome, Remedy, Said, Setting, SettingKind, Subagent, SubagentStatus,
-    TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
+    TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
 };
 
 use crate::action::{Action, RowKey};
@@ -494,9 +494,11 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         let mut prompt = el("div").class("prompt");
         if !turn.previews.is_empty() {
             prompt = prompt.child(
-                el("div")
-                    .class("image-previews")
-                    .children(turn.previews.iter().filter(|p| p.valid()).map(preview)),
+                el("div").class("image-previews").children(
+                    (turn.previews.iter())
+                        .filter(|p| p.valid())
+                        .map(|p| preview(p, open.id)),
+                ),
             );
         }
         if !turn.prompt.is_empty() {
@@ -890,7 +892,7 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
             }
             ToolContent::Diff(diff) => diff_view(diff),
             ToolContent::Output(output) => el("pre").class("output").text(last_lines(output)),
-            ToolContent::Image(image) => preview(image),
+            ToolContent::Image(image) => preview(image, open.id),
         });
     }
     if tool.content.is_empty() && !tool.locations.is_empty() {
@@ -905,12 +907,30 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
     details
 }
 
-fn preview(image: &clackatoo_protocol::ChatPreview) -> Element {
-    el("canvas")
-        .class("image-preview")
-        .attr("role", "img")
-        .attr("aria-label", "Image attachment preview")
-        .preview(image)
+/// An image in chat `chat`'s turns: painted from its pixels if they came
+/// with it, or else from the daemon's images, which the app asks for once
+/// it's on the screen (see `state::layer`), by its `data-image` and
+/// `data-terminal`. Until then it takes its space, at its shape.
+fn preview(image: &clackatoo_protocol::ChatPreview, chat: TerminalId) -> Element {
+    match image.image.filter(|_| !image.has_pixels()) {
+        Some(id) => el("img")
+            .class("image-preview")
+            .attr("role", "img")
+            .attr("alt", "Image attachment")
+            .attr("width", image.width.to_string())
+            .attr("height", image.height.to_string())
+            .attr("data-image", id.to_string())
+            .attr("data-terminal", chat.to_string())
+            .style(
+                "aspect-ratio",
+                format!("{} / {}", image.width, image.height),
+            ),
+        None => el("canvas")
+            .class("image-preview")
+            .attr("role", "img")
+            .attr("aria-label", "Image attachment preview")
+            .preview(image),
+    }
 }
 
 /// The last [`MOST_LINES`] lines of `text`, saying how many went before.
@@ -1991,7 +2011,7 @@ fn message(text: &str) -> Element {
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{
-        Choice, Location, Question, TerminalId, TurnEnd, Workspace, WorkspaceId, Workspaces,
+        Choice, Location, Question, TurnEnd, Workspace, WorkspaceId, Workspaces,
     };
 
     use super::*;
@@ -2229,6 +2249,56 @@ mod tests {
             text.contains("New branch, to write to · Branch 2 of 2"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn an_image_without_its_pixels_is_fetched_by_its_id() {
+        use clackatoo_protocol::{ChatPreview, ImageId};
+        let image = ImageId([0xab; 16]);
+        let painted = ChatPreview {
+            width: 2,
+            height: 1,
+            rgba: vec![9; 8].into(),
+            original: 0,
+            image: None,
+        };
+        // Pixels that came with it are painted, as from an older daemon.
+        let shown = preview(&painted, TerminalId(1));
+        assert_eq!(shown.tag, "canvas");
+        assert!(shown.image.is_some());
+        let fetched = ChatPreview {
+            width: 64,
+            height: 40,
+            rgba: Vec::new().into(),
+            image: Some(image),
+            ..painted
+        };
+        assert!(fetched.valid() && !fetched.has_pixels());
+        let mut node = ChatNode::default();
+        node.turns.push(Turn {
+            woke: None,
+            notice: None,
+            previews: vec![fetched],
+            prompt: "look".into(),
+            sent: 0,
+            items: Vec::new(),
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+        });
+        let turn = turn(&node, &open(), 0, 0);
+        let shown = turn.find_all("data-image");
+        assert_eq!(shown.len(), 1);
+        let img = shown[0];
+        assert_eq!(img.tag, "img");
+        assert_eq!(img.get("data-image"), Some("ab".repeat(16).as_str()));
+        assert_eq!(img.get("data-terminal"), Some("1"));
+        assert_eq!(img.get("width"), Some("64"));
+        assert_eq!(img.get("height"), Some("40"));
+        assert_eq!(img.get("src"), None, "asked for once it's seen");
+        assert!(img.image.is_none());
+        assert_eq!(img.styles, [("aspect-ratio", "64 / 40".to_owned())]);
     }
 
     #[test]

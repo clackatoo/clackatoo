@@ -69,7 +69,8 @@ pub fn handover(bytes: &[u8]) {
         chat.resume_forks(&mut state.forks);
         chat.resume_nesting(&state.nested);
         chat.resume_tool_previews(&mut state.tool_previews);
-        chat.resume_originals(&mut state.image_originals);
+        let images = state.images.as_ref().map(|images| images.chats.as_slice());
+        chat.resume_originals(&mut state.image_originals, images);
         chat.resume_queue(&mut state.chat_queues);
         chat.resume_draft(&mut state.drafts);
         if let Some(talk) = talk.as_mut() {
@@ -135,5 +136,30 @@ pub fn json_rpc(headers: bool, pieces: &[&[u8]], text: &str) {
     for message in crate::rpc::fuzz_read(framing, pieces) {
         crate::agent::fuzz_receive(&message);
         crate::lsp::fuzz_receive(&message, &text);
+    }
+}
+
+/// Reads `bytes` as an image the daemon is asked to keep, sent by a
+/// program, an agent or a file: what it is, by its header, must be read or
+/// refused, never panic, and what's kept must be of a size that may be;
+/// and, of a small one, a copy at a smaller size made, as the web app asks.
+///
+/// # Panics
+///
+/// If what's read of an image is of a size it may not be.
+pub fn image(bytes: &[u8]) {
+    let Ok((format, width, height)) = crate::images::look_at(bytes) else {
+        return;
+    };
+    assert!(clackatoo_protocol::ImageInfo::sized(width, height));
+    if u64::from(width) * u64::from(height) <= 1 << 16 {
+        let info = clackatoo_protocol::ImageInfo {
+            id: crate::images::id_of(bytes),
+            width,
+            height,
+            format,
+            bytes: bytes.len() as u64,
+        };
+        let _ = crate::images::decode(info, bytes);
     }
 }

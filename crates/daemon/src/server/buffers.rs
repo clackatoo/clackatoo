@@ -221,6 +221,13 @@ impl Daemon {
                 reason: "it isn't a folder".to_owned(),
             });
         }
+        // An image file is shown as a picture, unless it's being edited
+        // as text already.
+        if super::pictures::is_picture(&path)
+            && !(self.buffers.values()).any(|slot| slot.buffer.path() == path)
+        {
+            return Ok(self.open_picture(path));
+        }
         self.open_buffer(file, beside).map(Content::Buffer)
     }
 
@@ -291,7 +298,10 @@ impl Daemon {
         blank: &OpenBlank,
     ) -> Result<Response, Error> {
         let old = self.workspaces.check_pane(pane)?;
-        if !matches!(old, Content::Buffer(_) | Content::Folder(_)) {
+        if !matches!(
+            old,
+            Content::Buffer(_) | Content::Folder(_) | Content::Picture(_)
+        ) {
             return Err(Error::NotAFile(pane));
         }
         if self.loses_blank(&[pane]) {
@@ -303,6 +313,7 @@ impl Daemon {
         match old {
             Content::Buffer(old) => self.close_if_unwanted(old),
             Content::Folder(files) => self.close_files(files),
+            Content::Picture(picture) => self.forget_picture(picture),
             _ => {}
         }
         Ok(Response::Done)
@@ -777,7 +788,10 @@ impl Daemon {
     /// does, its listing being only the pane's.
     pub(super) fn open_here(&mut self, pane: PaneId, file: OpenFile) -> Result<Response, Error> {
         let old = self.workspaces.check_pane(pane)?;
-        if !matches!(old, Content::Buffer(_) | Content::Folder(_)) {
+        if !matches!(
+            old,
+            Content::Buffer(_) | Content::Folder(_) | Content::Picture(_)
+        ) {
             return Err(Error::NotAFile(pane));
         }
         // Not over the last view of a buffer with no file yet, with
@@ -792,6 +806,7 @@ impl Daemon {
             match old {
                 Content::Buffer(old) => self.close_if_unwanted(old),
                 Content::Folder(files) => self.close_files(files),
+                Content::Picture(picture) => self.forget_picture(picture),
                 _ => {}
             }
         }
@@ -916,6 +931,7 @@ impl Daemon {
             self.closed_in_git(buffer, slot.git_dir);
             self.unwatch_buffer(buffer);
             self.recovery_forget(buffer);
+            self.forget_buffer_images(buffer);
         }
     }
 

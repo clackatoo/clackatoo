@@ -112,7 +112,7 @@ impl Desk {
                 view.native_scroll_room(up, modifiers.shift)?,
                 1.0,
             )),
-            PaneView::Browser(_) | PaneView::Other(_) => None,
+            PaneView::Browser(_) | PaneView::Picture(..) | PaneView::Other(_) => None,
         }
     }
 

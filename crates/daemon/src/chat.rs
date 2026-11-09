@@ -1460,7 +1460,8 @@ impl HostedChat {
             .iter()
             .filter_map(|image| {
                 let mut preview = image.preview.clone()?;
-                preview.original = self.originals.insert(image.data.clone());
+                preview.original =
+                    (self.originals).insert(crate::images::Source::Base64(image.data.clone()));
                 Some(preview)
             })
             .collect();
@@ -3708,6 +3709,7 @@ impl HostedChat {
                     width: image.width,
                     height: image.height,
                     rgba: image.rgba.into(),
+                    image: None,
                 })
                 .collect();
             self.tool_images(&target, images);
@@ -3717,7 +3719,7 @@ impl HostedChat {
     pub(crate) fn tool_originals(
         &mut self,
         target: &crate::tool_images::Target,
-        images: Vec<(clackatoo_protocol::ChatPreview, String)>,
+        images: Vec<(clackatoo_protocol::ChatPreview, Vec<u8>)>,
     ) -> bool {
         // Validate the receipt and destination before retaining any original data.
         if images.is_empty()
@@ -3746,7 +3748,7 @@ impl HostedChat {
         let images = images
             .into_iter()
             .map(|(mut preview, data)| {
-                preview.original = self.originals.insert(data);
+                preview.original = self.originals.insert(crate::images::Source::Bytes(data));
                 preview
             })
             .collect();
@@ -3809,6 +3811,7 @@ impl HostedChat {
                     width: image.width,
                     height: image.height,
                     rgba: image.rgba.into(),
+                    image: None,
                 };
                 if preview.valid()
                     && bytes + preview.rgba.len() <= clackatoo_protocol::ChatPreview::HISTORY_BYTES
@@ -5013,6 +5016,7 @@ mod tests {
                 height: 1,
                 rgba: vec![1, 2, 3, 255].into(),
                 original: 0,
+                image: None,
             }),
         };
         let target = clackatoo_protocol::ChatTarget {
@@ -5237,6 +5241,7 @@ mod tests {
             width: 256,
             height: 256,
             rgba: vec![42; 256 * 256 * 4].into(),
+            image: None,
         };
         for index in 0..20 {
             let prompt = Prompt {
@@ -5262,20 +5267,27 @@ mod tests {
             .map(|p| p.rgba.len())
             .sum();
         assert_eq!(bytes, clackatoo_protocol::ChatPreview::HISTORY_BYTES);
+        // The store keeps the original: the thumbnail names it.
+        let image = clackatoo_protocol::ImageId([9; 16]);
+        assert_eq!(chat.originals.take_waiting().len(), 20);
+        assert!(chat.image_kept(20, image));
+        assert_eq!(chat.node.turns[19].previews[0].image, Some(image));
         let previews = chat.hand_over_previews();
-        let mut originals = vec![chat.hand_over_originals()];
+        let (originals, images) = chat.hand_over_originals();
+        let mut originals = vec![originals];
         let agent = crate::agents::AgentConfig::default()
             .find("claude")
             .unwrap();
         let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
         resumed.resume_previews(previews);
-        resumed.resume_originals(&mut originals);
+        resumed.resume_originals(&mut originals, Some(&[images]));
         assert_eq!(resumed.node.turns[19].previews[0].rgba, preview.rgba);
+        assert_eq!(resumed.node.turns[19].previews[0].image, Some(image));
         assert_eq!(
             resumed
                 .originals
                 .get(resumed.node.turns[19].previews[0].original),
-            Some("cG5n".into())
+            Some(image)
         );
         assert!(resumed.node.turns[0].previews.is_empty());
     }
@@ -5316,24 +5328,30 @@ mod tests {
             width: 1,
             height: 1,
             rgba: vec![20, 40, 60, 255].into(),
+            image: None,
         };
-        assert!(!chat.tool_originals(&stale, vec![(preview.clone(), "cG5n".into())]));
-        assert!(chat.originals.get(1).is_none());
+        assert!(!chat.tool_originals(&stale, vec![(preview.clone(), b"png".to_vec())]));
+        assert!(chat.originals.take_waiting().is_empty());
         let target = chat.image_target("image").unwrap();
-        assert!(chat.tool_originals(&target, vec![(preview.clone(), "cG5n".into())]));
-        let mut originals = vec![chat.hand_over_originals()];
+        assert!(chat.tool_originals(&target, vec![(preview.clone(), b"png".to_vec())]));
+        assert_eq!(chat.originals.take_waiting().len(), 1);
+        let image = clackatoo_protocol::ImageId([4; 16]);
+        assert!(chat.image_kept(1, image));
+        let (originals, kept) = chat.hand_over_originals();
+        let mut originals = vec![originals];
         let mut images = chat.hand_over_tool_previews();
         let agent = crate::agents::AgentConfig::default()
             .find("claude")
             .unwrap();
         let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
         resumed.resume_tool_previews(&mut images);
-        resumed.resume_originals(&mut originals);
+        resumed.resume_originals(&mut originals, Some(&[kept]));
         let preview = clackatoo_protocol::ChatPreview {
             original: 1,
+            image: Some(image),
             ..preview
         };
-        assert_eq!(resumed.originals.get(1), Some("cG5n".into()));
+        assert_eq!(resumed.originals.get(1), Some(image));
         assert!(resumed.node.turns[0].items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.contains(&ToolContent::Image(preview.clone())))));
     }
 
@@ -5345,6 +5363,7 @@ mod tests {
             width: 256,
             height: 256,
             rgba: vec![42; 256 * 256 * 4].into(),
+            image: None,
         };
         for index in 0..20 {
             let mut prompt = image_prompt();
@@ -5391,6 +5410,7 @@ mod tests {
             width: u32::MAX,
             height: 1,
             rgba: vec![0; 4].into(),
+            image: None,
         });
         assert!(
             chat.act(ChatAction::SendImages {

@@ -249,6 +249,7 @@ impl Desk {
             | PaneView::Board(..)
             | PaneView::Review(..)
             | PaneView::Browser(..)
+            | PaneView::Picture(..)
             | PaneView::Other(..) => None,
         }
     }

@@ -190,6 +190,7 @@ impl TestDaemon {
             pastes: None,
             logind: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
+            images: clackatoo_daemon::ImageLimits::default(),
         };
         daemon(&mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");

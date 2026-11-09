@@ -12,7 +12,10 @@
 mod bench;
 pub(crate) mod icons;
 pub use bench::FrameBench;
+pub(crate) mod textures;
 use icons::Icon;
+pub(crate) use textures::TextureKey;
+use textures::new_texture;
 
 use bytemuck::{Pod, Zeroable};
 use clackatoo_protocol::{Attributes, Underline};
@@ -46,8 +49,8 @@ pub(crate) struct Picture<'a> {
     pub(crate) glyphs: &'a [PlacedGlyph],
     /// The same, over the overlays, as a chat's menu's text is.
     pub(crate) over_glyphs: &'a [PlacedGlyph],
-    /// Pictures, as a browser pane's page is, over the panes'
-    /// backgrounds and under their text.
+    /// Pictures, as a browser pane's page is, each in its layer (see
+    /// [`Layer`]).
     pub(crate) images: &'a [PlacedImage<'a>],
 }
 
@@ -68,26 +71,61 @@ pub(crate) struct Image {
     pub(crate) rgba: Vec<u8>,
 }
 
-/// A picture placed in the window.
+/// Where a picture goes among what else is drawn: what's drawn after it
+/// goes over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layer {
+    /// Over the panes' backgrounds, under their text: a picture in a
+    /// pane, or a terminal's that a program put under its text.
+    UnderText,
+    /// Over the panes' text, under what's over the panes: a terminal's
+    /// picture its program put over its text.
+    OverText,
+    /// Over what's over the panes, as a modal image viewer.
+    Modal,
+}
+
+/// A picture placed in the window: as kitty places one in a terminal,
+/// the whole of it or a part (`crop`), stretched to `rect`, cut off
+/// outside `clip`, in a [`Layer`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlacedImage<'a> {
-    /// What it's kept on the GPU by from one frame to the next, as the
-    /// pane showing it: one texture each.
-    pub(crate) slot: u64,
-    /// Draw after overlay backgrounds, for modal image viewers.
-    pub(crate) over: bool,
+    /// What it's kept on the GPU by from one frame to the next.
+    pub(crate) key: TextureKey,
+    /// Where it goes among what else is drawn.
+    pub(crate) layer: Layer,
     /// Where it goes, left, top, width and height, in pixels: it's
     /// stretched to fill it.
     pub(crate) rect: [f32; 4],
+    /// The part of the picture drawn, left, top, width and height, in its
+    /// pixels: all of it if `None`.
+    pub(crate) crop: Option<[f32; 4]>,
     pub(crate) image: &'a Image,
-    /// Clip in window coordinates, for scrolling chat images.
+    /// What it's cut off outside, in the window's pixels.
     pub(crate) clip: Option<[f32; 4]>,
 }
 
-/// A chat image kept alive between layout and the GPU pass.
+impl<'a> PlacedImage<'a> {
+    /// `image`, kept by `key`, stretched to `rect`, under the text.
+    pub(crate) fn at(key: TextureKey, image: &'a Image, rect: [f32; 4]) -> Self {
+        Self {
+            key,
+            layer: Layer::UnderText,
+            rect,
+            crop: None,
+            image,
+            clip: None,
+        }
+    }
+}
+
+/// A picture laid out, kept alive between layout and the GPU pass, as a
+/// chat's or a Markdown page's.
 #[derive(Debug)]
 pub(crate) struct PaintedImage {
     pub(crate) over: bool,
+    /// What it's kept on the GPU by.
+    pub(crate) key: TextureKey,
     pub(crate) image: std::sync::Arc<Image>,
     pub(crate) rect: [f32; 4],
     pub(crate) clip: [f32; 4],
@@ -96,9 +134,14 @@ pub(crate) struct PaintedImage {
 impl PaintedImage {
     pub(crate) fn placed(&self) -> PlacedImage<'_> {
         PlacedImage {
-            slot: self.image.id,
-            over: self.over,
+            key: self.key,
+            layer: if self.over {
+                Layer::Modal
+            } else {
+                Layer::UnderText
+            },
             rect: self.rect,
+            crop: None,
             image: &self.image,
             clip: Some(self.clip),
         }
@@ -606,16 +649,6 @@ struct ImageQuad {
     uv_size: [f32; 2],
 }
 
-/// A picture on the GPU, in a slot.
-#[derive(Debug)]
-struct GpuImage {
-    /// The picture's number.
-    id: u64,
-    size: [u32; 2],
-    texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
-}
-
 /// The GPU objects that draw a terminal.
 #[derive(Debug)]
 pub(crate) struct Renderer {
@@ -624,8 +657,11 @@ pub(crate) struct Renderer {
     image_pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// The pictures drawn last frame, by slot.
-    images: std::collections::HashMap<u64, GpuImage>,
+    /// The pictures on the GPU, shared with the process's other windows.
+    textures: textures::Shared,
+    /// What this renderer draws each with: by its key, with the texture's
+    /// generation it was made for.
+    bound: std::collections::HashMap<TextureKey, (u64, wgpu::BindGroup)>,
     /// The most a picture is drawn, each way: [`MAX_IMAGE_SIDE`], or less
     /// if the GPU takes no bigger texture.
     image_side: u32,
@@ -777,7 +813,8 @@ impl Renderer {
             image_pipeline,
             layout,
             sampler,
-            images: std::collections::HashMap::new(),
+            textures: textures::shared(),
+            bound: std::collections::HashMap::new(),
             image_side: MAX_IMAGE_SIDE.min(device.limits().max_texture_dimension_2d),
             image_buffer: InstanceBuffer::new("images"),
             bind_group,
@@ -795,6 +832,19 @@ impl Renderer {
             shaped: Default::default(),
             cell_text: String::new(),
         }
+    }
+
+    /// Keeps pictures on the GPU in `shared`, with the process's other
+    /// windows, rather than its own.
+    pub(crate) fn share_textures(&mut self, shared: textures::Shared) {
+        self.textures = shared;
+        self.bound.clear();
+    }
+
+    /// The pictures this renderer keeps on the GPU.
+    #[cfg(test)]
+    pub(crate) fn textures(&self) -> &textures::Shared {
+        &self.textures
     }
 
     /// Throws away every rasterised glyph, after the text size changed.
@@ -908,12 +958,13 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, 0..count(background_rects));
             }
-            self.draw_images(&mut pass, &images, false);
+            self.draw_images(&mut pass, &images, Layer::UnderText);
             if let Some(buffer) = &self.glyph_buffer.buffer {
                 pass.set_pipeline(&self.glyph_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, 0..count(grid_glyphs));
             }
+            self.draw_images(&mut pass, &images, Layer::OverText);
             if let Some(buffer) = &self.rect_buffer.buffer
                 && self.rects.len() > background_rects
             {
@@ -921,7 +972,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, count(background_rects)..count(self.rects.len()));
             }
-            self.draw_images(&mut pass, &images, true);
+            self.draw_images(&mut pass, &images, Layer::Modal);
             if let Some(buffer) = &self.glyph_buffer.buffer
                 && self.glyph_instances.len() > grid_glyphs
             {
@@ -935,17 +986,19 @@ impl Renderer {
 
     /// Puts each of `placed` on the GPU, unless it's there already, and
     /// their quads in the image buffer, letting go of pictures no longer
-    /// drawn. Returns the slots drawn, in the quads' order.
+    /// wanted (see [`textures`]). Returns each picture drawn, with its
+    /// layer, in the quads' order.
     fn upload_images(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         placed: &[PlacedImage<'_>],
-    ) -> Vec<(u64, bool)> {
-        self.images
-            .retain(|slot, _| placed.iter().any(|placed| placed.slot == *slot));
+    ) -> Vec<(TextureKey, Layer)> {
+        let shared = std::sync::Arc::clone(&self.textures);
+        let mut textures = textures::lock(&shared);
+        let frame = textures.begin();
         let mut quads = Vec::with_capacity(placed.len());
-        let mut slots = Vec::with_capacity(placed.len());
+        let mut drawn = Vec::with_capacity(placed.len());
         for placed in placed {
             let image = placed.image;
             let expected = (image.width as usize) * (image.height as usize) * 4;
@@ -953,19 +1006,31 @@ impl Renderer {
             if image.width == 0 || image.height == 0 || too_big || image.rgba.len() != expected {
                 continue;
             }
-            let size = [image.width, image.height];
-            let stale = (self.images.get(&placed.slot)).is_none_or(|kept| kept.size != size);
-            if stale {
-                let gpu = self.new_image(device, size);
-                self.images.insert(placed.slot, gpu);
+            let [left, top, width, height] = placed.rect;
+            if width <= 0.0 || height <= 0.0 {
+                continue;
             }
-            let Some(gpu) = self.images.get_mut(&placed.slot) else {
+            let clipped = placed.clip.map_or(placed.rect, |clip| {
+                crate::markdown::layout::intersection(placed.rect, clip)
+            });
+            let [x, y, w, h] = clipped;
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            let size = [image.width, image.height];
+            let stale = (textures.kept.get(&placed.key)).is_none_or(|kept| kept.size != size);
+            if stale {
+                let kept = new_texture(device, size);
+                textures.insert(placed.key, kept);
+            }
+            let Some(kept) = textures.kept.get_mut(&placed.key) else {
                 continue;
             };
-            if stale || gpu.id != image.id {
+            kept.used = frame;
+            if stale || kept.picture != image.id {
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        texture: &gpu.texture,
+                        texture: &kept.texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
@@ -982,79 +1047,80 @@ impl Renderer {
                         depth_or_array_layers: 1,
                     },
                 );
-                gpu.id = image.id;
+                kept.picture = image.id;
             }
-            let [left, top, width, height] = placed.rect;
-            if width <= 0.0 || height <= 0.0 {
-                continue;
+            if self
+                .bound
+                .get(&placed.key)
+                .is_none_or(|(generation, _)| *generation != kept.generation)
+            {
+                let group = self.bind_texture(device, &kept.view);
+                self.bound.insert(placed.key, (kept.generation, group));
             }
-            let clipped = placed.clip.map_or(placed.rect, |clip| {
-                crate::markdown::layout::intersection(placed.rect, clip)
-            });
-            let [x, y, w, h] = clipped;
-            if w <= 0.0 || h <= 0.0 {
-                continue;
-            }
+            // The part of the picture drawn, as a fraction of it, then the
+            // part of that the clip leaves.
+            #[allow(clippy::cast_precision_loss)]
+            let [crop_x, crop_y, crop_w, crop_h] =
+                placed.crop.map_or([0.0, 0.0, 1.0, 1.0], |crop| {
+                    let [cx, cy, cw, ch] = crop;
+                    let (iw, ih) = (image.width as f32, image.height as f32);
+                    [cx / iw, cy / ih, cw / iw, ch / ih]
+                });
             quads.push(ImageQuad {
                 origin: [x, y],
                 size: [w, h],
-                uv_origin: [(x - left) / width, (y - top) / height],
-                uv_size: [w / width, h / height],
+                uv_origin: [
+                    crop_x + (x - left) / width * crop_w,
+                    crop_y + (y - top) / height * crop_h,
+                ],
+                uv_size: [w / width * crop_w, h / height * crop_h],
             });
-            slots.push((placed.slot, placed.over));
+            drawn.push((placed.key, placed.layer));
         }
+        textures.end(frame);
+        // What this window bound of what's been let go goes too.
+        self.bound.retain(|key, (generation, _)| {
+            (textures.kept.get(key)).is_some_and(|kept| kept.generation == *generation)
+        });
+        drop(textures);
         self.image_buffer
             .write(device, queue, bytemuck::cast_slice(&quads));
-        slots
+        drawn
     }
 
-    /// Draws the pictures in `slots`, in the image buffer's order, each
-    /// with its own texture bound, then binds the atlas again.
-    fn draw_images(&self, pass: &mut wgpu::RenderPass<'_>, slots: &[(u64, bool)], over: bool) {
-        if !slots.iter().any(|(_, above)| *above == over) {
+    /// Draws the pictures in `drawn` that are in `layer`, in the image
+    /// buffer's order, each with its own texture bound, then binds the
+    /// atlas again.
+    fn draw_images(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        drawn: &[(TextureKey, Layer)],
+        layer: Layer,
+    ) {
+        if !drawn.iter().any(|(_, at)| *at == layer) {
             return;
         }
-        let Some(buffer) = self
-            .image_buffer
-            .buffer
-            .as_ref()
-            .filter(|_| !slots.is_empty())
-        else {
+        let Some(buffer) = self.image_buffer.buffer.as_ref() else {
             return;
         };
         let count = |n: usize| u32::try_from(n).expect("far fewer than 4 billion pictures");
         pass.set_pipeline(&self.image_pipeline);
         pass.set_vertex_buffer(0, buffer.slice(..));
-        for (index, (slot, above)) in slots.iter().enumerate() {
-            if *above != over {
+        for (index, (key, at)) in drawn.iter().enumerate() {
+            if *at != layer {
                 continue;
             }
-            if let Some(image) = self.images.get(slot) {
-                pass.set_bind_group(0, &image.bind_group, &[]);
+            if let Some((_, group)) = self.bound.get(key) {
+                pass.set_bind_group(0, group, &[]);
                 pass.draw(0..4, count(index)..count(index + 1));
             }
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
     }
 
-    /// A texture `size` pixels, and what draws it.
-    fn new_image(&self, device: &wgpu::Device, [width, height]: [u32; 2]) -> GpuImage {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("image"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    /// What draws the texture `view` in this renderer.
+    fn bind_texture(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image"),
             layout: &self.layout,
             entries: &[
@@ -1064,20 +1130,14 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
-        });
-        GpuImage {
-            id: u64::MAX,
-            size: [width, height],
-            texture,
-            bind_group,
-        }
+        })
     }
 
     /// Turns the picture into rectangles and glyphs.

@@ -316,6 +316,14 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .terminals { margin-top: 6px; }
 
 .image-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }.image-preview { max-width: min(256px, 100%); height: auto; border-radius: 12px; border: 1px solid var(--line); }
+/* An image from the daemon's images keeps its shape until it comes; one dropped is a quiet word. */
+img.image-preview:not([src]) { background: var(--raised); color: transparent; }
+img.image-preview.missing { color: var(--muted); font-size: 13px; }
+img.image-preview.dropped { width: auto; height: auto; border: none; background: none; color: var(--muted); font-size: 13px; }
+/* Images programs place over a terminal's cells, from the grid's top left, under its text or over it. */
+.grid { position: relative; isolation: isolate; }
+.grid .placed { position: absolute; overflow: hidden; pointer-events: none; }
+.grid .placed img { position: absolute; max-width: none; }
 
 .footer-slot:has(.footer:empty) { display: none; }.attention-button { font-size: 12px; padding: 8px 10px; }
 

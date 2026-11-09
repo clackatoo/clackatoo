@@ -173,6 +173,11 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     /// Whether the device has been lost, as when the driver resets.
     pub(crate) lost: Arc<Lost>,
+    /// The pictures on it, which every window of the process draws from.
+    pub(crate) textures: crate::render::textures::Shared,
+    /// The images fetched and decoded, which every window of the process
+    /// shows (see [`crate::images`]).
+    pub(crate) images: crate::images::Shared,
 }
 
 /// Whether a GPU's device has been lost, and who to tell.
@@ -326,6 +331,8 @@ impl Gpu {
             device,
             queue,
             lost,
+            textures: crate::render::textures::shared(),
+            images: crate::images::shared(),
         })
     }
 
@@ -745,7 +752,8 @@ impl App {
         };
         let (format, present_mode) = (config.format, config.present_mode);
         let configured = self.started.elapsed();
-        let renderer = Renderer::new(&gpu.device, format);
+        let mut renderer = Renderer::new(&gpu.device, format);
+        renderer.share_textures(Arc::clone(&gpu.textures));
         log::debug!(
             "surface ready after {configured:.1?}, renderer after {:.1?}",
             self.started.elapsed()
@@ -2353,8 +2361,10 @@ impl App {
             }
         }
         self.desk.drawn(&drawn);
-        // The code the chats laid out, to colour.
-        if self.desk.ask_colours() {
+        // The code the chats laid out, to colour, and the images panes
+        // wanted as they were painted, to fetch.
+        let colours = self.desk.ask_colours();
+        if self.desk.settle_images() || colours {
             self.send_outbox();
         }
     }
@@ -2495,6 +2505,8 @@ impl App {
         self.desk.settle_explorers();
         self.desk.settle_boards();
         self.desk.settle_browsers();
+        self.desk.settle_pictures();
+        let pictures = self.paint_pictures(chrome);
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
@@ -2523,6 +2535,7 @@ impl App {
             shown.pane,
         );
         let mut images = browser_images(desk, &placement, &layout_panes, geometry.area.cell);
+        images.extend(pictures.iter().map(crate::render::PaintedImage::placed));
         images.extend(
             chat_paint
                 .images
@@ -2702,6 +2715,17 @@ impl App {
     /// Lays out and paints the shown tab's chats, which needs the fonts and
     /// each chat's view mutably, before the terminals are drawn. Returns
     /// the chats' terminals, and what to draw.
+    /// The images of the shown tab's picture panes, each under its words.
+    fn paint_pictures(&mut self, chrome: &Chrome) -> Vec<crate::render::PaintedImage> {
+        let area = &chrome.geometry.area;
+        let Some(tiles) =
+            (self.desk.shown_tab()).map(|tab| Placement::new(&tab.layout, area).panes)
+        else {
+            return Vec::new();
+        };
+        self.desk.paint_pictures(&tiles, area.cell)
+    }
+
     fn paint_chats(&mut self, chrome: &Chrome) -> (Vec<TerminalId>, TextPaint) {
         let mut all = TextPaint::default();
         let mut chats = Vec::new();
@@ -2877,13 +2901,8 @@ fn browser_images<'a>(
             height - words,
         ];
         if let Some(rect) = crate::browser::fit([image.width, image.height], area) {
-            images.push(PlacedImage {
-                over: false,
-                clip: None,
-                slot: u64::from(id.0),
-                rect,
-                image,
-            });
+            let key = crate::render::TextureKey::Slot(u64::from(id.0));
+            images.push(PlacedImage::at(key, image, rect));
         }
     }
     images
@@ -2982,6 +3001,13 @@ fn drawings<'a>(
             Content::Browser(_) => {
                 if let Some(browser) = desk.browser(id) {
                     let shown = ((browser.scene(), None), Vec::new());
+                    drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
+                }
+                continue;
+            }
+            Content::Picture(_) => {
+                if let Some(picture) = desk.picture(id) {
+                    let shown = ((picture.scene(), None), Vec::new());
                     drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
                 }
                 continue;
@@ -3670,6 +3696,8 @@ impl App {
                 // Whatever arrived while the window opened is drawn now:
                 // the notice, or panes whose snapshots came first.
                 frame.request_redraw();
+                let images = crate::images::Images::new(Arc::clone(&frame.gpu.images));
+                self.desk.share_images(&images);
                 self.frame = Some(frame);
                 self.fit_panes();
                 if said {
@@ -3893,6 +3921,7 @@ impl App {
             Event::Board { .. } => self.desk.board_event(event),
             Event::Review { .. } => self.desk.review_event(event),
             Event::Browser { .. } => self.desk.browser_event(event),
+            Event::Image(_) | Event::Picture { .. } => self.desk.image_event(event),
             event => self.desk.explorer_event(event),
         };
         if redraw {
@@ -4133,7 +4162,9 @@ impl App {
                 | Event::FileOp { .. }
                 | Event::Board { .. }
                 | Event::Review { .. }
-                | Event::Browser { .. }),
+                | Event::Browser { .. }
+                | Event::Image(_)
+                | Event::Picture { .. }),
             )) => self.explorer_event(event),
             SessionEvent::BrowserPicture { chat, image } => {
                 if self.desk.browser_picture(chat, &image) {

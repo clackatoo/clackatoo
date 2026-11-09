@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 
+mod images;
 mod measures;
 mod photos;
 mod terminal;
@@ -120,6 +121,8 @@ enum Pairing {
 #[derive(Debug)]
 struct ChatPage {
     photos: photos::Controls,
+    /// Watches its images, until each is on the screen.
+    images: Option<images::Watcher>,
     main: HtmlElement,
     scroller: DomElement,
     latest: HtmlElement,
@@ -306,6 +309,9 @@ struct App {
     term_page: Option<TermPage>,
     /// When the app looks again at whether keys go, if it's to.
     check_at: f64,
+    /// When the app asks again for images whose copies are being made,
+    /// if it's to.
+    images_at: f64,
     /// How many times what's typed in the box changed, for a pause in
     /// typing to tell the daemon it once (see [`App::typed_draft`]).
     drafts_typed: u64,
@@ -413,6 +419,7 @@ pub(crate) fn start() {
             page: None,
             term_page: None,
             check_at: 0.0,
+            images_at: 0.0,
             drafts_typed: 0,
             form_since: None,
             count_at: 0.0,
@@ -1374,6 +1381,7 @@ impl App {
             self.run_known(news);
         }
         self.send();
+        self.images_again_later();
         self.draw_soon();
     }
 
@@ -1842,6 +1850,7 @@ impl App {
         if draft_changed {
             self.save_draft(id);
         }
+        self.show_images(fresh);
         self.focus_sheet();
         if fresh {
             self.viewport_changed();
@@ -1896,6 +1905,7 @@ impl App {
 
     /// The page showing a chat: its parts, empty, and the box a message is
     /// typed in.
+    #[allow(clippy::too_many_lines, reason = "makes each part of the page once")]
     fn chat_page(&self) -> ChatPage {
         let document = &self.document;
         let main: HtmlElement =
@@ -1979,6 +1989,7 @@ impl App {
         let _ = self.root.append_child(&main);
         ChatPage {
             photos,
+            images: images::Watcher::new(),
             main,
             scroller,
             latest,

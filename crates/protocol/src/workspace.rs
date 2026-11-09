@@ -587,6 +587,11 @@ pub enum Content {
         /// What kind of pane it is, as the daemon names it: `browser`.
         kind: PaneKind,
     },
+    /// An image file, shown fitted, zoomed or moved about in, as the
+    /// window has it. One pane shows each. New in protocol 145
+    /// ([`wire::IMAGES`](crate::wire::IMAGES)): an older peer is sent a
+    /// pane to come ([`Content::Other`]) in its place.
+    Picture(crate::PictureId),
 }
 
 /// What a pane of a kind the client doesn't know is called, such as
@@ -702,6 +707,7 @@ impl Content {
             | Self::Review(_)
             | Self::Browser(_)
             | Self::Folder(_)
+            | Self::Picture(_)
             | Self::Other { .. } => None,
         }
     }
@@ -717,6 +723,7 @@ impl Content {
             | Self::Review(_)
             | Self::Browser(_)
             | Self::Folder(_)
+            | Self::Picture(_)
             | Self::Other { .. } => None,
         }
     }
@@ -732,6 +739,7 @@ impl Content {
             | Self::Board(_)
             | Self::Review(_)
             | Self::Browser(_)
+            | Self::Picture(_)
             | Self::Other { .. } => None,
         }
     }
@@ -753,6 +761,7 @@ impl Content {
             | Self::Review(_)
             | Self::Browser(_)
             | Self::Folder(_)
+            | Self::Picture(_)
             | Self::Other { .. } => None,
         }
     }
@@ -768,6 +777,7 @@ impl Content {
             | Self::Board(_)
             | Self::Browser(_)
             | Self::Folder(_)
+            | Self::Picture(_)
             | Self::Other { .. } => None,
         }
     }
@@ -781,6 +791,23 @@ impl Content {
             | Self::Files(_)
             | Self::Board(_)
             | Self::Review(_)
+            | Self::Folder(_)
+            | Self::Picture(_)
+            | Self::Other { .. } => None,
+        }
+    }
+
+    /// The picture pane it is, if it's one.
+    #[must_use]
+    pub fn picture(self) -> Option<crate::PictureId> {
+        match self {
+            Self::Picture(picture) => Some(picture),
+            Self::Terminal(_)
+            | Self::Buffer(_)
+            | Self::Files(_)
+            | Self::Board(_)
+            | Self::Review(_)
+            | Self::Browser(_)
             | Self::Folder(_)
             | Self::Other { .. } => None,
         }
@@ -798,6 +825,7 @@ impl Content {
             Self::Board(_) => "board",
             Self::Review(_) => "review",
             Self::Browser(_) => "browser",
+            Self::Picture(_) => "image",
             Self::Other { kind } => match kind.as_str() {
                 "terminal" => "terminal",
                 "editor" => "editor",
@@ -805,6 +833,7 @@ impl Content {
                 "board" => "board",
                 "review" => "review",
                 "browser" => "browser",
+                "image" => "image",
                 _ => "pane",
             },
         }

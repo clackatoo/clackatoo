@@ -52,6 +52,7 @@ mod kept;
 mod keys;
 mod marked;
 mod marks;
+mod page_images;
 mod panel;
 mod pattern;
 mod pieces;

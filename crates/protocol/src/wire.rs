@@ -412,6 +412,17 @@ gates! {
     /// `Request::Reopen` opens again. An older peer is shown every tab
     /// unzoomed, and is never sent either request.
     LAYOUT_EXTRAS = 144,
+    /// One layer for every image a pane shows (CLACKA-239): kept once by
+    /// the daemon, by an ID made from its bytes, and fetched by it in parts,
+    /// `Request::Image` (`ImageFrom`, `ImageAnswer`), with a copy at the
+    /// size shown for the web app, said ready with `Event::Image`
+    /// (`ImageNews`); an image file in a pane of its own,
+    /// `Content::Picture`, which an older peer is sent as a pane to come,
+    /// with `Request::AttachPicture`, `Response::Picture` and
+    /// `Event::Picture`; the images an editor's Markdown shows,
+    /// `Request::ImageAt`; and `ChatPreview`'s `image`, with whose
+    /// thumbnail no pixels are sent.
+    IMAGES = 145,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -529,6 +540,7 @@ impl Since for Content {
             | Self::Browser(_)
             | Self::Folder(_) => EARLIER,
             Self::Other { .. } => FALLBACKS,
+            Self::Picture(_) => IMAGES,
         }
     }
 }
@@ -738,6 +750,7 @@ impl Since for Event {
             Self::Listening(_) => BACKGROUND,
             Self::NativeRequest { .. } | Self::NativeGrantAck { .. } => HARNESS,
             Self::Paired { .. } => PAIRED,
+            Self::Image(_) | Self::Picture { .. } => IMAGES,
         }
     }
 }
@@ -1004,6 +1017,46 @@ fn with_placeholders(message: &ServerMessage) -> Option<ServerMessage> {
     })
 }
 
+/// `message`, if it's the workspaces and some of their panes are of a
+/// kind newer than `wire`, with those shown as panes to come
+/// ([`Content::Other`], naming their kind), which a peer that has them
+/// reads, and says it needs a newer clackatoo for: a picture pane for one
+/// from before [`IMAGES`]. A peer from before the fallbacks has no
+/// `Other`, and is sent none: the workspaces are refused it, as they
+/// always were for a pane it couldn't read.
+fn with_newer_kinds(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
+    let (ServerMessage::Event(Event::Workspaces(workspaces))
+    | ServerMessage::Response(Response::Workspaces(workspaces))) = message
+    else {
+        return None;
+    };
+    if wire < FALLBACKS {
+        return None;
+    }
+    let mut shown = workspaces.clone();
+    let mut changed = false;
+    let mut placeholder = |pane: &mut crate::Pane| {
+        if pane.content.since() > wire {
+            pane.content = Content::Other {
+                kind: crate::PaneKind::new(pane.content.kind_name()),
+            };
+            changed = true;
+        }
+    };
+    for workspace in &mut shown.list {
+        for tab in &mut workspace.tabs {
+            tab.layout.for_each_pane_mut(&mut placeholder);
+        }
+        for background in &mut workspace.background {
+            background.tab.layout.for_each_pane_mut(&mut placeholder);
+        }
+    }
+    changed.then_some(match message {
+        ServerMessage::Event(_) => ServerMessage::Event(Event::Workspaces(shown)),
+        _ => ServerMessage::Response(Response::Workspaces(shown)),
+    })
+}
+
 /// `message`, if it's the workspaces and some are from other machines,
 /// without those: what a peer from before federation is sent, which can't
 /// tell them from the daemon's own, as names may be the same, nor has any
@@ -1194,6 +1247,18 @@ impl Downgrade for ClientMessage {
             && matches!(
                 self,
                 Self::Request(crate::Request::Zoom { .. } | crate::Request::Reopen { .. })
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < IMAGES
+            && matches!(
+                self,
+                Self::Request(
+                    crate::Request::Image { .. }
+                        | crate::Request::ImageAt { .. }
+                        | crate::Request::AttachPicture { .. }
+                )
             )
         {
             return Downgraded::Refused;
@@ -1639,6 +1704,12 @@ impl Downgrade for ServerMessage {
                 downgraded => downgraded,
             };
         }
+        if let Some(shown) = with_newer_kinds(self, wire) {
+            return match shown.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(shown),
+                downgraded => downgraded,
+            };
+        }
         if wire < RELAY
             && let Some(shown) = with_placeholders(self)
         {
@@ -1661,6 +1732,8 @@ impl Downgrade for ServerMessage {
                 | Event::Said(_)
                 | Event::Listening(_)
                 | Event::Paired { .. }
+                | Event::Image(_)
+                | Event::Picture { .. }
                 | Event::Files {
                     update:
                         FilesUpdate::Changed { .. }
@@ -1960,6 +2033,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     rgba: vec![1, 2, 3, 255].into(),
+                    image: None,
                 }),
             ],
             exit: None,
@@ -2016,6 +2090,7 @@ mod tests {
             width: 1,
             height: 1,
             rgba: vec![1, 2, 3, 255].into(),
+            image: None,
         });
         let nested = |item| Item::nested("task".into(), item);
         let items = vec![
@@ -2343,6 +2418,7 @@ mod tests {
             width: 1,
             height: 1,
             rgba: vec![10, 20, 30, 255].into(),
+            image: None,
         };
         let mut image = crate::ChatImage {
             data: "cG5n".into(),
@@ -2524,7 +2600,9 @@ mod tests {
         // a window that reads it is sent; and what an explorer's bar is
         // told, which an older window does without;
         // and the question whether to trust a
-        // folder, which only a client that can answer it is asked.
+        // folder, which only a client that can answer it is asked; and
+        // what came of image work, and what a picture pane shows, which
+        // only a client that asked is sent.
         matches!(
             message,
             ServerMessage::Event(
@@ -2534,6 +2612,8 @@ mod tests {
                         | FilesUpdate::Notice(_),
                     ..
                 } | Event::Paired { .. }
+                    | Event::Image(_)
+                    | Event::Picture { .. }
                     | Event::NativeRequest { .. }
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }
@@ -3044,6 +3124,7 @@ mod original_tests {
             height: 1,
             rgba: vec![1, 2, 3, 255].into(),
             original: 42,
+            image: None,
         };
         let bytes = speaking(CHAT_ORIGINALS, || postcard::to_allocvec(&preview).unwrap());
         assert_eq!(
@@ -3210,5 +3291,164 @@ mod search_count_tests {
             searched.downgrade(SEARCH_COUNT - 1),
             Downgraded::To(ServerMessage::Response(Response::Found(found)))
         );
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::{
+        ChatPreview, ImageFrom, ImageId, ImageNews, Layout, Pane, PaneId, Picture, PictureId,
+        PictureState, Request, Tab, TabId, Workspace, WorkspaceId, Workspaces,
+    };
+
+    fn encode<T: serde::Serialize>(wire: u32, value: &T) -> Vec<u8> {
+        speaking(wire, || postcard::to_allocvec(value).unwrap())
+    }
+
+    fn read<T: serde::de::DeserializeOwned>(wire: u32, bytes: &[u8]) -> T {
+        speaking(wire, || postcard::from_bytes(bytes).unwrap())
+    }
+
+    fn preview(image: Option<ImageId>) -> ChatPreview {
+        ChatPreview {
+            width: 2,
+            height: 1,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255].into(),
+            original: 7,
+            image,
+        }
+    }
+
+    /// A thumbnail naming its image is sent without its pixels to a client
+    /// that fetches the image, and with them, as ever, to one that can't.
+    #[test]
+    fn a_thumbnail_naming_its_image_is_sent_without_pixels_only_to_who_fetches_it() {
+        let id = ImageId([3; 16]);
+        let named = preview(Some(id));
+        let sent: ChatPreview = read(IMAGES, &encode(IMAGES, &named));
+        assert_eq!(sent.image, Some(id));
+        assert!(sent.rgba.is_empty());
+        assert!(sent.valid() && !sent.has_pixels());
+        let older: ChatPreview = read(IMAGES - 1, &encode(IMAGES - 1, &named));
+        assert_eq!(
+            older,
+            ChatPreview {
+                image: None,
+                ..named.clone()
+            }
+        );
+        assert!(older.has_pixels());
+        // Older bytes are unchanged by the new field.
+        assert_eq!(
+            encode(IMAGES - 1, &named),
+            encode(IMAGES - 1, &preview(None))
+        );
+        // Without an image, the pixels go to anyone.
+        let plain = preview(None);
+        assert_eq!(read::<ChatPreview>(IMAGES, &encode(IMAGES, &plain)), plain);
+        // Neither pixels nor an image is no thumbnail.
+        assert!(
+            !ChatPreview {
+                rgba: Vec::new().into(),
+                ..plain
+            }
+            .valid()
+        );
+    }
+
+    fn workspaces_with(content: Content) -> ServerMessage {
+        ServerMessage::Event(Event::Workspaces(Workspaces {
+            list: vec![Workspace {
+                id: WorkspaceId(1),
+                name: "w".into(),
+                tabs: vec![Tab {
+                    id: TabId(2),
+                    layout: Layout::Pane(Pane {
+                        id: PaneId(3),
+                        content,
+                        home: None,
+                        key: None,
+                    }),
+                    focused: PaneId(3),
+                    name: None,
+                }],
+                active_tab: TabId(2),
+                home: None,
+                lent: None,
+                background: Vec::new(),
+            }],
+            active: None,
+            home: None,
+            restored: Vec::new(),
+            machine: None,
+            others: Vec::new(),
+            passed: Vec::new(),
+            kept: Vec::new(),
+            homes: Vec::new(),
+            zoomed: Vec::new(),
+        }))
+    }
+
+    /// An older client is sent a picture pane as a pane to come, which
+    /// says it needs a newer clackatoo; one older than the fallbacks has
+    /// none to be sent.
+    #[test]
+    fn a_picture_pane_is_a_pane_to_come_to_an_older_client() {
+        let picture = workspaces_with(Content::Picture(PictureId(4)));
+        assert_eq!(picture.downgrade(IMAGES), Downgraded::AsIs);
+        assert_eq!(
+            picture.downgrade(IMAGES - 1),
+            Downgraded::To(workspaces_with(Content::Other {
+                kind: crate::PaneKind::new("image"),
+            }))
+        );
+        assert!(!matches!(
+            picture.downgrade(FALLBACKS - 1),
+            Downgraded::AsIs | Downgraded::To(_)
+        ));
+    }
+
+    /// What answers only a newer client's asking is never sent to an older
+    /// one, and an older daemon is never asked.
+    #[test]
+    fn image_events_and_requests_never_reach_an_older_peer() {
+        for event in [
+            Event::Image(ImageNews::Scaled {
+                from: ImageFrom::Picture(PictureId(1)),
+                image: ImageId([1; 16]),
+                fit: [10, 10],
+            }),
+            Event::Picture {
+                picture: PictureId(1),
+                shown: Picture {
+                    path: "~/a.png".into(),
+                    state: PictureState::Loading,
+                },
+            },
+        ] {
+            let message = ServerMessage::Event(event);
+            assert_eq!(message.downgrade(IMAGES), Downgraded::AsIs);
+            assert_eq!(message.downgrade(IMAGES - 1), Downgraded::Dropped);
+        }
+        for request in [
+            Request::Image {
+                from: ImageFrom::Terminal(crate::TerminalId(1)),
+                image: ImageId([1; 16]),
+                fit: None,
+                at: 0,
+            },
+            Request::ImageAt {
+                buffer: crate::BufferId(1),
+                path: "a.png".into(),
+            },
+            Request::AttachPicture {
+                picture: PictureId(1),
+            },
+        ] {
+            let message = ClientMessage::Request(request);
+            assert_eq!(message.downgrade(IMAGES), Downgraded::AsIs);
+            assert_eq!(message.downgrade(IMAGES - 1), Downgraded::Refused);
+        }
     }
 }

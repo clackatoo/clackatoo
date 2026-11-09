@@ -1938,6 +1938,7 @@ pub(super) mod tests {
             pastes: None,
             logind: None,
             keep_wait: crate::DEFAULT_KEEP_WAIT,
+            images: crate::ImageLimits::default(),
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);

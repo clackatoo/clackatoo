@@ -3556,6 +3556,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: vec![255; 8].into(),
+            image: None,
         };
         let mut node = talk(&[("[Image]", "A screenshot.")]);
         node.turns[0].previews.push(preview.clone());
@@ -3579,6 +3580,64 @@ mod tests {
         assert_eq!(paint(&mut chat, &mut fonts).images.len(), 1);
     }
 
+    /// A thumbnail naming its image is drawn from the image itself,
+    /// through the window's images: a box while it comes, its pixels, if
+    /// any came, standing in; then the image, decoded at the size drawn.
+    #[test]
+    fn a_thumbnail_naming_its_image_is_drawn_through_the_window_s_images() {
+        use crate::chat::fixtures::{fonts, paint, talk};
+        use clackatoo_protocol::{ImageFormat, ImageFrom, ImageId, ImageInfo, TerminalId};
+        let mut fonts = fonts();
+        let mut png = Vec::new();
+        ::image::RgbaImage::from_pixel(40, 20, ::image::Rgba([1, 2, 3, 255]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+        let id = ImageId([6; 16]);
+        let preview = clackatoo_protocol::ChatPreview {
+            original: 1,
+            width: 40,
+            height: 20,
+            rgba: Vec::new().into(),
+            image: Some(id),
+        };
+        let mut node = talk(&[("[Image]", "A screenshot.")]);
+        node.turns[0].previews.push(preview);
+        let mut chat = ChatView::new("chat".into(), node);
+        let images = crate::images::Images::default();
+        chat.share_images(images.clone(), TerminalId(4));
+        let first = paint(&mut chat, &mut fonts);
+        assert!(first.images.is_empty(), "nothing yet");
+        let wanted = images.take_wanted();
+        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted[0].1, ImageFrom::Terminal(TerminalId(4)));
+        let side = wanted[0].0.1;
+        let info = ImageInfo {
+            id,
+            width: 40,
+            height: 20,
+            format: ImageFormat::Png,
+            bytes: png.len() as u64,
+        };
+        images.keep(id, None, info, png);
+        assert!(images.decode(id, side));
+        for _ in 0..500 {
+            if !images.take_decoded().1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let drawn = paint(&mut chat, &mut fonts);
+        assert_eq!(drawn.images.len(), 1);
+        assert_eq!(
+            drawn.images[0].key,
+            crate::render::TextureKey::Image(id, side)
+        );
+        assert_eq!(&drawn.images[0].image.rgba[..4], &[1, 2, 3, 255]);
+    }
+
     #[test]
     fn image_tools_stay_visible_when_work_is_folded_and_reuse_the_texture() {
         use crate::chat::fixtures::{fonts, paint, talk};
@@ -3589,6 +3648,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: vec![255; 8].into(),
+            image: None,
         };
         node.turns[0].items.insert(
             0,
@@ -3763,6 +3823,7 @@ mod tests {
                         width: 256,
                         height: 160,
                         rgba: vec![127; 256 * 160 * 4].into(),
+                        image: None,
                     };
                     if kind == "prompt" {
                         turn.previews.push(preview);

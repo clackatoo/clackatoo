@@ -40,6 +40,9 @@ pub(crate) struct Link {
     pub(crate) range: Range<usize>,
     /// Where it goes, as written: a URL, a file, or `#` and a heading.
     pub(crate) to: String,
+    /// It's an image's, which an editor's rendered view shows (see
+    /// `editor/rendered.rs`): its text is the image's description.
+    pub(crate) image: bool,
 }
 
 /// What a block is.
@@ -171,8 +174,8 @@ struct Reader {
     /// A list has started whose first item hasn't.
     list_starts: bool,
     /// The links being read: where each starts in the open block's text,
-    /// and where it goes.
-    links: Vec<(usize, String)>,
+    /// where it goes, and whether it's an image's.
+    links: Vec<(usize, String, bool)>,
 }
 
 /// Where in a table the reader is.
@@ -283,11 +286,11 @@ impl Reader {
             Tag::Strikethrough => self.strike = self.strike.saturating_add(1),
             Tag::Link { dest_url, .. } => {
                 self.link = self.link.saturating_add(1);
-                self.open_link(dest_url);
+                self.open_link(dest_url, false);
             }
             Tag::Image { dest_url, .. } => {
                 self.image = self.image.saturating_add(1);
-                self.open_link(dest_url);
+                self.open_link(dest_url, true);
             }
             _ => {}
         }
@@ -377,19 +380,19 @@ impl Reader {
     }
 
     /// A link to `to` starts here, or an image of it.
-    fn open_link(&mut self, to: &str) {
+    fn open_link(&mut self, to: &str, image: bool) {
         let start = self.open.as_ref().map_or(0, |block| block.text.len());
-        self.links.push((start, to.to_owned()));
+        self.links.push((start, to.to_owned(), image));
     }
 
     /// The link last opened ends here.
     fn close_link(&mut self) {
-        if let Some((start, to)) = self.links.pop()
+        if let Some((start, to, image)) = self.links.pop()
             && let Some(block) = &mut self.open
             && block.text.len() > start
         {
             let range = start..block.text.len();
-            block.links.push(Link { range, to });
+            block.links.push(Link { range, to, image });
         }
     }
 

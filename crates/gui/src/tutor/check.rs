@@ -93,6 +93,8 @@ pub(crate) enum Kind {
     Board,
     Review,
     Browser,
+    /// A picture pane, showing an image file.
+    Image,
     /// A pane of a kind this window doesn't know, from a newer daemon: no
     /// lesson asks for one.
     Other,
@@ -333,6 +335,7 @@ fn kind_of(word: &str) -> Result<Kind, String> {
         "board" => Kind::Board,
         "review" => Kind::Review,
         "browser" => Kind::Browser,
+        "image" => Kind::Image,
         other => return Err(format!("`{other}` isn't a kind of pane")),
     })
 }

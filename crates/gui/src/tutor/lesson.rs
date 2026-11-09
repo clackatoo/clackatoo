@@ -25,6 +25,7 @@
 //! | Block | Holds |
 //! |---|---|
 //! | `practice NAME` | A file for the scratch directory, named NAME. The lesson's first is the practice file, which the practice pane edits. In a step, the practice file's text from the step's start. |
+//! | `practice NAME base64` | A file of bytes for the scratch directory, as an image, in standard base64. Not the practice file, nor in a step. |
 //! | `setup` | What to do first, a line each (see [`Setup`]). |
 //! | `check` | What must hold for the step to be done, a line each, all of them (see [`Check`]). |
 //! | `expect` | The practice file's text, exactly, for the step to be done. |
@@ -53,6 +54,8 @@ pub(crate) struct Lesson {
     /// The files for the scratch directory, by name; the first is the
     /// practice file, unless the practice pane is a terminal.
     pub(crate) files: Vec<(String, String)>,
+    /// The files of bytes for the scratch directory, as images, by name.
+    pub(crate) bytes: Vec<(String, Vec<u8>)>,
     /// What to do as the lesson opens.
     pub(crate) setup: Vec<Setup>,
     pub(crate) steps: Vec<Step>,
@@ -149,6 +152,7 @@ impl Lesson {
             summary: String::new(),
             intro: Vec::new(),
             files: Vec::new(),
+            bytes: Vec::new(),
             setup: Vec::new(),
             steps: Vec::new(),
         };
@@ -232,6 +236,23 @@ impl Lesson {
         let lines = || body.iter().filter(|line| !line.trim().is_empty());
         let in_step = !self.steps.is_empty();
         match kind {
+            "practice" if rest.trim().ends_with(" base64") => {
+                use base64::Engine as _;
+                let name = rest.trim().trim_end_matches(" base64").trim();
+                if in_step || self.files.is_empty() {
+                    return Err(
+                        "a file of bytes comes after the practice file, before the steps".into(),
+                    );
+                }
+                if name.is_empty() || name.contains('/') || name.starts_with('.') {
+                    return Err(format!("a practice file needs a plain name, not `{name}`"));
+                }
+                let encoded: String = body.concat().split_whitespace().collect();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|err| format!("`{name}` isn't base64: {err}"))?;
+                self.bytes.push((name.to_owned(), bytes));
+            }
             "practice" => {
                 let name = rest.trim();
                 if !in_step {

@@ -1385,6 +1385,7 @@ impl Daemon {
             Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
             Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
             Content::Browser(_) => Err(format!("pane {pane} shows a browser, not a terminal")),
+            Content::Picture(_) => Err(format!("pane {pane} shows an image, not a terminal")),
             Content::Other { kind } => Err(format!("pane {pane} shows a {kind}, not a terminal")),
         }
     }
@@ -1633,6 +1634,18 @@ impl Daemon {
             },
             Content::Review(_) => "review of what agents changed".to_owned(),
             Content::Browser(chat) => format!("browser, watching chat {chat}'s page"),
+            // Its size, never its bytes.
+            Content::Picture(picture) => {
+                let path = (self.picture_path(picture)).map(|path| shorten(path, dir));
+                let image = (self.picture_image(picture))
+                    .and_then(|image| self.images.info(image))
+                    .map(|info| clackatoo_protocol::image_words(info.width, info.height));
+                match (path, image) {
+                    (Some(path), Some(image)) => format!("image, {path} {image}"),
+                    (Some(path), None) => format!("image, {path}"),
+                    (None, _) => "image".to_owned(),
+                }
+            }
             Content::Other { kind } => kind.to_string(),
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {

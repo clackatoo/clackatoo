@@ -266,7 +266,10 @@ impl Window {
         app.buttons = desktop.buttons.clone();
         fonts.set_scale(scale);
         let gpu = gpu()?;
-        let renderer = Renderer::new(&gpu.device, FORMAT);
+        let mut renderer = Renderer::new(&gpu.device, FORMAT);
+        renderer.share_textures(std::sync::Arc::clone(&gpu.textures));
+        let images = crate::images::Images::new(std::sync::Arc::clone(&gpu.images));
+        app.desk.share_images(&images);
         let offscreen = Offscreen::new(&gpu.device, pixels(size, scale), scale);
         app.frame = Some(Frame {
             target: Target::Offscreen(offscreen),

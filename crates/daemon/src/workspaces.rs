@@ -206,6 +206,10 @@ impl WorkspaceState {
                         id: pane.id.0,
                         files: files.0,
                     },
+                    Content::Picture(picture) => handover::Layout::Picture {
+                        id: pane.id.0,
+                        picture: picture.0,
+                    },
                     // Only what a newer daemon sends a client is Other,
                     // and a borrowed pane, handed over above: no request
                     // makes another, so no daemon's workspaces hold one.
@@ -2124,6 +2128,9 @@ fn handed_pane(node: &handover::Layout) -> Option<Pane> {
         handover::Layout::Review { id, review } => (id, Content::Review(ReviewId(review))),
         handover::Layout::Browser { id, chat } => (id, Content::Browser(TerminalId(chat))),
         handover::Layout::Folder { id, files } => (id, Content::Folder(FilesId(files))),
+        handover::Layout::Picture { id, picture } => {
+            (id, Content::Picture(clackatoo_protocol::PictureId(picture)))
+        }
         handover::Layout::Split { .. } | handover::Layout::Borrowed { .. } => return None,
     };
     Some(Pane {

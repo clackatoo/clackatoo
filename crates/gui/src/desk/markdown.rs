@@ -11,9 +11,11 @@
 
 use std::path::Path;
 
-use clackatoo_protocol::{ClientMessage, PaneId, Span};
+use clackatoo_protocol::{
+    BufferId, ClientMessage, ImageAnswer, ImageInfo, PaneId, Request, Response, Span, wire,
+};
 
-use super::Desk;
+use super::{Asked, Desk};
 use crate::chat::Pointer;
 use crate::editor::Done;
 use crate::fonts::Fonts;
@@ -59,8 +61,85 @@ impl Desk {
         origin: [f32; 2],
         size: [f32; 2],
     ) -> Option<TextPaint> {
+        let images = self.pictures.images.clone();
         let (editor, copy) = self.editor_and_copy(pane)?;
-        editor.paint_rendered(fonts, origin, size, copy)
+        let paint = editor.paint_rendered(fonts, (origin, size), copy, &images);
+        // The images it names that aren't known yet, asked of the daemon of
+        // its file's machine, which reads them from its folder.
+        let buffer = editor.buffer();
+        let asks = editor.take_image_asks();
+        if !asks.is_empty() && self.daemon_has(wire::IMAGES) {
+            for path in asks {
+                let request = Request::ImageAt {
+                    buffer,
+                    path: path.clone(),
+                };
+                self.request(request, Asked::MarkdownImage(buffer, path));
+            }
+        } else if !asks.is_empty() {
+            // An older daemon reads none: their descriptions stay.
+            for (_, editor) in self.editors_mut() {
+                if editor.buffer() == buffer {
+                    for path in &asks {
+                        editor.rendered_image_found(path, None);
+                    }
+                }
+            }
+        }
+        paint
+    }
+
+    /// The image at `path` from the folder of `buffer`'s file is `found`,
+    /// or can't be shown: the editors showing it rendered show it. Returns
+    /// whether the window must be redrawn.
+    pub(super) fn markdown_image_found(
+        &mut self,
+        buffer: BufferId,
+        path: &str,
+        found: Result<ImageInfo, String>,
+    ) -> bool {
+        if let Err(why) = &found {
+            log::info!("an image Markdown names can't be shown: {path}: {why}");
+        }
+        let found = found.ok();
+        let mut changed = false;
+        for (_, editor) in self.editors_mut() {
+            if editor.buffer() == buffer {
+                changed |= editor.rendered_image_found(path, found);
+            }
+        }
+        changed
+    }
+
+    /// Takes in the daemon's answer to reading the image at `path` from
+    /// the folder of `buffer`'s file. Returns whether the window must be
+    /// redrawn.
+    pub(super) fn markdown_image_answered(
+        &mut self,
+        buffer: BufferId,
+        path: &str,
+        response: Response,
+    ) -> bool {
+        match response {
+            // An event says, once it's read.
+            Response::Image(ImageAnswer::Loading) => false,
+            Response::Image(ImageAnswer::Found(info)) => {
+                self.markdown_image_found(buffer, path, Ok(info))
+            }
+            Response::Image(ImageAnswer::Failed(why)) => {
+                self.markdown_image_found(buffer, path, Err(why))
+            }
+            Response::Error(err) => self.markdown_image_found(buffer, path, Err(err.to_string())),
+            other => self.markdown_image_found(buffer, path, Err(format!("{other:?}"))),
+        }
+    }
+
+    /// Asks again for the images rendered Markdown names that weren't
+    /// answered, as a new connection does.
+    pub(super) fn markdown_images_reconnected(&mut self) {
+        for (_, editor) in self.editors_mut() {
+            editor.rendered_images_reconnected();
+        }
     }
 
     /// The editor showing its Markdown rendered at `point`, if one's there,

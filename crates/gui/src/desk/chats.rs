@@ -106,6 +106,7 @@ impl Desk {
         let pane = self.panes.remove(&terminal)?;
         let mut chat = ChatPane::taking_over(pane, view, node);
         chat.view_mut().share_finds(&self.finds);
+        (chat.view_mut()).share_images(self.pictures.images.clone(), terminal);
         chat.set_options(&self.options);
         Some(self.chats.entry(terminal).insert_entry(chat).into_mut())
     }
@@ -449,7 +450,9 @@ impl Desk {
     /// seconds to count or an image to finish decoding: the soonest.
     /// Chats suppress agent timers while offline; local image work can finish.
     pub(crate) fn chat_wakes(&self) -> Option<std::time::Instant> {
-        self.chats.values().filter_map(ChatPane::live).min()
+        (self.chats.values().filter_map(ChatPane::live))
+            .chain(self.pictures.wake)
+            .min()
     }
 
     /// Tells every chat the daemon has gone out of reach, if `offline`, or

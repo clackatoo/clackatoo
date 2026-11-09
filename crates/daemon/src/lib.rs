@@ -39,6 +39,7 @@ mod handoff;
 mod handover;
 mod hosted;
 mod ignores;
+mod images;
 mod inhibit;
 mod known;
 pub mod launch;
@@ -68,6 +69,8 @@ mod unlisted;
 pub mod upgrade;
 pub mod web;
 mod workspaces;
+
+pub use images::Limits as ImageLimits;
 
 use std::ffi::OsString;
 use std::ops::RangeInclusive;
@@ -242,6 +245,10 @@ pub struct DaemonConfig {
     /// kept before the machine shuts down or sleeps, as a D-Bus address
     /// (see `inhibit.rs`). `None` asks nothing.
     pub logind: Option<String>,
+    /// How much memory the images panes show may take: each terminal's,
+    /// chat's, picture pane's or buffer's, and all of them together (see
+    /// `images`).
+    pub images: ImageLimits,
 }
 
 /// Where images pasted into terminals are kept, and the programs that put
@@ -470,7 +477,10 @@ impl DaemonConfig {
     /// kept in, or `off` for none (or else `clackatoo/pastes` in
     /// [`cache_dir`]), and `$CLACKATOO_LOGIND`: the D-Bus address of the
     /// system bus logind is asked on, or `off` to ask nothing (or else the
-    /// system bus, but with `$CLACKATOO_DISPLAY` off, as for tests).
+    /// system bus, but with `$CLACKATOO_DISPLAY` off, as for tests), and
+    /// `$CLACKATOO_IMAGE_MEMORY`: how many MiB of images each terminal,
+    /// chat, picture pane or buffer may hold, and all of them together, as
+    /// `64,256`, the defaults.
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
     pub fn from_env() -> Self {
@@ -628,6 +638,7 @@ impl DaemonConfig {
                 None if non_empty("CLACKATOO_DISPLAY").is_some_and(|off| off == "off") => None,
                 None => Some(dbus::system_address()),
             },
+            images: ImageLimits::from_env(non_empty("CLACKATOO_IMAGE_MEMORY").as_deref()),
         }
     }
 }
