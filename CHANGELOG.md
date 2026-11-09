@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026.11.17 (2026-11-09)
+
+### Features
+
+- **terminal:** paste the clipboard's image into a terminal on any machine (CLACKA-227) (41d382c6)
+- **editor:** r and Enter breaks the line in place of the characters, as Vim's (8dae733d)
+- **vim:** Y yanks to the line's end, as Neovim's, in every pane (b49e9b88)
+- **explorer:** a drop on .., out of the explorer's root, asks first (f3b47821)
+
+### Fixes
+
+- **terminal:** name the image's type for wl-copy, and refuse a phone's clipboard paste where it connects (CLACKA-227) (5c6b1c5c)
+- **terminal:** keys typed after a pasted image wait for it, and the review fixes (CLACKA-227) (244c8aab)
+- **chat:** a sign-in an agent says ran out by itself names the login command (5e64de21)
+- **activities:** a result keeps the end of the output, with how the command ended (2d0dfc63)
+- **subagents:** a subagent the user sent back doesn't close with the chat that started it (c861a7d0)
+- **options:** carryover goes no higher than the daemon takes, 50000 (94b5bde1)
+- **mentions:** only a command the agent runs goes without its mentions, not any message starting with a slash (cc410fdb)
+- **options:** chatbrowser's short name is cbr, as cb is clipboard's (6fdd8ba9)
+- **web:** web.toml's lock_after is read, in range, and unknown keys are logged (c8756219)
+- **chat:** the slash menu leaves out the window's command the agent offers in any case (931d1072)
+- **chat:** an agent's image keeps to the pixels a pasted one may have, one cap for both (f9f52c13)
+- **agents:** one agent wrong in agents.toml is left out alone, not every agent (77d66a54)
+- **editor:** r with a count past the line's end fails, stopping a macro, as Vim's (d31f6544)
+- **vim:** Del while a count is typed takes its last digit off, as Vim's (e589b15d)
+- **editor:** visual D, X, C, S and R take the lines selected, as Vim's (62596565)
+- **editor:** visual A types after the selection's end, as Vim's, not at the line's end (0d344721)
+- **explorer:** only a key pressed now answers a drop's question, as a link's (12572fb6)
+- **explorer:** a drop's need for a key pressed now goes with its question, never to the next (f1538bca)
+- **term:** end a compacted history line as a raw one ends (7e3e28a6)
+- **web:** follow keyboard transitions frame by frame, and show the phone's measurements (CLACKA-159) (f0caf9bb)
+- **web:** the measurements check taps its button however hover is emulated (CLACKA-159) (2ff5f31f)
+- **web:** the list's expected taps include Screen measurements, and clippy's line limits hold (CLACKA-159) (efe8af81)
+- **web:** tapping the terminal's rows applies its typing layout though its focusin goes unheard (CLACKA-159) (6b69ef54)
+
 ## 2026.11.16 (2026-11-09)
 
 ### Features
