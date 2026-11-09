@@ -751,7 +751,8 @@ The daemon was set before in `daemon/agents.toml`, `machine.toml` and
 `web.toml`. The first time a daemon with this config starts or upgrades, and
 finds them there and no `settings.lua`, it moves every value they set into
 `settings.lua`, a line each, with their comments, and keeps the old files
-beside it as `agents.toml.bak` and so on. A value the config can't hold, or a
+beside it as `agents.toml.bak` and so on. `machine.toml`'s `[terminals]`
+becomes `daemon.terminals`. A value the config can't hold, or a
 key that was never a setting, is written commented out, saying why, so the
 rest still runs. A field an agent or profile never had is left out alone,
 keeping the agent, as before. If any of `web.toml` is left out, so is its
@@ -860,6 +861,15 @@ How phones and browsers reach the daemon: see
 | `daemon.history.every` | How often, in seconds, the scrollback of terminals that changed is written, from 1 to 86400. | 30 |
 | `daemon.images.terminal_mb` | The most MiB of [images](~clackatoo/reference/images) each terminal, chat, picture pane or Markdown buffer may hold. | 64 |
 | `daemon.images.total_mb` | The most MiB of images they may hold together. | 256 |
+
+### The daemon's terminals
+
+How the daemon's terminals behave, for every window.
+
+| Option | Is | Starts |
+|---|---|---|
+| `daemon.terminals.notify_after` | How many seconds a command must run for its end to be [told in a notification](~clackatoo/reference/terminal-emulation#long-commands) while you aren't looking at its terminal, up to 86400. 0 tells none. | 10 |
+| `daemon.terminals.vs16` | [Variation selector 16](~clackatoo/reference/terminal-emulation#screen-behavior) widens an emoji to two columns. Terminals already open keep what they started with. | on |
 
 ## When it goes wrong
 

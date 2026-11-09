@@ -198,6 +198,8 @@ pub enum Category {
     Web,
     /// The daemon's: what it keeps of terminals.
     Kept,
+    /// The daemon's: how its terminals behave.
+    DaemonTerminals,
 }
 
 impl Category {
@@ -219,6 +221,7 @@ impl Category {
             Self::Subagents => "Chats agents start",
             Self::Web => "The web app",
             Self::Kept => "What terminals keep",
+            Self::DaemonTerminals => "The daemon's terminals",
         }
     }
 }

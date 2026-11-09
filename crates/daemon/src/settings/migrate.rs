@@ -515,6 +515,28 @@ fn statements(
                     "the password's hash, now kept in the state directory".to_owned(),
                 ));
             }
+            // A table of its own, as `daemon.terminals`.
+            (Some("machine"), "terminals") if item.is_table_like() => {
+                let inner = item.as_table_like().expect("a table");
+                statements.extend(
+                    comments
+                        .into_iter()
+                        .map(|comment| Statement::new(vec![comment], key, String::new())),
+                );
+                for (inner_key, inner_item) in inner.iter() {
+                    let comments = (inner.key(inner_key))
+                        .map(|key| comments_in(key.leaf_decor()))
+                        .unwrap_or_default();
+                    statements.push(set(
+                        comments,
+                        key,
+                        "daemon.terminals",
+                        (inner_key, inner_item),
+                        None,
+                        left_out,
+                    ));
+                }
+            }
             (Some(group), key) => {
                 statements.push(set(
                     comments,
@@ -795,20 +817,40 @@ mod tests {
         assert!(by.at.unwrap().file.ends_with("daemon/settings.lua"));
     }
 
-    /// machine.toml's name and priority move.
+    /// machine.toml's name, priority and terminals move.
     #[test]
     fn machine_toml_moves_whole() {
         let (_temp, dirs) = dirs();
         write(
             &dirs,
             "machine.toml",
-            "name = \"jack-desktop\"\npriority = false\n",
+            "name = \"jack-desktop\"\npriority = false\n\n\
+             # How the terminals behave.\n[terminals]\nnotify_after = 30 # seconds\n\
+             vs16 = false\nwide = 1\n",
         );
-        once(&dirs, &mut Vec::new());
+        let mut notes = Vec::new();
+        once(&dirs, &mut notes);
         assert!(dirs.daemon.join("machine.toml.bak").exists());
+        let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
+        assert!(text.contains("-- How the terminals behave."), "{text}");
+        assert!(
+            text.contains("daemon.terminals.notify_after = 30\n"),
+            "{text}"
+        );
+        assert!(text.contains("-- daemon.terminals.wide = 1"), "{text}");
+        assert!(notes[0].contains("daemon.terminals.wide = 1"), "{notes:?}");
         let settings = crate::settings::load(&dirs, crate::settings::When::Starting).settings;
         assert_eq!(settings.machine_name().as_deref(), Some("jack-desktop"));
         assert!(!settings.priority());
+        assert!(!settings.on("terminals.vs16"));
+        assert_eq!(settings.number("terminals.notify_after"), 30);
+        // As machine.toml had it, a [terminals] that isn't a table moves
+        // as anything wrong does: left out, saying so.
+        let (_temp, dirs) = super::tests::dirs();
+        write(&dirs, "machine.toml", "terminals = 3\n");
+        once(&dirs, &mut Vec::new());
+        let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
+        assert!(text.contains("-- daemon.machine.terminals = 3"), "{text}");
     }
 
     /// web.toml moves, but for its password, which goes to the state

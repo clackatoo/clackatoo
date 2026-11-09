@@ -178,9 +178,9 @@ desktop; nothing about it passes between machines.
   form one column wide, as ❤ or ✔ has, makes it two columns wide, as kitty
   and Ghostty draw it: the cursor moves on a column more, over what was
   there. In the last column, or at the right margin, with no room for it, the
-  selector is left out, and the character stays one column wide. `vs16 = false` in `daemon/machine.toml`'s
-  [`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) keeps
-  it one column, for programs that count it so; each terminal keeps the rule
+  selector is left out, and the character stays one column wide.
+  [`daemon.terminals.vs16 = false`](~clackatoo/reference/config#the-daemon-s-terminals)
+  in the daemon's config keeps it one column, for programs that count it so; each terminal keeps the rule
   it started with, through upgrades too, and one carried over from a build
   before the rule keeps the old one. A window older than protocol 147 gets
   each widened emoji's second column as a space, so what follows it stays in
@@ -426,9 +426,8 @@ when clackatoo's own shell integration said it, signed; otherwise it's
 itself again, as with an agent's wait for a command, so a program printing
 the marks of an end (OSC 133 `D`) while it runs on says nothing. Terminals an
 agent started, and those showing what an agent's command printed, never say.
-`notify_after` in `daemon/machine.toml`'s
-[`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) changes
-the 10 seconds, or turns it off.
+[`daemon.terminals.notify_after`](~clackatoo/reference/config#the-daemon-s-terminals)
+in the daemon's config changes the 10 seconds, or with 0, turns it off.
 
 ## Not supported
 

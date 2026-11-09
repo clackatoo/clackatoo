@@ -72,7 +72,7 @@ exited 2
 
 A program can ask for a desktop notification, as a long build does when it ends: `OSC 9`, `OSC 777` and kitty's `OSC 99`. clackatoo shows it while you aren't looking at the program's pane: it's in another tab, or the window is in the background. It goes once you look. What it says is cleaned, as tab names are, and a program asking over and over shows a few, then one every ten seconds. `:set notify=off` turns them off with chats'.
 
-A command that ran for 10 seconds or more tells of its end the same way, with how it ended and how long it took; `notify_after` in `daemon/machine.toml`'s `[terminals]` changes the 10 seconds.
+A command that ran for 10 seconds or more tells of its end the same way, with how it ended and how long it took; `daemon.terminals.notify_after` in the daemon's config, `daemon/init.lua`, changes the 10 seconds.
 
 `:notify phone` marks the terminal so its notifications reach your phone too, through the web app, when no one is looking at it anywhere; `:notify nophone` takes the mark off. The tab's name ends with ` 📱` while one of its terminals is marked.
 
@@ -151,4 +151,4 @@ When builds take every core, your keys still echo at once. clackatoo's daemon, w
 
 Under systemd, the daemon also takes a group of its own, `app-clackatoo-PID.scope`, which shares the machine out: the daemon first, your terminals as usual, and agents, language servers and the terminals agents start after them. It takes the group only while you linger (`loginctl enable-linger`, which keeps your systemd running when you're logged out): without that, the group would end with your last login, and your terminals with it, so the daemon keeps out of it, and a window says so once. `clackatoo priority` says how it went, any time.
 
-`priority = false` in `daemon/machine.toml` turns it off for the daemon, and `priority = "normal"` in `startup.toml` for the window.
+`daemon.machine.priority = false` in the daemon's config, `daemon/init.lua`, turns it off for the daemon, and `priority = "normal"` in `startup.toml` for the window.

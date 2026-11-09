@@ -132,11 +132,11 @@ impl Settings {
         self.options.contains_key(name)
     }
 
-    fn on(&self, name: &str) -> bool {
+    pub(crate) fn on(&self, name: &str) -> bool {
         matches!(self.value(name), Value::Bool(true))
     }
 
-    fn number(&self, name: &str) -> u32 {
+    pub(crate) fn number(&self, name: &str) -> u32 {
         match self.value(name) {
             Value::Number(number) => number,
             _ => 0,

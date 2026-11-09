@@ -114,6 +114,12 @@ options! {
     "images.terminal_mb" ("MiB of images each terminal or chat may hold") in Kept: number(1, 1 << 20) => Value::Number(64);
     /// How many MiB of images all of them may hold together.
     "images.total_mb" ("MiB of images all of them may hold") in Kept: number(1, 1 << 20) => Value::Number(256);
+    /// How many seconds a command must have run for its end to be told
+    /// in a notification while no one is looking; 0 tells none.
+    "terminals.notify_after" ("Seconds a command runs before its end is told") in DaemonTerminals: Kind::Number { min: 1, max: 86_400, or_zero: true } => Value::Number(10);
+    /// Whether variation selector 16 widens an emoji to two columns, in
+    /// terminals started from then on (see [`clackatoo_term::Widths`]).
+    "terminals.vs16" ("Variation selector 16 widens an emoji") in DaemonTerminals: Kind::Bool => Value::Bool(true);
 }
 
 /// The option called `name`, if there is one.
@@ -168,6 +174,14 @@ mod tests {
             number("history.every"),
             Value::Number(u32::try_from(crate::DEFAULT_HISTORY_EVERY.as_secs()).unwrap())
         );
+        assert_eq!(
+            number("terminals.notify_after"),
+            Value::Number(u32::try_from(crate::DEFAULT_LONG_COMMAND.as_secs()).unwrap())
+        );
+        assert_eq!(
+            number("terminals.vs16"),
+            Value::Bool(clackatoo_term::Config::default().widths.vs16)
+        );
         let images = crate::images::Limits::default();
         assert_eq!(
             number("images.total_mb"),
@@ -181,7 +195,8 @@ mod tests {
                 "subagents",
                 "web",
                 "history",
-                "images"
+                "images",
+                "terminals"
             ]
         );
     }

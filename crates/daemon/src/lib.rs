@@ -195,9 +195,8 @@ pub struct DaemonConfig {
     pub fit_lasts: std::time::Duration,
     /// How long a command must have run for a notification to say it
     /// ended, while no one is looking at its terminal (see
-    /// `server/notices.rs`). `None` says none. `notify_after` in
-    /// `daemon/machine.toml`'s `[terminals]`, or else
-    /// [`DEFAULT_LONG_COMMAND`].
+    /// `server/notices.rs`). `None` says none. `daemon.terminals.notify_after`
+    /// in the daemon's config, or else [`DEFAULT_LONG_COMMAND`].
     pub long_commands: Option<std::time::Duration>,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
@@ -455,8 +454,8 @@ pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_m
 /// unless told otherwise: zsh with plugins can take seconds to start.
 pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long a command must have run for its end to be told, unless
-/// `daemon/machine.toml` says otherwise (see
+/// How long a command must have run for its end to be told, unless the
+/// daemon's config says otherwise (see
 /// [`DaemonConfig::long_commands`]).
 pub const DEFAULT_LONG_COMMAND: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -579,7 +578,8 @@ impl DaemonConfig {
             .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
-        let widths = clackatoo_term::Config::default().widths;
+        let mut widths = clackatoo_term::Config::default().widths;
+        widths.vs16 = settings.on("terminals.vs16");
         let mut notes = Vec::new();
         Self {
             terminal: clackatoo_term::Config {
@@ -641,7 +641,10 @@ impl DaemonConfig {
             gone_wait: DEFAULT_GONE_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,
-            long_commands: Some(DEFAULT_LONG_COMMAND),
+            long_commands: match settings.number("terminals.notify_after") {
+                0 => None,
+                seconds => Some(std::time::Duration::from_secs(seconds.into())),
+            },
             rename_gate: None,
             workspaces: match non_empty("CLACKATOO_WORKSPACES") {
                 Some(off) if off == "off" => None,
@@ -897,6 +900,28 @@ fn parse_ports(ports: &str) -> Option<RangeInclusive<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the daemon's terminals do, as its config says.
+    #[test]
+    fn the_terminals_go_by_the_config() {
+        let config = DaemonConfig::from_settings(&settings::Settings::default());
+        assert!(config.terminal.widths.vs16);
+        assert_eq!(config.long_commands, Some(DEFAULT_LONG_COMMAND));
+        let settings = settings::Settings::from_lua(
+            "daemon.terminals.vs16 = false\ndaemon.terminals.notify_after = 30\n",
+        )
+        .unwrap();
+        let config = DaemonConfig::from_settings(&settings);
+        assert!(!config.terminal.widths.vs16);
+        assert_eq!(
+            config.long_commands,
+            Some(std::time::Duration::from_secs(30))
+        );
+        let never = settings::Settings::from_lua("daemon.terminals.notify_after = 0").unwrap();
+        assert_eq!(DaemonConfig::from_settings(&never).long_commands, None);
+        assert!(settings::Settings::from_lua("daemon.terminals.notify_after = -3").is_err());
+        assert!(settings::Settings::from_lua("daemon.terminals.vs16 = \"no\"").is_err());
+    }
 
     /// The environment's `$CLACKATOO_HISTORY*` and `$CLACKATOO_IMAGE_MEMORY`
     /// outdo the daemon's config, for tests and CI.
