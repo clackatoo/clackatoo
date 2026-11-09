@@ -56,13 +56,19 @@ pub(crate) const VERSION: u32 = 1;
 /// What a history file's name ends with.
 const EXTENSION: &str = "history";
 
-/// The most bytes a history file can be, compressed: far more than the
-/// most text kept of a terminal ever compresses to.
-const MOST_FILE: u64 = 64 * 1024 * 1024;
+/// The most bytes a history file can be, compressed: more than the most
+/// this build writes ever compresses to.
+const MOST_FILE: u64 = 16 * 1024 * 1024;
 
 /// The most bytes a history file's body can be once inflated, so a file
-/// that inflates without end is refused.
-const MOST_INFLATED: u64 = 64 * 1024 * 1024;
+/// that inflates without end is refused, and reading one at a start costs
+/// no more than this: the most this build writes, [`MOST_WRITTEN`], and
+/// room for its framing.
+const MOST_INFLATED: u64 = 24 * 1024 * 1024;
+
+/// The most bytes of lines this build writes to a file, framing included,
+/// whatever it's asked to keep: always read back.
+const MOST_WRITTEN: usize = 20 * 1024 * 1024;
 
 /// How many jobs wait for the thread before more are refused, the
 /// terminals they're of written at the next chance instead.
@@ -257,6 +263,7 @@ impl Writer {
     /// alone if it isn't there, no more than `bytes` of text a terminal.
     pub(crate) fn start(dir: PathBuf, bytes: usize) -> io::Result<Self> {
         crate::recovery::make_dir(&dir)?;
+        let bytes = bytes.min(MOST_WRITTEN);
         let (jobs, received) = mpsc::sync_channel(QUEUED);
         let (finished, done) = mpsc::channel();
         std::thread::Builder::new()
@@ -414,11 +421,36 @@ mod tests {
         assert!(!body.windows(7).any(|bytes| bytes == b"hunter2"));
     }
 
+    /// A file bigger than this build writes isn't read, nor one whose
+    /// body inflates past what it writes.
+    #[test]
+    fn files_too_big_or_inflating_too_far_arent_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key(1, 2);
+        let path = path_of(dir.path(), &key);
+        let mut big = MAGIC.to_vec();
+        big.extend_from_slice(&VERSION.to_le_bytes());
+        big.resize(usize::try_from(MOST_FILE).unwrap() + 1, 0);
+        fs::write(&path, &big).unwrap();
+        let err = read(dir.path(), &key).unwrap_err();
+        assert!(err.contains("bigger"), "{err}");
+        let mut bomb = MAGIC.to_vec();
+        bomb.extend_from_slice(&VERSION.to_le_bytes());
+        let mut deflate = DeflateEncoder::new(bomb, Compression::best());
+        let zeros = vec![0; 1024 * 1024];
+        for _ in 0..25 {
+            deflate.write_all(&zeros).unwrap();
+        }
+        fs::write(&path, deflate.finish().unwrap()).unwrap();
+        let err = read(dir.path(), &key).unwrap_err();
+        assert!(err.contains("bigger"), "{err}");
+    }
+
     /// No more than the bytes of text allowed are written: the newest.
     #[test]
     fn no_more_is_written_than_allowed() {
         let dir = tempfile::tempdir().unwrap();
-        let writer = Writer::start(dir.path().to_owned(), 12).unwrap();
+        let writer = Writer::start(dir.path().to_owned(), 40).unwrap();
         let key = key(1, 2);
         writer.send(Job::Write {
             key: key.clone(),

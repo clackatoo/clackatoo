@@ -96,8 +96,8 @@ impl Terminal {
 
 impl KeptCopy {
     /// The copy's lines, oldest first, the screen's last blank rows left
-    /// out, as plain data, holding no more than `most_bytes` of text, the
-    /// oldest let go first. With `only`, only the lines numbered within
+    /// out, as plain data, taking no more than `most_bytes` with what
+    /// frames each line, the oldest let go first. With `only`, only the lines numbered within
     /// those ranges are kept. A run of lines never to be written to disk
     /// becomes one placeholder line.
     #[must_use]
@@ -153,8 +153,9 @@ impl KeptCopy {
             .iter()
             .rev()
             .take_while(|kept| {
-                bytes +=
-                    kept.line.text.len() + kept.line.runs.len() * size_of::<crate::snapshot::Run>();
+                bytes += LINE_FRAMING
+                    + kept.line.text.len()
+                    + kept.line.runs.len() * size_of::<crate::snapshot::Run>();
                 bytes <= most_bytes
             })
             .count();
@@ -222,6 +223,10 @@ impl KeptLines {
         Ok(KeptHistory { history })
     }
 }
+
+/// What a line takes besides its text and runs, at most, as it's written:
+/// its width, whether it continues, its hints and the lengths of each.
+const LINE_FRAMING: usize = 16;
 
 /// The line that stands for a run of lines never written to disk.
 fn not_kept(width: usize) -> Line {
@@ -294,7 +299,7 @@ mod tests {
             copy.lines(Some(&[1..3, 5..6]), usize::MAX).texts(),
             ["b", "c", "f"]
         );
-        assert_eq!(copy.lines(None, 2).texts(), ["e", "f"]);
+        assert_eq!(copy.lines(None, 2 * (LINE_FRAMING + 1)).texts(), ["e", "f"]);
         // History holds a and b; the screen, c to f.
         assert_eq!(
             old.copy_to_keep(1).lines(None, usize::MAX).texts(),
