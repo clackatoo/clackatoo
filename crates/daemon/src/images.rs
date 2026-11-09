@@ -347,6 +347,11 @@ impl<T: Clone + PartialEq> Images<T> {
         }
     }
 
+    /// The limits it keeps within.
+    pub(crate) fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Has the image `source` holds kept for `owner`, for `why`: on the
     /// store's thread, and then, once [`take`](Self::take) takes it, here.
     /// Refused at once, saying why, if too much is on its way already.
@@ -497,7 +502,8 @@ impl<T: Clone + PartialEq> Images<T> {
             }
         });
         entry.used = tick;
-        if !entry.owners.contains(&owner) {
+        let added = !entry.owners.contains(&owner);
+        if added {
             entry.owners.push(owner);
             *self.owners.entry(owner).or_default() += info.bytes;
         }
@@ -507,6 +513,16 @@ impl<T: Clone + PartialEq> Images<T> {
         self.make_room();
         if let Some(entry) = self.entries.get_mut(&info.id) {
             entry.pins -= 1;
+        }
+        // The limits hold, whatever's pinned: past them, it isn't kept.
+        let over =
+            self.total > self.limits.total || self.bytes(Some(owner)) > self.limits.per_owner;
+        if over && added {
+            self.let_go_of_quietly(info.id, owner);
+            return Err(format!(
+                "it's over the {} MB limit for images, with those shown",
+                self.limits.total / MIB
+            ));
         }
         Ok(info)
     }
@@ -554,6 +570,20 @@ impl<T: Clone + PartialEq> Images<T> {
         if self.entries[&id].owners.is_empty() {
             self.forget(id);
             self.remember_dropped(id, limit);
+        }
+    }
+
+    /// Lets `owner` go of image `id`, which goes if nobody else holds it,
+    /// not remembered as dropped, as it was never shown.
+    fn let_go_of_quietly(&mut self, id: ImageId, owner: ImageFrom) {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
+        entry.owners.retain(|held| *held != owner);
+        let bytes = entry.info.bytes;
+        self.lose_bytes(owner, bytes);
+        if self.entries[&id].owners.is_empty() {
+            self.forget(id);
         }
     }
 
@@ -1185,6 +1215,30 @@ mod tests {
         // An image bigger than an owner's limit by itself is refused.
         let big = png(512, 512, 7);
         assert!(kept(&mut store, CHAT, big).unwrap_err().contains("limit"));
+    }
+
+    /// The limits hold even when what's shown fills them: a new image past
+    /// them isn't kept, and what's shown stays.
+    #[test]
+    fn past_the_limits_with_what_is_shown_a_new_image_is_refused() {
+        let one = png(64, 64, 1).len() as u64;
+        let limits = Limits {
+            per_owner: one * 10,
+            total: one * 2 + one / 2,
+        };
+        let mut store = Images::<u32>::new(limits, None);
+        let a = kept(&mut store, CHAT, png(64, 64, 1)).unwrap();
+        let b = kept(&mut store, OTHER, png(64, 64, 2)).unwrap();
+        store.pin(a.id);
+        store.pin(b.id);
+        let refused = kept(&mut store, CHAT, png(64, 64, 3));
+        assert!(refused.unwrap_err().contains("limit"));
+        assert!(store.bytes(None) <= limits.total);
+        assert!(matches!(store.get(CHAT, a.id), Found::Kept { .. }));
+        assert!(matches!(store.get(OTHER, b.id), Found::Kept { .. }));
+        // Unpinned, they can go for it.
+        store.unpin(b.id);
+        assert!(kept(&mut store, CHAT, png(64, 64, 3)).is_ok());
     }
 
     #[test]

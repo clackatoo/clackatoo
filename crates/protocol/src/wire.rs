@@ -419,7 +419,8 @@ gates! {
     /// (`ImageNews`); an image file in a pane of its own,
     /// `Content::Picture`, which an older peer is sent as a pane to come,
     /// with `Request::AttachPicture`, `Response::Picture` and
-    /// `Event::Picture`; the images an editor's Markdown shows,
+    /// `Event::Picture` and `Request::DetachPicture`; the images an
+    /// editor's Markdown shows,
     /// `Request::ImageAt`; and `ChatPreview`'s `image`, with whose
     /// thumbnail no pixels are sent.
     IMAGES = 145,
@@ -1258,6 +1259,7 @@ impl Downgrade for ClientMessage {
                     crate::Request::Image { .. }
                         | crate::Request::ImageAt { .. }
                         | crate::Request::AttachPicture { .. }
+                        | crate::Request::DetachPicture { .. }
                 )
             )
         {

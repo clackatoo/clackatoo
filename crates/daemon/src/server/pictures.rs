@@ -35,8 +35,12 @@ pub(super) struct Pictures {
 struct Shown {
     path: PathBuf,
     picture: Picture,
-    /// The clients attached, told what it shows each time that changes.
+    /// The clients attached, told what it shows each time that changes:
+    /// those showing it.
     watchers: Vec<Token>,
+    /// The image pinned for it, as it's shown (see
+    /// [`Daemon::pin_picture`]).
+    pinned: Option<ImageId>,
 }
 
 /// An image a buffer's Markdown asked for.
@@ -84,6 +88,7 @@ impl Daemon {
                     state,
                 },
                 watchers: Vec::new(),
+                pinned: None,
             },
         );
         Content::Picture(id)
@@ -100,10 +105,7 @@ impl Daemon {
         self.pictures.next = self.pictures.next.max(id.0);
         let owner = ImageFrom::Picture(id);
         let state = match image.and_then(|image| self.images.info(image)) {
-            Some(info) if self.images.holds(owner, info.id) => {
-                self.images.pin(info.id);
-                PictureState::Shown(info)
-            }
+            Some(info) if self.images.holds(owner, info.id) => PictureState::Shown(info),
             _ => match self
                 .images
                 .keep(owner, Why::Picture(id), Source::File(path.clone()))
@@ -122,6 +124,7 @@ impl Daemon {
                     state,
                 },
                 watchers: Vec::new(),
+                pinned: None,
             },
         );
     }
@@ -136,13 +139,59 @@ impl Daemon {
 
     /// Answers [`Request::AttachPicture`](clackatoo_protocol::Request::AttachPicture).
     pub(super) fn attach_picture(&mut self, token: Token, picture: PictureId) -> Response {
+        let owner = ImageFrom::Picture(picture);
         let Some(shown) = self.pictures.shown.get_mut(&picture) else {
             return Response::Error(Error::Other("there's no such picture".into()));
         };
         if !shown.watchers.contains(&token) {
             shown.watchers.push(token);
         }
-        Response::Picture(shown.picture.clone())
+        // Let go while nobody showed it: read again.
+        if let PictureState::Shown(info) = shown.picture.state
+            && !self.images.holds(owner, info.id)
+        {
+            let source = Source::File(shown.path.clone());
+            shown.picture.state = match self.images.keep(owner, Why::Picture(picture), source) {
+                Ok(()) => PictureState::Loading,
+                Err(why) => PictureState::Failed(why),
+            };
+        }
+        let shown = shown.picture.clone();
+        self.pin_picture(picture);
+        Response::Picture(shown)
+    }
+
+    /// Answers [`Request::DetachPicture`](clackatoo_protocol::Request::DetachPicture):
+    /// the client at `token` no longer shows `picture`.
+    pub(super) fn detach_picture(&mut self, token: Token, picture: PictureId) -> Response {
+        if let Some(shown) = self.pictures.shown.get_mut(&picture) {
+            shown.watchers.retain(|watcher| *watcher != token);
+        }
+        self.pin_picture(picture);
+        Response::Done
+    }
+
+    /// Pins picture pane `picture`'s image while some client shows it, and
+    /// only then: one nobody shows may be let go like any other, and is
+    /// read again from its file when it's shown again.
+    fn pin_picture(&mut self, picture: PictureId) {
+        let Some(shown) = self.pictures.shown.get_mut(&picture) else {
+            return;
+        };
+        let wanted = match shown.picture.state {
+            PictureState::Shown(info) if !shown.watchers.is_empty() => Some(info.id),
+            _ => None,
+        };
+        if wanted == shown.pinned {
+            return;
+        }
+        let old = std::mem::replace(&mut shown.pinned, wanted);
+        if let Some(id) = wanted {
+            self.images.pin(id);
+        }
+        if let Some(id) = old {
+            self.images.unpin(id);
+        }
     }
 
     /// Closes `pane`, which shows picture `picture`, and the picture.
@@ -159,8 +208,8 @@ impl Daemon {
         let Some(shown) = self.pictures.shown.remove(&picture) else {
             return;
         };
-        if let PictureState::Shown(info) = shown.picture.state {
-            self.images.unpin(info.id);
+        if let Some(id) = shown.pinned {
+            self.images.unpin(id);
         }
         self.images.release(ImageFrom::Picture(picture));
     }
@@ -180,8 +229,15 @@ impl Daemon {
     /// images and watching pictures.
     pub(super) fn forget_image_asker(&mut self, token: Token) {
         self.images.forget_asker(&token);
-        for shown in self.pictures.shown.values_mut() {
-            shown.watchers.retain(|watcher| *watcher != token);
+        let watched: Vec<PictureId> = (self.pictures.shown.iter_mut())
+            .filter(|(_, shown)| shown.watchers.contains(&token))
+            .map(|(&picture, shown)| {
+                shown.watchers.retain(|watcher| *watcher != token);
+                picture
+            })
+            .collect();
+        for picture in watched {
+            self.pin_picture(picture);
         }
         for asked in self.pictures.markdown.values_mut() {
             if let Markdown::Loading(waiting) = asked {
@@ -332,17 +388,12 @@ impl Daemon {
             self.images.release(ImageFrom::Picture(picture));
             return;
         };
-        if let PictureState::Shown(old) = shown.picture.state {
-            self.images.unpin(old.id);
-        }
         shown.picture.state = match read {
-            Ok(info) => {
-                self.images.pin(info.id);
-                PictureState::Shown(info)
-            }
+            Ok(info) => PictureState::Shown(info),
             Err(why) => PictureState::Failed(why),
         };
         let (watchers, picture_shown) = (shown.watchers.clone(), shown.picture.clone());
+        self.pin_picture(picture);
         for token in watchers {
             let shown = picture_shown.clone();
             self.send_event(token, Event::Picture { picture, shown });
@@ -438,7 +489,16 @@ impl Daemon {
     /// what's known of those written.
     fn spill(&self, dir: &Path) -> Vec<handover::KeptImage> {
         let mut kept = Vec::new();
-        for (info, bytes, owners, _, _) in self.images.all() {
+        // Those used last first, within the limit in all, as the next
+        // build keeps them.
+        let mut all: Vec<_> = self.images.all().collect();
+        all.sort_unstable_by_key(|&(.., used)| std::cmp::Reverse(used));
+        let mut room = self.images.limits().total;
+        for (info, bytes, owners, _, _) in all {
+            let Some(left) = room.checked_sub(info.bytes) else {
+                continue;
+            };
+            room = left;
             let path = dir.join(info.id.to_string());
             if let Err(err) = write_private(&path, bytes) {
                 log::error!("an image can't be handed over: {}: {err}", path.display());
@@ -674,6 +734,52 @@ mod tests {
         // Its image goes with it, as nothing else holds it.
         daemon.forget_picture(picture);
         assert!(daemon.images.info(info.id).is_none());
+    }
+
+    /// A picture pane's image is kept, pinned, only while a client shows
+    /// it: once none does, it may be let go, and it's read again from its
+    /// file as one shows it again.
+    #[test]
+    fn a_picture_nobody_shows_may_be_let_go_and_is_read_again_when_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        let one = png(40, 40, 5).len() as u64;
+        let limits = crate::images::Limits {
+            per_owner: one * 4,
+            total: one + one / 2,
+        };
+        daemon.images = crate::images::Images::new(limits, None);
+        std::fs::write(dir.path().join("plan.png"), png(40, 40, 5)).unwrap();
+        let picture = open(&mut daemon, dir.path(), "plan.png");
+        daemon.take_images(true);
+        let PictureState::Shown(read) = shown(&mut daemon, picture) else {
+            panic!("not read");
+        };
+        // Shown, it stays: another image past the limit isn't kept.
+        let chat = ImageFrom::Terminal(chat);
+        let other = |shade| {
+            let bytes = png(40, 40, shade);
+            let (format, width, height) = crate::images::look_at(&bytes).unwrap();
+            let info = ImageInfo {
+                id: crate::images::id_of(&bytes),
+                width,
+                height,
+                format,
+                bytes: bytes.len() as u64,
+            };
+            (info, bytes)
+        };
+        let (info, bytes) = other(6);
+        assert!(daemon.images.insert(chat, info, bytes.into()).is_err());
+        // Shown nowhere, it goes for another.
+        daemon.detach_picture(ASKER, picture);
+        let (info, bytes) = other(7);
+        assert!(daemon.images.insert(chat, info, bytes.into()).is_ok());
+        assert!(daemon.images.info(read.id).is_none(), "let go");
+        // Shown again: read again from its file.
+        assert_eq!(shown(&mut daemon, picture), PictureState::Loading);
+        daemon.take_images(true);
+        assert_eq!(shown(&mut daemon, picture), PictureState::Shown(read));
     }
 
     #[test]

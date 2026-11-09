@@ -3730,6 +3730,7 @@ impl Daemon {
             } => Ok(self.serve_image(token, from, image, fit, at)),
             Request::ImageAt { buffer, path } => Ok(self.image_at(token, buffer, path)),
             Request::AttachPicture { picture } => Ok(self.attach_picture(token, picture)),
+            Request::DetachPicture { picture } => Ok(self.detach_picture(token, picture)),
             Request::Chat { terminal, action } => {
                 self.note_device_action(token, terminal, &action);
                 // Answered with the message's text, for the box asking.

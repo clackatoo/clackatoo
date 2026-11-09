@@ -397,6 +397,15 @@ impl Images {
         lock(&self.shared).gone(id, gone);
     }
 
+    /// The daemon offers image `id` again, as a picture read again does:
+    /// let go there before, it can be fetched now.
+    pub(crate) fn offered(&self, id: ImageId) {
+        let mut cache = lock(&self.shared);
+        if matches!(cache.gone.get(&id), Some(Gone::Dropped(_))) {
+            cache.gone.remove(&id);
+        }
+    }
+
     /// Takes in what the decoding thread has done. Returns whether
     /// anything came, and whether anything's still being decoded.
     pub(crate) fn take_decoded(&self) -> (bool, bool) {

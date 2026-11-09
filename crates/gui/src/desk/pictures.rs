@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Event, ImageAnswer, ImageFrom, ImageId, ImageNews, PaneId, Picture, PictureId, Request,
-    Response, Size, wire,
+    Event, ImageAnswer, ImageFrom, ImageId, ImageNews, PaneId, Picture, PictureId, PictureState,
+    Request, Response, Size, wire,
 };
 
 use super::{Asked, Desk};
@@ -106,6 +106,15 @@ impl Desk {
         if !self.connected || !self.daemon_has(wire::IMAGES) {
             return;
         }
+        // Those no longer shown, which the daemon may let go of meanwhile.
+        let gone: Vec<PictureId> = (self.pictures.attached.iter())
+            .filter(|attached| !shown.iter().any(|(_, picture)| picture == *attached))
+            .copied()
+            .collect();
+        for picture in gone {
+            self.pictures.attached.remove(&picture);
+            self.request(Request::DetachPicture { picture }, Asked::Quiet);
+        }
         for (_, picture) in shown {
             if self.pictures.attached.insert(picture) {
                 self.request(Request::AttachPicture { picture }, Asked::Picture(picture));
@@ -188,6 +197,9 @@ impl Desk {
 
     /// Takes in what the daemon says the picture `picture` shows.
     pub(super) fn picture_shown(&mut self, picture: PictureId, shown: &Picture) -> bool {
+        if let PictureState::Shown(info) = &shown.state {
+            self.pictures.images.offered(info.id);
+        }
         let mut changed = false;
         for pane in self.pictures.panes.values_mut() {
             if pane.picture() == picture {

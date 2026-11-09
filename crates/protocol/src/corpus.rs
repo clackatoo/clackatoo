@@ -3979,6 +3979,10 @@ fn images(terminal: TerminalId) -> Vec<(u32, Sample)> {
             IMAGES,
             Client(ClientMessage::Request(Request::AttachPicture { picture })),
         ),
+        (
+            IMAGES,
+            Client(ClientMessage::Request(Request::DetachPicture { picture })),
+        ),
         answer(ImageAnswer::Part {
             info: info(ImageFormat::Png),
             total: 3,
