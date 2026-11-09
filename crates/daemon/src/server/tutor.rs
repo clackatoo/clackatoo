@@ -34,13 +34,13 @@
 //! It's all done on the loop: a few small files, at most [`MOST_BYTES`]
 //! in all, as a buffer's save is.
 
+use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Write as _};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-
-use std::collections::HashMap;
 
 use clackatoo_protocol::{Error, Response, TutorFiles};
 use mio::Token;
@@ -61,6 +61,10 @@ const MOST_FILES: usize = 32;
 
 /// The most bytes a lesson's text and practice files may have in all.
 const MOST_BYTES: usize = 1024 * 1024;
+
+/// The deepest a folder in a lesson's is removed from: one deeper, as a
+/// practice shell could make, is left, and the folders it's in.
+const DEEPEST: usize = 64;
 
 /// The lessons' folders made, by name, each with the client that made it,
 /// for as long as it's connected.
@@ -194,7 +198,7 @@ impl Lessons {
             write_new(&made, &format!("{lesson}.txt"), text)
         })();
         if let Err(err) = written {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = remove_named(self.folder.as_fd(), &name);
             return Err(err.to_string());
         }
         let path = (path.into_os_string().into_string())
@@ -236,10 +240,7 @@ impl Lessons {
     /// Removes the lesson's folder `name`, and everything in it, if it's
     /// there.
     fn remove(&self, name: &str) -> Result<(), String> {
-        match std::fs::remove_dir_all(self.path.join(name)) {
-            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.to_string()),
-            _ => Ok(()),
-        }
+        remove_named(self.folder.as_fd(), name).map_err(|err| err.to_string())
     }
 
     /// The name of `dir`, if it's a folder of this one's, as made for a
@@ -297,7 +298,7 @@ impl Lessons {
             let modified = SystemTime::UNIX_EPOCH
                 + Duration::from_secs(u64::try_from(stat.st_mtime).unwrap_or_default());
             if now.duration_since(modified).is_ok_and(|age| age > KEPT_FOR) {
-                let _ = std::fs::remove_dir_all(self.path.join(name));
+                let _ = remove_named(self.folder.as_fd(), name);
             } else {
                 kept.push((modified, name.to_owned()));
             }
@@ -305,7 +306,7 @@ impl Lessons {
         kept.sort();
         let over = (kept.len() + 1).saturating_sub(MOST_KEPT);
         for (_, name) in kept.into_iter().take(over) {
-            let _ = std::fs::remove_dir_all(self.path.join(name));
+            let _ = remove_named(self.folder.as_fd(), &name);
         }
     }
 }
@@ -322,6 +323,62 @@ fn plain(name: &str) -> Result<(), String> {
     } else {
         Err(format!("‘{}’ isn't a plain file name", name.escape_debug()))
     }
+}
+
+/// Removes `name` in `dir`, as [`remove_at`] does.
+fn remove_named(dir: BorrowedFd<'_>, name: &str) -> io::Result<()> {
+    let name = CString::new(name).map_err(io::Error::other)?;
+    remove_at(dir, &name, 0)
+}
+
+/// Removes `name` in `dir`, and everything in it if it's a folder, `depth`
+/// folders down from where removing started, never following a link:
+/// each folder is opened from the one it's in, never by its path, and a
+/// link is removed as itself. What isn't there is no mistake.
+fn remove_at(dir: BorrowedFd<'_>, name: &CStr, depth: usize) -> io::Result<()> {
+    match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
+        Ok(()) | Err(Errno::NOENT) => return Ok(()),
+        Err(Errno::ISDIR) => {}
+        Err(err) => return Err(err.into()),
+    }
+    if depth >= DEEPEST {
+        return Err(io::Error::other("its folders go too deep"));
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let inner = rustix::fs::openat(dir, name, flags, Mode::empty())?;
+    loop {
+        let names = some_names(&inner)?;
+        if names.is_empty() {
+            break;
+        }
+        for child in &names {
+            remove_at(inner.as_fd(), child, depth + 1)?;
+        }
+    }
+    match rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR) {
+        Ok(()) | Err(Errno::NOENT) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Some of the names in the folder `dir`, from its start: up to 256, and
+/// none if it's empty.
+fn some_names(dir: &OwnedFd) -> io::Result<Vec<CString>> {
+    let mut listing = Dir::read_from(dir)?;
+    // The folder may have been read before: its offset is shared.
+    listing.rewind();
+    let mut names = Vec::new();
+    for entry in listing {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+        if names.len() == 256 {
+            break;
+        }
+    }
+    Ok(names)
 }
 
 /// The folder `name` in `dir`, open, never through a link.
@@ -546,6 +603,54 @@ mod tests {
         std::fs::rename(dir.path().join("t"), Path::new(&made).join("basics.txt")).unwrap();
         lessons.rewrite(&name, "basics", "# Again\n").unwrap();
         assert_eq!(listed(), before);
+    }
+
+    #[test]
+    fn a_lessons_folder_is_removed_through_the_folder_it_is_in_never_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let lessons = lessons(dir.path());
+        let precious = dir.path().join("precious");
+        std::fs::create_dir(&precious).unwrap();
+        std::fs::write(precious.join("mine"), "mine\n").unwrap();
+        // A link in a lesson's folder is removed, not what it names; and
+        // folders in it go, but no deeper than the deepest.
+        let (name, made) = lessons.make("basics", "", &[]).unwrap();
+        let practice = Path::new(&made).join("basics");
+        std::os::unix::fs::symlink(&precious, practice.join("link")).unwrap();
+        std::fs::create_dir_all(practice.join("a/b/c")).unwrap();
+        std::fs::write(practice.join("a/b/c/d"), "").unwrap();
+        lessons.remove(&name).unwrap();
+        assert!(!Path::new(&made).exists());
+        assert!(precious.join("mine").is_file());
+        // The folder swapped for a link to another: only the link goes.
+        let (name, made) = lessons.make("basics", "", &[]).unwrap();
+        std::fs::rename(&made, dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(&precious, &made).unwrap();
+        lessons.remove(&name).unwrap();
+        assert!(!Path::new(&made).exists() && !Path::new(&made).is_symlink());
+        assert!(precious.join("mine").is_file());
+        // The folder they're all in swapped for a link, once open: what's
+        // removed is in the folder open, not where the link goes.
+        let (name, _) = lessons.make("basics", "", &[]).unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(victim.join(&name)).unwrap();
+        std::fs::write(victim.join(&name).join("mine"), "mine\n").unwrap();
+        std::fs::rename(&lessons.path, dir.path().join("away")).unwrap();
+        std::os::unix::fs::symlink(&victim, &lessons.path).unwrap();
+        lessons.remove(&name).unwrap();
+        assert!(victim.join(&name).join("mine").is_file());
+        assert!(!dir.path().join("away").join(&name).exists());
+        // Too deep to remove: left, and said.
+        std::fs::remove_file(&lessons.path).unwrap();
+        std::fs::rename(dir.path().join("away"), &lessons.path).unwrap();
+        let (name, made) = lessons.make("basics", "", &[]).unwrap();
+        let mut deep = Path::new(&made).join("basics");
+        for _ in 0..DEEPEST + 1 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(lessons.remove(&name).is_err());
+        assert!(Path::new(&made).is_dir());
     }
 
     #[test]
