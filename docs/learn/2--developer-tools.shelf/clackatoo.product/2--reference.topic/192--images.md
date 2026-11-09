@@ -69,7 +69,8 @@ Images you paste into a chat, and those an agent's tools show, are kept in the
 same layer. Each is shown from the image itself, at the size it's drawn, and
 fetched once. Selecting one opens it whole, over the chat. A window older than
 the image layer, or a daemon older than it, still shows the small previews it
-always did.
+always did, even of a chat on another machine that comes to it through newer
+daemons.
 
 ## On the phone
 
@@ -103,6 +104,8 @@ reads as `image, ~/plan.png [image 640×480]`.
   that needs a newer clackatoo. Open the file on that machine's own workspace,
   or with a `--remote` window.
 - An animated GIF or WebP shows only its first frame.
+- A JPEG of more than about 37 million pixels (8000 × 6000, say) isn't shown:
+  decoding one would take more memory than clackatoo allows an image.
 - SVG isn't shown as an image.
 - Terminal programs can't show images yet: kitty's graphics, sixel and iTerm2's
   images come next.
