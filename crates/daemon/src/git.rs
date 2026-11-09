@@ -512,6 +512,8 @@ pub(crate) fn git(dir: &Path) -> Result<Command, &'static str> {
         // In a process group of its own, so one killed for taking too
         // long takes what it started with it (see [`crate::group`]).
         .process_group(0);
+    // What the user sees: at the usual priority, as the user's own.
+    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
     Ok(command)
 }
 

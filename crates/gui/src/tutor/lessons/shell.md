@@ -106,3 +106,11 @@ clackatoo keeps your workspaces, tabs and panes as they change, so they come bac
 A terminal that was running a command, such as `cargo watch`, says so at its bottom right. In normal mode, `R` puts it at the new shell's prompt, to read, and Enter runs it; Esc dismisses it, and a click on either does the same. Nothing runs by itself. Typing into the terminal dismisses it too. This works in bash, zsh and fish, started as your shell. A command typed with a space before it is never kept, as shells keep those out of their history, nor is one bash left out of its history some other way, nor one a program only printed: clackatoo's shell integration marks each command with a secret only it and clackatoo know, and only a command marked so is offered.
 
 To start once with no workspaces, run `clackatoo stop`, then `clackatoo daemon --fresh`.
+
+## On a busy machine
+
+When builds take every core, your keys still echo at once. clackatoo's daemon, which runs your terminals, asks RealtimeKit, the service desktops run so sound keeps up, to run ahead of your other programs, and so does the window. What they start never does: your shells, and everything you run in them, start as any program would.
+
+Under systemd, the daemon also takes a group of its own, `app-clackatoo-PID.scope`, which shares the machine out: the daemon first, your terminals as usual, and agents, language servers and the terminals agents start after them. Its log says how it went, in one line. `systemctl --user status 'app-clackatoo-*'` shows the group, while you linger (`loginctl enable-linger`): without that, the daemon keeps out of it, as the group would end with your last login, and your terminals with it.
+
+`priority = false` in `daemon/machine.toml` turns it off for the daemon, and `priority = "normal"` in `startup.toml` for the window.

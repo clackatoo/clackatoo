@@ -1,25 +1,29 @@
-//! Just enough of D-Bus, the desktop's message bus, to show
-//! notifications: connecting to the session bus over its Unix socket,
-//! the EXTERNAL login (the bus checks the socket's user), writing method
-//! calls, and reading the replies and signals that come back.
+//! Just enough of D-Bus, the desktop's message bus, for the window's
+//! notifications and the daemon's place on the machine (see
+//! [`crate::priority`]): connecting to the session or system bus over its
+//! Unix socket, the EXTERNAL login (the bus checks the socket's user),
+//! writing method calls, and reading the replies and signals that come
+//! back.
 //!
 //! It's a few hundred lines in place of a D-Bus library, as a window needs
 //! four calls (`Hello`, `AddMatch`, `Notify`, `CloseNotification`) and
-//! three signals, and every library either links the C libdbus or brings
-//! an async runtime and dozens of crates. The wire format is the D-Bus
-//! specification's: <https://dbus.freedesktop.org/doc/dbus-specification.html>.
+//! three signals, and the daemon a handful of calls to `RealtimeKit`,
+//! logind and systemd, and every library either links the C libdbus or
+//! brings an async runtime and dozens of crates. The wire format is the
+//! D-Bus specification's:
+//! <https://dbus.freedesktop.org/doc/dbus-specification.html>.
 //!
-//! Everything here blocks, so it only ever runs on the notifier's own
-//! threads (see [`super`]), never the window's.
+//! Everything here blocks, so it only ever runs on threads of its own,
+//! never the window's or the daemon's event loop.
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The bus's own name, path and interface, for `Hello` and `AddMatch`,
 /// and the sender of its own signals.
-pub(super) const BUS: &str = "org.freedesktop.DBus";
+pub const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
 
 /// The most of a message from the bus that's kept. What a window hears of
@@ -31,31 +35,60 @@ const LARGEST: usize = 128 << 20;
 /// How long writing to the bus may take before it's given up on.
 const WRITE_WAIT: Duration = Duration::from_secs(5);
 
+/// The system bus's address, unless `$DBUS_SYSTEM_BUS_ADDRESS` says.
+const SYSTEM_BUS: &str = "unix:path=/run/dbus/system_bus_socket";
+
 /// What a message is. An error, 3, is anything that isn't the reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
+pub enum Kind {
+    /// A method call.
     Call = 1,
+    /// The answer to one.
     Reply = 2,
+    /// A signal, which answers nothing.
     Signal = 4,
+}
+
+/// The session bus's address: `$DBUS_SESSION_BUS_ADDRESS`, or else `bus`
+/// in `$XDG_RUNTIME_DIR`, where systemd puts it. `None` if neither says.
+#[must_use]
+pub fn session_address() -> Option<String> {
+    std::env::var("DBUS_SESSION_BUS_ADDRESS")
+        .ok()
+        .filter(|address| !address.is_empty())
+        .or_else(|| {
+            let runtime = std::env::var("XDG_RUNTIME_DIR").ok()?;
+            Some(format!("unix:path={runtime}/bus"))
+        })
+}
+
+/// The system bus's address: `$DBUS_SYSTEM_BUS_ADDRESS`, or else where
+/// the specification says it is.
+#[must_use]
+pub fn system_address() -> String {
+    std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
+        .ok()
+        .filter(|address| !address.is_empty())
+        .unwrap_or_else(|| SYSTEM_BUS.to_owned())
 }
 
 /// A connection to the bus, logged in, for writing calls. What comes back
 /// is read from a clone of the socket (see [`Bus::reader`]).
 #[derive(Debug)]
-pub(super) struct Bus {
+pub struct Bus {
     stream: UnixStream,
     /// The last call's number.
     serial: u32,
 }
 
 impl Bus {
-    /// Connects to the session bus at `address`, a D-Bus address as
+    /// Connects to the bus at `address`, a D-Bus address as
     /// `$DBUS_SESSION_BUS_ADDRESS` holds one, and logs in.
     ///
     /// # Errors
     ///
     /// If none of its addresses can be reached, or the bus won't have it.
-    pub(super) fn connect(address: &str) -> io::Result<Self> {
+    pub fn connect(address: &str) -> io::Result<Self> {
         let mut last = io::Error::new(io::ErrorKind::NotFound, "no Unix address to connect to");
         for each in address.split(';') {
             match connect_to(each).and_then(login) {
@@ -71,7 +104,7 @@ impl Bus {
     /// # Errors
     ///
     /// If it can't be cloned.
-    pub(super) fn reader(&self) -> io::Result<UnixStream> {
+    pub fn reader(&self) -> io::Result<UnixStream> {
         self.stream.try_clone()
     }
 
@@ -81,7 +114,7 @@ impl Bus {
     /// # Errors
     ///
     /// If it can't be written.
-    pub(super) fn call(&mut self, call: &Call<'_>, body: &Body, no_reply: bool) -> io::Result<u32> {
+    pub fn call(&mut self, call: &Call<'_>, body: &Body, no_reply: bool) -> io::Result<u32> {
         self.serial = self.serial.wrapping_add(1).max(1);
         let bytes = call.message(self.serial, body, no_reply);
         self.stream.write_all(&bytes)?;
@@ -93,7 +126,7 @@ impl Bus {
     /// # Errors
     ///
     /// If it can't be written.
-    pub(super) fn hello(&mut self) -> io::Result<u32> {
+    pub fn hello(&mut self) -> io::Result<u32> {
         let call = Call {
             destination: BUS,
             path: BUS_PATH,
@@ -109,7 +142,7 @@ impl Bus {
     /// # Errors
     ///
     /// If it can't be written.
-    pub(super) fn add_match(&mut self, rule: &str) -> io::Result<u32> {
+    pub fn add_match(&mut self, rule: &str) -> io::Result<u32> {
         let call = Call {
             destination: BUS,
             path: BUS_PATH,
@@ -129,7 +162,7 @@ impl Bus {
     /// # Errors
     ///
     /// If it can't be written.
-    pub(super) fn get_name_owner(&mut self, name: &str) -> io::Result<u32> {
+    pub fn get_name_owner(&mut self, name: &str) -> io::Result<u32> {
         let call = Call {
             destination: BUS,
             path: BUS_PATH,
@@ -140,6 +173,53 @@ impl Bus {
         let mut body = Body::default();
         body.string(name);
         self.call(&call, &body, false)
+    }
+
+    /// Writes a method call and waits up to `wait` for its reply, on a
+    /// connection no other thread reads: what else comes meanwhile, such
+    /// as the bus's own signals, is passed over.
+    ///
+    /// # Errors
+    ///
+    /// If it can't be written, no reply comes in time, or the reply is an
+    /// error, which is said with its name and message.
+    pub fn ask(&mut self, call: &Call<'_>, body: &Body, wait: Duration) -> io::Result<Message> {
+        let serial = self.call(call, body, false)?;
+        self.answer(serial, wait)
+    }
+
+    /// Waits up to `wait` for the reply to call `serial`, on a connection
+    /// no other thread reads: see [`Bus::ask`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Bus::ask`].
+    pub fn answer(&mut self, serial: u32, wait: Duration) -> io::Result<Message> {
+        let until = Instant::now() + wait;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the bus didn't answer in time",
+                ));
+            }
+            self.stream.set_read_timeout(Some(left))?;
+            let Some(message) = read_message(&mut self.stream)? else {
+                continue;
+            };
+            if message.reply_serial != Some(serial) {
+                continue;
+            }
+            if message.is(Kind::Reply) {
+                return Ok(message);
+            }
+            let said = (message.args("s"))
+                .and_then(|mut args| args.string())
+                .unwrap_or_default();
+            let name = message.error.as_deref().unwrap_or("an error");
+            return Err(io::Error::other(format!("{name}: {said}")));
+        }
     }
 }
 
@@ -241,13 +321,17 @@ fn read_line(stream: &mut UnixStream) -> io::Result<String> {
 
 /// A method call's addressing.
 #[derive(Debug)]
-pub(super) struct Call<'a> {
-    pub(super) destination: &'a str,
-    pub(super) path: &'a str,
-    pub(super) interface: &'a str,
-    pub(super) member: &'a str,
+pub struct Call<'a> {
+    /// The connection it's for, by name, as `org.freedesktop.Notifications`.
+    pub destination: &'a str,
+    /// The object it's on.
+    pub path: &'a str,
+    /// The interface of its method.
+    pub interface: &'a str,
+    /// The method.
+    pub member: &'a str,
     /// The body's signature, as `susssasa{sv}i`.
-    pub(super) signature: &'a str,
+    pub signature: &'a str,
 }
 
 impl Call<'_> {
@@ -282,13 +366,13 @@ impl Call<'_> {
 /// to its size from the start, as D-Bus wants. A body starts on a multiple
 /// of 8 in its message, so aligning from its own start is the same.
 #[derive(Debug, Default)]
-pub(super) struct Body {
+pub struct Body {
     bytes: Vec<u8>,
 }
 
 /// Where an array begins: its length's place, and its first element's.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Array {
+pub struct Array {
     length_at: usize,
     start: usize,
 }
@@ -300,23 +384,37 @@ impl Body {
         }
     }
 
-    pub(super) fn byte(&mut self, byte: u8) {
+    /// A byte, `y`.
+    pub fn byte(&mut self, byte: u8) {
         self.bytes.push(byte);
     }
 
-    pub(super) fn u32(&mut self, value: u32) {
+    /// An unsigned 32-bit number, `u`.
+    pub fn u32(&mut self, value: u32) {
         self.align(4);
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
-    pub(super) fn i32(&mut self, value: i32) {
+    /// A signed 32-bit number, `i`.
+    pub fn i32(&mut self, value: i32) {
         self.align(4);
         self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// An unsigned 64-bit number, `t`.
+    pub fn u64(&mut self, value: u64) {
+        self.align(8);
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// A boolean, `b`, which D-Bus writes as a 32-bit 0 or 1.
+    pub fn boolean(&mut self, value: bool) {
+        self.u32(u32::from(value));
     }
 
     /// A string, or an object path, which is written the same. A NUL in
     /// it, which D-Bus forbids, is dropped.
-    pub(super) fn string(&mut self, text: &str) {
+    pub fn string(&mut self, text: &str) {
         let text: Vec<u8> = text.bytes().filter(|&byte| byte != 0).collect();
         self.u32(u32::try_from(text.len()).unwrap_or(u32::MAX));
         self.bytes.extend_from_slice(&text);
@@ -332,7 +430,7 @@ impl Body {
     }
 
     /// Begins an array whose elements align to `to`.
-    pub(super) fn begin_array(&mut self, to: usize) -> Array {
+    pub fn begin_array(&mut self, to: usize) -> Array {
         self.align(4);
         let length_at = self.bytes.len();
         self.bytes.extend_from_slice(&[0; 4]);
@@ -345,26 +443,48 @@ impl Body {
 
     /// Ends `array`, writing its length: its elements', without the
     /// padding before the first.
-    pub(super) fn end_array(&mut self, array: Array) {
+    pub fn end_array(&mut self, array: Array) {
         let length = u32::try_from(self.bytes.len() - array.start).unwrap_or(u32::MAX);
         self.bytes[array.length_at..array.length_at + 4].copy_from_slice(&length.to_le_bytes());
     }
 
     /// Begins a struct, or a dictionary's entry, which align to 8.
-    pub(super) fn begin_struct(&mut self) {
+    pub fn begin_struct(&mut self) {
         self.align(8);
     }
 
     /// A variant holding the string `text`.
-    pub(super) fn variant_string(&mut self, text: &str) {
+    pub fn variant_string(&mut self, text: &str) {
         self.signature("s");
         self.string(text);
     }
 
     /// A variant holding the byte `byte`.
-    pub(super) fn variant_byte(&mut self, byte: u8) {
+    pub fn variant_byte(&mut self, byte: u8) {
         self.signature("y");
         self.byte(byte);
+    }
+
+    /// A variant holding the number `value`, as `t`.
+    pub fn variant_u64(&mut self, value: u64) {
+        self.signature("t");
+        self.u64(value);
+    }
+
+    /// A variant holding the boolean `value`.
+    pub fn variant_bool(&mut self, value: bool) {
+        self.signature("b");
+        self.boolean(value);
+    }
+
+    /// A variant holding the numbers `values`, as an array, `au`.
+    pub fn variant_u32s(&mut self, values: &[u32]) {
+        self.signature("au");
+        let array = self.begin_array(4);
+        for &value in values {
+            self.u32(value);
+        }
+        self.end_array(array);
     }
 
     /// A header field: its code, and a variant of `signature` (`s` or `o`)
@@ -376,49 +496,56 @@ impl Body {
         self.string(text);
     }
 
-    #[cfg(test)]
-    pub(super) fn as_bytes(&self) -> &[u8] {
+    /// What's been written.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
 
-/// A message from the bus, as far as a window needs it.
+/// A message from the bus, as far as clackatoo needs it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Message {
+pub struct Message {
     /// Its kind's number: see [`Kind`].
-    pub(super) kind: u8,
+    pub kind: u8,
     /// The call it answers, for a reply or an error.
-    pub(super) reply_serial: Option<u32>,
-    pub(super) interface: Option<String>,
-    pub(super) member: Option<String>,
+    pub reply_serial: Option<u32>,
+    /// The interface of the signal or call.
+    pub interface: Option<String>,
+    /// The signal or method.
+    pub member: Option<String>,
     /// The error's name, for an error.
-    pub(super) error: Option<String>,
+    pub error: Option<String>,
     /// The unique name of the connection that sent it, as the bus says,
     /// which no one else can claim: `:1.42`, or the bus's own name for
     /// its signals.
-    pub(super) sender: Option<String>,
+    pub sender: Option<String>,
     /// The body's signature.
-    pub(super) signature: String,
-    pub(super) body: Vec<u8>,
+    pub signature: String,
+    /// The body, as it came.
+    pub body: Vec<u8>,
     /// Whether its numbers are big-endian, as the sender wrote them.
-    pub(super) big: bool,
+    pub big: bool,
 }
 
 impl Message {
     /// Whether it's `kind`.
-    pub(super) fn is(&self, kind: Kind) -> bool {
+    #[must_use]
+    pub fn is(&self, kind: Kind) -> bool {
         self.kind == kind as u8
     }
 
     /// Whether it's the signal `member` of `interface`.
-    pub(super) fn is_signal(&self, interface: &str, member: &str) -> bool {
+    #[must_use]
+    pub fn is_signal(&self, interface: &str, member: &str) -> bool {
         self.is(Kind::Signal)
             && self.interface.as_deref() == Some(interface)
             && self.member.as_deref() == Some(member)
     }
 
     /// Its body, to read values from, if its signature is `signature`.
-    pub(super) fn args(&self, signature: &str) -> Option<Cursor<'_>> {
+    #[must_use]
+    pub fn args(&self, signature: &str) -> Option<Cursor<'_>> {
         (self.signature == signature).then(|| Cursor {
             bytes: &self.body,
             at: 0,
@@ -434,7 +561,7 @@ impl Message {
 ///
 /// If it can't be read, isn't a D-Bus message, or is bigger than D-Bus
 /// allows.
-pub(super) fn read_message(stream: &mut impl Read) -> io::Result<Option<Message>> {
+pub fn read_message(stream: &mut impl Read) -> io::Result<Option<Message>> {
     let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     let mut fixed = [0u8; 16];
     stream.read_exact(&mut fixed)?;
@@ -524,7 +651,7 @@ fn parse(whole: &[u8], big: bool, fields_len: usize, header_len: usize) -> Optio
 
 /// Where reading a message's values has got to.
 #[derive(Debug)]
-pub(super) struct Cursor<'a> {
+pub struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
     big: bool,
@@ -542,7 +669,8 @@ impl<'a> Cursor<'a> {
         Some(byte)
     }
 
-    pub(super) fn u32(&mut self) -> Option<u32> {
+    /// The next value, an unsigned 32-bit number, `u`.
+    pub fn u32(&mut self) -> Option<u32> {
         self.align(4)?;
         let bytes: [u8; 4] = self.bytes.get(self.at..self.at + 4)?.try_into().ok()?;
         self.at += 4;
@@ -553,7 +681,28 @@ impl<'a> Cursor<'a> {
         })
     }
 
-    pub(super) fn string(&mut self) -> Option<&'a str> {
+    /// The next value, a signed 32-bit number, `i`.
+    pub fn i32(&mut self) -> Option<i32> {
+        self.u32().map(u32::cast_signed)
+    }
+
+    /// The next value, a boolean, `b`: anything but 0 or 1 isn't one.
+    pub fn boolean(&mut self) -> Option<bool> {
+        match self.u32()? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// The next value, a variant: the signature of what it holds, which
+    /// is read next.
+    pub fn variant(&mut self) -> Option<&'a str> {
+        self.signature()
+    }
+
+    /// The next value, a string or an object path.
+    pub fn string(&mut self) -> Option<&'a str> {
         let len = self.u32()? as usize;
         let text = self.bytes.get(self.at..self.at.checked_add(len)?)?;
         self.at += len + 1;
@@ -702,6 +851,53 @@ mod tests {
         assert_eq!(read_message(&mut reading).unwrap(), None);
         let next = read_message(&mut reading).unwrap().unwrap();
         assert_eq!(next.member.as_deref(), Some("Next"));
+    }
+
+    /// The values the daemon writes and reads besides a window's: 64-bit
+    /// numbers on a multiple of 8, booleans as 32-bit numbers, and
+    /// variants, as `Properties.Get` answers.
+    #[test]
+    fn numbers_booleans_and_variants_are_aligned_and_read_back() {
+        let mut body = Body::default();
+        body.byte(1);
+        body.u64(7);
+        body.variant_bool(true);
+        body.variant_u32s(&[3, 4]);
+        let bytes = body.as_bytes();
+        assert_eq!(
+            &bytes[..16],
+            &[1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // `b`, then true on a multiple of 4.
+        assert_eq!(&bytes[16..19], b"\x01b\0");
+        assert_eq!(&bytes[20..24], &[1, 0, 0, 0]);
+        // `au`, then the array's length, 8, and its numbers.
+        assert_eq!(&bytes[24..28], b"\x02au\0");
+        assert_eq!(&bytes[28..40], &[8, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
+
+        let mut answer = Body::default();
+        answer.signature("i");
+        answer.i32(-15);
+        let message = Message {
+            signature: "v".to_owned(),
+            body: answer.as_bytes().to_vec(),
+            ..Message::default()
+        };
+        let mut args = message.args("v").unwrap();
+        assert_eq!(args.variant(), Some("i"));
+        assert_eq!(args.i32(), Some(-15));
+
+        let mut answer = Body::default();
+        answer.signature("b");
+        answer.boolean(false);
+        let message = Message {
+            signature: "v".to_owned(),
+            body: answer.as_bytes().to_vec(),
+            ..Message::default()
+        };
+        let mut args = message.args("v").unwrap();
+        assert_eq!(args.variant(), Some("b"));
+        assert_eq!(args.boolean(), Some(false));
     }
 
     #[test]

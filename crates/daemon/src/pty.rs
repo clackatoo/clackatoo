@@ -121,6 +121,9 @@ pub(crate) struct Program<'a> {
     /// followed (see [`crate::display`]).
     pub(crate) display: Option<&'a crate::display::Env>,
     pub(crate) cwd: &'a Path,
+    /// Whose it is, which says which of the daemon's leaves it goes in
+    /// (see [`crate::priority`]).
+    pub(crate) leaf: crate::priority::Leaf,
 }
 
 /// Starts `program` on a new PTY of `size`.
@@ -171,7 +174,8 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
             Ok(())
         });
     }
-    let child = command.spawn()?;
+    // Never at the daemon's priority, and in its leaf.
+    let child = crate::priority::spawn(&mut command, program.leaf)?;
     // The slave fds go with `command`. Close them now, because the master only
     // reports EOF once every copy of the slave is closed, and ours would keep
     // it open forever.

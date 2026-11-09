@@ -4,7 +4,8 @@
 //! marks go by; this is how they're shown.
 //!
 //! [`Desktop`] shows them as the freedesktop notification spec says, over
-//! D-Bus on the session bus (see [`dbus`]), which GNOME, KDE and the other
+//! D-Bus on the session bus (see the daemon's [`dbus`], which the window
+//! shares), which GNOME, KDE and the other
 //! Linux desktops' notification servers listen on. Talking to the bus
 //! blocks, so it's done on a thread of its own, started the first time a
 //! notification is shown, never as the window opens; the window only ever
@@ -21,17 +22,14 @@
 //! what the agent wrote, as for the phone's (see the daemon's
 //! `web/push.rs`): a lock screen can show it.
 
-mod dbus;
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use clackatoo_daemon::dbus::{self, Body, Bus, Call, Kind, Message};
 use clackatoo_protocol::TerminalId;
 
 use crate::session::{Proxy, SessionEvent};
-
-use dbus::{Body, Bus, Call, Kind, Message};
 
 /// The notification server's name, path and interface.
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
@@ -244,14 +242,7 @@ impl Thread {
     }
 
     fn open(&mut self, inputs: &Receiver<Input>) -> Result<(), String> {
-        let address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
-            .ok()
-            .filter(|address| !address.is_empty())
-            .or_else(|| {
-                let runtime = std::env::var("XDG_RUNTIME_DIR").ok()?;
-                Some(format!("unix:path={runtime}/bus"))
-            })
-            .ok_or("there's no session bus")?;
+        let address = dbus::session_address().ok_or("there's no session bus")?;
         let mut bus = Bus::connect(&address).map_err(|err| format!("the session bus: {err}"))?;
         let mut reader = bus.reader().map_err(|err| err.to_string())?;
         self.connection += 1;

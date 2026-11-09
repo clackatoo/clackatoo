@@ -102,8 +102,13 @@ impl Daemon {
                 size,
             } => {
                 let command = super::lent_background::checked_command(command)?;
-                let (pane, terminal) =
-                    self.start_background(workspace, (cwd.clone(), pane), size, command)?;
+                let (pane, terminal) = self.start_background(
+                    workspace,
+                    (cwd.clone(), pane),
+                    size,
+                    command,
+                    crate::priority::Leaf::Terminals,
+                )?;
                 self.type_at_first_prompt(terminal, command.to_owned(), None, None);
                 Ok(Response::PaneCreated(pane))
             }
@@ -376,14 +381,16 @@ impl Daemon {
     /// Starts a shell in a new background tab of `workspace`, in `cwd`, or
     /// else in the directory `beside` is in, or the workspace's focused
     /// pane, as a new pane beside it would start, called after `command`,
-    /// which is to run in it. Returns its pane and its terminal, for the
-    /// command to be typed at its first prompt.
+    /// which is to run in it, its shell in `leaf`: the agents' for one an
+    /// agent asked for. Returns its pane and its terminal, for the command
+    /// to be typed at its first prompt.
     pub(super) fn start_background(
         &mut self,
         workspace: WorkspaceId,
         (cwd, beside): (Option<String>, Option<PaneId>),
         size: Size,
         command: &str,
+        leaf: crate::priority::Leaf,
     ) -> Result<(PaneId, TerminalId), Error> {
         self.workspaces.check_new_background(workspace)?;
         let beside = beside.or_else(|| self.workspaces.focused_pane(workspace));
@@ -396,12 +403,13 @@ impl Daemon {
             ));
         }
         let cwd = cwd.or_else(|| beside.and_then(|pane| self.working_directory(pane)));
-        let terminal = self.new_terminal(&NewTerminal {
+        let request = NewTerminal {
             size,
             command: None,
             cwd,
             record_to: None,
-        })?;
+        };
+        let terminal = self.new_terminal_in(&request, leaf)?;
         let (tab, pane) = self.workspaces.new_background(workspace, terminal.into());
         if let Some((_, background)) = self.workspaces.get().find_background(tab) {
             let tab = background.tab.clone();

@@ -270,7 +270,7 @@ struct McpArgs {
 
 #[derive(Debug, Args)]
 struct ConfigArgs {
-    /// The setting: font, font-size or renderer.
+    /// The setting: font, font-size, renderer or priority.
     name: Option<String>,
     /// The value to set it to. Without one, prints its value.
     #[arg(conflicts_with = "unset")]
@@ -729,6 +729,8 @@ fn window_options(args: &WindowArgs) -> clackatoo_gui::Options {
             .map(Into::into)
             .or(config.renderer)
             .unwrap_or_default(),
+        priority: config.priority.unwrap_or(true)
+            && std::env::var_os("CLACKATOO_PRIORITY").is_none_or(|priority| priority != "off"),
         config: config::dir(),
     }
 }
@@ -756,6 +758,9 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     if let Some(web) = &mut config.web {
         web.assets = web_app::ASSETS;
     }
+    // Its loop above the user's other programs, and what it starts kept
+    // apart from it, unless switched off.
+    clackatoo_daemon::priority::enable();
     // An upgrade runs the next build with the same arguments, but for
     // `--fresh`, which was for this start alone.
     let rerun: Vec<OsString> = std::env::args_os()
@@ -1233,6 +1238,7 @@ mod tests {
             font: Some("Iosevka".into()),
             font_size: Some(13.5),
             renderer: None,
+            priority: None,
         };
         let (font, fixed) = window_font(&window(&[]), &file);
         assert_eq!((font.family.as_deref(), font.size), (Some("Iosevka"), 13.5));

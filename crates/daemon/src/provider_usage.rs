@@ -265,14 +265,14 @@ fn probe_read(
             command
         }
     };
-    let mut child = command
+    command
         .current_dir(std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .ok()?;
+        .process_group(0);
+    crate::priority::prepare(&mut command, crate::priority::Leaf::Agents);
+    let mut child = command.spawn().ok()?;
     let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).ok()?)?;
     let group = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
         .ok()

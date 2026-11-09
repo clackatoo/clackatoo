@@ -226,7 +226,9 @@ impl Peer {
         // it starts too, as `npx` starts node (see [`crate::group`]). The
         // daemon has no terminal whose signals it would miss.
         command.process_group(0);
-        let mut child = command.spawn()?;
+        // Agents and language servers alike: never at the daemon's
+        // priority, and in the agents' leaf (see [`crate::priority`]).
+        let mut child = crate::priority::spawn(&mut command, crate::priority::Leaf::Agents)?;
         let pid = rustix::process::Pid::from_child(&child);
         // Taken first, so failing below drops the pipes, which ends it.
         let (stdin, stdout, stderr) = (

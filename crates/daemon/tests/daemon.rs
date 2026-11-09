@@ -26198,3 +26198,97 @@ fn a_pasted_image_goes_by_the_desktops_clipboard_or_else_by_its_path() {
         text.replace('\n', "").contains(&path)
     });
 }
+
+/// What the scheduler and the cgroups say of process `pid`: its nice,
+/// its scheduling policy (0 is `SCHED_OTHER`), and its cgroup's path.
+fn standing(pid: u32) -> (i32, u32, String) {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // Fields 19 and 41 of proc(5), counted from the state, the 3rd.
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+    let cgroup = (cgroup.lines())
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap()
+        .to_owned();
+    (
+        fields[16].parse().unwrap(),
+        fields[38].parse().unwrap(),
+        cgroup,
+    )
+}
+
+/// This process's child whose command line has `word` in an argument,
+/// once it has started that program.
+fn child_running(word: &str) -> u32 {
+    let ours = std::process::id().to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Some(pid) = (entry.file_name().to_str()).and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let (Ok(cmdline), Ok(stat)) = (
+                std::fs::read(format!("/proc/{pid}/cmdline")),
+                std::fs::read_to_string(format!("/proc/{pid}/stat")),
+            ) else {
+                continue;
+            };
+            let parent =
+                (stat.rsplit_once(')')).and_then(|(_, rest)| rest.split_whitespace().nth(1));
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            if parent == Some(ours.as_str()) && cmdline.split('\0').any(|arg| arg.contains(word)) {
+                return pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "no child running {word}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What jack asked of the daemon's priority (CLACKA-231): only its loop
+/// runs raised, and what it starts gets none of it. A terminal's program
+/// and an agent each start at nice 0, at the usual scheduling, in a leaf
+/// of their own, never the daemon's.
+///
+/// It needs RealtimeKit, and a systemd user manager the user lingers
+/// under, with the cpu controller delegated, so it's run by hand, alone:
+/// it moves this test process into a scope of its own, as the daemon
+/// moves itself.
+#[test]
+#[ignore = "needs RealtimeKit and a lingering systemd user manager; moves this process: run alone"]
+fn the_daemons_children_start_at_the_usual_priority_in_leaves_of_their_own() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let task = loop {
+        if let Some(task) = daemon.task.get() {
+            break task.clone();
+        }
+        assert!(Instant::now() < deadline, "the daemon's loop never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let tid: i32 = task.file_name().unwrap().to_str().unwrap().parse().unwrap();
+    clackatoo_daemon::priority::begin_for(rustix::process::Pid::from_raw(tid).unwrap());
+    let settled = clackatoo_daemon::priority::settled().expect("setting up began");
+    assert!(settled.nice.is_some_and(|nice| nice < 0), "{settled:?}");
+    let scope = settled.scope.clone().expect("the daemon has a scope");
+    let (_, _, ours) = standing(std::process::id());
+    assert!(ours.ends_with(&format!("/{scope}/daemon")), "{ours}");
+
+    let terminal = spawn(&mut client, &["sleep", "4231.5"]);
+    let (nice, policy, cgroup) = standing(child_running("4231.5"));
+    assert_eq!((nice, policy), (0, 0), "terminal {terminal}");
+    assert!(cgroup.ends_with(&format!("/{scope}/terminals")), "{cgroup}");
+
+    start_chat(&mut client);
+    let log = daemon.dir.path().join("agent.log");
+    let (nice, policy, cgroup) = standing(child_running(&log.to_string_lossy()));
+    assert_eq!((nice, policy), (0, 0), "the agent");
+    assert!(cgroup.ends_with(&format!("/{scope}/agents")), "{cgroup}");
+}

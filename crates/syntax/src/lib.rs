@@ -38,3 +38,28 @@ pub use pack::{Languages, Pack};
 pub use pieces::Ask;
 pub use server::{Server, git_root};
 pub use worker::{Answered, Coloured, Found, Highlighted, Key, Reply, Snippet, Syntax};
+
+use std::ffi::OsStr;
+use std::process::Command;
+use std::sync::OnceLock;
+
+/// What's done to each program installing runs (curl, npm, tar and the
+/// like) before it starts, if anything is: see [`prepare_programs_with`].
+static PREPARE: OnceLock<fn(&mut Command)> = OnceLock::new();
+
+/// Has `prepare` done to each program installing runs before it starts,
+/// from now on: the daemon puts them where the programs it starts for
+/// agents go, at the usual priority. Only the first call counts.
+pub fn prepare_programs_with(prepare: fn(&mut Command)) {
+    let _ = PREPARE.set(prepare);
+}
+
+/// A program for installing to run, prepared as
+/// [`prepare_programs_with`] says.
+pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    if let Some(prepare) = PREPARE.get() {
+        prepare(&mut command);
+    }
+    command
+}

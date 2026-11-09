@@ -1682,13 +1682,26 @@ impl Daemon {
             return Err(format!("there's no directory {}", cwd.display()));
         }
         let size = self.chat(chat).ok_or("the chat has closed")?.size();
-        let content = PaneTerminal::New(NewTerminal {
+        self.anchor_pane(chat).ok_or("the chat isn't in a pane")?;
+        // Started first, so its shell goes with what agents start (see
+        // `crate::priority`), then placed.
+        let request = NewTerminal {
             size,
             command: None,
             cwd: Some(cwd.to_string_lossy().into_owned()),
             record_to: None,
-        });
-        let pane = self.place_beside(chat, content)?;
+        };
+        let terminal = (self.new_terminal_in(&request, crate::priority::Leaf::Agents))
+            .map_err(|err| err.to_string())?;
+        let pane = match self.place_beside(chat, PaneTerminal::Existing(terminal)) {
+            Ok(pane) => pane,
+            Err(err) => {
+                if self.close_terminal(terminal).is_err() {
+                    log::warn!("terminal {terminal} couldn't be closed");
+                }
+                return Err(err);
+            }
+        };
         let Some(Content::Terminal(terminal)) = self.workspaces.check_pane(pane).ok() else {
             return Err("the terminal closed at once".to_owned());
         };
@@ -1723,8 +1736,14 @@ impl Daemon {
         let workspace = workspace.id;
         let size = self.chat(chat).ok_or("the chat has closed")?.size();
         let cwd = cwd.to_string_lossy().into_owned();
-        let (pane, terminal) = (self.start_background(workspace, (Some(cwd), None), size, command))
-            .map_err(|err| err.to_string())?;
+        let (pane, terminal) = (self.start_background(
+            workspace,
+            (Some(cwd), None),
+            size,
+            command,
+            crate::priority::Leaf::Agents,
+        ))
+        .map_err(|err| err.to_string())?;
         Ok((pane, terminal))
     }
 

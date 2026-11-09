@@ -199,14 +199,15 @@ impl Takes {
 /// Returns what else it takes (see [`Takes`]).
 pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<Takes, String> {
     let run = |err: io::Error| format!("{} can't be run: {err}", executable.display());
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .arg(VERSIONS_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(run)?;
+        .stderr(Stdio::null());
+    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
+    let mut child = command.spawn().map_err(run)?;
     let deadline = std::time::Instant::now() + VERSIONS_TIMEOUT;
     while child.try_wait().map_err(run)?.is_none() {
         if std::time::Instant::now() > deadline {
@@ -316,6 +317,9 @@ fn serve_signalled(
     restore: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
+    // Before anything is started, on the thread that runs the loop: its
+    // priority, and the daemon's place, if `clackatoo daemon` asked.
+    crate::priority::begin();
     let resumed = if resume {
         receive()
             .and_then(|handover| resume_from(handover, config))

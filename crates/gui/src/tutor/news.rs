@@ -1355,6 +1355,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Tab names and the window title keep the joiners emoji need, so 👩‍👩‍👧 shows whole",
     },
+    News {
+        id: "priority",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "The daemon and window run ahead of your builds on a busy machine; what they start never does",
+    },
 ];
 
 impl News {

@@ -39,7 +39,7 @@ end)
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
   daemon/agents.toml        agents chats can talk to, besides those clackatoo knows, and their limits
-  daemon/machine.toml       the name this machine's daemon goes by on other machines
+  daemon/machine.toml       the name this machine's daemon goes by on other machines, and its priority
   daemon/web.toml           whether phones and browsers can reach it, and how
   lua/                      modules shared with the daemon's config, once it has one
 ```
@@ -58,6 +58,8 @@ The config runs once for the client, the process that opens windows, so its bind
     name = "jack-desktop"
 
 Without it, the daemon takes the machine's hostname. It's read when the daemon starts or upgrades.
+
+`priority = false` beside it has the daemon run as other programs do, rather than [ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
 
 Each daemon also has an ID of its own, chosen the first time it starts and kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`), or in `$CLACKATOO_MACHINE`. Deleting that file makes the daemon a new machine to every other; copying it to another machine makes the two refuse each other until one of them deletes it. `CLACKATOO_MACHINE=off` chooses a new ID at every start, as tests do.
 

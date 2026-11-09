@@ -2713,13 +2713,24 @@ impl Daemon {
         }
     }
 
+    /// Starts a terminal for the user, as `request` says.
     fn new_terminal(
         &mut self,
         request: &clackatoo_protocol::NewTerminal,
     ) -> Result<TerminalId, Error> {
+        self.new_terminal_in(request, crate::priority::Leaf::Terminals)
+    }
+
+    /// Starts a terminal as `request` says, its program in `leaf`: the
+    /// agents' for one an agent asked for.
+    fn new_terminal_in(
+        &mut self,
+        request: &clackatoo_protocol::NewTerminal,
+        leaf: crate::priority::Leaf,
+    ) -> Result<TerminalId, Error> {
         let id = TerminalId(self.next_id);
         let display = self.display_env();
-        let terminal = HostedTerminal::start(id, request, &self.config, display.as_deref())?;
+        let terminal = HostedTerminal::start(id, request, &self.config, display.as_deref(), leaf)?;
         if let Some(display) = &self.display {
             display.terminal_made();
         }

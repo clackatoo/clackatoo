@@ -144,11 +144,14 @@ fn exe_of(pid: u32) -> Option<(u64, u64)> {
 }
 
 impl HostedTerminal {
+    /// Starts terminal `id` as `request` says, in the daemon's `leaf` for
+    /// whoever asked for it (see [`crate::priority`]).
     pub(crate) fn start(
         id: TerminalId,
         request: &NewTerminal,
         config: &DaemonConfig,
         display: Option<&crate::display::Env>,
+        leaf: crate::priority::Leaf,
     ) -> Result<Self, Error> {
         // Open the recording first: failing then leaves nothing to clean up.
         let recording = match &request.record_to {
@@ -196,6 +199,7 @@ impl HostedTerminal {
             env: &integration.env,
             display,
             cwd,
+            leaf,
         };
         let spawned = pty::spawn(&program, request.size)
             .map_err(|err| Error::SpawnFailed(err.to_string()))?;
@@ -892,7 +896,14 @@ mod tests {
             cwd: Some("/".into()),
             record_to: None,
         };
-        HostedTerminal::start(TerminalId(1), &request, &DaemonConfig::from_env(), None).unwrap()
+        HostedTerminal::start(
+            TerminalId(1),
+            &request,
+            &DaemonConfig::from_env(),
+            None,
+            crate::priority::Leaf::Terminals,
+        )
+        .unwrap()
     }
 
     /// Reads `terminal`'s output until there's been none for a while,

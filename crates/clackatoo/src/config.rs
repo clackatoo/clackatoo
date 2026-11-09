@@ -36,7 +36,7 @@ struct Setting {
 }
 
 /// Every setting.
-const SETTINGS: [Setting; 3] = [
+const SETTINGS: [Setting; 4] = [
     Setting {
         name: "font",
         kind: Kind::Text,
@@ -53,6 +53,13 @@ const SETTINGS: [Setting; 3] = [
         kind: Kind::Choice(&["vulkan", "opengl"]),
         default: "\"vulkan\"",
     },
+    // Whether the window's thread asks to run ahead of the user's other
+    // programs: see `clackatoo_daemon::priority`.
+    Setting {
+        name: "priority",
+        kind: Kind::Choice(&["high", "normal"]),
+        default: "\"high\"",
+    },
 ];
 
 /// The settings the file gives. `None` means it doesn't say.
@@ -61,6 +68,8 @@ pub(crate) struct ClientConfig {
     pub(crate) font: Option<String>,
     pub(crate) font_size: Option<f32>,
     pub(crate) renderer: Option<GraphicsApi>,
+    /// Whether the window asks for a high priority: `true` for `high`.
+    pub(crate) priority: Option<bool>,
 }
 
 /// clackatoo's config directory: `$XDG_CONFIG_HOME/clackatoo`, or
@@ -130,6 +139,9 @@ fn parse(text: &str) -> (ClientConfig, Vec<String>) {
                     "opengl" => GraphicsApi::OpenGl,
                     _ => GraphicsApi::Vulkan,
                 });
+            }
+            ("priority", Checked::Text(priority)) => {
+                config.priority = Some(priority == "high");
             }
             _ => unreachable!("every setting is handled"),
         }
@@ -292,14 +304,16 @@ mod tests {
 
     #[test]
     fn settings_are_read_and_mistakes_reported_one_by_one() {
-        let (config, problems) =
-            parse("# Mine\nfont = \"JetBrains Mono\"\nfont-size = 13\nrenderer = \"opengl\"\n");
+        let (config, problems) = parse(
+            "# Mine\nfont = \"JetBrains Mono\"\nfont-size = 13\nrenderer = \"opengl\"\npriority = \"normal\"\n",
+        );
         assert_eq!(
             config,
             ClientConfig {
                 font: Some("JetBrains Mono".into()),
                 font_size: Some(13.0),
                 renderer: Some(GraphicsApi::OpenGl),
+                priority: Some(false),
             }
         );
         assert!(problems.is_empty(), "{problems:?}");

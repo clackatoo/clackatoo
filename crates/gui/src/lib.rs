@@ -104,6 +104,10 @@ pub struct Options {
     pub font_fixed: FontFixed,
     /// The graphics API to draw with.
     pub graphics_api: GraphicsApi,
+    /// Whether the thread drawing the window and taking its keys asks to
+    /// run ahead of the user's other programs, as the daemon's loop does
+    /// (see `clackatoo_daemon::priority`).
+    pub priority: bool,
     /// clackatoo's config directory, whose `client/init.lua` configures
     /// the window, if there is one.
     pub config: Option<PathBuf>,
@@ -318,6 +322,7 @@ fn open_here(
     started: Instant,
     share: bool,
 ) -> anyhow::Result<()> {
+    raise(options.priority);
     let start = options::Options::drawing_with(&spec.font);
     let fonts = find_fonts(&start.font_options())?;
     let (event_loop, gpu) = gpu_and_loop(options.graphics_api, None)?;
@@ -358,7 +363,7 @@ fn fork_host(
                 host(
                     options.runtime.clone(),
                     options.config.clone(),
-                    options.graphics_api,
+                    (options.graphics_api, options.priority),
                     listen,
                     theirs,
                 )
@@ -374,19 +379,21 @@ fn fork_host(
 }
 
 /// Runs the process of windows, forked by `clackatoo` (see [`run`]), with
-/// the config in `config` and drawing with `graphics_api`: it sets up the
-/// GPU at once, reads the first window asked for on `first` and finds its
-/// fonts, takes the windows asked for on the socket at `listen` too, if
-/// there's one, and ends with its last window.
+/// the config in `config` and drawing with `graphics_api`, its thread
+/// raised if `priority` says: it sets up the GPU at once, reads the first
+/// window asked for on `first` and finds its fonts, takes the windows
+/// asked for on the socket at `listen` too, if there's one, and ends with
+/// its last window.
 fn host(
     runtime: RuntimeDir,
     config: Option<PathBuf>,
-    graphics_api: GraphicsApi,
+    (graphics_api, priority): (GraphicsApi, bool),
     listen: Option<PathBuf>,
     first: std::os::unix::net::UnixStream,
 ) -> anyhow::Result<()> {
     let born = Instant::now();
     clackatoo_daemon::launch::name_this_process(c"clackatoo-win");
+    raise(priority);
     // Panics are logged, as it has no stderr to say them on.
     let said = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -415,6 +422,18 @@ fn host(
     host.listen();
     event_loop.run_app(&mut host)?;
     host.result
+}
+
+/// Has the calling thread, which runs this process's event loop, drawing
+/// every window it opens and taking their keys, ask to run ahead of the
+/// user's other programs, if `priority` says, on a thread of its own (see
+/// `clackatoo_daemon::priority`): once per process, as it runs one loop.
+/// Never before a fork, which only the thread forking survives, and what
+/// it starts never gets it.
+fn raise(priority: bool) {
+    if priority {
+        clackatoo_daemon::priority::raise_this_thread("the windows");
+    }
 }
 
 /// Starts finding the fonts in `font` on a thread of its own.

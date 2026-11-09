@@ -22,7 +22,6 @@ use std::fs::{self, File};
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::install::{Download, InstallError, download};
@@ -326,7 +325,7 @@ impl KnownServer {
                 Ok(())
             }
             Source::Npm { packages } => {
-                let output = Command::new("npm")
+                let output = crate::command("npm")
                     .args(["install", "--no-audit", "--no-fund", "--ignore-scripts"])
                     .arg("--prefix")
                     .arg(dir)
@@ -352,7 +351,7 @@ impl KnownServer {
             } => {
                 fs::write(dir.join("package.json"), manifest)?;
                 fs::write(dir.join("package-lock.json"), lock)?;
-                let output = Command::new("npm")
+                let output = crate::command("npm")
                     .args(["ci", "--no-audit", "--no-fund", "--ignore-scripts"])
                     .current_dir(dir)
                     .output()
@@ -415,14 +414,14 @@ fn unpack(bytes: &[u8], packed: Packed, dir: &Path, program: &str) -> Result<(),
             return Ok(());
         }
         Packed::Gzip => {
-            let output = Command::new("gzip").arg("-dc").arg(&archive).output();
+            let output = crate::command("gzip").arg("-dc").arg(&archive).output();
             let output = output.map_err(|err| tool("gzip", &err))?;
             if output.status.success() {
                 fs::write(dir.join(program), output.stdout)?;
             }
             output.status.success()
         }
-        Packed::TarGz => Command::new("tar")
+        Packed::TarGz => crate::command("tar")
             .arg("-xzf")
             .arg(&archive)
             .arg("-C")
@@ -430,7 +429,7 @@ fn unpack(bytes: &[u8], packed: Packed, dir: &Path, program: &str) -> Result<(),
             .status()
             .map_err(|err| tool("tar", &err))?
             .success(),
-        Packed::Zip => Command::new("unzip")
+        Packed::Zip => crate::command("unzip")
             .args(["-q", "-o"])
             .arg(&archive)
             .arg("-d")
@@ -519,6 +518,7 @@ pub fn find_program(program: &str, servers: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn every_language_server_known_is_findable_by_its_program() {

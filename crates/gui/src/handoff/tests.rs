@@ -467,6 +467,7 @@ fn a_window_handed_over_goes_to_the_process_running_or_comes_back() {
         font: FontOptions::default(),
         font_fixed: FontFixed::default(),
         graphics_api: GraphicsApi::Vulkan,
+        priority: false,
         config: None,
     };
     assert_eq!(crate::hand_window(&options, launched()), Err(launched()));

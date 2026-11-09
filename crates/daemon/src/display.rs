@@ -853,12 +853,14 @@ fn read_source(
     let (program, args) = command
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command"))?;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    crate::priority::prepare(&mut command, crate::priority::Leaf::Terminals);
+    let mut child = command.spawn()?;
     let pid = rustix::process::Pid::from_child(&child);
     if let Ok(pidfd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
         *reading.lock().unwrap_or_else(PoisonError::into_inner) = Some(pidfd);

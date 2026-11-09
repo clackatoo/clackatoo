@@ -440,6 +440,32 @@ fn write(path: &Path, id: MachineId, seed: Seed, replace: bool) -> io::Result<()
 /// gives one: `name = "jack-desktop"`. A file that can't be read, or a
 /// name that isn't text, is said in the log and passed over.
 pub(crate) fn configured_name(config: &Path) -> Option<String> {
+    let (path, document) = machine_toml(config)?;
+    let name = document.get("name")?;
+    let Some(name) = name.as_str() else {
+        log::warn!("`name` in {} isn't text", path.display());
+        return None;
+    };
+    Some(name.to_owned())
+}
+
+/// Whether `daemon/machine.toml` in `config` has the daemon take a higher
+/// priority and a place of its own (see [`crate::priority`]), if it says:
+/// `priority = false` turns it off. Read as the daemon starts or
+/// upgrades, as the name is.
+pub(crate) fn configured_priority(config: &Path) -> Option<bool> {
+    let (path, document) = machine_toml(config)?;
+    let priority = document.get("priority")?;
+    let Some(priority) = priority.as_bool() else {
+        log::warn!("`priority` in {} is true or false", path.display());
+        return None;
+    };
+    Some(priority)
+}
+
+/// `daemon/machine.toml` in `config`, and where it is, if it's there and
+/// can be read. One that can't, or isn't TOML, is said in the log.
+fn machine_toml(config: &Path) -> Option<(PathBuf, toml_edit::DocumentMut)> {
     let path = config.join("daemon/machine.toml");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -449,19 +475,13 @@ pub(crate) fn configured_name(config: &Path) -> Option<String> {
             return None;
         }
     };
-    let document = match text.parse::<toml_edit::DocumentMut>() {
-        Ok(document) => document,
+    match text.parse::<toml_edit::DocumentMut>() {
+        Ok(document) => Some((path, document)),
         Err(err) => {
             log::warn!("{} isn't TOML: {err}", path.display());
-            return None;
+            None
         }
-    };
-    let name = document.get("name")?;
-    let Some(name) = name.as_str() else {
-        log::warn!("`name` in {} isn't text", path.display());
-        return None;
-    };
-    Some(name.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -650,5 +670,20 @@ mod tests {
         assert_eq!(configured_name(dir.path()).as_deref(), Some("desk"));
         fs::write(&file, "name = 3\n").unwrap();
         assert_eq!(configured_name(dir.path()), None);
+    }
+
+    #[test]
+    fn priority_is_switched_off_only_by_false() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(configured_priority(dir.path()), None);
+        fs::create_dir(dir.path().join("daemon")).unwrap();
+        let file = dir.path().join("daemon/machine.toml");
+        fs::write(&file, "name = \"desk\"\npriority = false\n").unwrap();
+        assert_eq!(configured_priority(dir.path()), Some(false));
+        assert_eq!(configured_name(dir.path()).as_deref(), Some("desk"));
+        fs::write(&file, "priority = true\n").unwrap();
+        assert_eq!(configured_priority(dir.path()), Some(true));
+        fs::write(&file, "priority = \"off\"\n").unwrap();
+        assert_eq!(configured_priority(dir.path()), None);
     }
 }

@@ -6,10 +6,10 @@
 //! socket, or over SSH to a daemon on another machine (see [`remote`]).
 //! Terminals outlive any client, so closing a window closes nothing.
 
-// The only unsafe code is the pre-exec hooks in `pty::spawn` and
-// `browser::cdp::spawn`, the declaration of glibc's `malloc_trim` in
-// `memory`, and the signal handling in `signals`, which opt out of this
-// explicitly.
+// The only unsafe code is the pre-exec hooks in `pty::spawn`,
+// `browser::cdp::spawn` and `priority`, the declaration of glibc's
+// `malloc_trim` in `memory`, the scheduling flag `priority` sets, and the
+// signal handling in `signals`, which opt out of this explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 // The list of the tools agents get is one long `json!`.
@@ -24,6 +24,7 @@ mod buffer;
 mod changes;
 mod chat;
 pub mod client;
+pub mod dbus;
 pub mod display;
 mod elicit;
 mod explorer;
@@ -45,6 +46,7 @@ mod machine;
 pub mod mcp;
 mod memory;
 mod ports;
+pub mod priority;
 mod profiles;
 mod provider_usage;
 mod pty;

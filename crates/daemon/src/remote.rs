@@ -292,6 +292,9 @@ fn ssh_command(
         remote.command,
         if replace { " --replace" } else { "" }
     ));
+    // A daemon's link to another machine is the user's: at the usual
+    // priority. Elsewhere, as for a window, this does nothing.
+    crate::priority::prepare(&mut ssh, crate::priority::Leaf::Terminals);
     ssh
 }
 

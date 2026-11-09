@@ -351,7 +351,7 @@ fn spawn(
             Ok(())
         });
     }
-    command.spawn()
+    crate::priority::spawn(&mut command, crate::priority::Leaf::Agents)
 }
 
 /// What reads the browser's pipe, on a thread of its own.

@@ -82,7 +82,10 @@ Settings you rarely change, or change to tune how the window starts, live in `st
 font = "JetBrains Mono"
 font-size = 12
 renderer = "opengl"
+priority = "normal"
 ```
+
+`priority = "high"`, as it starts, has the window's thread, which draws it and takes your keys, ask to run ahead of your other programs, as [the daemon's does](~clackatoo/reference/cli#staying-quick-on-a-busy-machine); `"normal"` leaves it as other programs are. `CLACKATOO_PRIORITY=off` in the environment does the same.
 
 `clackatoo config` shows and changes them, keeping the rest of the file, comments included, as it was:
 
