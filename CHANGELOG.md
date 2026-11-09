@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.11.26 (2026-11-09)
+
+### Features
+
+- **daemon:** terminals' scrollback survives restarts and reboots (c233a40e)
+
+### Fixes
+
+- **daemon:** history files are read only up to what's written: 16 MiB, 24 MiB inflated (49cde976)
+- **daemon:** history is read only from the user's own folder, theirs alone, and their own files (58b327e9)
+- **daemon:** one history job waits for each terminal at most, a newer one in its place (47065531)
+- **daemon:** forgetting a terminal's history is said done only once it's on its way, and logind waits for all of it (30fc4c0c)
+- **daemon:** every start sweeps away history files of terminals it doesn't have, and half-written ones (99a779ef)
+- **daemon:** only an agent's own terminals go unkept, and one that becomes one loses its history file (87140ada)
+- **daemon:** :forget behind a full-screen program forgets the whole main screen (9d7b4111)
+- **daemon:** kept blocks ride on their rows, and forgotten lines stay forgotten when lines are numbered again (37e17649)
+
 ## 2026.11.25 (2026-11-09)
 
 ### Features
