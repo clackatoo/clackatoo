@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.23 (2026-11-09)
+
+### Fixes
+
+- **tutor:** a lesson's files are made where its panes are (protocol 143) (0deb508c)
+- **tutor:** a daemon relaying makes no lesson's files (f653eb13)
+- **tutor:** only the window that made a lesson's folder changes it (df72d8ee)
+- **tutor:** writing a lesson's text again makes no other file (49420acd)
+- **tutor:** lessons' folders are removed through the folder they're in (f4e69ac5)
+- **tutor:** lessons' folders are removed off the loop, never a connected window's (cb3a6d7b)
+
 ## 2026.11.22 (2026-11-09)
 
 ### Features
