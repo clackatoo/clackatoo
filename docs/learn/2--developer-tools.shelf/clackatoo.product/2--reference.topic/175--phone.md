@@ -31,7 +31,7 @@ The daemon listens on a socket only you can open, `~/.local/share/clackatoo/web/
 tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
 ```
 
-and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that login must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs. Connections are counted by the device sending each request, by its whole tailnet address (IPv6 too), as `tailscale serve` says: each can have eight open at once, and its password tries and asks to pair are its own. At most sixteen connections can wait to say whom they're from; past that, the oldest is closed. Past 64 in all, room is made as from the network (below).
+and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that name must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs. Connections are counted by the device sending each request, by its whole tailnet address (IPv6 too), as `tailscale serve` says: each can have eight open at once, and its password tries and asks to pair are its own. At most sixteen connections can wait to say whom they're from; past that, the oldest is closed. Past 64 in all, room is made as from the network (below).
 
 ### Straight from the network
 

@@ -58,4 +58,4 @@ cd crates/daemon
 CLACKATOO_DISPLAY=off cargo test --test daemon a_real_session_of_six_turns -- --ignored --nocapture
 ```
 
-Run them one at a time. They use the accounts `claude` and `codex` are logged in to. Most run the adapter the daemon would run, unless `CLACKATOO_REAL_AGENT` (Claude Code) or `CLACKATOO_REAL_CODEX` (Codex) gives a command, and with none say they were skipped and pass; a few older ones need `CLACKATOO_REAL_AGENT`.
+Run them one at a time. They use the accounts `claude` and `codex` are signed in to. Most run the adapter the daemon would run, unless `CLACKATOO_REAL_AGENT` (Claude Code) or `CLACKATOO_REAL_CODEX` (Codex) gives a command, and with none say they were skipped and pass; a few older ones need `CLACKATOO_REAL_AGENT`.

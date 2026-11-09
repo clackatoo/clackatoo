@@ -87,7 +87,7 @@ Closing a terminal hangs up its program, as closing a terminal window would. A t
 
 ## From another machine
 
-With clackatoo on both machines, and ssh able to log in to the other one (the window asks for a password or a key's passphrase itself, if ssh needs one):
+With clackatoo on both machines, and ssh able to sign in to the other one (the window asks for a password or a key's passphrase itself, if ssh needs one):
 
 ```sh
 clackatoo --remote desktop
