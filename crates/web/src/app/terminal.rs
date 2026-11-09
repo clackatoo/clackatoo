@@ -440,6 +440,8 @@ impl super::App {
                 if let Some(page) = &self.term_page {
                     let _ = page.input.focus();
                 }
+                // Its focusin came while the app was busy here, unheard.
+                self.viewport_settling("type");
             }
             Action::HideKeyboard => {
                 if let Some(page) = &self.term_page {
