@@ -31,7 +31,8 @@
 //!
 //! A phone may paste an image as a path, within the limits of the photos
 //! it sends chats ([`ChatImage`]'s), but never onto the clipboard: that's
-//! the desktop's, not the phone's.
+//! the desktop's, not the phone's. That's refused where the phone is
+//! connected, as a daemon it's relayed to sees only the relay.
 
 use std::collections::HashMap;
 use std::ffi::{CString, OsStr};
@@ -160,12 +161,7 @@ impl Daemon {
                 "the image is too big: at most 16 million pixels, 6 MiB as PNG".into(),
             ));
         }
-        // The clipboard is the desktop's, not a phone's.
-        if how == ImagePaste::Clipboard && self.device_of(token).is_some() {
-            return Err(Error::Other(
-                "a phone pastes an image as its path, never onto the clipboard".into(),
-            ));
-        }
+        self.refuse_phones_clipboard(token, how)?;
         if self.pastes.under_way.len() >= MOST_UNDER_WAY {
             return Err(Error::Other(
                 "images are being pasted already: try again in a moment".into(),
@@ -205,6 +201,22 @@ impl Daemon {
                 due: Instant::now() + PATIENCE,
             },
         );
+        Ok(())
+    }
+
+    /// Refuses a phone's paste onto the clipboard, here or through this
+    /// daemon to another machine's: the clipboard is the desktop's, not
+    /// the phone's.
+    pub(super) fn refuse_phones_clipboard(
+        &self,
+        token: Token,
+        how: ImagePaste,
+    ) -> Result<(), Error> {
+        if how == ImagePaste::Clipboard && self.device_of(token).is_some() {
+            return Err(Error::Other(
+                "a phone pastes an image as its path, never onto the clipboard".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -506,7 +518,12 @@ fn put_on_clipboard(job: &Job, file: File) -> Result<(), String> {
         return Err(format!("there's no desktop session on ‘{machine}’"));
     };
     let mut command = match desktop {
-        Desktop::Wayland => Command::new(&job.config.wayland),
+        // Named, as wl-copy would otherwise guess, and may guess text.
+        Desktop::Wayland => {
+            let mut command = Command::new(&job.config.wayland);
+            command.args(["--type", "image/png"]);
+            command
+        }
         Desktop::X => {
             let mut command = Command::new(&job.config.x);
             command.args(["-selection", "clipboard", "-t", "image/png"]);

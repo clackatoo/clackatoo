@@ -851,6 +851,9 @@ impl Daemon {
                         Err(err) => Routed::Answered(Response::Error(err)),
                     };
                 };
+                if let Err(err) = self.refuse_phones_clipboard(token, how) {
+                    return Routed::Answered(Response::Error(err));
+                }
                 if self.link_wire(at) < wire::PASTE_IMAGE {
                     let error = self.too_old(at, "pasting an image into a terminal");
                     return Routed::Answered(Response::Error(error));
