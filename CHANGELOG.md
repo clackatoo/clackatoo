@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026.11.32 (2026-11-09)
+
+Nothing to note: tests, chores and tidying.
+
 ## 2026.11.31 (2026-11-09)
 
 ### Fixes
