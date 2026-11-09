@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.20 (2026-11-09)
+
+### Fixes
+
+- **agents:** a big change worked out into the next turn isn't settled as that turn's end (a7b6ed3a)
+
 ## 2026.11.19 (2026-11-09)
 
 ### Features
