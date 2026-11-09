@@ -495,14 +495,25 @@ impl Daemon {
     }
 
     /// Once every terminal has been made again: writes the history each
-    /// took under its new name, then removes every other file, those
-    /// of the terminals before the restart included.
+    /// took under its new name, before [`sweep_histories`] removes the
+    /// files of the terminals before the restart.
+    ///
+    /// [`sweep_histories`]: Self::sweep_histories
     pub(super) fn history_restored(&mut self) {
         self.histories.restoring.clear();
+        if self.history_config().is_some() {
+            self.keep_histories(true);
+        }
+    }
+
+    /// Removes every history file but those of the terminals this daemon
+    /// has, as it starts, however it starts: those of a daemon before,
+    /// whose terminals weren't made again, and any a crash left half
+    /// written. After what's asked to be written before.
+    pub fn sweep_histories(&mut self) {
         if self.history_config().is_none() {
             return;
         }
-        self.keep_histories(true);
         let keep: HashSet<String> = (self.terminals.keys())
             .map(|&id| history::key(self.id, id.0))
             .collect();
@@ -638,6 +649,30 @@ pub(in crate::server) mod tests {
         let terminal = daemon.new_terminal(&request).unwrap();
         let pane = daemon.workspaces.new_workspace("kept".to_owned(), terminal);
         (daemon, terminal, pane)
+    }
+
+    /// Every start removes the files of terminals it doesn't have, and
+    /// any a crash left half written, whether workspaces were made again
+    /// or not, and keeps its own terminals'.
+    #[test]
+    fn a_start_sweeps_away_the_files_of_terminals_it_doesnt_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, _) = keeping(dir.path(), true);
+        let history = dir.path().join("state/history");
+        crate::recovery::make_dir(&history).unwrap();
+        let own = history.join(format!("{}.history", history::key(daemon.id, terminal.0)));
+        let old = history.join(format!("{}.history", history::key(daemon.id ^ 1, 3)));
+        let half = history.join(format!(".{}.tmp", history::key(daemon.id ^ 1, 4)));
+        let other = history.join("notes.txt");
+        for path in [&own, &old, &half, &other] {
+            std::fs::write(path, "").unwrap();
+        }
+        daemon.sweep_histories();
+        daemon.keep_last();
+        daemon.kept_last();
+        assert!(own.exists());
+        assert!(!old.exists() && !half.exists());
+        assert!(other.exists(), "nothing but history files is touched");
     }
 
     /// The user is told what they asked of a terminal's history is done

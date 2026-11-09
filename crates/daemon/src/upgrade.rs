@@ -347,6 +347,9 @@ fn serve_signalled(
     if afresh && restore {
         daemon.restore_workspaces();
     }
+    // Every start, after what's made again is written: history files of
+    // terminals it doesn't have, and those a crash left, go.
+    daemon.sweep_histories();
 
     while let Some(Upgrade {
         executable,
