@@ -11,17 +11,18 @@
 //! - `plan`: a strong model that changes nothing and returns a plan;
 //! - `general`: the parent's agent and model, with no role or limits.
 //!
-//! The user adds their own, or changes the built-in ones, in
-//! `agents.toml`, read again whenever a chat is started:
+//! The user adds their own, or changes the built-in ones, in the
+//! daemon's config (see [`crate::settings`]), read as it starts:
 //!
-//! ```toml
-//! [profiles.review]
-//! about = "Reviews a change for bugs"
-//! agent = "codex"
-//! model = "gpt-6-luna"          # or a table, by agent: { claude = "haiku" }
-//! effort = "low"
-//! limits = "read-only"          # or "no-commands", or "none"
-//! prompt = "You review changes for bugs. Say what's wrong, briefly."
+//! ```lua
+//! daemon.profiles.review = {
+//!   about = "Reviews a change for bugs",
+//!   agent = "codex",
+//!   model = "gpt-6-luna",          -- or a table, by agent: { claude = "haiku" }
+//!   effort = "low",
+//!   limits = "read-only",          -- or "no-commands", or "none"
+//!   prompt = "You review changes for bugs. Say what's wrong, briefly.",
+//! }
 //! ```
 //!
 //! How far limits hold depends on the agent (see [`Limits`]).
@@ -58,7 +59,7 @@ pub(crate) enum Limits {
 }
 
 impl Limits {
-    /// What it's called, in `agents.toml`, and as chats keep it.
+    /// What it's called, in the daemon's config, and as chats keep it.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -261,50 +262,29 @@ pub(crate) fn built_in() -> Vec<Profile> {
     ]
 }
 
-/// The profiles an `agents.toml` adds or changes, from its `profiles`
-/// table, over `base`, the built-in ones: a profile of a built-in one's
-/// name changes only what it gives.
-pub(crate) fn parse(
-    document: &toml_edit::DocumentMut,
-    base: &mut Vec<Profile>,
-) -> Result<(), String> {
-    let Some(profiles) = document.get("profiles") else {
-        return Ok(());
-    };
-    let profiles = profiles
-        .as_table_like()
-        .ok_or("profiles is a table, of profiles by name")?;
-    for (name, table) in profiles.iter() {
-        let table = (table.as_table_like()).ok_or_else(|| format!("profiles.{name} is a table"))?;
-        let text = |key: &str| -> Result<Option<String>, String> {
-            table.get(key).map_or(Ok(None), |item| {
-                (item.as_str().map(|text| Some(text.to_owned())))
-                    .ok_or_else(|| format!("profiles.{name}.{key} is a string"))
-            })
-        };
-        // A string for any agent, or a table by agent.
-        let by_agent = |key: &str| -> Result<Option<Vec<(String, String)>>, String> {
-            let Some(item) = table.get(key) else {
-                return Ok(None);
-            };
-            if let Some(value) = item.as_str() {
-                return Ok(Some(vec![("*".to_owned(), value.to_owned())]));
-            }
-            let wrong =
-                || format!("profiles.{name}.{key} is a string, or a table of them by agent");
-            let values = item.as_table_like().ok_or_else(wrong)?;
-            (values.iter())
-                .map(|(agent, value)| {
-                    let value = value.as_str().ok_or_else(wrong)?;
-                    Ok((agent.to_owned(), value.to_owned()))
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .map(Some)
-        };
-        let known = base.iter().position(|profile| profile.name == name);
+/// What the daemon's config gives a profile, as `daemon.profiles.NAME`:
+/// a profile of its own, or of a built-in one's name, changes to it, of
+/// only what it gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Change {
+    pub(crate) name: String,
+    pub(crate) about: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) limits: Option<Limits>,
+    pub(crate) agent: Option<String>,
+    /// The model by agent, `*` for any, `inherit` for the parent's.
+    pub(crate) models: Option<Vec<(String, String)>>,
+    /// How hard it thinks, by agent, as `models`.
+    pub(crate) efforts: Option<Vec<(String, String)>>,
+}
+
+/// `changes`, in turn, over `base`, the built-in profiles.
+pub(crate) fn apply(changes: &[Change], base: &mut Vec<Profile>) {
+    for change in changes {
+        let known = base.iter().position(|profile| profile.name == change.name);
         let at = known.unwrap_or_else(|| {
             base.push(Profile {
-                name: name.to_owned(),
+                name: change.name.clone(),
                 about: String::new(),
                 prompt: String::new(),
                 limits: Limits::None,
@@ -316,32 +296,29 @@ pub(crate) fn parse(
             base.len() - 1
         });
         let profile = &mut base[at];
-        if let Some(about) = text("about")? {
-            profile.about = about;
+        if let Some(about) = &change.about {
+            profile.about.clone_from(about);
         }
-        if let Some(prompt) = text("prompt")? {
-            profile.prompt = prompt;
+        if let Some(prompt) = &change.prompt {
+            profile.prompt.clone_from(prompt);
         }
-        if let Some(limits) = text("limits")? {
-            profile.limits = Limits::named(&limits).ok_or_else(|| {
-                format!("profiles.{name}.limits is \"read-only\", \"no-commands\" or \"none\"")
-            })?;
+        if let Some(limits) = change.limits {
+            profile.limits = limits;
         }
-        if let Some(agent) = text("agent")? {
-            profile.agent = Some(agent);
+        if let Some(agent) = &change.agent {
+            profile.agent = Some(agent.clone());
         }
-        if let Some(models) = by_agent("model")? {
+        if let Some(models) = &change.models {
             profile.inherit_model = models.iter().any(|(_, model)| model == "inherit");
-            profile.models = models
-                .into_iter()
+            profile.models = (models.iter())
                 .filter(|(_, model)| model != "inherit")
+                .cloned()
                 .collect();
         }
-        if let Some(efforts) = by_agent("effort")? {
-            profile.efforts = efforts;
+        if let Some(efforts) = &change.efforts {
+            profile.efforts.clone_from(efforts);
         }
     }
-    Ok(())
 }
 
 /// The choice `wanted` names, among `choices`: by its value, or else its
@@ -430,26 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn agents_toml_adds_profiles_and_changes_the_built_in_ones() {
-        let document = r#"
-            [profiles.review]
-            about = "Reviews a change"
-            agent = "codex"
-            model = "gpt-6-luna"
-            effort = "low"
-            limits = "read-only"
-            prompt = "You review."
-
-            [profiles.explore]
-            model = { claude = "sonnet" }
-
-            [profiles.mine]
-            model = "inherit"
-        "#
-        .parse()
+    fn config_adds_profiles_and_changes_the_built_in_ones() {
+        let settings = crate::settings::Settings::from_lua(
+            r#"
+            daemon.profiles.review = {
+              about = "Reviews a change",
+              agent = "codex",
+              model = "gpt-6-luna",
+              effort = "low",
+              limits = "read-only",
+              prompt = "You review.",
+            }
+            daemon.profiles.explore = { model = { claude = "sonnet" } }
+            daemon.profiles.mine = { model = "inherit" }
+            "#,
+        )
         .unwrap();
         let mut profiles = built_in();
-        parse(&document, &mut profiles).unwrap();
+        apply(&settings.agents().profiles, &mut profiles);
         let named = |name: &str| {
             profiles
                 .iter()
@@ -471,8 +446,13 @@ mod tests {
         assert!(!explore.prompt.is_empty());
         assert!(named("mine").inherit_model);
 
-        let wrong = "[profiles.x]\nlimits = \"loose\"".parse().unwrap();
-        let refused = parse(&wrong, &mut built_in()).unwrap_err();
-        assert!(refused.contains("profiles.x.limits"), "{refused}");
+        let refused =
+            crate::settings::Settings::from_lua("daemon.profiles.x = { limits = \"loose\" }")
+                .unwrap_err();
+        assert!(
+            refused.said.contains("daemon.profiles.x.limits"),
+            "{refused:?}"
+        );
+        assert_eq!(refused.at.unwrap().line, 1);
     }
 }

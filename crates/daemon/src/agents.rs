@@ -19,23 +19,18 @@
 //! alive beside it, as `npx` keeps. Only with none of the three does a
 //! chat wait for it to be installed.
 //!
-//! The user adds agents, or gives a known one another command, in
-//! `daemon/agents.toml` in clackatoo's config directory, which is read
-//! again whenever a chat starts:
+//! The user adds agents, or gives a known one another command, in the
+//! daemon's config (see [`crate::settings`]), read as it starts or
+//! upgrades:
 //!
-//! ```toml
-//! [agents.opencode]
-//! name = "OpenCode"
-//! command = ["opencode", "acp"]
-//!
-//! [agents.claude]
-//! command = ["claude-agent-acp"]
-//! tasks = false
+//! ```lua
+//! daemon.agents.opencode = { name = "OpenCode", command = { "opencode", "acp" } }
+//! daemon.agents.claude = { command = { "claude-agent-acp" }, tasks = false }
 //! ```
 //!
 //! `tasks` says whether to ask the agent what it runs in the background
 //! (see [`crate::agent::Task`]): Claude Code is asked unless it's `false`.
-//! Its `[subagents]` table sets how far chats agents start may go (see
+//! `daemon.subagents` sets how far chats agents start may go (see
 //! [`SubagentLimits`]).
 //!
 //! It's the daemon's, not the window's, as the daemon runs the agent:
@@ -302,10 +297,10 @@ pub(crate) enum Start {
 #[derive(Clone, Debug, Default)]
 pub struct AgentConfig {
     /// Agents set when the daemon started, such as by `$CLACKATOO_AGENT`:
-    /// over those in the file, and those clackatoo knows.
+    /// over those its config adds, and those clackatoo knows.
     pub custom: Vec<CustomAgent>,
-    /// The user's `agents.toml`, read again whenever a chat starts.
-    pub file: Option<PathBuf>,
+    /// What the daemon's config says of agents, as it started.
+    pub configured: Configured,
     /// Where known agents' adapters are installed, one directory each.
     /// `None` installs none.
     pub dir: Option<PathBuf>,
@@ -318,10 +313,41 @@ pub struct AgentConfig {
     /// [`crate::rpc::Peer::trace_agent_to`]). `None` writes none.
     pub trace: Option<PathBuf>,
     /// Stops every agent as the daemon upgrades, as before agents went on
-    /// through upgrades, whatever `agents.toml` says: the switch to turn
+    /// through upgrades, whatever the config says: the switch to turn
     /// that off, `CLACKATOO_LIVE_AGENTS=off` (see
     /// [`kept_through_upgrades`](Self::kept_through_upgrades)).
     pub restart_on_upgrade: bool,
+}
+
+/// What the daemon's config says of agents (see [`crate::settings`]): the
+/// agents it adds, or gives another command, the profiles it adds or
+/// changes, the limits on chats agents start, and whether agents go on
+/// through upgrades.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Configured {
+    pub(crate) agents: Vec<CustomAgent>,
+    pub(crate) profiles: Vec<profiles::Change>,
+    pub(crate) subagents: SubagentLimits,
+    pub(crate) keep_agents: bool,
+}
+
+impl Default for Configured {
+    fn default() -> Self {
+        Self {
+            agents: Vec::new(),
+            profiles: Vec::new(),
+            subagents: SubagentLimits::default(),
+            keep_agents: true,
+        }
+    }
+}
+
+impl Configured {
+    /// As the daemon's config `settings` says.
+    #[must_use]
+    pub fn from(settings: &crate::settings::Settings) -> Self {
+        settings.agents()
+    }
 }
 
 impl Known {
@@ -377,51 +403,28 @@ impl AgentConfig {
     /// Whether agents' processes go on through an upgrade, with all they
     /// run (CLACKA-188), rather than being stopped first: unless
     /// [`restart_on_upgrade`](Self::restart_on_upgrade) says otherwise, or
-    /// `agents.toml` does, with
-    ///
-    /// ```toml
-    /// [upgrade]
-    /// keep_agents = false
-    /// ```
+    /// the config does, with `daemon.upgrade.keep_agents = false`.
     ///
     /// The build upgrading asks this, and so does the build it upgrades to,
     /// which then doesn't say it takes them (see
     /// [`crate::upgrade::TAKES_ADAPTERS`]).
     pub(crate) fn kept_through_upgrades(&self) -> bool {
-        if self.restart_on_upgrade {
-            return false;
-        }
-        let document = self.file.as_deref().and_then(read_document);
-        let kept = document.as_ref().and_then(|document| {
-            let item = document.get("upgrade")?.get("keep_agents")?;
-            let kept = item.as_bool();
-            if kept.is_none() {
-                log::warn!("agents.toml: upgrade.keep_agents is true or false");
-            }
-            kept
-        });
-        kept.unwrap_or(true)
+        !self.restart_on_upgrade && self.configured.keep_agents
     }
 
-    /// The limits on chats agents start, as the `[subagents]` table of
-    /// `agents.toml` sets them, and what's wrong in it. It reads the file:
-    /// the daemon keeps what it says, and asks again only as a chat starts,
-    /// an agent's `start_chat` among them, never on its other tool calls.
-    pub(crate) fn subagent_limits(&self) -> (SubagentLimits, Vec<String>) {
-        (self.file.as_deref().and_then(read_document))
-            .map(|document| SubagentLimits::from_document(&document))
-            .unwrap_or_default()
+    /// The limits on chats agents start, as the daemon's config sets them.
+    pub(crate) fn subagent_limits(&self) -> SubagentLimits {
+        self.configured.subagents
     }
 
     /// The agent called `name`: the one clackatoo knows, changed or
     /// replaced by the user's, or why there isn't one.
     pub(crate) fn find(&self, name: &str) -> Result<AgentSpec, String> {
-        let from_file = self.file.as_deref().map(read_file).unwrap_or_default();
-        self.find_among(name, &from_file)
+        self.find_among(name, &self.configured.agents)
     }
 
     /// The agent called `name`, as [`find`](Self::find) finds it, with
-    /// `from_file` the agents `agents.toml` adds.
+    /// `from_file` the agents the config adds.
     fn find_among(&self, name: &str, from_file: &[CustomAgent]) -> Result<AgentSpec, String> {
         let custom = (self.custom.iter().find(|custom| custom.name == name))
             .or_else(|| from_file.iter().find(|custom| custom.name == name));
@@ -545,7 +548,7 @@ impl AgentConfig {
         } else if self.dir.is_none() {
             Start::Unavailable(format!(
                 "{} isn't installed, and this daemon installs no agents: give it a \
-                 command in agents.toml",
+                 command in the daemon's config, daemon/init.lua",
                 known.title
             ))
         } else if !npm {
@@ -556,24 +559,25 @@ impl AgentConfig {
         } else {
             Start::Unavailable(format!(
                 "{}'s adapter is installed with npm, which isn't here: install Node.js, \
-                 then send a message to try again, or give {} a command in agents.toml",
+                 then send a message to try again, or give {} a command in the daemon's \
+                 config, daemon/init.lua",
                 known.title, known.name
             ))
         }
     }
 
     /// Every agent a chat can talk to: those clackatoo knows, then the
-    /// user's own, in the order they're given. Reads `agents.toml` once.
+    /// user's own, in the order they're given.
     pub(crate) fn all(&self) -> Vec<AgentSpec> {
-        let from_file = self.file.as_deref().map(read_file).unwrap_or_default();
+        let from_file = &self.configured.agents;
         let mut names: Vec<&str> = KNOWN.iter().map(|known| known.name).collect();
-        for custom in self.custom.iter().chain(&from_file) {
+        for custom in self.custom.iter().chain(from_file) {
             if !names.contains(&custom.name.as_str()) {
                 names.push(&custom.name);
             }
         }
         (names.into_iter())
-            .filter_map(|name| self.find_among(name, &from_file).ok())
+            .filter_map(|name| self.find_among(name, from_file).ok())
             .collect()
     }
 
@@ -623,15 +627,10 @@ impl AgentConfig {
     }
 
     /// Every profile chats can be started as: clackatoo's, changed by
-    /// `agents.toml`, then the user's own. Reads `agents.toml` once.
+    /// the config, then the user's own.
     pub(crate) fn profiles(&self) -> Vec<Profile> {
         let mut profiles = profiles::built_in();
-        if let Some(path) = self.file.as_deref()
-            && let Some(document) = read_document(path)
-            && let Err(err) = profiles::parse(&document, &mut profiles)
-        {
-            log::warn!("{}: {err}", path.display());
-        }
+        profiles::apply(&self.configured.profiles, &mut profiles);
         profiles
     }
 
@@ -650,12 +649,11 @@ impl AgentConfig {
         ))
     }
 
-    /// The directories the user's agents are run from, as `agents.toml`
-    /// and the daemon's own settings give their commands: an install
-    /// never removes them.
+    /// The directories the user's agents are run from, as the config and
+    /// the daemon's own settings give their commands: an install never
+    /// removes them.
     pub(crate) fn named_dirs(&self) -> Vec<PathBuf> {
-        let from_file = self.file.as_deref().map(read_file).unwrap_or_default();
-        (self.custom.iter().chain(&from_file))
+        (self.custom.iter().chain(&self.configured.agents))
             .filter_map(|custom| custom.command.first())
             .map(PathBuf::from)
             .filter(|program| program.is_absolute())
@@ -814,8 +812,8 @@ pub(crate) fn install_dir(dir: &Path, known: &Known) -> PathBuf {
 
 /// Installs `known`'s adapter in `dir`, unless another daemon did
 /// meanwhile, and removes its other versions: all but those a process,
-/// of this daemon or another, runs from, and those in `keep`, which
-/// `agents.toml` names. Holds `dir`'s lock throughout, so no two daemons
+/// of this daemon or another, runs from, and those in `keep`, which the
+/// config names. Holds `dir`'s lock throughout, so no two daemons
 /// install or remove at once. Takes a while: it's for a thread of its
 /// own.
 ///
@@ -898,101 +896,21 @@ fn is_program(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-/// The agents `agents.toml` at `path` adds, or none if it isn't there or
-/// doesn't make sense: one that doesn't is left out, and what's wrong is
-/// logged.
-fn read_file(path: &Path) -> Vec<CustomAgent> {
-    let Some(document) = read_document(path) else {
-        return Vec::new();
-    };
-    let (agents, wrong) = parse(&document);
-    for why in wrong {
-        log::warn!("{}: {why}", path.display());
-    }
-    agents
-}
-
-/// `agents.toml` at `path`, if it's there and is TOML: what's wrong
-/// otherwise is logged.
-fn read_document(path: &Path) -> Option<toml_edit::DocumentMut> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            log::warn!("{} couldn't be read: {err}", path.display());
-            return None;
-        }
-    };
-    (text.parse::<toml_edit::DocumentMut>())
-        .map_err(|err| log::warn!("{}: {err}", path.display()))
-        .ok()
-}
-
-/// The agents an `agents.toml` adds, and what's wrong with those left
-/// out: one wrong leaves the others in.
-pub(crate) fn parse(document: &toml_edit::DocumentMut) -> (Vec<CustomAgent>, Vec<String>) {
-    let Some(agents) = document.get("agents") else {
-        return (Vec::new(), Vec::new());
-    };
-    let Some(agents) = agents.as_table_like() else {
-        return (
-            Vec::new(),
-            vec!["agents is a table, of agents by name".into()],
-        );
-    };
-    let mut parsed = Vec::new();
-    let mut wrong = Vec::new();
-    for (name, agent) in agents.iter() {
-        match parse_agent(name, agent) {
-            Ok(agent) => parsed.push(agent),
-            Err(why) => wrong.push(format!("{why}; agents.{name} is left out")),
-        }
-    }
-    (parsed, wrong)
-}
-
-/// The agent called `name` that `agent`, its table in `agents.toml`, adds.
-fn parse_agent(name: &str, agent: &toml_edit::Item) -> Result<CustomAgent, String> {
-    let agent = (agent.as_table_like()).ok_or_else(|| format!("agents.{name} is a table"))?;
-    let text = |key: &str| -> Result<Option<String>, String> {
-        agent.get(key).map_or(Ok(None), |item| {
-            (item.as_str().map(|text| Some(text.to_owned())))
-                .ok_or_else(|| format!("agents.{name}.{key} is a string"))
-        })
-    };
-    let command = (agent.get("command").and_then(toml_edit::Item::as_array))
-        .ok_or_else(|| format!("agents.{name} needs a command, a list of strings"))?;
-    let command = (command.iter())
-        .map(|word| word.as_str().map(OsString::from))
-        .collect::<Option<Vec<_>>>()
-        .filter(|command| !command.is_empty())
-        .ok_or_else(|| format!("agents.{name}.command is a list of strings"))?;
-    let tasks = agent.get("tasks").map_or(Ok(None), |item| {
-        (item.as_bool().map(Some)).ok_or_else(|| format!("agents.{name}.tasks is true or false"))
-    })?;
-    Ok(CustomAgent {
-        name: name.to_owned(),
-        title: text("name")?,
-        command,
-        starting_mode: text("mode")?,
-        tasks,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The agents `text`, an `agents.toml`, adds, or what's wrong with
+    /// The agents `text`, the daemon's config, adds, or what's wrong with
     /// it, if anything is.
     fn parse(text: &str) -> Result<Vec<CustomAgent>, String> {
-        let document = text
-            .parse()
-            .map_err(|err: toml_edit::TomlError| err.to_string())?;
-        match super::parse(&document) {
-            (agents, wrong) if wrong.is_empty() => Ok(agents),
-            (_, wrong) => Err(wrong.join("\n")),
-        }
+        crate::settings::Settings::from_lua(text)
+            .map(|settings| settings.agents().agents)
+            .map_err(|failure| failure.said)
+    }
+
+    /// The agents `text`, the daemon's config, sets.
+    fn configured(text: &str) -> Configured {
+        crate::settings::Settings::from_lua(text).unwrap().agents()
     }
 
     fn custom(name: &str, command: &[&str]) -> CustomAgent {
@@ -1043,23 +961,18 @@ mod tests {
         );
     }
 
-    /// Agents go on through upgrades unless `agents.toml` or the switch
+    /// Agents go on through upgrades unless the config or the switch
     /// says not to (CLACKA-188).
     #[test]
     fn agents_go_on_through_upgrades_unless_told_not_to() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("agents.toml");
-        let config = AgentConfig {
-            file: Some(file.clone()),
+        assert!(AgentConfig::default().kept_through_upgrades(), "no config");
+        let config = |text| AgentConfig {
+            configured: configured(text),
             ..AgentConfig::default()
         };
-        assert!(config.kept_through_upgrades(), "no file");
-        fs::write(&file, "[upgrade]\nkeep_agents = true\n").unwrap();
-        assert!(config.kept_through_upgrades());
-        fs::write(&file, "[upgrade]\nkeep_agents = false\n").unwrap();
-        assert!(!config.kept_through_upgrades());
-        fs::write(&file, "[upgrade]\nkeep_agents = \"no\"\n").unwrap();
-        assert!(config.kept_through_upgrades(), "nonsense is ignored");
+        assert!(config("daemon.upgrade.keep_agents = true").kept_through_upgrades());
+        assert!(!config("daemon.upgrade.keep_agents = false").kept_through_upgrades());
+        assert!(parse("daemon.upgrade.keep_agents = \"no\"").is_err());
         let switched = AgentConfig {
             restart_on_upgrade: true,
             ..AgentConfig::default()
@@ -1067,26 +980,22 @@ mod tests {
         assert!(!switched.kept_through_upgrades());
     }
 
-    /// The limits on chats agents start are read from the file's
-    /// `[subagents]` table (CLACKA-209).
+    /// The limits on chats agents start come from `daemon.subagents`
+    /// (CLACKA-209).
     #[test]
-    fn subagent_limits_come_from_the_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("agents.toml");
+    fn subagent_limits_come_from_the_config() {
+        assert_eq!(
+            AgentConfig::default().subagent_limits(),
+            SubagentLimits::default()
+        );
         let config = AgentConfig {
-            file: Some(file.clone()),
+            configured: configured(
+                "daemon.subagents.working = 4\ndaemon.subagents.default = 4\ndaemon.subagents.depth = 2",
+            ),
             ..AgentConfig::default()
         };
-        assert_eq!(
-            config.subagent_limits().0,
-            SubagentLimits::default(),
-            "no file"
-        );
-        fs::write(&file, "[subagents]\nworking = 4\ndepth = 2\n").unwrap();
-        let (limits, _) = config.subagent_limits();
+        let limits = config.subagent_limits();
         assert_eq!((limits.working, limits.default, limits.depth), (4, 4, 2));
-        fs::write(&file, "not toml [").unwrap();
-        assert_eq!(config.subagent_limits().0, SubagentLimits::default());
     }
 
     #[test]
@@ -1168,17 +1077,16 @@ mod tests {
     }
 
     #[test]
-    fn agents_toml_adds_agents_and_says_what_it_gets_wrong() {
+    fn the_config_adds_agents_and_says_what_it_gets_wrong() {
         let parsed = parse(
             r#"
-                [agents.opencode]
-                name = "OpenCode"
-                command = ["opencode", "acp"]
-                mode = "build"
-                tasks = false
-
-                [agents.claude]
-                command = ["claude-agent-acp"]
+                daemon.agents.opencode = {
+                  name = "OpenCode",
+                  command = { "opencode", "acp" },
+                  mode = "build",
+                  tasks = false,
+                }
+                daemon.agents.claude = { command = { "claude-agent-acp" } }
             "#,
         )
         .unwrap();
@@ -1196,52 +1104,40 @@ mod tests {
             ]
         );
         assert_eq!(parse("").unwrap(), Vec::new());
-        assert!(
-            parse("[agents.x]\nname = \"X\"")
-                .unwrap_err()
-                .contains("needs a command")
-        );
-        assert!(
-            parse("[agents.x]\ncommand = []")
-                .unwrap_err()
-                .contains("list of strings")
-        );
-        assert!(
-            parse("[agents.x]\ncommand = [\"a\"]\nmode = 1")
-                .unwrap_err()
-                .contains("mode")
-        );
-        assert!(parse("agents = 3").is_err());
+        let wrong = |text: &str| parse(text).unwrap_err();
+        assert!(wrong("daemon.agents.x = { name = \"X\" }").contains("needs a command"));
+        assert!(wrong("daemon.agents.x = { command = {} }").contains("list of strings"));
+        assert!(wrong("daemon.agents.x = { command = { \"a\" }, mode = 1 }").contains("mode"));
+        assert!(wrong("daemon.agents.x = { command = { \"a\" }, moed = \"m\" }").contains("moed"));
+        assert!(wrong("daemon.agents = 3").contains("can't be set"));
+        assert!(wrong("daemon.agents.x = 3").contains("is a table"));
     }
 
+    /// An agent set can be changed after, and taken out, and reads back.
     #[test]
-    fn an_agent_wrong_in_agents_toml_leaves_the_others_in() {
-        let document = "[agents.bad]\nname = \"Bad\"\n\n[agents.good]\ncommand = [\"good\"]"
-            .parse()
-            .unwrap();
-        let (agents, wrong) = super::parse(&document);
-        assert_eq!(agents, vec![custom("good", &["good"])]);
-        assert_eq!(
-            wrong,
-            ["agents.bad needs a command, a list of strings; agents.bad is left out"]
-        );
-    }
-
-    #[test]
-    fn the_file_is_read_again_whenever_an_agent_is_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("agents.toml");
-        let config = AgentConfig {
-            file: Some(file.clone()),
-            ..AgentConfig::default()
-        };
-        assert!(config.find("mine").is_err());
-        fs::write(&file, "[agents.mine]\ncommand = [\"mine-acp\"]\n").unwrap();
-        assert_eq!(config.find("mine").unwrap().title, "mine");
-        // Set by the daemon, over the file.
+    fn an_agent_set_can_be_changed_and_taken_out() {
+        let parsed = parse(
+            r#"
+                daemon.agents.mine = { command = { "mine-acp" } }
+                daemon.agents.mine.tasks = false
+                daemon.agents.gone = { command = { "gone" } }
+                daemon.agents.gone = nil
+                daemon.agents["my agent"] = { command = { "spaced" } }
+                local names = {}
+                for name in daemon.agents do table.insert(names, name) end
+                assert(#names == 2, "two agents")
+                assert(daemon.agents.mine.command[1] == "mine-acp")
+            "#,
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].tasks, Some(false));
+        assert_eq!(parsed[1].name, "my agent");
+        // Set by the daemon, over the config.
         let config = AgentConfig {
             custom: vec![custom("mine", &["other"])],
-            ..config
+            configured: configured("daemon.agents.mine = { command = { \"mine-acp\" } }"),
+            ..AgentConfig::default()
         };
         let spec = config.find("mine").unwrap();
         assert_eq!(spec.launch, Launch::Command(vec!["other".into()]));
@@ -1339,8 +1235,8 @@ mod tests {
             config.start(&spec),
             Start::Ready { suggest: None, .. }
         ));
-        // Nor without a directory to install in, which says to use
-        // agents.toml when there's nothing else.
+        // Nor without a directory to install in, which says to use the
+        // config when there's nothing else.
         let config = AgentConfig {
             path: Some(dir.path().join("none").into()),
             ..AgentConfig::default()
@@ -1348,11 +1244,11 @@ mod tests {
         let Start::Unavailable(why) = config.start(&spec) else {
             panic!()
         };
-        assert!(why.contains("agents.toml"), "{why}");
+        assert!(why.contains("daemon/init.lua"), "{why}");
     }
 
     #[test]
-    fn an_install_keeps_what_runs_and_what_agents_toml_names() {
+    fn an_install_keeps_what_runs_and_what_the_config_names() {
         let dir = tempfile::tempdir().unwrap();
         let codex = known("codex").unwrap();
         let installed = codex.installed_program(&install_dir(dir.path(), codex));
@@ -1379,7 +1275,7 @@ mod tests {
         assert!(installed.is_file());
         assert!(!old("1.0.0").exists());
         assert!(old("1.1.0").exists(), "it's running");
-        assert!(old("1.2.0").exists(), "agents.toml names it");
+        assert!(old("1.2.0").exists(), "the config names it");
         assert!(dir.path().join("codex-mine").exists(), "not a version");
     }
 

@@ -64,8 +64,8 @@
 //! rtkit, a user manager, lingering, or cgroups as systemd delegates them,
 //! as in tests (whose daemons never call [`enable`]), under
 //! `CLACKATOO_DISPLAY=off` or `CLACKATOO_PRIORITY=off`, or with
-//! `priority = false` in `daemon/machine.toml`, the daemon runs as it
-//! always has, and says why in one line of its log.
+//! `daemon.machine.priority = false` in the daemon's config, the daemon
+//! runs as it always has, and says why in one line of its log.
 
 #![allow(
     unsafe_code,
@@ -214,11 +214,17 @@ pub struct Settled {
 }
 
 /// Has the daemon take its priority and place as it serves (see
-/// [`crate::upgrade::serve`]): called by `clackatoo daemon`, never by
-/// tests, whose daemons stay as they are.
-pub fn enable() {
+/// [`crate::upgrade::serve`]), unless `configured` is false, as
+/// `daemon.machine.priority = false` in the daemon's config makes it:
+/// called by `clackatoo daemon`, never by tests, whose daemons stay as
+/// they are.
+pub fn enable(configured: bool) {
+    CONFIGURED_OFF.store(!configured, Ordering::SeqCst);
     WANTED.store(true, Ordering::SeqCst);
 }
+
+/// Whether the daemon's config switches it off (see [`enable`]).
+static CONFIGURED_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Before the daemon has its runtime directory's lock, and starts
 /// anything, if [`enable`] asked: the programs it starts from now on are
@@ -595,7 +601,7 @@ pub fn linger_note(runtime: &Path) -> Option<&'static str> {
 }
 
 /// Why the daemon is to run as it always has, if it is: the environment
-/// or `daemon/machine.toml` says so.
+/// or the daemon's config says so.
 fn switched_off() -> Option<String> {
     let off = |name: &str| std::env::var_os(name).is_some_and(|value| value == "off");
     if off("CLACKATOO_PRIORITY") {
@@ -604,9 +610,8 @@ fn switched_off() -> Option<String> {
     if off("CLACKATOO_DISPLAY") {
         return Some("CLACKATOO_DISPLAY is off".to_owned());
     }
-    let config = crate::config_dir()?;
-    (crate::machine::configured_priority(&config) == Some(false))
-        .then(|| "daemon/machine.toml says priority = false".to_owned())
+    (CONFIGURED_OFF.load(Ordering::SeqCst))
+        .then(|| "the daemon's config says daemon.machine.priority = false".to_owned())
 }
 
 /// The calling thread's id, from `/proc/thread-self`, which links to

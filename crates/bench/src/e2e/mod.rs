@@ -262,6 +262,7 @@ fn startup(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .arg("list")
             .arg("--socket")
             .arg(daemon.socket())

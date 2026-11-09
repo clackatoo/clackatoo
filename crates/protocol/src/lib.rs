@@ -1897,7 +1897,7 @@ pub struct NewAgent {
     /// beside it is in, as for a new terminal.
     pub cwd: Option<String>,
     /// The agent, by its name: `claude`, `codex`, or one the daemon's
-    /// `agents.toml` adds. `None` is the daemon's default, Claude Code.
+    /// config adds. `None` is the daemon's default, Claude Code.
     pub agent: Option<String>,
     /// What the agent may do in the workspace through clackatoo's own
     /// tools.

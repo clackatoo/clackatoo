@@ -65,6 +65,7 @@ mod chat_queue;
 mod chats;
 mod clipboard;
 mod closed;
+mod config_notes;
 mod disk;
 mod edit_log;
 mod explorers;
@@ -3389,6 +3390,7 @@ impl Daemon {
                     self.present(token, here);
                     if here {
                         self.tell_trusted_through_upgrade(token);
+                        self.tell_config_notes(token);
                     }
                     continue;
                 }

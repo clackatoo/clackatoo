@@ -354,7 +354,7 @@ mod tests {
     }
 
     // The file is the user's, so it's checked on anything at all here, as
-    // the fuzzer checks the daemon's `agents.toml` (see `fuzz/`), which
+    // the fuzzer checks the daemon's old `agents.toml` (see `fuzz/`), which
     // can't reach into this program.
     proptest::proptest! {
         #[test]

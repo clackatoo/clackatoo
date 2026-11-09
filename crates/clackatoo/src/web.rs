@@ -1,16 +1,13 @@
 //! `clackatoo web` and `clackatoo devices`: the daemon's web app, which
 //! phones reach it through. `web password` keeps the password's hash in
-//! `daemon/web.toml`; `devices` lists the devices paired with it, and
+//! the state directory, never in the config; `devices` lists the devices paired with it, and
 //! answers those asking to pair, or unpairs one.
 
 use std::io::{self, BufRead as _, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clackatoo_protocol::{Request, Response};
 use clap::{Args, Subcommand};
-use toml_edit::DocumentMut;
 
 use crate::Connection;
 
@@ -22,8 +19,8 @@ const MIN_PASSWORD: usize = 8;
 pub(crate) enum WebCommand {
     /// Set the password devices pair with, asked for twice, or read from
     /// standard input if it isn't a terminal. Only its hash is kept, in
-    /// daemon/web.toml; the daemon reads it when it next starts or
-    /// upgrades.
+    /// web-password in the state directory, which only you may read; the
+    /// daemon reads it when it next starts or upgrades.
     Password {
         /// Take the password away instead: devices then pair only by
         /// being allowed from a window.
@@ -60,17 +57,18 @@ enum DevicesCommand {
 /// Runs `clackatoo web`.
 pub(crate) fn run(command: &WebCommand) -> anyhow::Result<()> {
     let WebCommand::Password { unset } = command;
-    let path = settings().context("no config directory: set $HOME or $XDG_CONFIG_HOME")?;
-    let mut document = read(&path)?;
+    let state = clackatoo_daemon::state_dir()
+        .context("no state directory: set $HOME or $XDG_STATE_HOME")?;
+    let path = state.join(clackatoo_daemon::settings::PASSWORD);
     if *unset {
-        document.remove("password");
-        write(&path, &document.to_string())?;
+        clackatoo_daemon::settings::set_password(&state, None)
+            .with_context(|| format!("couldn't remove {}", path.display()))?;
         println!("The password is gone from {}.", path.display());
     } else {
         let password = read_password()?;
         let hash = clackatoo_daemon::web::hash_password(&password);
-        document["password"] = toml_edit::value(hash);
-        write(&path, &document.to_string())?;
+        clackatoo_daemon::settings::set_password(&state, Some(&hash))
+            .with_context(|| format!("couldn't write {}", path.display()))?;
         println!("The password's hash is in {}.", path.display());
     }
     println!("The daemon reads it when it next starts: `clackatoo upgrade` restarts it in place.");
@@ -134,52 +132,6 @@ fn ago(millis: u64) -> String {
         60..1440 => plural(minutes / 60, "hour"),
         _ => plural(minutes / 1440, "day"),
     }
-}
-
-/// Where the web app's settings are: `daemon/web.toml` in clackatoo's
-/// config directory.
-fn settings() -> Option<PathBuf> {
-    Some(clackatoo_daemon::config_dir()?.join("daemon/web.toml"))
-}
-
-/// The settings at `path`, or none if there are none yet.
-fn read(path: &Path) -> anyhow::Result<DocumentMut> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text
-            .parse()
-            .with_context(|| format!("{} isn't TOML", path.display())),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(DocumentMut::new()),
-        Err(err) => Err(err).with_context(|| format!("couldn't read {}", path.display())),
-    }
-}
-
-/// Writes `text` as the settings at `path`, which only the user may read,
-/// beside the old and renamed over them.
-fn write(path: &Path, text: &str) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("couldn't make {}", dir.display()))?;
-    }
-    let partial = path.with_extension("toml.partial");
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&partial)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            // On disk before it takes the old one's place.
-            file.sync_all()
-        })
-        .with_context(|| format!("couldn't write {}", partial.display()))?;
-    std::fs::rename(&partial, path)
-        .with_context(|| format!("couldn't write {}", path.display()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .with_context(|| format!("couldn't write {}", path.display()))?;
-    }
-    Ok(())
 }
 
 /// The password: typed twice, without being shown, on a terminal, or else

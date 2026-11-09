@@ -338,6 +338,7 @@ impl Window {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .env("XDG_RUNTIME_DIR", daemon.runtime_dir())
             .envs(display.vars.iter().map(|(name, value)| (name, value)))
             .env("RUST_LOG", log)

@@ -1,43 +1,43 @@
-//! The web app's settings: `daemon/web.toml` in clackatoo's config
-//! directory, read when the daemon starts.
+//! The web app's settings: `daemon.web` in the daemon's config (see
+//! [`crate::settings`]), read when the daemon starts or upgrades.
 //!
-//! ```toml
-//! # Off unless this says otherwise.
-//! mode = "tailscale"        # or "public", or "off"
-//! # tailscale: the unix socket `tailscale serve` connects to, which only
-//! # you and root can reach; by default, web.sock in the web app's data.
-//! socket = "/home/you/.local/share/clackatoo/web/web.sock"
-//! # tailscale: the Tailscale login allowed in; else the first device's,
-//! # which only a window can let in.
-//! login = "you@github"
-//! # Written by `clackatoo web password`: an Argon2id hash, never the
-//! # password itself. Optional with tailscale, required with public.
-//! password = "$argon2id$v=19$m=19456,t=2,p=1$…"
-//! # public: where to listen, and the certificate to show, read again
-//! # when its files change.
-//! address = "0.0.0.0"
-//! port = 8765
-//! certificate = "/etc/letsencrypt/live/example.com/fullchain.pem"
-//! key = "/etc/letsencrypt/live/example.com/privkey.pem"
-//! # The address the app is reached at: requests for any other name, or
-//! # from any other page, are refused. Required with public.
-//! origin = "https://example.com:8765"
-//! # A device unused this long is unpaired.
-//! expire_days = 90
-//! # Ask for the password again after this many days; 0 never does.
-//! password_days = 0
-//! # Whether a device may ask to be allowed from a window: by default
-//! # with tailscale, not with public.
-//! ask = true
-//! # Wrong passwords in a row before pairing with the password locks,
-//! # from 1 to 10000.
-//! lock_after = 50
+//! ```lua
+//! -- Off unless this says otherwise.
+//! daemon.web.mode = "tailscale"        -- or "public", or "off"
+//! -- tailscale: the unix socket `tailscale serve` connects to, which only
+//! -- you and root can reach; by default, web.sock in the web app's data.
+//! daemon.web.socket = "/home/you/.local/share/clackatoo/web/web.sock"
+//! -- tailscale: the Tailscale login allowed in; else the first device's,
+//! -- which only a window can let in.
+//! daemon.web.login = "you@github"
+//! -- public: where to listen, and the certificate to show, read again
+//! -- when its files change.
+//! daemon.web.address = "0.0.0.0"
+//! daemon.web.port = 8765
+//! daemon.web.certificate = "/etc/letsencrypt/live/example.com/fullchain.pem"
+//! daemon.web.key = "/etc/letsencrypt/live/example.com/privkey.pem"
+//! -- The address the app is reached at: requests for any other name, or
+//! -- from any other page, are refused. Required with public.
+//! daemon.web.origin = "https://example.com:8765"
+//! -- A device unused this long is unpaired.
+//! daemon.web.expire_days = 90
+//! -- Ask for the password again after this many days; 0 never does.
+//! daemon.web.password_days = 0
+//! -- Whether a device may ask to be allowed from a window: by default
+//! -- with tailscale, not with public.
+//! daemon.web.ask = true
+//! -- Wrong passwords in a row before pairing with the password locks,
+//! -- from 1 to 10000.
+//! daemon.web.lock_after = 50
 //! ```
 //!
-//! A key it doesn't know is logged, and passed over.
+//! The password is never in the config, which people keep in git: `clackatoo
+//! web password` keeps its Argon2id hash in `web-password` in the state
+//! directory (see [`crate::settings::PASSWORD`]). Optional with
+//! tailscale, required with public.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::Asset;
@@ -52,26 +52,6 @@ pub const DEFAULT_EXPIRY: Duration = Duration::from_hours(90 * 24);
 /// How many wrong passwords in a row lock pairing with the password,
 /// unless told otherwise.
 pub const LOCK_AFTER: u32 = 50;
-
-/// The most `lock_after` may be: more is as good as never locking.
-const MOST_LOCK_AFTER: u64 = 10_000;
-
-/// The keys `web.toml` may have.
-const KEYS: &[&str] = &[
-    "mode",
-    "socket",
-    "login",
-    "password",
-    "address",
-    "port",
-    "certificate",
-    "key",
-    "origin",
-    "expire_days",
-    "password_days",
-    "ask",
-    "lock_after",
-];
 
 /// The unix socket's name in the web app's data directory, unless told
 /// otherwise.
@@ -177,195 +157,87 @@ impl WebConfig {
     }
 }
 
-/// The settings in `web.toml` at `path`, keeping what they keep in
-/// `data`: `None` if it isn't there, or says `off`, or doesn't make
-/// sense, which is logged.
-#[must_use]
-pub fn read(path: &Path, data: PathBuf) -> Option<WebConfig> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            log::warn!("{} couldn't be read: {err}", path.display());
-            return None;
-        }
-    };
-    parse(&text, data)
-        .map_err(|err| log::error!("{}: {err}; the web app is off", path.display()))
-        .ok()
-        .flatten()
-}
-
-/// The settings `text` says, keeping what they keep in `data`: `None` if
-/// it's off.
-///
-/// # Errors
-///
-/// If `text` isn't TOML, or a setting doesn't make sense.
-pub fn parse(text: &str, data: PathBuf) -> Result<Option<WebConfig>, String> {
-    let document: toml_edit::DocumentMut = text.parse().map_err(|err| format!("{err}"))?;
-    for key in unknown(&document) {
-        log::warn!("web.toml: there's no setting {key:?}; it's passed over");
-    }
-    let text = |key: &str| -> Result<Option<String>, String> {
-        document.get(key).map_or(Ok(None), |item| {
-            (item.as_str().map(|text| Some(text.to_owned())))
-                .ok_or_else(|| format!("{key} is a string"))
-        })
-    };
-    let number = |key: &str| -> Result<Option<u64>, String> {
-        document.get(key).map_or(Ok(None), |item| {
-            (item.as_integer().and_then(|n| u64::try_from(n).ok()))
-                .map(Some)
-                .ok_or_else(|| format!("{key} is a number, 0 or more"))
-        })
-    };
-    let mode = match text("mode")?.as_deref() {
-        None | Some("off") => return Ok(None),
-        Some("tailscale") => WebMode::Tailscale,
-        Some("public") => WebMode::Public {
-            certificate: text("certificate")?
-                .ok_or("public needs a certificate: the path of its PEM file")?
-                .into(),
-            key: text("key")?
-                .ok_or("public needs a key: the path of the certificate's private key")?
-                .into(),
-        },
-        Some(other) => return Err(format!("mode is off, tailscale or public, not {other:?}")),
-    };
-    let mut config = WebConfig::new(mode, data);
-    if config.tailscale() {
-        if document.contains_key("port") || document.contains_key("address") {
-            return Err(
-                "port and address are for public: tailscale listens on a unix socket, \
-                 which `tailscale serve --bg unix:PATH` serves"
-                    .into(),
-            );
-        }
-        if let Some(socket) = text("socket")? {
-            config.socket = PathBuf::from(socket);
-        }
-    } else {
-        if document.contains_key("socket") {
-            return Err("socket is for tailscale: public listens on address and port".into());
-        }
-        if let Some(port) = number("port")? {
-            let port = u16::try_from(port).map_err(|_| "port is at most 65535".to_owned())?;
-            config.address.set_port(port);
-        }
-        if let Some(address) = text("address")? {
-            let ip: IpAddr = (address.parse())
-                .map_err(|_| format!("address is an IP address to listen on, not {address:?}"))?;
-            config.address.set_ip(ip);
-        }
-    }
-    config.login = text("login")?.filter(|login| !login.is_empty());
-    config.password = text("password")?.filter(|hash| !hash.is_empty());
-    if let Some(hash) = &config.password {
-        super::auth::check_hash(hash).map_err(|err| format!("password: {err}"))?;
-    } else if !config.tailscale() {
-        return Err("public needs a password: `clackatoo web password` sets one".into());
-    }
-    if let Some(origin) = text("origin")? {
-        let origin = origin.trim_end_matches('/').to_ascii_lowercase();
-        if !origin.starts_with("https://") || origin[8..].contains('/') {
-            return Err(format!(
-                "origin is the address the app is reached at, as https://host:port, not {origin:?}"
-            ));
-        }
-        config.origin = Some(origin);
-    } else if !config.tailscale() {
-        return Err(
-            "public needs an origin: the address the app is reached at, as https://host:port"
-                .into(),
-        );
-    }
-    if let Some(days) = number("expire_days")? {
-        if days == 0 {
-            return Err("expire_days is at least 1".into());
-        }
-        config.expire_after = Duration::from_hours(days.saturating_mul(24));
-    }
-    config.password_every = number("password_days")?
-        .filter(|&days| days > 0)
-        .map(|days| Duration::from_hours(days.saturating_mul(24)));
-    if let Some(ask) = document.get("ask") {
-        config.ask = ask.as_bool().ok_or("ask is true or false")?;
-    }
-    if let Some(wrong) = number("lock_after")? {
-        if !(1..=MOST_LOCK_AFTER).contains(&wrong) {
-            return Err(format!("lock_after is from 1 to {MOST_LOCK_AFTER}"));
-        }
-        config.lock_after = u32::try_from(wrong).unwrap_or(LOCK_AFTER);
-    }
-    Ok(Some(config))
-}
-
-/// The keys in `document` that aren't settings, as a slip in one's name.
-fn unknown(document: &toml_edit::DocumentMut) -> Vec<String> {
-    (document.iter())
-        .map(|(key, _)| key)
-        .filter(|key| !KEYS.contains(key))
-        .map(str::to_owned)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
 
-    fn parse(text: &str) -> Result<Option<WebConfig>, String> {
-        super::parse(text, PathBuf::from("/data"))
+    /// The web app `text`, the daemon's config, sets up, with the
+    /// password's hash `password`; or what's wrong, as the config says it
+    /// or as it's off.
+    fn web(text: &str, password: Option<&str>) -> Result<Option<WebConfig>, String> {
+        let settings = Settings::from_lua(text).map_err(|failure| failure.said)?;
+        settings.web(PathBuf::from("/data"), password.map(str::to_owned))
     }
 
     #[test]
     fn off_unless_a_mode_says_otherwise() {
-        assert!(parse("").unwrap().is_none());
-        assert!(parse("mode = \"off\"\nport = 1").unwrap().is_none());
-        assert!(parse("mode = \"on\"").is_err());
+        assert!(web("", None).unwrap().is_none());
+        assert!(
+            web("daemon.web.mode = \"off\"\ndaemon.web.port = 1", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(web("daemon.web.mode = \"on\"", None).is_err());
     }
 
     #[test]
     fn tailscale_listens_on_a_unix_socket_only() {
-        let config = parse("mode = \"tailscale\"\nlogin = \"jack@github\"")
-            .unwrap()
-            .unwrap();
+        let config = web(
+            "daemon.web.mode = \"tailscale\"\ndaemon.web.login = \"jack@github\"",
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(config.socket, PathBuf::from("/data/web.sock"));
         assert_eq!(config.login.as_deref(), Some("jack@github"));
         assert!(config.password.is_none());
         assert!(config.ask, "a window may let a device in by default");
         assert_eq!(config.expire_after, DEFAULT_EXPIRY);
-        let config = parse("mode = \"tailscale\"\nsocket = \"/run/w.sock\"")
-            .unwrap()
-            .unwrap();
+        let config = web(
+            "daemon.web.mode = \"tailscale\"\ndaemon.web.socket = \"/run/w.sock\"",
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(config.socket, PathBuf::from("/run/w.sock"));
-        for listening in ["port = 9000", "address = \"0.0.0.0\""] {
-            let err = parse(&format!("mode = \"tailscale\"\n{listening}")).unwrap_err();
+        for listening in ["daemon.web.port = 9000", "daemon.web.address = \"0.0.0.0\""] {
+            let err = web(
+                &format!("daemon.web.mode = \"tailscale\"\n{listening}"),
+                None,
+            )
+            .unwrap_err();
             assert!(err.contains("unix socket"), "{err}");
+            assert!(err.starts_with("daemon/init.lua:2: "), "{err}");
         }
     }
 
     #[test]
     fn public_needs_a_certificate_a_password_and_its_origin() {
-        let err = parse("mode = \"public\"").unwrap_err();
+        let err = web("daemon.web.mode = \"public\"", None).unwrap_err();
         assert!(err.contains("certificate"), "{err}");
-        let base = "mode = \"public\"\ncertificate = \"c.pem\"\nkey = \"k.pem\"\n";
-        let err = parse(base).unwrap_err();
+        let base = "daemon.web.mode = \"public\"\ndaemon.web.certificate = \"c.pem\"\n\
+                    daemon.web.key = \"k.pem\"\n";
+        let err = web(base, None).unwrap_err();
+        assert!(err.contains("origin"), "{err}");
+        let base = format!("{base}daemon.web.origin = \"https://Example.com:8443/\"\n");
+        let err = web(&base, None).unwrap_err();
         assert!(err.contains("password"), "{err}");
-        let err = parse(&format!("{base}password = \"hunter2\"")).unwrap_err();
+        let err = web(&base, Some("hunter2")).unwrap_err();
         assert!(
             err.contains("password:"),
             "a plain password isn't a hash: {err}"
         );
         let hash = crate::web::hash_password("hunter2");
-        let err = parse(&format!("{base}password = \"{hash}\"")).unwrap_err();
-        assert!(err.contains("origin"), "{err}");
-        let base = format!("{base}password = \"{hash}\"\norigin = \"https://Example.com:8443/\"\n");
-        let config = parse(&base).unwrap().unwrap();
+        let config = web(&base, Some(&hash)).unwrap().unwrap();
         assert!(!config.ask, "strangers don't ask windows by default");
-        let config = parse(&format!(
-            "{base}address = \"::\"\nport = 8443\nexpire_days = 7\npassword_days = 30\nask = true"
-        ))
+        let config = web(
+            &format!(
+                "{base}daemon.web.address = \"::\"\ndaemon.web.port = 8443\n\
+                 daemon.web.expire_days = 7\ndaemon.web.password_days = 30\ndaemon.web.ask = true"
+            ),
+            Some(&hash),
+        )
         .unwrap()
         .unwrap();
         assert_eq!(config.address, "[::]:8443".parse().unwrap());
@@ -373,29 +245,35 @@ mod tests {
         assert_eq!(config.expire_after, Duration::from_hours(7 * 24));
         assert_eq!(config.password_every, Some(Duration::from_hours(30 * 24)));
         assert!(config.ask);
-        assert!(parse(&base.replace("https://Example.com:8443/", "http://x")).is_err());
-        assert!(parse(&format!("{base}socket = \"/s\"")).is_err());
+        let wrong_origin = base.replace("https://Example.com:8443/", "http://x");
+        assert!(web(&wrong_origin, Some(&hash)).is_err());
+        assert!(web(&format!("{base}daemon.web.socket = \"/s\""), Some(&hash)).is_err());
+        assert!(web(&format!("{base}daemon.web.address = \"here\""), Some(&hash)).is_err());
     }
 
     #[test]
     fn lock_after_is_read_within_its_range() {
-        let base = "mode = \"tailscale\"\n";
-        assert_eq!(parse(base).unwrap().unwrap().lock_after, LOCK_AFTER);
-        let config = parse(&format!("{base}lock_after = 5")).unwrap().unwrap();
+        let base = "daemon.web.mode = \"tailscale\"\n";
+        assert_eq!(web(base, None).unwrap().unwrap().lock_after, LOCK_AFTER);
+        let config = web(&format!("{base}daemon.web.lock_after = 5"), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(config.lock_after, 5);
         for wrong in ["0", "10001", "\"5\""] {
             assert!(
-                parse(&format!("{base}lock_after = {wrong}")).is_err(),
+                web(&format!("{base}daemon.web.lock_after = {wrong}"), None).is_err(),
                 "{wrong}"
             );
         }
     }
 
     #[test]
-    fn a_key_that_isnt_a_setting_is_found_out() {
-        let document: toml_edit::DocumentMut = "mode = \"tailscale\"\nlock_afer = 3\nask = true"
-            .parse()
-            .unwrap();
-        assert_eq!(unknown(&document), ["lock_afer"]);
+    fn a_name_that_isnt_a_setting_is_refused_saying_which_there_are() {
+        let err = web("daemon.web.lock_afer = 3", None).unwrap_err();
+        assert!(
+            err.contains("there's no setting daemon.web.lock_afer"),
+            "{err}"
+        );
+        assert!(err.contains("lock_after"), "{err}");
     }
 }

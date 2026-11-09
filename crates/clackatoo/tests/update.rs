@@ -281,6 +281,7 @@ fn update_moves_the_daemon_onto_the_new_build() {
         // Never the machine of the user running the tests.
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .spawn()
         .unwrap();
     let runtime = Runtime(runtime, Some(daemon));

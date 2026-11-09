@@ -15,6 +15,7 @@ fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .output()
@@ -35,6 +36,7 @@ fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("daemon")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
@@ -155,6 +157,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .args(args)
         .args(["--remote", "box", "--remote-command", remote_command])
         .args(command)
@@ -275,6 +278,7 @@ fn the_bridge_relays_over_pipes() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("bridge")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -360,6 +364,7 @@ fn config_sets_shows_and_unsets_settings() {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .arg("config")
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
@@ -395,6 +400,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .arg("edit")
             .args(args)
             .env("XDG_RUNTIME_DIR", runtime.path())
@@ -463,6 +469,7 @@ fn files_shows_a_folder_in_an_explorer_and_the_current_one_with_no_path() {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .arg("files")
             .args(args)
             .env("XDG_RUNTIME_DIR", runtime.path())
@@ -530,6 +537,7 @@ fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
             .env("CLACKATOO_WORKSPACES", "off")
             .args(["web", "password"])
             .env("XDG_CONFIG_HOME", home.path())
+            .env("XDG_STATE_HOME", home.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -543,14 +551,99 @@ fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
             .unwrap();
         child.wait_with_output().unwrap()
     };
-    let settings = home.path().join("clackatoo/daemon/web.toml");
+    // In the state directory, never the config, which people keep in git.
+    let settings = home.path().join("clackatoo/web-password");
     let short = password("hunter2\n");
     assert!(!short.status.success(), "seven characters is too few");
     assert!(!settings.exists());
     stdout(&password("correct horse\n"));
     let written = std::fs::read_to_string(&settings).unwrap();
-    assert!(written.contains("password = \"$argon2id$"), "{written}");
+    assert!(written.starts_with("$argon2id$"), "{written}");
     assert!(!written.contains("correct horse"));
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&settings).unwrap().permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(!home.path().join("clackatoo/daemon").exists());
+    let unset = Command::new(BINARY)
+        .args(["web", "password", "--unset"])
+        .env("XDG_STATE_HOME", home.path())
+        .output()
+        .unwrap();
+    stdout(&unset);
+    assert!(!settings.exists());
+}
+
+/// The daemon's config is moved from its old TOML as the daemon starts,
+/// run again at each upgrade, and when it goes wrong, the daemon keeps
+/// what it last ran and says so in the first window the user is at.
+#[test]
+fn the_daemons_config_is_moved_and_run_again_at_each_upgrade() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::Event;
+
+    let runtime = Runtime::new();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config");
+    std::fs::create_dir_all(config.join("daemon")).unwrap();
+    std::fs::write(config.join("daemon/machine.toml"), "name = \"from-toml\"\n").unwrap();
+    let daemon = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
+        .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", &config)
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .arg("daemon")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let socket = runtime.path().join("clackatoo/daemon.sock");
+    eventually("the daemon answers", || Client::connect(&socket).is_ok());
+    let name = || {
+        let mut client = Client::connect(&socket).unwrap();
+        client.watch_workspaces().unwrap().machine.unwrap().name
+    };
+    assert_eq!(name(), "from-toml");
+    assert!(config.join("daemon/settings.lua").exists());
+    assert!(config.join("daemon/machine.toml.bak").exists());
+    assert!(!config.join("daemon/machine.toml").exists());
+    // Changed, then upgraded: run again.
+    let init = config.join("daemon/init.lua");
+    std::fs::write(&init, "daemon.machine.name = \"from-lua\"\n").unwrap();
+    stdout(&clackatoo(runtime.path(), &["upgrade"]));
+    assert_eq!(name(), "from-lua");
+    // Broken, then upgraded: what ran last is kept, and said.
+    std::fs::write(
+        &init,
+        "daemon.machine.name = \"broken\"\nwhile true do end\n",
+    )
+    .unwrap();
+    stdout(&clackatoo(runtime.path(), &["upgrade"]));
+    assert_eq!(name(), "from-lua");
+    let mut window = Client::connect(&socket).unwrap();
+    window.watch_workspaces().unwrap();
+    window.say_window().unwrap();
+    window.present(true).unwrap();
+    window
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let said = loop {
+        if let Event::Said(said) = window.next_event().unwrap() {
+            break said;
+        }
+    };
+    assert!(
+        said.contains("kept its settings from the last time it ran"),
+        "{said}"
+    );
+    assert!(said.contains("ran too long"), "{said}");
+    drop(window);
+    drop(runtime);
+    wait(daemon);
 }
 
 /// Polls `check` until it holds, failing after a few seconds.
@@ -627,6 +720,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -712,6 +806,7 @@ fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -739,6 +834,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -806,6 +902,7 @@ fn mcp_serves_a_chats_tools_only_to_its_agent() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -837,6 +934,7 @@ fn mcp_serves_a_chats_tools_only_to_its_agent() {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .args(["mcp", "--chat", &chat.0.to_string()])
             .env("XDG_RUNTIME_DIR", runtime.path())
             .stdin(std::process::Stdio::null());
@@ -856,6 +954,7 @@ fn mcp_serves_a_chats_tools_only_to_its_agent() {
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .args(["mcp", "--chat", "99"])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -993,6 +1092,7 @@ impl UserShell {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", shell)
@@ -2070,6 +2170,7 @@ fn open(runtime: &Path, state: &Path, cwd: &Path, paths: &[&std::ffi::OsStr]) ->
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .env("XDG_RUNTIME_DIR", runtime)
         .env("XDG_STATE_HOME", state)
         .env("XDG_CONFIG_HOME", state)

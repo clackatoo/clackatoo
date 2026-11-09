@@ -63,6 +63,7 @@ mod runtime;
 mod saved;
 pub mod schema;
 mod server;
+pub mod settings;
 mod shell;
 mod signals;
 mod tool_images;
@@ -78,7 +79,7 @@ use std::ffi::OsString;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-pub use agents::{AgentConfig, CustomAgent};
+pub use agents::{AgentConfig, Configured as ConfiguredAgents, CustomAgent};
 pub use browser::{BrowserConfig, check_browser, snap_of};
 pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
 pub use display::DisplayConfig;
@@ -260,6 +261,10 @@ pub struct DaemonConfig {
     /// How terminals' history is kept from one run of the daemon to the
     /// next, as the workspaces are (see `history`). `None` keeps none.
     pub history: Option<HistoryConfig>,
+    /// What the first window the user is at is told of the daemon's
+    /// config as it started: what was moved into it from the old TOML
+    /// files, and what went wrong (see [`settings`]).
+    pub notes: Vec<String>,
 }
 
 /// How terminals' history is kept across a restart of the daemon (see
@@ -509,8 +514,7 @@ impl DaemonConfig {
     /// [`state_dir`]), `$SHELL` (or `/bin/sh`),
     /// `$HOME` (or `/`), `$CLACKATOO_MACHINE`, the file this daemon's ID is
     /// kept in, or `off` for a new one each start (or else `machine` in
-    /// [`state_dir`]), the name `daemon/machine.toml` in [`config_dir`]
-    /// gives it, `$CLACKATOO_SSH`: the program run as ssh to connect to
+    /// [`state_dir`]), `$CLACKATOO_SSH`: the program run as ssh to connect to
     /// other daemons (or else `ssh`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
     /// Code's adapter), `$CLACKATOO_MCP`: the command, split at spaces,
@@ -518,14 +522,11 @@ impl DaemonConfig {
     /// PATH` after it (or else none: the `clackatoo` program sets its own),
     /// `$CLACKATOO_UDP_PORTS`: a port, a range such as
     /// `60000-61000` (the default), or `off`, the language packs in
-    /// [`languages_dir`], agents added in `daemon/agents.toml` in
-    /// [`config_dir`], and `$CLACKATOO_BROWSER`: the browser agents drive,
+    /// [`languages_dir`], and `$CLACKATOO_BROWSER`: the browser agents drive,
     /// or `off` for none (or else Chromium or Chrome, as found on `PATH`),
     /// with its profile in `$CLACKATOO_BROWSER_PROFILE` (or else
     /// `clackatoo/browser` in the data directory, or for a snap, in its
-    /// own folder), the web app as `daemon/web.toml` in [`config_dir`]
-    /// says, keeping its devices in `clackatoo/web` in the data directory,
-    /// the folders trusted to run their language servers in `trusted` in
+    /// own folder), the folders trusted to run their language servers in `trusted` in
     /// [`state_dir`] (or for this run only, with none),
     /// `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
     /// messages to (or else none), `$CLACKATOO_ACP_TRACE`: a directory to
@@ -539,10 +540,38 @@ impl DaemonConfig {
     /// system bus, but with `$CLACKATOO_DISPLAY` off, as for tests), and
     /// `$CLACKATOO_IMAGE_MEMORY`: how many MiB of images each terminal,
     /// chat, picture pane or buffer may hold, and all of them together, as
-    /// `64,256`, the defaults.
+    /// `64,256`, the defaults. The daemon's config sets none of it: see
+    /// [`configured`](Self::configured).
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_settings(&settings::Settings::default())
+    }
+
+    /// As `clackatoo daemon` starts or upgrades: the daemon's config run
+    /// (see [`settings::load`]), moved from the old TOML files first if
+    /// they're there, and the environment over it, as
+    /// [`from_settings`](Self::from_settings) says; and what the config
+    /// set, for what's read of it beyond, as the daemon's priority.
+    #[must_use]
+    pub fn configured() -> (Self, settings::Settings) {
+        let loaded = (settings::Dirs::from_env())
+            .map(|dirs| settings::load(&dirs))
+            .unwrap_or_default();
+        let mut config = Self::from_settings(&loaded.settings);
+        config.notes.splice(0..0, loaded.notes);
+        (config, loaded.settings)
+    }
+
+    /// As [`from_env`](Self::from_env) says, over what the daemon's config
+    /// `settings` sets: the agents it adds and their limits, this
+    /// machine's name, the web app, keeping its devices in
+    /// `clackatoo/web` in the data directory and its password's hash in
+    /// [`state_dir`], how terminals' history is kept and how much memory
+    /// images may take. The environment's `$CLACKATOO_HISTORY*` and
+    /// `$CLACKATOO_IMAGE_MEMORY` outdo it, for tests.
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
-    pub fn from_env() -> Self {
+    pub fn from_settings(settings: &settings::Settings) -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
         // Programs name this machine in `file://` links (see
         // `clackatoo_term::Config::local_host`).
@@ -550,10 +579,8 @@ impl DaemonConfig {
             .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
-        let mut widths = clackatoo_term::Config::default().widths;
-        if let Some(vs16) = config_dir().and_then(|dir| machine::configured_vs16(&dir)) {
-            widths.vs16 = vs16;
-        }
+        let widths = clackatoo_term::Config::default().widths;
+        let mut notes = Vec::new();
         Self {
             terminal: clackatoo_term::Config {
                 local_host,
@@ -575,7 +602,7 @@ impl DaemonConfig {
                         tasks: None,
                     })
                     .collect(),
-                file: config_dir().map(|dir| dir.join("daemon/agents.toml")),
+                configured: settings.agents(),
                 dir: languages_dir().map(|dir| dir.with_file_name("agents")),
                 path: None,
                 trace: non_empty("CLACKATOO_ACP_TRACE").map(PathBuf::from),
@@ -614,9 +641,7 @@ impl DaemonConfig {
             gone_wait: DEFAULT_GONE_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,
-            long_commands: config_dir().map_or(Some(DEFAULT_LONG_COMMAND), |dir| {
-                machine::configured_long_command(&dir).unwrap_or(Some(DEFAULT_LONG_COMMAND))
-            }),
+            long_commands: Some(DEFAULT_LONG_COMMAND),
             rename_gate: None,
             workspaces: match non_empty("CLACKATOO_WORKSPACES") {
                 Some(off) if off == "off" => None,
@@ -656,15 +681,13 @@ impl DaemonConfig {
                     idle: DEFAULT_BROWSER_IDLE,
                 }),
             },
-            web: config_dir().zip(data_dir()).and_then(|(config, data)| {
-                web::config::read(&config.join("daemon/web.toml"), data.join("clackatoo/web"))
-            }),
+            web: web_from(settings, &mut notes),
             machine: match non_empty("CLACKATOO_MACHINE") {
                 Some(off) if off == "off" => None,
                 Some(path) => Some(PathBuf::from(path)),
                 None => state_dir().map(|dir| dir.join("machine")),
             },
-            machine_name: config_dir().and_then(|config| machine::configured_name(&config)),
+            machine_name: settings.machine_name(),
             links: Some(LinkConfig {
                 ssh: remote::ssh_program(),
                 // Only the `clackatoo` program knows it can ask.
@@ -705,31 +728,79 @@ impl DaemonConfig {
                 None if non_empty("CLACKATOO_DISPLAY").is_some_and(|off| off == "off") => None,
                 None => Some(dbus::system_address()),
             },
-            images: ImageLimits::from_env(non_empty("CLACKATOO_IMAGE_MEMORY").as_deref()),
-            history: history_from_env(&non_empty),
+            images: images_from(settings, &non_empty),
+            history: history_from(settings, &non_empty),
+            notes,
         }
     }
 }
 
-/// How terminals' history is kept, as the environment says:
-/// `$CLACKATOO_HISTORY`, the folder it's kept in, or `off` for none (or
-/// else `history` in [`state_dir`]), `$CLACKATOO_HISTORY_LINES`, the most
-/// lines kept of each terminal, and `$CLACKATOO_HISTORY_EVERY`, how often
-/// in seconds what changed is written.
-fn history_from_env(non_empty: &dyn Fn(&str) -> Option<OsString>) -> Option<HistoryConfig> {
+/// How much memory images may take, as the daemon's config `settings`
+/// says, or `$CLACKATOO_IMAGE_MEMORY` over it.
+fn images_from(
+    settings: &settings::Settings,
+    non_empty: &dyn Fn(&str) -> Option<OsString>,
+) -> ImageLimits {
+    match non_empty("CLACKATOO_IMAGE_MEMORY") {
+        Some(value) => ImageLimits::from_env(Some(&value)),
+        None => settings.images(),
+    }
+}
+
+/// The web app, as the daemon's config `settings` says, with the
+/// password's hash in [`state_dir`]: why it's off when it's set to be on
+/// goes in `notes`.
+fn web_from(settings: &settings::Settings, notes: &mut Vec<String>) -> Option<web::WebConfig> {
+    if settings.value("web.mode") == schema::Value::Choice("off") {
+        return None;
+    }
+    let data = data_dir()?.join("clackatoo/web");
+    let password = match state_dir().map(|state| settings::password(&state)) {
+        Some(Ok(password)) => password,
+        Some(Err(why)) => {
+            log::error!("{why}; the web app is off");
+            notes.push(format!("the web app is off: {why}"));
+            return None;
+        }
+        None => None,
+    };
+    settings
+        .web(data, password)
+        .inspect_err(|why| {
+            log::error!("{why}; the web app is off");
+            notes.push(format!("the web app is off: {why}"));
+        })
+        .ok()
+        .flatten()
+}
+
+/// How terminals' history is kept, as the daemon's config `settings`
+/// says, in `history` in [`state_dir`], and the environment over it:
+/// `$CLACKATOO_HISTORY`, the folder it's kept in, or `off` for none,
+/// `$CLACKATOO_HISTORY_LINES`, the most lines kept of each terminal, and
+/// `$CLACKATOO_HISTORY_EVERY`, how often in seconds what changed is
+/// written.
+fn history_from(
+    settings: &settings::Settings,
+    non_empty: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<HistoryConfig> {
     let mut config = match non_empty("CLACKATOO_HISTORY") {
         Some(off) if off == "off" => return None,
         // Only from somewhere in particular, as a relative path would be
         // from wherever the daemon happened to start.
-        Some(dir) if Path::new(&dir).is_absolute() => HistoryConfig::in_dir(PathBuf::from(dir)),
+        Some(dir) if Path::new(&dir).is_absolute() => {
+            let mut config = settings.history(PathBuf::from(&dir));
+            config.get_or_insert_with(|| HistoryConfig::in_dir(PathBuf::from(dir)));
+            config?
+        }
         Some(dir) => {
             log::warn!(
                 "CLACKATOO_HISTORY isn't an absolute path or `off`: {}",
                 dir.display()
             );
-            HistoryConfig::in_dir(state_dir()?.join("history"))
+            settings.history(state_dir()?.join("history"))?
         }
-        None => HistoryConfig::in_dir(state_dir()?.join("history")),
+        None => settings.history(state_dir()?.join("history"))?,
     };
     let number = |name: &str| {
         let value = non_empty(name)?;
@@ -826,6 +897,54 @@ fn parse_ports(ports: &str) -> Option<RangeInclusive<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The environment's `$CLACKATOO_HISTORY*` and `$CLACKATOO_IMAGE_MEMORY`
+    /// outdo the daemon's config, for tests and CI.
+    #[test]
+    fn the_environment_outdoes_the_config() {
+        let settings = settings::Settings::from_lua(
+            "daemon.history.lines = 500\ndaemon.history.every = 60\n\
+             daemon.images.terminal_mb = 8\ndaemon.images.total_mb = 16\n",
+        )
+        .unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                (pairs.iter())
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        let none = env(&[]);
+        if let Some(history) = history_from(&settings, &none) {
+            assert_eq!(history.lines, 500);
+            assert_eq!(history.every, std::time::Duration::from_secs(60));
+        }
+        let images = images_from(&settings, &none);
+        assert_eq!((images.per_owner, images.total), (8 << 20, 16 << 20));
+        let over = env(&[
+            ("CLACKATOO_HISTORY", "/kept"),
+            ("CLACKATOO_HISTORY_LINES", "7"),
+            ("CLACKATOO_IMAGE_MEMORY", "1,2"),
+        ]);
+        let history = history_from(&settings, &over).unwrap();
+        assert_eq!(history.dir, PathBuf::from("/kept"));
+        assert_eq!(history.lines, 7);
+        assert_eq!(
+            history.every,
+            std::time::Duration::from_secs(60),
+            "the config's"
+        );
+        let images = images_from(&settings, &over);
+        assert_eq!((images.per_owner, images.total), (1 << 20, 2 << 20));
+        assert_eq!(
+            history_from(&settings, &env(&[("CLACKATOO_HISTORY", "off")])),
+            None
+        );
+        // Off in the config, the environment can still keep it.
+        let off = settings::Settings::from_lua("daemon.history.keep = false").unwrap();
+        assert!(history_from(&off, &none).is_none());
+        assert!(history_from(&off, &env(&[("CLACKATOO_HISTORY", "/kept")])).is_some());
+    }
 
     #[test]
     fn a_relative_state_home_is_ignored() {

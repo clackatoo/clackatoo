@@ -12,7 +12,7 @@ use std::path::Path;
 use clackatoo_term::{Config, Terminal};
 use clackatoo_text::Rope;
 
-use crate::agents::{AgentSpec, DEEPEST_SUBAGENTS, Launch, SubagentLimits};
+use crate::agents::{AgentSpec, DEEPEST_SUBAGENTS, Launch};
 use crate::buffer::Buffer;
 use crate::chat::HostedChat;
 use crate::handover::State;
@@ -98,23 +98,24 @@ pub fn saved_workspaces(bytes: &[u8]) {
     assert_eq!(again, state);
 }
 
-/// Reads `text` as `agents.toml`: its agents, profiles and limits on
-/// subagents.
+/// Moves `text`, as an old `agents.toml`, into the daemon's Luau config,
+/// as the first build with it does (see `settings/migrate.rs`), and runs
+/// what it comes to: its agents, profiles and limits on subagents.
 ///
 /// # Panics
 ///
-/// If a limit it reads is out of its range.
+/// If what it comes to doesn't run, or a limit it sets is out of its
+/// range.
 pub fn agents_toml(text: &str) {
-    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
-        return;
-    };
-    let _ = crate::agents::parse(&document);
-    let mut profiles = crate::profiles::built_in();
-    let _ = crate::profiles::parse(&document, &mut profiles);
-    let (limits, _) = SubagentLimits::from_document(&document);
+    let lua = crate::settings::migrate_agents_toml(text);
+    let settings = crate::settings::Settings::from_lua(&lua)
+        .unwrap_or_else(|failure| panic!("{}\n{lua}", failure.said));
+    let limits = settings.agents().subagents;
     assert!((1..=64).contains(&limits.working));
     assert!(limits.default <= limits.working);
     assert!((1..=DEEPEST_SUBAGENTS).contains(&limits.depth));
+    let mut profiles = crate::profiles::built_in();
+    crate::profiles::apply(&settings.agents().profiles, &mut profiles);
 }
 
 /// Reads `pieces`, one after another, as what an agent (one message a

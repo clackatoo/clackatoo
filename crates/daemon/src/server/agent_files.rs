@@ -1939,6 +1939,7 @@ pub(super) mod tests {
             pastes: None,
             logind: None,
             history: None,
+            notes: Vec::new(),
             keep_wait: crate::DEFAULT_KEEP_WAIT,
             images: crate::ImageLimits::default(),
         };

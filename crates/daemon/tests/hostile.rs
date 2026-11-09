@@ -64,7 +64,7 @@ impl TestDaemon {
                     }]
                 })
                 .unwrap_or_default(),
-            file: None,
+            configured: clackatoo_daemon::ConfiguredAgents::default(),
             dir: None,
             path: Some(root.join("empty-path").into()),
             trace: None,
@@ -109,6 +109,7 @@ impl TestDaemon {
             pastes: None,
             logind: None,
             history: None,
+            notes: Vec::new(),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
         };

@@ -58,7 +58,7 @@ if [ -f "$dir/password" ]; then
     [ "$answer" = "$(cat "$dir/password")" ] || { echo "Permission denied (password)." >&2; exit 255; }
 fi
 # Real ssh never passes its environment on.
-exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE CLACKATOO_DISPLAY=off XDG_RUNTIME_DIR="$dir/hosts/$host" sh -c "exec $*"
+exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE CLACKATOO_DISPLAY=off CLACKATOO_CONFIG=off XDG_RUNTIME_DIR="$dir/hosts/$host" sh -c "exec $*"
 "#;
 
 /// Where the "machines" are: the stand-in for ssh, and each daemon's
@@ -207,6 +207,7 @@ impl World {
             pastes: Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes"))),
             logind: None,
             history: None,
+            notes: Vec::new(),
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),
@@ -8357,6 +8358,7 @@ fn process_daemon_with(
         )
         .env("SHELL", "/bin/sh")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")

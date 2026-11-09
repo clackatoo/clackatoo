@@ -204,6 +204,7 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
         .env("CLACKATOO_BOARDS", root.join("boards"))
         .env("CLACKATOO_BROWSER", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .env("CLACKATOO_UDP_PORTS", "off")
         .env_remove("CLACKATOO_LSP_TRACE")
         .env_remove("CLACKATOO_RECOVERY")

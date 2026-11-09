@@ -354,6 +354,7 @@ fn spawn(root: &Path, unit: &str, logind: Option<&str>) -> Child {
         .env("CLACKATOO_BOARDS", root.join("boards"))
         .env("CLACKATOO_BROWSER", "off")
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .env("CLACKATOO_UDP_PORTS", "off")
         .env_remove("CLACKATOO_RECOVERY")
         .env_remove("CLACKATOO_WORKSPACES")
@@ -688,6 +689,7 @@ fn every_workspace_outlives_an_upgrade_in_its_scope_and_a_stop_after() {
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", daemon.root())
         .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_CONFIG", "off")
         .stdin(Stdio::null())
         .output()
         .unwrap();

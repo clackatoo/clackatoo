@@ -46,7 +46,7 @@ use serde_json::json;
 pub use auth::hash_password;
 pub use config::{WebConfig, WebMode};
 
-pub(crate) use auth::Refused;
+pub(crate) use auth::{Refused, check_hash};
 pub(crate) use conn::{Filled, HttpConn, Peer, Read, Standing, State, WebLink, Who};
 pub(crate) use http::{Method, Request, Response};
 pub(crate) use push::payload as push_payload;
@@ -808,7 +808,7 @@ impl Web {
                 return Handled::Respond(Response::error(
                     403,
                     "the first device is allowed from a window: ask a window, or name the \
-                     login let in as login in web.toml",
+                     login let in as daemon.web.login in the daemon's config",
                 ));
             }
             return self.check_password(conn, token, password, pairing, &who, now);

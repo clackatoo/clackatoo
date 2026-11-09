@@ -130,6 +130,7 @@ impl TestDaemon {
             pastes: None,
             logind: None,
             history: None,
+            notes: Vec::new(),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
         };
@@ -188,6 +189,13 @@ fn custom_agent(name: &str, command: Vec<std::ffi::OsString>) -> CustomAgent {
         starting_mode: None,
         tasks: None,
     }
+}
+
+/// What the daemon's config `text` says of agents.
+fn configured(text: &str) -> clackatoo_daemon::ConfiguredAgents {
+    clackatoo_daemon::settings::Settings::from_lua(text)
+        .expect("the config runs")
+        .agents()
 }
 
 /// The agent for tests: see `examples/fake_agent.rs`.
@@ -2368,6 +2376,42 @@ fn say_present(window: &mut Client, here: bool) {
     window.list_terminals().unwrap();
 }
 
+/// What the daemon's config came to as it started, such as that it went
+/// wrong, is said in the bar of the first window the user is at, once.
+#[test]
+fn what_the_config_came_to_is_said_to_the_first_window_the_user_is_at() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.notes = vec![
+            "the daemon's config went wrong".to_owned(),
+            "and more".to_owned(),
+        ];
+    });
+    let mut away = daemon.client();
+    a_window(&mut away);
+    say_present(&mut away, false);
+    let mut window = daemon.client();
+    a_window(&mut window);
+    say_present(&mut window, true);
+    window
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let said = loop {
+        if let Event::Said(said) = window.next_event().unwrap() {
+            break said;
+        }
+    };
+    assert_eq!(said, "the daemon's config went wrong; and more");
+    // Once: the next window the user is at isn't told again.
+    let mut next = daemon.client();
+    a_window(&mut next);
+    say_present(&mut next, true);
+    next.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    while let Ok(event) = next.next_event() {
+        assert!(!matches!(event, Event::Said(_)), "{event:?}");
+    }
+}
+
 /// A client that says it's a window, watching the workspaces.
 fn a_window(client: &mut Client) {
     client.watch_workspaces().unwrap();
@@ -4343,16 +4387,14 @@ fn only_claude_code_is_asked_for_its_background_tasks() {
 }
 
 #[test]
-fn claude_code_isnt_asked_for_its_background_tasks_with_tasks_off_in_agents_toml() {
+fn claude_code_isnt_asked_for_its_background_tasks_with_tasks_off_in_the_config() {
     // As asking costs the text of its Read, Grep and Glob results.
-    let daemon = TestDaemon::start_with(|dir, config| {
-        config.agents.file = Some(dir.join("agents.toml"));
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.configured = configured(&format!(
+            "daemon.agents.claude = {{ command = {{ \"{}\" }}, tasks = false }}",
+            fake_agent().display()
+        ));
     });
-    let toml = format!(
-        "[agents.claude]\ncommand = [\"{}\"]\ntasks = false\n",
-        fake_agent().display()
-    );
-    std::fs::write(daemon.dir.path().join("agents.toml"), toml).unwrap();
     let mut client = daemon.client();
     let (chat, _) = start_chat_with(&mut client, "claude");
     let node = ask(&mut client, chat, "background");
@@ -5199,19 +5241,18 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
 }
 
 #[test]
-fn an_agent_added_in_agents_toml_is_found_when_a_chat_starts() {
-    let daemon = TestDaemon::start_with(|dir, config| {
-        config.agents.file = Some(dir.join("agents.toml"));
+fn an_agent_added_in_the_config_is_found_when_a_chat_starts() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.configured = configured(&format!(
+            "daemon.agents.mine = {{ name = \"Mine\", command = {{ \"{}\", \"--codex\" }}, \
+             mode = \"read-only\" }}",
+            fake_agent().display()
+        ));
     });
-    let toml = format!(
-        "[agents.mine]\nname = \"Mine\"\ncommand = [\"{}\", \"--codex\"]\nmode = \"read-only\"\n",
-        fake_agent().display()
-    );
-    std::fs::write(daemon.dir.path().join("agents.toml"), toml).unwrap();
     let mut client = daemon.client();
     let (chat, node) = start_chat_with(&mut client, "mine");
     assert_eq!(node.agent, "Mine");
-    // It starts in the mode the file gives it.
+    // It starts in the mode the config gives it.
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "read-only gpt-6-astra\n"
@@ -15639,13 +15680,12 @@ fn starting_a_chat_opens_it_beside_with_the_message_without_asking() {
 
 #[test]
 fn chats_agents_start_are_limited_in_depth_and_number() {
-    // As agents.toml sets them (CLACKA-209).
-    let daemon = TestDaemon::start_with(|dir, config| {
+    // As the daemon's config sets them (CLACKA-209).
+    let daemon = TestDaemon::start_with(|_, config| {
         config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
-        config.agents.file = Some(dir.join("agents.toml"));
-        let limits = "[subagents]\ndepth = 2\nworking = 4\n";
-        std::fs::write(dir.join("agents.toml"), limits).unwrap();
+        config.agents.configured =
+            configured("daemon.subagents.depth = 2\ndaemon.subagents.working = 4\n");
     });
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Allow);
@@ -16374,7 +16414,7 @@ fn a_chat_is_told_when_one_it_started_finishes_and_closes_it_when_done() {
     clippy::too_many_lines,
     reason = "one profile after another, each its own"
 )]
-fn a_profile_gives_a_chat_its_role_model_and_limits_and_agents_toml_adds_profiles() {
+fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles() {
     let daemon = TestDaemon::start_with(|dir, config| {
         let log = dir.join("claude.log");
         config.agents.custom = vec![
@@ -16385,14 +16425,10 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_agents_toml_adds_profile
             custom_agent("codex", vec![fake_agent().into(), "--codex".into()]),
         ];
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
-        let file = dir.join("agents.toml");
-        std::fs::write(
-            &file,
-            "[profiles.deep]\nabout = \"thinks hard\"\nmodel = \"sonnet\"\n\
-             limits = \"no-commands\"\nprompt = \"You think deeply.\"\n",
-        )
-        .unwrap();
-        config.agents.file = Some(file);
+        config.agents.configured = configured(
+            "daemon.profiles.deep = { about = \"thinks hard\", model = \"sonnet\", \
+             limits = \"no-commands\", prompt = \"You think deeply.\" }",
+        );
     });
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Allow);

@@ -112,8 +112,13 @@ pub fn readable_versions() -> &'static [u32] {
 /// what it declares to agents.
 #[must_use]
 pub fn versions_answer() -> String {
+    // As this build would run the daemon's config, moved from the old
+    // TOML files or not, writing nothing.
+    let settings = crate::settings::Dirs::from_env()
+        .map(|dirs| crate::settings::peek(&dirs))
+        .unwrap_or_default();
     let agents = crate::agents::AgentConfig {
-        file: crate::config_dir().map(|dir| dir.join("daemon/agents.toml")),
+        configured: settings.agents(),
         restart_on_upgrade: crate::restart_agents_on_upgrade(),
         ..crate::agents::AgentConfig::default()
     };

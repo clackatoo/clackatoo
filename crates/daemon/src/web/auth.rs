@@ -118,7 +118,7 @@ pub fn hash_password(password: &str) -> String {
 /// # Errors
 ///
 /// If it isn't an Argon2 hash in PHC form.
-pub(super) fn check_hash(hash: &str) -> Result<(), String> {
+pub(crate) fn check_hash(hash: &str) -> Result<(), String> {
     let parsed = PasswordHash::new(hash)
         .map_err(|_| "isn't a password hash: `clackatoo web password` writes one".to_owned())?;
     if !parsed.algorithm.as_str().starts_with("argon2") {

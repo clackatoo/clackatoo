@@ -603,6 +603,7 @@ dependencies = [
  "log",
  "memchr",
  "mio",
+ "mlua",
  "postcard",
  "pulldown-cmark",
  "quinn-proto",

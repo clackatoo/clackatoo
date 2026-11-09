@@ -76,6 +76,7 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
         pastes: None,
         logind: None,
         history: None,
+        notes: Vec::new(),
         keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         images: clackatoo_daemon::ImageLimits::default(),
     };

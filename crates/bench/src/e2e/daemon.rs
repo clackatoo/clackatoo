@@ -42,6 +42,7 @@ impl DaemonProcess {
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_DISPLAY", "off")
+            .env("CLACKATOO_CONFIG", "off")
             .env("CLACKATOO_WORKSPACES", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime_dir.path())

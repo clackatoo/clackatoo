@@ -509,7 +509,7 @@ options! {
     /// does it even for a daemon on this machine; `never` doesn't.
     predictecho("pe", "When to predict typing over remote connections") in Terminals: PredictEcho = PredictEcho::Auto;
     /// The agent `:Agent` and Ctrl+B `a` open a chat with, by its name:
-    /// `claude`, `codex`, `gemini`, or one the daemon's `agents.toml`
+    /// `claude`, `codex`, `gemini`, or one the daemon's config
     /// adds. Empty is the daemon's default, Claude Code.
     agent("ag", "Default provider for new agent chats") in Agents: String = "claude".to_owned();
     /// What a new chat's agent may do with clackatoo's own tools, which

@@ -16,7 +16,8 @@ take a place that wouldn't. To linger:
     loginctl enable-linger
 
 then `clackatoo upgrade`, which keeps your terminals, gives the daemon its place.
-`priority = false` in daemon/machine.toml stops the daemon asking, and windows saying so.
+`daemon.machine.priority = false` in daemon/init.lua stops the daemon asking, and windows saying
+so.
 ";
 
 /// Prints what the daemon said, or fails if no daemon is running, or it

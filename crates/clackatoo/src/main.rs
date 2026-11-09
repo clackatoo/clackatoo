@@ -206,8 +206,8 @@ enum Command {
     /// Put clackatoo in your desktop's app launcher, or take it out.
     #[command(subcommand)]
     Desktop(desktop::DesktopCommand),
-    /// The web app phones reach the daemon through, set up in
-    /// daemon/web.toml.
+    /// The web app phones reach the daemon through, set up as daemon.web
+    /// in the daemon's config, daemon/init.lua.
     #[command(subcommand)]
     Web(web::WebCommand),
     /// List the devices paired with the web app, or allow one asking to
@@ -751,7 +751,9 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     clackatoo_gui::forget_launch_token();
     logs::daemon();
     let runtime = RuntimeDir::for_current_user();
-    let mut config = DaemonConfig::from_env();
+    // The daemon's config, moved from the old TOML files first if they're
+    // there, run off any loop, before the loop starts.
+    let (mut config, settings) = DaemonConfig::configured();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
     config.mcp = agent_tools();
     // ssh asks its questions, connecting to other daemons, through this
@@ -766,7 +768,7 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     }
     // Its loop above the user's other programs, and what it starts kept
     // apart from it, unless switched off.
-    clackatoo_daemon::priority::enable();
+    clackatoo_daemon::priority::enable(settings.priority());
     // An upgrade runs the next build with the same arguments, but for
     // `--fresh`, which was for this start alone.
     let rerun: Vec<OsString> = std::env::args_os()

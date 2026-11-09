@@ -113,10 +113,8 @@ const MAX_PROMPT: usize = 2048;
 /// What the daemon keeps for agents talking to each other.
 #[derive(Debug, Default)]
 pub(super) struct Talk {
-    /// The limits on chats agents start, as `agents.toml` last said.
+    /// The limits on chats agents start, as the daemon's config said.
     pub(super) limits: SubagentLimits,
-    /// What was wrong in its `[subagents]` table, as last logged.
-    pub(super) limits_wrong: Vec<String>,
     /// How many chats agents have started under each of the user's chats,
     /// and since which of the user's turns there, by its uid, as
     /// `notice_turns` counts: the user writing there starts it again.
@@ -721,22 +719,13 @@ impl Daemon {
         }
     }
 
-    /// Reads the limits on chats agents start from `agents.toml` again, as
+    /// Takes the limits on chats agents start from the daemon's config, as
     /// a chat starts, and has every chat's Subagents setting offer what
-    /// they allow, if they've changed: none more than `working`. What's
-    /// wrong in the table is logged only as it changes, not at each start.
-    /// Returns whether it logged anything.
-    pub(in crate::server) fn refresh_subagent_limits(&mut self) -> bool {
-        let (limits, wrong) = self.config.agents.subagent_limits();
-        let logged = wrong != self.tools.talk.limits_wrong && !wrong.is_empty();
-        if wrong != self.tools.talk.limits_wrong {
-            for why in &wrong {
-                log::warn!("agents.toml: {why}");
-            }
-            self.tools.talk.limits_wrong = wrong;
-        }
+    /// they allow, if they've changed: none more than `working`.
+    pub(in crate::server) fn refresh_subagent_limits(&mut self) {
+        let limits = self.config.agents.subagent_limits();
         if limits == self.tools.talk.limits {
-            return logged;
+            return;
         }
         self.tools.talk.limits = limits;
         self.hold_subagents();
@@ -750,7 +739,6 @@ impl Daemon {
             }
             self.collect_damage(id);
         }
-        logged
     }
 
     /// Forgets the counts of chats started under the user's chats that
@@ -2695,9 +2683,8 @@ mod tests {
         );
         kid.started_by(a, a, 1, None);
         kid.set_subagents(daemon.subagents_cap(a));
-        let file = dir.path().join("agents.toml");
-        daemon.config.agents.file = Some(file.clone());
-        std::fs::write(&file, "[subagents]\nworking = 2\n").unwrap();
+        daemon.config.agents.configured =
+            configured("daemon.subagents.working = 2\ndaemon.subagents.default = 2");
         daemon.start_hosted_chat(kid);
         assert_eq!(daemon.chat_ref(TerminalId(7)).unwrap().subagents(), 2);
     }
@@ -2709,11 +2696,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         daemon.set_subagents(a, "12");
-        let file = dir.path().join("agents.toml");
-        daemon.config.agents.file = Some(file.clone());
-        std::fs::write(&file, "[subagents]\nworking = 4\nwide = 1\n").unwrap();
-        assert!(daemon.refresh_subagent_limits(), "what's wrong is logged");
-        assert!(!daemon.refresh_subagent_limits(), "once, not at each start");
+        daemon.config.agents.configured =
+            configured("daemon.subagents.working = 4\ndaemon.subagents.default = 4");
+        daemon.refresh_subagent_limits();
         let chat = daemon.chat_ref(a).unwrap();
         assert_eq!(chat.subagents(), 4);
         let setting = (chat.node().settings.iter())
@@ -2723,10 +2708,11 @@ mod tests {
             .map(|choice| choice.value.as_str())
             .collect();
         assert_eq!(values, ["off", "2", "4"]);
-        assert_eq!(
-            daemon.tools.talk.limits_wrong,
-            ["subagents.wide isn't a limit clackatoo knows"]
-        );
+    }
+
+    /// What the daemon's config `text` says of agents.
+    fn configured(text: &str) -> crate::agents::Configured {
+        crate::settings::Settings::from_lua(text).unwrap().agents()
     }
 
     /// Waking a chat is held to `working` too, whatever its family's
@@ -2735,9 +2721,8 @@ mod tests {
     fn a_message_waking_a_chat_is_held_to_working_in_all() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        let file = dir.path().join("agents.toml");
-        daemon.config.agents.file = Some(file.clone());
-        std::fs::write(&file, "[subagents]\nworking = 3\n").unwrap();
+        daemon.config.agents.configured =
+            configured("daemon.subagents.working = 3\ndaemon.subagents.default = 3");
         daemon.refresh_subagent_limits();
         let other = idle_chat(&mut daemon, 9);
         working_chat(&mut daemon, 2, (other, other, 1));

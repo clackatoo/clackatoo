@@ -6,8 +6,8 @@
 //! (`~/.local/state/clackatoo/machine`), so it's the same through
 //! restarts, and through upgrades, which also hand it over. Every daemon
 //! that keeps its state in that directory is the same machine. The name is
-//! for people: `name` in `daemon/machine.toml` in the config directory, or
-//! else the machine's hostname. The run is the daemon's own number, chosen
+//! for people: `daemon.machine.name` in the daemon's config (see
+//! [`crate::settings`]), or else the machine's hostname. The run is the daemon's own number, chosen
 //! as it starts afresh and kept through upgrades, which tells a copy of
 //! the state directory, elsewhere, from the machine itself.
 //!
@@ -436,93 +436,6 @@ fn write(path: &Path, id: MachineId, seed: Seed, replace: bool) -> io::Result<()
     File::open(dir)?.sync_all()
 }
 
-/// The name `daemon/machine.toml` in `config` gives this machine, if it
-/// gives one: `name = "jack-desktop"`. A file that can't be read, or a
-/// name that isn't text, is said in the log and passed over.
-pub(crate) fn configured_name(config: &Path) -> Option<String> {
-    let (path, document) = machine_toml(config)?;
-    let name = document.get("name")?;
-    let Some(name) = name.as_str() else {
-        log::warn!("`name` in {} isn't text", path.display());
-        return None;
-    };
-    Some(name.to_owned())
-}
-
-/// Whether `daemon/machine.toml` in `config` has the daemon take a higher
-/// priority and a place of its own (see [`crate::priority`]), if it says:
-/// `priority = false` turns it off. Read as the daemon starts or
-/// upgrades, as the name is.
-pub(crate) fn configured_priority(config: &Path) -> Option<bool> {
-    let (path, document) = machine_toml(config)?;
-    let priority = document.get("priority")?;
-    let Some(priority) = priority.as_bool() else {
-        log::warn!("`priority` in {} is true or false", path.display());
-        return None;
-    };
-    Some(priority)
-}
-
-/// How long a command must have run for a notification to say it ended,
-/// if `daemon/machine.toml` in `config` says, in seconds:
-/// `[terminals] notify_after = 30`; 0 says never (`Some(None)`). Read as
-/// the daemon starts or upgrades, as the name is.
-#[allow(clippy::option_option, reason = "unsaid, or said to be none")]
-pub(crate) fn configured_long_command(config: &Path) -> Option<Option<std::time::Duration>> {
-    let (path, document) = machine_toml(config)?;
-    let after = document.get("terminals")?.get("notify_after")?;
-    let Some(seconds) = after
-        .as_integer()
-        .and_then(|seconds| u64::try_from(seconds).ok())
-    else {
-        log::warn!(
-            "`notify_after` in {}'s [terminals] is a number of seconds",
-            path.display()
-        );
-        return None;
-    };
-    Some((seconds > 0).then(|| std::time::Duration::from_secs(seconds)))
-}
-
-/// Whether `daemon/machine.toml` in `config` says variation selector 16
-/// widens an emoji in the terminals the daemon starts, if it says:
-/// `[terminals] vs16 = false` keeps them as wide as the emoji alone (see
-/// [`clackatoo_term::Widths`]). Read as the daemon starts or upgrades; a
-/// terminal keeps the rule it started with.
-pub(crate) fn configured_vs16(config: &Path) -> Option<bool> {
-    let (path, document) = machine_toml(config)?;
-    let vs16 = document.get("terminals")?.get("vs16")?;
-    let Some(vs16) = vs16.as_bool() else {
-        log::warn!(
-            "`vs16` in {}'s [terminals] is true or false",
-            path.display()
-        );
-        return None;
-    };
-    Some(vs16)
-}
-
-/// `daemon/machine.toml` in `config`, and where it is, if it's there and
-/// can be read. One that can't, or isn't TOML, is said in the log.
-fn machine_toml(config: &Path) -> Option<(PathBuf, toml_edit::DocumentMut)> {
-    let path = config.join("daemon/machine.toml");
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            log::warn!("{} couldn't be read: {err}", path.display());
-            return None;
-        }
-    };
-    match text.parse::<toml_edit::DocumentMut>() {
-        Ok(document) => Some((path, document)),
-        Err(err) => {
-            log::warn!("{} isn't TOML: {err}", path.display());
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,47 +610,5 @@ mod tests {
                 .trim()
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn the_name_comes_from_the_config() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(configured_name(dir.path()), None);
-        fs::create_dir(dir.path().join("daemon")).unwrap();
-        let file = dir.path().join("daemon/machine.toml");
-        fs::write(&file, "name = \"desk\"\n").unwrap();
-        assert_eq!(configured_name(dir.path()).as_deref(), Some("desk"));
-        fs::write(&file, "name = 3\n").unwrap();
-        assert_eq!(configured_name(dir.path()), None);
-    }
-
-    #[test]
-    fn priority_is_switched_off_only_by_false() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(configured_priority(dir.path()), None);
-        fs::create_dir(dir.path().join("daemon")).unwrap();
-        let file = dir.path().join("daemon/machine.toml");
-        fs::write(&file, "name = \"desk\"\npriority = false\n").unwrap();
-        assert_eq!(configured_priority(dir.path()), Some(false));
-        assert_eq!(configured_name(dir.path()).as_deref(), Some("desk"));
-        fs::write(&file, "priority = true\n").unwrap();
-        assert_eq!(configured_priority(dir.path()), Some(true));
-        assert_eq!(configured_long_command(dir.path()), None);
-        fs::write(&file, "[terminals]\nnotify_after = 30\n").unwrap();
-        assert_eq!(
-            configured_long_command(dir.path()),
-            Some(Some(std::time::Duration::from_secs(30)))
-        );
-        fs::write(&file, "[terminals]\nnotify_after = 0\n").unwrap();
-        assert_eq!(configured_long_command(dir.path()), Some(None));
-        fs::write(&file, "[terminals]\nnotify_after = -3\n").unwrap();
-        assert_eq!(configured_long_command(dir.path()), None);
-        assert_eq!(configured_vs16(dir.path()), None);
-        fs::write(&file, "[terminals]\nvs16 = false\n").unwrap();
-        assert_eq!(configured_vs16(dir.path()), Some(false));
-        fs::write(&file, "[terminals]\nvs16 = \"no\"\n").unwrap();
-        assert_eq!(configured_vs16(dir.path()), None);
-        fs::write(&file, "priority = \"off\"\n").unwrap();
-        assert_eq!(configured_priority(dir.path()), None);
     }
 }
