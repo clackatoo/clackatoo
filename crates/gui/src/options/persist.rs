@@ -151,6 +151,26 @@ fn settings_lua(path: &Path, info: &Info, value: Option<Value>) -> anyhow::Resul
     replace(path, &rendered, PRIVATE)
 }
 
+/// Where `path` is, past any links: itself, if it's no link, or isn't
+/// there.
+fn through_links(path: &Path) -> anyhow::Result<PathBuf> {
+    /// As many links as the kernel follows.
+    const MOST: usize = 40;
+    let mut path = path.to_owned();
+    for _ in 0..MOST {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&path)
+                    .with_context(|| format!("couldn't read the link {}", path.display()))?;
+                // A link's relative target is from the link's folder.
+                path = path.parent().unwrap_or(Path::new("/")).join(target);
+            }
+            _ => return Ok(path),
+        }
+    }
+    anyhow::bail!("{} is a link to links that go round", path.display())
+}
+
 /// Who may read and write a new settings.lua: only its owner, as config
 /// can say what's private.
 pub(crate) const PRIVATE: u32 = 0o600;
@@ -158,10 +178,13 @@ pub(crate) const PRIVATE: u32 = 0o600;
 /// Replaces the file at `path` with `text`, all at once, so whatever reads
 /// it meanwhile reads either the old file or the new one, and a crash
 /// leaves one or the other on the disk. The file keeps its mode, or a new
-/// one has `mode`. A file half written is never left behind.
+/// one has `mode`. A file half written is never left behind. A link, as
+/// stow and home-manager make, stays one: the file it goes to is replaced.
 pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let linked = through_links(path)?;
+    let (link, path) = (path, linked.as_path());
     let dir = path.parent().context("the file is in a directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("couldn't make {}", dir.display()))?;
     let name = path.file_name().context("the file has a name")?;
@@ -180,7 +203,14 @@ pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> 
             .truncate(true)
             .mode(mode)
             .open(&partial)
-            .with_context(|| format!("couldn't write in {}", dir.display()))?;
+            .with_context(|| match link == path {
+                true => format!("couldn't write in {}", dir.display()),
+                false => format!(
+                    "couldn't write in {}, where {} links to",
+                    dir.canonicalize().as_deref().unwrap_or(dir).display(),
+                    link.display()
+                ),
+            })?;
         // As the old file was, whatever the umask says.
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(text.as_bytes())?;
@@ -284,6 +314,64 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn a_link_stays_a_link_and_the_file_it_goes_to_is_saved() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles/clackatoo");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(dir.path().join("client")).unwrap();
+        std::fs::write(dotfiles.join("settings.lua"), "-- mine\n").unwrap();
+        let settings = dir.path().join("client/settings.lua");
+        std::os::unix::fs::symlink("../dotfiles/clackatoo/settings.lua", &settings).unwrap();
+        // A link to a file not there yet, as a fresh checkout has.
+        let startup = dir.path().join("client/startup.toml");
+        std::os::unix::fs::symlink(dotfiles.join("startup.toml"), &startup).unwrap();
+        assert!(
+            saved(dir.path(), "nu", Some(Value::Bool(false)))
+                .result
+                .is_ok()
+        );
+        assert!(
+            saved(
+                dir.path(),
+                "fsz",
+                Some(Value::Decimal(super::super::Decimal::whole(13)))
+            )
+            .result
+            .is_ok()
+        );
+        for link in [&settings, &startup] {
+            assert!(
+                std::fs::symlink_metadata(link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dotfiles.join("settings.lua")).unwrap(),
+            "-- mine\nclient.opt.number = false\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dotfiles.join("startup.toml")).unwrap(),
+            "font-size = 13\n"
+        );
+        // A folder the link goes to that can't be written in is named.
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = saved(dir.path(), "wrap", Some(Value::Bool(false))).result;
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let refused = refused.unwrap_err();
+        assert!(
+            refused.starts_with(&format!(
+                "couldn't write in {}, where {} links to",
+                dotfiles.display(),
+                settings.display()
+            )),
+            "{refused}"
+        );
     }
 
     #[test]

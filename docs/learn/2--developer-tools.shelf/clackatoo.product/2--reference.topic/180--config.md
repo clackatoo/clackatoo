@@ -380,7 +380,11 @@ know, saved by a newer one. An option saved for the first time goes among the
 options at the end of the file, in the order they're listed here. A block
 comment, `--[[ … ]]`, is kept whole, so an option commented out in one stays
 commented out, and saving it adds a line of its own. The file is replaced all
-at once, never left half written, off the window's thread.
+at once, never left half written, off the window's thread, keeping its
+permissions; a new one is readable only by you. If `settings.lua` or
+`startup.toml` is a link, as stow and home-manager make, the file it links to
+is changed and the link kept; the bottom bar says if its folder can't be
+written in.
 
 If the file has a line clackatoo didn't write, such as code, or a block comment
 it can't follow, as one that doesn't end, nothing is saved, and the bottom bar
