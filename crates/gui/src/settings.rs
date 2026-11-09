@@ -282,14 +282,8 @@ pub(crate) struct History(HashMap<String, Vec<Undo>>);
 enum Editing {
     /// A value being typed for an option, as `:set` takes it after `=`.
     Value { info: &'static Info, text: String },
-    /// A font being picked from those installed: none until the window
-    /// has said what they are.
-    Font {
-        families: Vec<String>,
-        picker: Picker,
-        items: Items,
-        ranking: Ranking,
-    },
+    /// A font being picked from those installed.
+    Font(FontPicker),
     /// Keys being recorded, to do what a binding does.
     Keys { bound: Bound, keys: Vec<Chord> },
 }
@@ -541,14 +535,9 @@ impl SettingsMenu {
                 crate::vim::list::paste_into(typed, text);
                 Outcome::Changed
             }
-            Some(Editing::Font {
-                picker,
-                items,
-                ranking,
-                ..
-            }) => {
-                if picker.paste(text) == picker::Keyed::Typed {
-                    ranking.set_query(picker.query(), items);
+            Some(Editing::Font(fonts)) => {
+                if fonts.picker.paste(text) == picker::Keyed::Typed {
+                    fonts.ranking.set_query(fonts.picker.query(), &fonts.items);
                 }
                 Outcome::Changed
             }
@@ -601,9 +590,9 @@ impl SettingsMenu {
     /// Moves what's picked by `by` rows, as the mouse's wheel does.
     pub(crate) fn scroll(&mut self, by: isize) -> Outcome {
         match &mut self.editing {
-            Some(Editing::Font {
-                picker, ranking, ..
-            }) => picker.go(by, ranking.len()).outcome(|| Outcome::Changed),
+            Some(Editing::Font(fonts)) => (fonts.picker)
+                .go(by, fonts.ranking.len())
+                .outcome(|| Outcome::Changed),
             _ => self.go(by),
         }
     }
@@ -617,11 +606,8 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
-        if let Some(Editing::Font {
-            picker, ranking, ..
-        }) = &mut self.editing
-        {
-            if !picker.click(row, ranking.len()) {
+        if let Some(Editing::Font(fonts)) = &mut self.editing {
+            if !fonts.picker.click(row, fonts.ranking.len()) {
                 return Outcome::Nothing;
             }
             return if open {
@@ -687,12 +673,7 @@ impl SettingsMenu {
                 match info.kind {
                     Kind::Bool | Kind::Choice(_) => self.step(1, facts, history),
                     Kind::Text if info.name == "font" => {
-                        self.editing = Some(Editing::Font {
-                            families: Vec::new(),
-                            picker: Picker::default(),
-                            items: Items::default(),
-                            ranking: Ranking::new(Case::default(), false),
-                        });
+                        self.editing = Some(Editing::Font(FontPicker::default()));
                         Outcome::Fonts
                     }
                     _ => {
@@ -1041,12 +1022,7 @@ impl SettingsMenu {
                     }
                 }
             }
-            Some(Editing::Font {
-                families,
-                picker,
-                items,
-                ranking,
-            }) => match stroke {
+            Some(Editing::Font(fonts)) => match stroke {
                 Stroke::Escape
                 | Stroke::Char {
                     ch: 'c',
@@ -1056,23 +1032,22 @@ impl SettingsMenu {
                     Outcome::Changed
                 }
                 Stroke::Enter => {
-                    let Some(index) = ranking.get(picker.selected()) else {
+                    let Some(family) = fonts.picked() else {
                         return Outcome::Nothing;
-                    };
-                    // The first is the system's font, which is no family.
-                    let family = if index == 0 {
-                        String::new()
-                    } else {
-                        families[index - 1].clone()
                     };
                     self.editing = None;
                     let info = crate::options::find("font").expect("an option");
                     let value = Value::Text(family);
                     self.change(info, value.clone(), Some(value), facts, history)
                 }
-                stroke => match picker.key(stroke, ranking.len()) {
+                Stroke::Tab => {
+                    fonts.all = !fonts.all;
+                    fonts.fill(&facts.store.font);
+                    Outcome::Changed
+                }
+                stroke => match fonts.picker.key(stroke, fonts.ranking.len()) {
                     Some(keyed) => keyed.outcome(|| {
-                        ranking.set_query(picker.query(), items);
+                        fonts.ranking.set_query(fonts.picker.query(), &fonts.items);
                         Outcome::Changed
                     }),
                     None => Outcome::Nothing,
@@ -1085,35 +1060,20 @@ impl SettingsMenu {
     /// Whether it waits for the fonts installed, which [`fonts`](Self::fonts)
     /// gives it.
     pub(crate) fn wants_fonts(&self) -> bool {
-        matches!(&self.editing, Some(Editing::Font { items, .. }) if items.len() == 0)
+        matches!(&self.editing, Some(Editing::Font(fonts)) if fonts.installed.is_none())
     }
 
     /// Takes in the font families installed, as `fc-list : family` lists
-    /// them, for the font picker, the one in use, `font`, picked.
-    pub(crate) fn fonts(&mut self, mut installed: Vec<String>, font: &str) {
-        let Some(Editing::Font {
-            families,
-            picker,
-            items,
-            ranking,
-        }) = &mut self.editing
-        else {
+    /// them, each with whether it's monospace, for the font picker, the one
+    /// in use, `font`, picked.
+    pub(crate) fn fonts(&mut self, mut installed: Vec<(String, bool)>, font: &str) {
+        let Some(Editing::Font(fonts)) = &mut self.editing else {
             return;
         };
-        installed.sort_by_key(|family| family.to_lowercase());
-        installed.dedup();
-        items.clear();
-        ranking.clear();
-        items.push(SYSTEM_FONT);
-        for family in &installed {
-            items.push(family);
-        }
-        ranking.add(items);
-        let at = (installed.iter())
-            .position(|family| family == font)
-            .map_or(0, |at| at + 1);
-        picker.set_selected(at);
-        *families = installed;
+        installed.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        installed.dedup_by(|a, b| a.0 == b.0);
+        fonts.installed = Some(installed);
+        fonts.fill(font);
     }
 
     /// What to draw, for a list `rows` rows tall and `cols` cells wide,
@@ -1127,20 +1087,8 @@ impl SettingsMenu {
         let picked = self.picked();
         let side = self.side(picked.as_ref(), rows, cols);
         let cols = cols.saturating_sub(side.cells()).max(1);
-        if let Some(Editing::Font {
-            families,
-            picker,
-            items,
-            ranking,
-        }) = &mut self.editing
-        {
-            let font = FontPicker {
-                families,
-                picker,
-                items,
-                ranking,
-            };
-            return font.view(&facts.store.font, side, (rows, cols), preview);
+        if let Some(Editing::Font(fonts)) = &mut self.editing {
+            return fonts.view(&facts.store.font, side, (rows, cols), preview);
         }
         let len = self.ranking.len();
         let range = self.picker.shown(rows, len);
@@ -1294,26 +1242,80 @@ impl SettingsMenu {
 }
 
 /// The font picker, while it's open: the families installed, what's typed
-/// to find one, and the one picked.
-struct FontPicker<'a> {
-    families: &'a [String],
-    picker: &'a mut Picker,
-    items: &'a Items,
-    ranking: &'a mut Ranking,
+/// to find one, and the one picked. It lists monospace families, as a
+/// terminal's font is, unless Tab lists them all.
+#[derive(Debug)]
+struct FontPicker {
+    /// The families installed, each with whether it's monospace: none
+    /// until the window has said.
+    installed: Option<Vec<(String, bool)>>,
+    /// Every family is listed, not only the monospace ones.
+    all: bool,
+    /// The families listed, as `items` has them after the system's font.
+    families: Vec<String>,
+    picker: Picker,
+    items: Items,
+    ranking: Ranking,
 }
 
-impl FontPicker<'_> {
+impl Default for FontPicker {
+    fn default() -> Self {
+        Self {
+            installed: None,
+            all: false,
+            families: Vec::new(),
+            picker: Picker::default(),
+            items: Items::default(),
+            ranking: Ranking::new(Case::default(), false),
+        }
+    }
+}
+
+impl FontPicker {
+    /// Lists the families again, as `all` says, the one in use, `font`,
+    /// among them whatever it is, and picks it.
+    fn fill(&mut self, font: &str) {
+        let installed = self.installed.as_deref().unwrap_or_default();
+        self.families = (installed.iter())
+            .filter(|(family, mono)| self.all || *mono || family == font)
+            .map(|(family, _)| family.clone())
+            .collect();
+        self.items.clear();
+        self.ranking.clear();
+        self.items.push(SYSTEM_FONT);
+        for family in &self.families {
+            self.items.push(family);
+        }
+        self.ranking.add(&self.items);
+        let at = (self.families.iter())
+            .position(|family| family == font)
+            .map_or(0, |at| at + 1);
+        let rank = (0..self.ranking.len()).find(|&rank| self.ranking.get(rank) == Some(at));
+        self.picker.set_selected(rank.unwrap_or(0));
+    }
+
+    /// The family picked: empty for the system's monospace font.
+    fn picked(&mut self) -> Option<String> {
+        let index = self.ranking.get(self.picker.selected())?;
+        Some(match index {
+            0 => String::new(),
+            index => self.families.get(index - 1)?.clone(),
+        })
+    }
+
     /// What to draw, `font` being the one in use, with `side` beside it,
     /// for a list `rows` rows tall and `cols` cells wide, and a preview so
     /// big, if there's room for one.
     fn view(
-        self,
+        &mut self,
         font: &str,
         side: SideView,
         (rows, cols): (usize, usize),
         preview: Option<(usize, usize)>,
     ) -> FinderView {
         let Self {
+            installed,
+            all,
             families,
             picker,
             items,
@@ -1347,11 +1349,18 @@ impl FontPicker<'_> {
                 Some(fit(text, &inks, cols, false))
             })
             .collect();
-        let waiting = items.len() == 0;
+        let waiting = installed.is_none();
         FinderView {
             title: "Font",
             side: Some(side),
-            place: None,
+            place: Some(
+                if *all {
+                    "every font"
+                } else {
+                    "monospace fonts"
+                }
+                .into(),
+            ),
             query: picker::drawn(picker.query()),
             count: if waiting {
                 "looking for fonts…".into()
@@ -1368,6 +1377,15 @@ impl FontPicker<'_> {
                         vec![
                             ("Enter", Ink::Key),
                             (" sets it · ", Ink::Muted),
+                            ("Tab", Ink::Key),
+                            (
+                                if *all {
+                                    " lists monospace ones · "
+                                } else {
+                                    " lists every font · "
+                                },
+                                Ink::Muted,
+                            ),
                             ("Esc", Ink::Key),
                             (" goes back", Ink::Muted),
                         ],
@@ -1784,6 +1802,24 @@ mod tests {
                 ("i".to_owned(), Source::Default)
             ]
         );
+    }
+
+    #[test]
+    fn the_font_picker_lists_monospace_families_and_tab_lists_them_all() {
+        let mut fonts = FontPicker::default();
+        fonts.installed = Some(vec![
+            ("Mono A".to_owned(), true),
+            ("Sans B".to_owned(), false),
+            ("Serif C".to_owned(), false),
+        ]);
+        fonts.fill("Serif C");
+        // The one in use is listed whatever it is, and picked.
+        assert_eq!(fonts.families, ["Mono A", "Serif C"]);
+        assert_eq!(fonts.picked().as_deref(), Some("Serif C"));
+        fonts.all = true;
+        fonts.fill("");
+        assert_eq!(fonts.families, ["Mono A", "Sans B", "Serif C"]);
+        assert_eq!(fonts.picked().as_deref(), Some(""));
     }
 
     #[test]

@@ -121,8 +121,9 @@ impl Desk {
             .is_some_and(SettingsMenu::wants_fonts)
     }
 
-    /// Takes in the font families installed, for the menu's font picker.
-    pub(crate) fn font_families(&mut self, families: Vec<String>) {
+    /// Takes in the font families installed, each with whether it's
+    /// monospace, for the menu's font picker.
+    pub(crate) fn font_families(&mut self, families: Vec<(String, bool)>) {
         let font = self.options.font.clone();
         if let Some(menu) = &mut self.settings {
             menu.fonts(families, &font);

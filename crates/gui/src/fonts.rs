@@ -290,12 +290,23 @@ impl Fonts {
         Ok(())
     }
 
-    /// The font families installed, as fontconfig finds them, which
-    /// `fc-list : family` lists too: those the `font` option can name.
-    pub(crate) fn families(&mut self) -> Vec<String> {
-        (self.font_cx.collection.family_names())
-            .map(str::to_owned)
-            .collect()
+    /// What lists the font families installed, as fontconfig finds them,
+    /// which `fc-list : family` lists too, those the `font` option can
+    /// name, each with whether it's monospace: to run off the window's
+    /// thread, as each family's font is read to tell, sharing the system's
+    /// fonts with this collection.
+    pub(crate) fn families(&self) -> impl FnOnce() -> Vec<(String, bool)> + Send + 'static {
+        let mut collection = self.font_cx.collection.clone();
+        move || {
+            let mut cache = SourceCache::default();
+            let names: Vec<String> = (collection.family_names()).map(str::to_owned).collect();
+            (names.into_iter())
+                .map(|name| {
+                    let mono = monospace(&mut collection, &mut cache, &name);
+                    (name, mono)
+                })
+                .collect()
+        }
     }
 
     /// The terminal's size, in points.
@@ -720,6 +731,40 @@ fn face_id(faces: &mut Vec<Face>, face: Face) -> FaceId {
     }
 }
 
+/// Whether the family called `name` is monospace: its regular font says
+/// it is, or its letters `i`, `M` and `W` and a full stop are as wide as
+/// each other, as a terminal's font's are.
+fn monospace(collection: &mut Collection, cache: &mut SourceCache, name: &str) -> bool {
+    let Some(family) = collection.family_by_name(name) else {
+        return false;
+    };
+    let Some(info) = family.default_font() else {
+        return false;
+    };
+    let Some(blob) = info.load(Some(cache)) else {
+        return false;
+    };
+    let Some(font) = usize::try_from(info.index())
+        .ok()
+        .and_then(|index| FontRef::from_index(blob.as_ref(), index))
+    else {
+        return false;
+    };
+    if font.metrics(&[]).is_monospace {
+        return true;
+    }
+    let (charmap, metrics) = (font.charmap(), font.glyph_metrics(&[]));
+    let widths: Vec<f32> = (['i', 'M', 'W', '.'].into_iter())
+        .map(|ch| charmap.map(ch))
+        .filter(|&glyph| glyph != 0)
+        .map(|glyph| metrics.advance_width(glyph))
+        .collect();
+    widths.len() == 4
+        && widths
+            .windows(2)
+            .all(|pair| (pair[0] - pair[1]).abs() < 0.01)
+}
+
 /// The best match for `family` in `variant`.
 fn query(
     collection: &mut Collection,
@@ -803,6 +848,19 @@ fn measure(face: &Face, ppem: f32) -> CellMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_families_listed_say_which_are_monospace() {
+        let fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let listed = fonts.families()();
+        assert!(listed.iter().any(|(_, mono)| *mono), "{listed:?}");
+        // As most systems have them.
+        for (family, wanted) in [("DejaVu Sans Mono", true), ("DejaVu Sans", false)] {
+            if let Some((_, mono)) = listed.iter().find(|(name, _)| name == family) {
+                assert_eq!(*mono, wanted, "{family}");
+            }
+        }
+    }
 
     #[test]
     fn the_interface_tries_the_family_named_then_the_systems_sans_then_common_ones() {

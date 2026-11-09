@@ -130,6 +130,10 @@ pub(crate) enum SessionEvent {
     /// could be read, for the editors. Sent from a thread reading them, not
     /// the session's.
     Clipboard(Vec<(crate::pane::Copy, String)>),
+    /// The font families installed, each with whether it's monospace, for
+    /// the settings menu's font picker. Sent from a thread listing them,
+    /// not the session's.
+    Fonts(Vec<(String, bool)>),
     /// Clipboard data read and encoded off the UI thread.
     ChatPaste {
         chat: TerminalId,

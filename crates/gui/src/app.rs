@@ -561,6 +561,9 @@ pub(crate) struct App {
     clipboard: Option<Clipboard>,
     /// Whether a thread is reading the clipboard, for the editors.
     reading_clipboard: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether a thread is listing the fonts installed, for the settings
+    /// menu's font picker.
+    listing_fonts: bool,
     /// The connection to the daemon.
     session: Session,
     /// Shown instead of the panes, while there's no connection.
@@ -666,6 +669,7 @@ impl App {
             wheel_remainder: 0.0,
             clipboard: None,
             reading_clipboard: Arc::default(),
+            listing_fonts: false,
             session,
             // Shown from the first frame, so the window appears at once:
             // on Wayland, a window that hasn't drawn isn't shown at all.
@@ -2341,13 +2345,7 @@ impl App {
             self.fit_panes();
             self.send_outbox();
         }
-        // The settings menu's font picker lists the fonts installed.
-        if self.desk.wants_font_families()
-            && let Some(frame) = &mut self.frame
-        {
-            let families = frame.fonts.families();
-            self.desk.font_families(families);
-        }
+        self.list_fonts();
         let Some(chrome) = self.chrome() else {
             return;
         };
@@ -2438,6 +2436,30 @@ impl App {
         if let Err(err) = spawned {
             log::warn!("no thread to read the clipboard: {err}");
             self.reading_clipboard.store(false, Ordering::Release);
+        }
+    }
+
+    /// Lists the fonts installed for the settings menu's font picker, if
+    /// it wants them, on a thread of its own, as reading each family's
+    /// font to tell whether it's monospace takes a while. The answer comes
+    /// as [`SessionEvent::Fonts`]. One listing at a time.
+    fn list_fonts(&mut self) {
+        if self.listing_fonts || !self.desk.wants_font_families() {
+            return;
+        }
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let (list, proxy) = (frame.fonts.families(), self.session.proxy());
+        let spawned = std::thread::Builder::new()
+            .name("font list".into())
+            .spawn(move || {
+                // The window has closed if this fails.
+                let _ = proxy.send_event(SessionEvent::Fonts(list()));
+            });
+        match spawned {
+            Ok(_) => self.listing_fonts = true,
+            Err(err) => log::warn!("no thread to list fonts: {err}"),
         }
     }
 
@@ -4251,6 +4273,11 @@ impl App {
             }
             SessionEvent::ClipboardImage => {
                 self.desk.clipboard_holds_an_image();
+                self.request_redraw();
+            }
+            SessionEvent::Fonts(families) => {
+                self.listing_fonts = false;
+                self.desk.font_families(families);
                 self.request_redraw();
             }
             SessionEvent::Clipboard(heard) => {
