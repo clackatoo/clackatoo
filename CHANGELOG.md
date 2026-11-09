@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026.11.30 (2026-11-09)
+
+### Fixes
+
+- **daemon:** each turn's in-place rewrite of a big file is undone on its own (CLACKA-235) (3c8efe98)
+- **daemon:** a split settlement shares its turns' texts, and each lost turn is noted (CLACKA-235) (c214f878)
+- **term:** what wraps to a left margin never joins the cell past it (CLACKA-247) (9c3591ee)
+
 ## 2026.11.29 (2026-11-09)
 
 ### Features
