@@ -141,6 +141,8 @@ What each group measures:
 | | Per scrollback line, before compaction | The same, measured as soon as the output ends. |
 | | Per scrollback line, typical | The same as the first, with lines of varying length, averaging half the width. |
 | `idle` | Wakeups | How often the daemon wakes up per second, with a client connected and three quiet terminals, one of which printed some history before going quiet. This should be zero. It is counted from the context switches in `/proc`. |
+| `gate` | Keypress to view update (cat), median and 99th percentile | The [keystroke gate](#the-keystroke-gate)'s first measurement: rounds of 1,000 keys typed into `cat`, each round on a new daemon, a pause apart. Each line gives the median of the rounds' medians, or of their 99th percentiles. |
+| | A terminal's frame built, median and 99th percentile | Its second: how long the window takes to turn a 120x40 screen of coloured text into the rectangles and glyphs it draws, in rounds of 1,000 frames, typing changing the screen between them. Without a GPU, it's skipped. |
 | `window` | Start to first frame | From starting `clackatoo` to the window's first frame, in a process of its own (`CLACKATOO_WINDOW_HOST=off`), with the daemon already running. Most of it is the GPU driver starting up. |
 | | Start to first frame, first window of a process of windows | From starting `clackatoo` to the first frame of the first window, as by default: it forks the [process of windows](~clackatoo/reference/frame#windows-share-one-process), which sets up the GPU and opens it. The process is ended after each. |
 | | Start to first frame, another window | From starting `clackatoo` to the first frame of a window it hands to the [process of windows](~clackatoo/reference/frame#windows-share-one-process) with a window open already, which opens it on the GPU it set up then, as the process's log says. |
@@ -199,6 +201,91 @@ binary's size, report any change.
 Criterion keeps its baselines in `target/criterion/`. The end-to-end harness
 keeps its own in `target/clackatoo-bench/` as tab-separated files, along with
 the commit they were measured on.
+
+## The keystroke gate
+
+Typing must never get slower. The keystroke gate measures the two things
+between a key and the screen that clackatoo's own code decides, and checks
+them against a baseline kept in the repository, `crates/bench/gate.tsv`:
+
+- **Key to echo:** a key typed into `cat` in a terminal, through the daemon,
+  until the view update showing it arrives, as a window follows it.
+- **Frame built:** the window turning a screen of text into what it draws.
+
+`scripts/release` runs it before making a release, and stops if it fails:
+
+```sh
+cargo bench --profile quick -p clackatoo --bench e2e -- --gate
+```
+
+It's built with the `quick` profile, an optimised build without whole-program
+optimisation, into `target/quick/`. That's quicker to build, and it leaves the
+release build in `target/release/`, which may be the one you're running,
+alone. The baseline must be measured with the same profile.
+
+### How it keeps from crying wolf
+
+A desktop running other work makes timings slower, never faster: another
+program takes the CPU, or the other half of its core, and caches go cold. On
+a desktop busy with builds, a few hundred milliseconds of measuring can come
+out two to four times slower than the same a few seconds later, and a busy
+spell can last minutes. So:
+
+- Each measurement is taken in rounds, 15 to a batch, half a second apart,
+  each with a daemon, and a renderer, of its own. The gate compares the least
+  of the rounds, the moment the machine let it alone, for each round's median
+  and its 99th percentile, the slowest key in a hundred.
+- Each round also times a yardstick: hashing 16 KiB, work on the CPU that's
+  none of clackatoo's. While even its least round takes over 10% longer than
+  the baseline's, the machine is busier than when the baseline was made, and
+  the gate judges nothing.
+- If anything comes out slower than allowed, or the gate can't judge, it takes
+  another batch, up to three, the least of all their rounds counting. A busy
+  spell passes; a real slowdown doesn't.
+- The least round's median may take up to 25% longer than the baseline's, and
+  its 99th percentile up to 50%.
+
+Those margins come from runs on a desktop with six cores (a Ryzen 5 7600X)
+running other builds, at load averages of 6 to 42. While the yardstick held,
+the least of a batch nearly always stayed within 10% of the baseline for
+medians and 40% for 99th percentiles; one batch in about twenty came out
+slower than allowed, and the next batch put it right. While the yardstick
+didn't hold, the echo came out up to 2 times slower, and its 99th percentile
+4 times. Of ten checks at load averages of 16 to 42, eight passed and two
+couldn't judge; none said anything was slower. The task CLACKA-241 has the
+numbers.
+
+If it fails, it says either what took longer than allowed, or that the machine
+stayed too busy to judge, with its load. When it's too busy, run it again once
+the machine is quieter. When something took longer, the change made typing
+slower.
+
+### GitHub's runners
+
+CI runs the `gate` group on each push to `main`, but only to record its
+numbers: a runner's machine differs from one run to the next, so its numbers
+can't be checked against a baseline measured on another machine. Read them in
+the `keystrokes` job's log.
+
+### A new baseline
+
+When a change is meant to cost something, or the baseline is measured on a
+new machine, make a new one, and commit it with the change and the reason.
+Make it as releases are made: on the same machine, with what usually runs
+beside a release running. The least of many rounds finds the machine's quiet
+moments even while it's busy, but conditions count both ways: some batches
+at the busiest times had keys come back faster (25 µs, against 31 µs at
+quieter ones), so a check on a machine with nothing else running may come
+out slower than a baseline made on a busy one.
+
+```sh
+cargo bench --profile quick -p clackatoo --bench e2e -- --update-gate
+```
+
+That takes all three batches, about half a minute, and writes them to
+`crates/bench/gate.tsv`, with the commit it was measured on; the gate reads
+the least round of each. The baseline is only meaningful on the machine
+releases are made on.
 
 ## Profile a workload
 

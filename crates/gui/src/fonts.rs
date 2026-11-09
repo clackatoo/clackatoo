@@ -212,7 +212,6 @@ impl std::fmt::Debug for Fonts {
 impl Fonts {
     /// Loads the configured family at `options.size` points, on a display
     /// with `scale` physical pixels per logical pixel.
-    #[cfg(test)]
     pub(crate) fn load(options: &FontOptions, scale: f64) -> anyhow::Result<Self> {
         Self::load_in(
             Collection::new(CollectionOptions::default()),

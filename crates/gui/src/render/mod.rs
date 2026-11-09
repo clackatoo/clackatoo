@@ -9,7 +9,9 @@
 //! renderer draws into any texture, so the same code serves the window and
 //! offscreen tests.
 
+mod bench;
 pub(crate) mod icons;
+pub use bench::FrameBench;
 use icons::Icon;
 
 use bytemuck::{Pod, Zeroable};

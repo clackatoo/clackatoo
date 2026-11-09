@@ -789,9 +789,8 @@ fn gpu() -> anyhow::Result<Gpu> {
 }
 
 /// The device and queue of the GPU windows drawn offscreen draw with,
-/// for the rendering tests to draw with too, rather than open another:
-/// see [`gpu`].
-#[cfg(test)]
+/// for the rendering tests and the frame benchmark to draw with too,
+/// rather than open another: see [`gpu`].
 pub(crate) fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     gpu().ok().map(|gpu| (gpu.device, gpu.queue))
 }

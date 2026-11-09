@@ -84,6 +84,7 @@ pub use complete::Ranking;
 pub use editor::EditorBench;
 pub use fonts::FontOptions;
 pub use launch::LaunchToken;
+pub use render::FrameBench;
 use winit::event_loop::EventLoop;
 
 /// How to open the window.

@@ -5,6 +5,7 @@
 #   scripts/release              the next version this month
 #   scripts/release 2026.10.4    this version
 #   scripts/release --dry-run    says what it would do, changing nothing
+#   scripts/release --no-gate    skips the keystroke gate, below
 #
 # Versions are YEAR.MONTH.N: N counts the releases made that month before
 # this one, from 0. What changed is read from the Conventional Commits
@@ -15,6 +16,13 @@
 # The protocol's fixture for the release's protocol version is written
 # and committed with it, if it's new (see crates/protocol/src/corpus.rs).
 #
+# First, the keystroke gate: a key's echo through the daemon, and the
+# frame that shows it, must be no slower than crates/bench/gate.tsv
+# allows (see docs/learn's benchmarks page). It's built with the quick
+# profile, into target/quick, so the build in target/release, which may be
+# the one running, is left alone. A busy machine can fail it: run it
+# again once it's quieter, and skip it only if it can't be run here.
+#
 # Pushing the commit and the tag is left to you: CI builds, signs and
 # publishes a release for each tag pushed.
 #
@@ -23,11 +31,13 @@
 set -euo pipefail
 
 dry_run=false
+gate=true
 version=""
 for arg in "$@"; do
     case "$arg" in
         --dry-run) dry_run=true ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-gate) gate=false ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "release: no option $arg" >&2; exit 2 ;;
         *) version="$arg" ;;
     esac
@@ -105,6 +115,11 @@ if $dry_run; then
     echo
     printf '%s' "$section"
     exit 0
+fi
+
+if $gate && [ -f crates/bench/gate.tsv ]; then
+    "${CARGO:-cargo}" bench --profile quick --locked -p clackatoo --bench e2e -- --gate \
+        || die "the keystroke gate failed: a key or a frame is slower than crates/bench/gate.tsv allows"
 fi
 
 # The protocol's fixture for this release's protocol version: its sample

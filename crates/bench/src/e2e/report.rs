@@ -44,7 +44,7 @@ impl Unit {
         .find(|unit| unit.key() == key)
     }
 
-    fn format(self, value: f64) -> String {
+    pub(crate) fn format(self, value: f64) -> String {
         const KIB: f64 = 1024.0;
         const MIB: f64 = 1024.0 * 1024.0;
         match self {
@@ -68,6 +68,9 @@ pub(crate) struct Summary {
     pub(crate) low: f64,
     /// The 90th percentile.
     pub(crate) high: f64,
+    /// The smallest: the least a run took, which noise from other work on
+    /// the machine can only add to (see the keystroke gate).
+    pub(crate) least: f64,
 }
 
 impl Summary {
@@ -86,6 +89,7 @@ impl Summary {
             median,
             low: percentile(&sorted, 10),
             high: percentile(&sorted, 90),
+            least: sorted[0],
         }
     }
 
@@ -101,7 +105,7 @@ impl Summary {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )] // Sample counts are small, and the rank is between 1 and the count.
-fn percentile(sorted: &[f64], percent: usize) -> f64 {
+pub(crate) fn percentile(sorted: &[f64], percent: usize) -> f64 {
     let rank = (sorted.len() as f64 * percent as f64 / 100.0).ceil() as usize;
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
@@ -139,14 +143,28 @@ impl Results {
                         .ok()
                         .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
                 }
-                [name, unit, median, low, high] if !name.starts_with('#') => {
+                // Results saved before the least was kept have five fields:
+                // their 10th percentile stands in for it.
+                [name, unit, median, low, high] | [name, unit, median, low, high, _]
+                    if !name.starts_with('#') =>
+                {
                     let parse = |field: &str| field.parse::<f64>().ok();
-                    let (Some(unit), Some(median), Some(low), Some(high)) =
-                        (Unit::from_key(unit), parse(median), parse(low), parse(high))
-                    else {
+                    let least = fields.get(5).map_or(Some(low), |&least| Some(least));
+                    let (Some(unit), Some(median), Some(low), Some(high), Some(least)) = (
+                        Unit::from_key(unit),
+                        parse(median),
+                        parse(low),
+                        parse(high),
+                        least.and_then(parse),
+                    ) else {
                         anyhow::bail!("{} has a malformed line: {line:?}", path.display());
                     };
-                    let summary = Summary { median, low, high };
+                    let summary = Summary {
+                        median,
+                        low,
+                        high,
+                        least,
+                    };
                     results
                         .metrics
                         .insert(name.to_owned(), Metric { unit, summary });
@@ -167,9 +185,14 @@ impl Results {
             self.commit
         );
         for (name, metric) in &self.metrics {
-            let Summary { median, low, high } = metric.summary;
+            let Summary {
+                median,
+                low,
+                high,
+                least,
+            } = metric.summary;
             let unit = metric.unit.key();
-            writeln!(text, "{name}\t{unit}\t{median}\t{low}\t{high}")?;
+            writeln!(text, "{name}\t{unit}\t{median}\t{low}\t{high}\t{least}")?;
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -205,6 +228,16 @@ impl Baselines {
                     save: Some(path(name)),
                 }
             }
+        }
+    }
+}
+
+impl Baselines {
+    /// Compares with the results in `file`, replacing them if `save`.
+    pub(crate) fn file(file: &Path, save: bool) -> Self {
+        Self {
+            compare: file.to_owned(),
+            save: save.then(|| file.to_owned()),
         }
     }
 }
@@ -277,6 +310,14 @@ impl Report {
             .insert(name.to_owned(), Metric { unit, summary });
     }
 
+    /// The least of `name`'s samples in this run, and in the baseline, if
+    /// both have it, in the same unit.
+    pub(crate) fn least(&self, name: &str) -> Option<(f64, f64)> {
+        let now = self.results.metrics.get(name)?;
+        let base = self.baseline.as_ref()?.metrics.get(name)?;
+        (now.unit == base.unit).then_some((now.summary.least, base.summary.least))
+    }
+
     /// Saves the results, keeping saved metrics this run didn't measure.
     pub(crate) fn finish(mut self) -> anyhow::Result<()> {
         let Some(path) = &self.baselines.save else {
@@ -345,13 +386,15 @@ mod tests {
         assert_eq!(summary.median, 3.0);
         assert_eq!(summary.low, 1.0);
         assert_eq!(summary.high, 5.0);
+        assert_eq!(summary.least, 1.0);
         assert_eq!(Summary::of(&[1.0, 2.0]).median, 1.5);
         assert_eq!(
             Summary::of(&[7.0]),
             Summary {
                 median: 7.0,
                 low: 7.0,
-                high: 7.0
+                high: 7.0,
+                least: 7.0,
             }
         );
     }
@@ -362,16 +405,19 @@ mod tests {
             median: 100.0,
             low: 95.0,
             high: 105.0,
+            least: 95.0,
         };
         let close = Summary {
             median: 103.0,
             low: 98.0,
             high: 108.0,
+            least: 98.0,
         };
         let faster = Summary {
             median: 150.0,
             low: 145.0,
             high: 155.0,
+            least: 145.0,
         };
         let throughput = Unit::BytesPerSecond;
         assert_eq!(describe_change(&base, &close, throughput), "+3.0% (noise)");
@@ -386,11 +432,13 @@ mod tests {
             median: 100.0,
             low: 99.9,
             high: 100.1,
+            least: 99.9,
         };
         let drifted = Summary {
             median: 104.0,
             low: 103.9,
             high: 104.1,
+            least: 103.9,
         };
         assert_eq!(
             describe_change(&tight, &drifted, throughput),
@@ -404,6 +452,7 @@ mod tests {
             median,
             low: median,
             high: median,
+            least: median,
         };
         let size = Unit::Bytes;
         assert_eq!(
@@ -425,6 +474,7 @@ mod tests {
             median: 0.1 + 0.2,
             low: 1e-7,
             high: 12_345.678,
+            least: 1e-8,
         };
         results.metrics.insert(
             "startup/daemon".to_owned(),
@@ -441,5 +491,15 @@ mod tests {
         let metric = &loaded.metrics["startup/daemon"];
         assert_eq!(metric.unit, Unit::Seconds);
         assert_eq!(metric.summary, summary);
+    }
+
+    #[test]
+    fn results_saved_before_the_least_was_kept_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("base.tsv");
+        std::fs::write(&path, "#commit\tabc1234\nlatency/view\ts\t3\t2\t4\n").unwrap();
+        let loaded = Results::load(&path).unwrap().unwrap();
+        let summary = loaded.metrics["latency/view"].summary;
+        assert_eq!((summary.median, summary.least), (3.0, 2.0));
     }
 }

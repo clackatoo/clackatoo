@@ -15,6 +15,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 mod daemon;
+mod gate;
 mod pty;
 mod report;
 mod window;
@@ -67,6 +68,12 @@ const IDLE_SECONDS: usize = 3;
 /// How long to wait for anything before deciding it's stuck.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Builds a window's frames of a terminal of a size, with output played
+/// into it: a frame each call of what it returns, or `None` without a GPU.
+/// The window's crate is the bench target's to give (see
+/// `clackatoo_gui::FrameBench`).
+pub type Frames = fn(Size, &[u8]) -> Option<Box<dyn FnMut()>>;
+
 /// The paths the harness needs, which only the bench target knows.
 #[derive(Debug)]
 pub struct Paths<'a> {
@@ -76,6 +83,10 @@ pub struct Paths<'a> {
     pub results: &'a Path,
     /// The repository, to note which commit was measured.
     pub repo: &'a Path,
+    /// The keystroke gate's baseline, kept in the repository.
+    pub gate: &'a Path,
+    /// Builds the window's frames, for the keystroke gate.
+    pub frames: Frames,
 }
 
 /// Runs the harness with the process's arguments, printing the results.
@@ -95,17 +106,22 @@ usage: cargo bench -p clackatoo --bench e2e -- [OPTIONS] [GROUP...]
 
 Measures the release clackatoo binary end to end. Without GROUPs, runs
 every group: size, startup, latency, throughput (with cpu), memory,
-idle, window. The window group needs a display, and is skipped without
-one.
+idle, gate, window. The window group needs a display, and is skipped
+without one.
 
 options:
   --save-baseline NAME  compare with baseline NAME, then replace it
   --baseline NAME       compare with baseline NAME, without saving
   --binary PATH         measure another clackatoo binary, such as one
                         built from a different branch
+  --gate                measure the gate group only, and fail if it's
+                        slower than crates/bench/gate.tsv allows
+  --update-gate         measure the gate group only, and make that
+                        crates/bench/gate.tsv
   -h, --help            show this help
 
-Without either option, compares with the previous run and replaces it.";
+Without either baseline option, compares with the previous run and
+replaces it.";
 
 #[derive(Debug, Default)]
 struct Options {
@@ -113,7 +129,18 @@ struct Options {
     compare: Option<String>,
     /// A different `clackatoo` binary to measure, such as another branch's.
     binary: Option<PathBuf>,
+    /// What to do with the keystroke gate's baseline, if anything.
+    gate: Option<Gate>,
     groups: Vec<String>,
+}
+
+/// What a run does with the keystroke gate's baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gate {
+    /// Checks the gate's measurements against it.
+    Check,
+    /// Replaces it with them.
+    Update,
 }
 
 impl Options {
@@ -138,6 +165,8 @@ impl Options {
                 "--bench" => {}
                 "--save-baseline" => options.save = Some(value("--save-baseline")?),
                 "--baseline" => options.compare = Some(value("--baseline")?),
+                "--gate" => options.gate = Some(Gate::Check),
+                "--update-gate" => options.gate = Some(Gate::Update),
                 "--binary" => {
                     let path = args.next().context("--binary needs a path")?;
                     options.binary = Some(PathBuf::from(path));
@@ -169,6 +198,16 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
     };
     println!("clackatoo end-to-end benchmarks");
     println!("binary: {}", binary.display());
+    if let Some(gate) = options.gate {
+        let baselines = Baselines::file(paths.gate, gate == Gate::Update);
+        let mut report = Report::start(baselines, measured)?;
+        let wanted = match gate {
+            Gate::Check => gate::Use::Check,
+            Gate::Update => gate::Use::Baseline,
+        };
+        gate::run(binary, paths.frames, &mut report, wanted)?;
+        return report.finish();
+    }
     let baselines = Baselines::new(
         paths.results,
         options.save.as_deref(),
@@ -194,6 +233,9 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
     }
     if options.wants("idle") {
         idle(binary, &mut report)?;
+    }
+    if options.wants("gate") {
+        gate::run(binary, paths.frames, &mut report, gate::Use::Record)?;
     }
     if options.wants("window") {
         window::measure(binary, &mut report)?;
@@ -905,6 +947,9 @@ mod tests {
 
         let options = parse(&["--binary", "/tmp/other"]).unwrap().unwrap();
         assert_eq!(options.binary.as_deref(), Some(Path::new("/tmp/other")));
+
+        let options = parse(&["--gate"]).unwrap().unwrap();
+        assert_eq!(options.gate, Some(Gate::Check));
 
         assert!(parse(&["--help"]).unwrap().is_none());
         assert!(parse(&["--frobnicate"]).is_err());
