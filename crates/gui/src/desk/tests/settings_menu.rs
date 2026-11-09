@@ -329,3 +329,44 @@ fn keys_saved_in_some_modes_change_only_those_and_taking_out_nothing_says_so() {
         Some("<A-t> wasn't taken out: client/settings.lua doesn't bind <A-t> in those modes")
     );
 }
+
+#[test]
+fn undoing_keys_recorded_over_saved_ones_binds_those_again() {
+    let (mut desk, dir) = configured("");
+    command(&mut desk, "mapp n <A-t> <C-b>]");
+    saved(&mut desk, 1);
+    command(&mut desk, "Settings new tab");
+    assert!(menu(&mut desk).0.starts_with("<C-b>c"));
+    named(&mut desk, NamedKey::Enter);
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("t".into()), None, alt);
+    named(&mut desk, NamedKey::Enter);
+    saved(&mut desk, 1);
+    assert_eq!(
+        read(&dir, "client/settings.lua"),
+        format!(
+            "{HEADER}\nclient.keys.map(\"niv\", \"<A-t>\", \"<C-b>c\", {{ desc = \"new tab\" }})\n"
+        )
+    );
+    // Undone, the keys go, and what settings.lua bound them to before is
+    // bound and saved again.
+    type_keys(&mut desk, "u");
+    saved(&mut desk, 2);
+    assert_eq!(
+        read(&dir, "client/settings.lua"),
+        format!("{HEADER}\nclient.keys.map(\"n\", \"<A-t>\", \"<C-b>]\")\n")
+    );
+    let keys = parse_keys("<A-t>").unwrap();
+    let client = desk.client().0;
+    let bindings = client.keys();
+    assert_eq!(
+        bindings
+            .get(KeyMode::Normal, &keys)
+            .map(|(binding, _)| binding.clone()),
+        Some(crate::desk::Binding::Keys(parse_keys("<C-b>]").unwrap()))
+    );
+    assert!(bindings.get(KeyMode::Insert, &keys).is_none());
+}

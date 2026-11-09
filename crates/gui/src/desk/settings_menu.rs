@@ -141,7 +141,11 @@ impl Desk {
                 self.save_change(Change::Option { info, value: saved });
             }
             Outcome::ClearLocal(info) => self.drop_local_option(info),
-            Outcome::Keys { mapping, bound } => self.map_keys(mapping, bound),
+            Outcome::Keys(changes) => {
+                for (mapping, bound) in changes {
+                    self.map_keys(mapping, bound);
+                }
+            }
             Outcome::Open(place) => {
                 self.settings = None;
                 let opening = Opening {

@@ -134,8 +134,8 @@ pub(crate) enum Outcome {
     /// This window's own value of `info`'s option is to go.
     ClearLocal(&'static Info),
     /// Keys are to be bound, and saved, or with `bound` false, put back as
-    /// the window starts them and taken out of settings.lua.
-    Keys { mapping: Mapping, bound: bool },
+    /// the window starts them and taken out of settings.lua, each in turn.
+    Keys(Vec<(Mapping, bool)>),
     /// The line at `place` is to be opened in an editor, and the menu
     /// closed.
     Open(Place),
@@ -245,8 +245,8 @@ enum Undo {
         live: Value,
         saved: Option<Value>,
     },
-    /// Binds keys again, or takes them out, as `bound` says.
-    Keys { mapping: Mapping, bound: bool },
+    /// Binds keys again, or takes them out, as each says, in turn.
+    Keys(Vec<(Mapping, bool)>),
 }
 
 /// The changes the menu has made, row by row, newest last, to undo: kept
@@ -845,7 +845,7 @@ impl SettingsMenu {
                 }
                 Outcome::Change { info, live, saved }
             }
-            Undo::Keys { mapping, bound } => Outcome::Keys { mapping, bound },
+            Undo::Keys(changes) => Outcome::Keys(changes),
         }
     }
 
@@ -879,14 +879,12 @@ impl SettingsMenu {
             to: to.clone(),
             desc: bound.label.clone(),
         };
-        history.0.entry(bound.name()).or_default().push(Undo::Keys {
-            mapping: mapping.clone(),
-            bound: true,
-        });
-        Outcome::Keys {
-            mapping,
-            bound: false,
-        }
+        history
+            .0
+            .entry(bound.name())
+            .or_default()
+            .push(Undo::Keys(vec![(mapping.clone(), true)]));
+        Outcome::Keys(vec![(mapping, false)])
     }
 
     /// A key while keys are recorded: Enter saves them, Esc gives up,
@@ -947,20 +945,23 @@ impl SettingsMenu {
         if keys == bound.keys {
             return self.refuse(&format!("{} already does it", display(&keys)));
         }
+        // What settings.lua bound the keys to before, to bind again on
+        // undoing.
+        let before = saved_bindings(facts.keys, &bound.modes, &keys);
         let mapping = Mapping {
             modes: bound.modes.clone(),
             keys,
             to,
             desc: Some(bound.does()),
         };
-        history.0.entry(bound.name()).or_default().push(Undo::Keys {
-            mapping: mapping.clone(),
-            bound: false,
-        });
-        Outcome::Keys {
-            mapping,
-            bound: true,
-        }
+        let mut undo = vec![(mapping.clone(), false)];
+        undo.extend(before.into_iter().map(|before| (before, true)));
+        history
+            .0
+            .entry(bound.name())
+            .or_default()
+            .push(Undo::Keys(undo));
+        Outcome::Keys(vec![(mapping, true)])
     }
 
     /// A key while a value is typed, or a font picked.
@@ -1542,6 +1543,31 @@ fn bindings(keys: &Keys) -> Vec<Bound> {
         }
     }
     found.sort_by(|a, b| (&a.keys, &a.modes).cmp(&(&b.keys, &b.modes)));
+    found
+}
+
+/// What settings.lua binds `keys` to in each of `modes` it binds them
+/// in, those alike as one, as it would save them again.
+fn saved_bindings(keys: &Keys, modes: &[KeyMode], bound: &[Chord]) -> Vec<Mapping> {
+    let mut found: Vec<Mapping> = Vec::new();
+    for &mode in modes {
+        if keys.bound_by(mode, bound).source != Source::Settings {
+            continue;
+        }
+        let Some((Binding::Keys(to), label)) = keys.get(mode, bound) else {
+            continue;
+        };
+        let desc = label.map(str::to_owned);
+        match (found.iter_mut()).find(|saved| saved.to == *to && saved.desc == desc) {
+            Some(saved) => saved.modes.push(mode),
+            None => found.push(Mapping {
+                modes: vec![mode],
+                keys: bound.to_vec(),
+                to: to.clone(),
+                desc,
+            }),
+        }
+    }
     found
 }
 
