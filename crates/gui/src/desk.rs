@@ -1241,6 +1241,13 @@ impl Desk {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             return;
         };
+        // Coming to a zoomed tab from another, the pane that fills it, so
+        // arriving never puts its splits back; moving within it does.
+        let arriving = self.shown.is_none_or(|shown| shown.tab != tab.id);
+        let pane = match self.workspaces.zoomed_in(tab) {
+            Some(zoomed) if arriving => zoomed,
+            _ => pane,
+        };
         let shown = Shown {
             workspace: workspace.id,
             tab: tab.id,
@@ -4644,6 +4651,30 @@ mod tests {
         other.zoomed[0].pane = PaneId(3);
         desk.workspaces_changed(other);
         assert_eq!(shown_pane(&desk), PaneId(3));
+    }
+
+    #[test]
+    fn coming_to_a_zoomed_tab_from_another_goes_to_the_pane_that_fills_it() {
+        let mut desk = three_tabs();
+        ctrl_b(&mut desk, "2");
+        answer_all(&mut desk);
+        // Another window zoomed tab 1 to pane 3; its focused pane, as this
+        // window last heard, is still 1.
+        let mut zoomed = desk.workspaces.clone();
+        zoomed.zoomed = vec![clackatoo_protocol::Zoomed {
+            tab: TabId(1),
+            pane: PaneId(3),
+        }];
+        desk.workspaces_changed(zoomed);
+        assert_eq!(shown_pane(&desk), PaneId(4), "tab 2 isn't zoomed");
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "1");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        let asked = answer_all(&mut desk);
+        assert!(
+            !asked.contains(&Request::Focus { pane: PaneId(1) }),
+            "{asked:?}"
+        );
     }
 
     #[test]

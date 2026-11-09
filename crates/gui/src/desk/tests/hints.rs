@@ -164,3 +164,32 @@ fn hintpattern_adds_matches_of_its_own_and_one_that_cant_be_read_is_said() {
     ctrl_b(&mut desk, "f");
     assert!(!desk.hinting(), "nothing else to pick");
 }
+
+#[test]
+fn a_click_puts_hints_away_and_the_next_letter_is_the_panes() {
+    let mut desk = desk(one_tab(side_by_side(vec![pane(1), pane(2)])));
+    screen_showing(&mut desk, 1, 30, "7e84c2e9\r\n");
+    screen_showing(&mut desk, 2, 30, "$ ");
+    answer_all(&mut desk);
+    ctrl_b(&mut desk, "f");
+    assert!(desk.hinting());
+    assert!(desk.cancel_keys());
+    assert!(!desk.hinting());
+    // Gone with its pane too, as when a macro or another window moves
+    // the focus: the next letter is the pane's.
+    ctrl_b(&mut desk, "f");
+    answer_all(&mut desk);
+    desk.show_pane(PaneId(2));
+    answer_all(&mut desk);
+    let typed_into_two = |desk: &mut Desk| {
+        (answer_all(desk).iter()).any(|request| {
+            matches!(request, Request::SendInput { terminal: TerminalId(2), bytes } if bytes == b"a")
+        })
+    };
+    normal_mode(&mut desk);
+    type_keys(&mut desk, "i");
+    answer_all(&mut desk);
+    letter(&mut desk, "a", Modifiers::default());
+    assert!(!desk.hinting());
+    assert!(typed_into_two(&mut desk));
+}

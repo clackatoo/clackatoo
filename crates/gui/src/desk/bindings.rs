@@ -523,11 +523,14 @@ impl Desk {
         })
     }
 
-    /// Stops waiting for the rest of a binding's keys, as when the mouse
-    /// is clicked. Returns whether it was waiting.
+    /// Stops waiting for the rest of a binding's keys, and puts hints
+    /// away, as when the mouse is clicked. Returns whether it was waiting
+    /// or hints were shown.
     pub(crate) fn cancel_keys(&mut self) -> bool {
         self.forget_waiting();
-        self.keymap.cancel()
+        // A click puts hints away, as any key but a label's letter does.
+        let hinted = self.hinting.take().is_some();
+        self.keymap.cancel() || hinted
     }
 
     /// Carries out one of the window's own actions.

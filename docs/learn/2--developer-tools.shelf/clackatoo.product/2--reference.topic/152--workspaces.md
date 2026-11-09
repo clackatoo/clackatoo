@@ -75,7 +75,9 @@ the splits back as they were.
 
 Going to another of the tab's panes, as <kbd>Ctrl</kbd>+<kbd>B</kbd> `h` or
 <kbd>Ctrl</kbd>+<kbd>L</kbd> does, or splitting a pane in it, puts the splits
-back first, as tmux does. So does the zoomed pane closing.
+back first, as tmux does. So does the zoomed pane closing. Looking at another
+of its terminals on [your phone](~clackatoo/reference/phone) doesn't, as the
+phone shows one terminal at a time anyway.
 
 The zoom belongs to the tab, which the daemon keeps, as it keeps the layout:
 every window showing the tab shows it zoomed, and goes to the zoomed pane. It

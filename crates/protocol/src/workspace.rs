@@ -1189,6 +1189,45 @@ mod tests {
     }
 
     #[test]
+    fn zoomed_tabs_reach_only_a_peer_that_knows_of_them() {
+        let pane = |id| {
+            Layout::Pane(Pane {
+                id: PaneId(id),
+                content: Content::Terminal(TerminalId(id)),
+                home: None,
+                key: None,
+            })
+        };
+        let tab = Tab {
+            id: TabId(1),
+            layout: Layout::Split {
+                axis: Axis::LeftToRight,
+                parts: vec![pane(1), pane(2)],
+                shares: vec![1, 1],
+            },
+            focused: PaneId(2),
+            name: None,
+        };
+        let workspaces = Workspaces {
+            zoomed: vec![Zoomed {
+                tab: TabId(1),
+                pane: PaneId(2),
+            }],
+            ..Workspaces::default()
+        };
+        let at = |version| {
+            let bytes = wire::speaking(version, || postcard::to_allocvec(&workspaces)).unwrap();
+            wire::speaking(version, || postcard::from_bytes::<Workspaces>(&bytes)).unwrap()
+        };
+        assert_eq!(at(wire::LAYOUT_EXTRAS), workspaces);
+        assert_eq!(workspaces.shown_layout(&tab).panes().len(), 1);
+        // An older window is shown every tab's splits.
+        let older = at(wire::LAYOUT_EXTRAS - 1);
+        assert!(older.zoomed.is_empty());
+        assert_eq!(*older.shown_layout(&tab), tab.layout);
+    }
+
+    #[test]
     fn a_pane_kind_goes_as_a_string_and_keeps_what_fits() {
         let kind = PaneKind::new("browser");
         assert_eq!(kind.as_str(), "browser");

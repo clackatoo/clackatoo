@@ -130,6 +130,15 @@ impl Desk {
         let Some(hinting) = &mut self.hinting else {
             return false;
         };
+        // Its pane left, as for another a macro went to, they're gone, and
+        // the key is the pane's.
+        if self.shown.map(|shown| shown.pane) != Some(hinting.pane) {
+            self.hinting = None;
+            return false;
+        }
+        let Some(hinting) = &mut self.hinting else {
+            return false;
+        };
         let letter = match press.key {
             Key::Named(NamedKey::Backspace) => {
                 if hinting.typed.pop().is_none() {

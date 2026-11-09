@@ -630,8 +630,9 @@ impl WorkspaceState {
         Some(workspace.tab(workspace.active_tab)?.focused)
     }
 
-    /// Records a switch to `pane`.
-    pub(crate) fn focus(&mut self, pane: PaneId) -> Result<(), Error> {
+    /// Records a switch to `pane`: a tab zoomed to another of its panes
+    /// is unzoomed if `unzoom`, as tmux's select-pane does.
+    pub(crate) fn focus(&mut self, pane: PaneId, unzoom: bool) -> Result<(), Error> {
         let (workspace, tab, _) = self
             .workspaces
             .find_pane(pane)
@@ -643,7 +644,7 @@ impl WorkspaceState {
         }
         // Another of a zoomed tab's panes, as tmux's select-pane does.
         let zoomed = (self.workspaces.zoomed.iter()).any(|z| z.tab == tab && z.pane != pane);
-        if zoomed {
+        if zoomed && unzoom {
             self.unzoom(tab);
         }
         let workspace = self.workspace_mut(workspace);
@@ -2644,7 +2645,7 @@ mod tests {
         let two = state.split(one, Side::Right, TerminalId(2));
         state.split(two, Side::Below, TerminalId(3));
         assert_eq!(shape(&only_tab(&state).layout), "(1 | (2 / 3))");
-        state.focus(two).unwrap();
+        state.focus(two, true).unwrap();
 
         assert!(state.remove_terminal(TerminalId(2)));
         assert_eq!(shape(&only_tab(&state).layout), "(1 | 3)");
@@ -2685,7 +2686,7 @@ mod tests {
         // Its panes are no others': nothing asked of a pane finds them.
         assert!(state.get().find_pane(two).is_none());
         assert_eq!(state.check_pane(two), Err(Error::NoSuchPane(two)));
-        assert_eq!(state.focus(two), Err(Error::NoSuchPane(two)));
+        assert_eq!(state.focus(two, true), Err(Error::NoSuchPane(two)));
         assert_eq!(state.background_of(TerminalId(3)), Some(tab));
         assert_eq!(state.background_of(TerminalId(1)), None);
         // The workspace's only tab needs another in its place first.
@@ -2968,10 +2969,13 @@ mod tests {
             state.zoom(tab, Some(PaneId(99))),
             Err(Error::NoSuchPane(PaneId(99)))
         );
-        // Focusing it again changes nothing; focusing another unzooms.
-        state.focus(one).unwrap();
+        // Focusing it again changes nothing; focusing another unzooms,
+        // but for a phone's looking at it.
+        state.focus(one, true).unwrap();
         assert_eq!(state.zoomed_to(tab), Some(one));
-        state.focus(two).unwrap();
+        state.focus(two, false).unwrap();
+        assert_eq!(state.zoomed_to(tab), Some(one));
+        state.focus(two, true).unwrap();
         assert_eq!(state.zoomed_to(tab), None);
         // Splitting unzooms, as tmux does.
         state.zoom(tab, Some(three)).unwrap();
@@ -3178,7 +3182,7 @@ mod tests {
         assert_eq!(state.check_new_tab(a), Ok(()));
         // Its empty name is no one's, and no name is taken from it.
         assert_eq!(state.name_for_new(None).unwrap(), "2");
-        state.focus(pane).unwrap();
+        state.focus(pane, true).unwrap();
         assert_eq!(state.get().active, Some(a));
         // With this daemon's own gone, no workspace is the active one.
         state.remove_pane(own);
@@ -3269,10 +3273,13 @@ mod tests {
         let two = state.new_tab(a, TerminalId(2));
         state.new_workspace("b".into(), TerminalId(3));
         assert_eq!(state.focused_pane(a), Some(two));
-        state.focus(one).unwrap();
+        state.focus(one, true).unwrap();
         assert_eq!(state.get().active, Some(a));
         assert_eq!(state.focused_pane(a), Some(one));
-        assert_eq!(state.focus(PaneId(99)), Err(Error::NoSuchPane(PaneId(99))));
+        assert_eq!(
+            state.focus(PaneId(99), true),
+            Err(Error::NoSuchPane(PaneId(99)))
+        );
     }
 
     #[test]

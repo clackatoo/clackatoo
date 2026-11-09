@@ -3969,7 +3969,10 @@ impl Daemon {
                 if self.workspaces.get().find_background_pane(pane).is_some() {
                     Ok(Response::Done)
                 } else {
-                    self.workspaces.focus(pane).map(|()| {
+                    // A phone looking at a terminal leaves a tab zoomed,
+                    // as it shows one terminal at a time anyway.
+                    let unzoom = !self.is_web_device(token);
+                    self.workspaces.focus(pane, unzoom).map(|()| {
                         self.workspaces_changed();
                         Response::Done
                     })
