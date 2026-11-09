@@ -41,7 +41,9 @@ use clackatoo_protocol::{Content, PaneId, Side, TabId, WorkspaceId};
 use mlua::thread::ThreadStatus;
 use mlua::{Function, Lua, MultiValue, Table, Thread, Value, VmState};
 
-use super::{Chunk, FromLua, KeyInfo, Listen, Scope, Source, To, ToLua, TurnEnd, Wake, World};
+use super::{
+    Chunk, FromLua, KeyInfo, Listen, Origin, Scope, Source, To, ToLua, TurnEnd, Wake, World,
+};
 use crate::command::Kind;
 use crate::keymap::{KeyMode, parse_keys, parse_modes};
 use crate::options::provenance::{Place, Source as SetFrom};
@@ -67,7 +69,7 @@ struct State {
     /// The options every window shares, as the windows last said, and as
     /// set since.
     options: RefCell<Options>,
-    to_windows: Sender<(To, FromLua)>,
+    to_windows: Sender<(To, Origin, FromLua)>,
     wake: Wake,
     bindings: RefCell<HashMap<u64, Function>>,
     handlers: RefCell<HashMap<u64, (Scope, Listen, Function)>>,
@@ -76,12 +78,14 @@ struct State {
     loading: Cell<Option<SetFrom>>,
     /// The window whose event is being handled, while one is.
     window: Cell<Option<u32>>,
+    /// Whether that event is guarded (see [`Origin`]).
+    guarded: Cell<bool>,
     /// The files of Lua that have set something, each kept once.
     files: RefCell<Vec<Arc<str>>>,
 }
 
 impl State {
-    fn new(options: Options, to_windows: Sender<(To, FromLua)>, wake: Wake) -> Self {
+    fn new(options: Options, to_windows: Sender<(To, Origin, FromLua)>, wake: Wake) -> Self {
         Self {
             worlds: RefCell::default(),
             options: RefCell::new(options),
@@ -92,12 +96,17 @@ impl State {
             next: Cell::new(0),
             loading: Cell::new(None),
             window: Cell::new(None),
+            guarded: Cell::new(false),
             files: RefCell::default(),
         }
     }
 
     fn tell(&self, to: To, message: FromLua) {
-        if self.to_windows.send((to, message)).is_ok() {
+        let from = Origin {
+            window: self.window.get(),
+            guarded: self.guarded.get(),
+        };
+        if self.to_windows.send((to, from, message)).is_ok() {
             (self.wake)();
         }
     }
@@ -178,7 +187,7 @@ pub(super) struct Start<'a> {
 /// work go first, as the windows set it when a key comes.
 pub(super) fn run(
     start: Start<'_>,
-    (from_windows, to_windows): (Receiver<ToLua>, Sender<(To, FromLua)>),
+    (from_windows, to_windows): (Receiver<ToLua>, Sender<(To, Origin, FromLua)>),
     slice: Arc<AtomicBool>,
     wake: Wake,
 ) {
@@ -231,8 +240,9 @@ struct Job {
     /// What it's resumed with next: its event, to begin with; an answer;
     /// or nothing, after a slice.
     args: MultiValue,
-    /// The window whose event it handles, if any.
-    window: Option<u32>,
+    /// The window whose event it handles, if any, and whether that's
+    /// guarded.
+    origin: Origin,
     /// The config's file it is, if it's one still loading.
     loading: Option<SetFrom>,
     /// How long it's run since it started or its answer came.
@@ -240,11 +250,11 @@ struct Job {
 }
 
 impl Job {
-    fn new(thread: Thread, args: MultiValue, window: Option<u32>) -> Self {
+    fn new(thread: Thread, args: MultiValue, origin: Origin) -> Self {
         Self {
             thread,
             args,
-            window,
+            origin,
             loading: None,
             ran: Duration::ZERO,
         }
@@ -364,7 +374,7 @@ impl Runtime {
             };
             let job = Job {
                 loading: Some(chunk.from),
-                ..Job::new(thread, MultiValue::new(), None)
+                ..Job::new(thread, MultiValue::new(), Origin::default())
             };
             self.run(job, INIT_TIME, false);
         }
@@ -418,11 +428,11 @@ impl Runtime {
             ToLua::Run { key, binding } => {
                 let handler = self.state.bindings.borrow().get(&binding).cloned();
                 if let Some(handler) = handler {
-                    self.later(
-                        &handler,
-                        |runtime| runtime.decided_event(&key),
-                        Some(key.window),
-                    );
+                    let origin = Origin {
+                        window: Some(key.window),
+                        guarded: key.guarded,
+                    };
+                    self.later(&handler, |runtime| runtime.decided_event(&key), origin);
                 }
             }
             ToLua::Answer { request, result } => {
@@ -449,11 +459,11 @@ impl Runtime {
                 // In the order they were added.
                 handlers.sort_by_key(|&(id, _)| id);
                 for (_, handler) in handlers {
-                    self.later(
-                        &handler,
-                        |runtime| runtime.turn_event(&turn),
-                        Some(turn.window),
-                    );
+                    let origin = Origin {
+                        window: Some(turn.window),
+                        guarded: turn.guarded,
+                    };
+                    self.later(&handler, |runtime| runtime.turn_event(&turn), origin);
                 }
             }
         }
@@ -464,17 +474,17 @@ impl Runtime {
         values.into_lua_multi(&self.lua).unwrap_or_default()
     }
 
-    /// Queues `handler` as background work, for `window`'s event, called
-    /// with the event `event` makes.
+    /// Queues `handler` as background work, for the event from `origin`,
+    /// called with the event `event` makes.
     fn later(
         &mut self,
         handler: &Function,
         event: impl FnOnce(&Self) -> mlua::Result<Table>,
-        window: Option<u32>,
+        origin: Origin,
     ) {
         let made = event(self).and_then(|event| {
             let thread = self.lua.create_thread(handler.clone())?;
-            Ok(Job::new(thread, self.args(event), window))
+            Ok(Job::new(thread, self.args(event), origin))
         });
         match made {
             Ok(job) => self.background.push_back(job),
@@ -502,7 +512,11 @@ impl Runtime {
         for handler in handlers {
             match self.lua.create_thread(handler.clone()) {
                 Ok(thread) => {
-                    let job = Job::new(thread, self.args(&event), Some(key.window));
+                    let origin = Origin {
+                        window: Some(key.window),
+                        guarded: key.guarded,
+                    };
+                    let job = Job::new(thread, self.args(&event), origin);
                     self.run(job, self.budget, false);
                 }
                 Err(err) => self.report(&err),
@@ -556,14 +570,15 @@ impl Runtime {
     fn run(&mut self, mut job: Job, limit: Duration, sliced: bool) {
         // Not resumed at all once it's had its time, which a slice that
         // ran to the end of it, or a run of yields, can come to.
+        self.state.window.set(job.origin.window);
+        self.state.guarded.set(job.origin.guarded);
         if job.ran >= limit {
-            self.state.window.set(job.window);
             self.report(&mlua::Error::runtime("ran too long, so it was stopped"));
             self.state.window.set(None);
+            self.state.guarded.set(false);
             return;
         }
         self.state.loading.set(job.loading);
-        self.state.window.set(job.window);
         if sliced {
             self.sliced.set(job.thread.state());
         }
@@ -578,6 +593,7 @@ impl Runtime {
         self.sliced.set(std::ptr::null_mut());
         self.state.loading.set(None);
         self.state.window.set(None);
+        self.state.guarded.set(false);
         self.settle(job, resumed);
     }
 

@@ -23,7 +23,9 @@ use std::time::Instant;
 use clackatoo_protocol::{MachineId, TerminalId};
 
 use crate::desk::{Binding, Keys};
-use crate::lua::{self, DECISION_TIME, FromLua, Listen, Lua, Scope, Source, To, ToLua};
+use crate::lua::{
+    self, DECISION_TIME, FromLua, Listen, Lua, Origin, Said, Scope, Source, To, ToLua,
+};
 use crate::options::{Shared, Store};
 
 /// How many daemon events are remembered, to tell each one once.
@@ -51,7 +53,10 @@ struct Inner {
     seq: Cell<u64>,
     /// The windows, by number, each with what Lua has said for it that it
     /// hasn't taken yet.
-    windows: RefCell<BTreeMap<u32, Vec<FromLua>>>,
+    windows: RefCell<BTreeMap<u32, Vec<Said>>>,
+    /// The windows a chat has Control of now: what the config asks of
+    /// every window isn't kept for windows opened later while one is.
+    guarded: RefCell<std::collections::BTreeSet<u32>>,
     /// The last window's number.
     numbered: Cell<u32>,
     /// The window with the desktop's focus, if one has.
@@ -154,13 +159,22 @@ impl Client {
     pub(crate) fn join(&self) -> u32 {
         let window = self.0.numbered.get() + 1;
         self.0.numbered.set(window);
-        let mut asked: Vec<FromLua> = (self.0.hosts.borrow().iter())
-            .map(|(host, share)| FromLua::Connect {
-                host: host.clone(),
-                share: *share,
+        let mut asked: Vec<Said> = (self.0.hosts.borrow().iter())
+            .map(|(host, share)| {
+                let host = host.clone();
+                (
+                    Origin::default(),
+                    FromLua::Connect {
+                        host,
+                        share: *share,
+                    },
+                )
             })
             .collect();
-        asked.extend((self.0.forwards.borrow().iter()).map(|spec| FromLua::Forward(spec.clone())));
+        asked.extend(
+            (self.0.forwards.borrow().iter())
+                .map(|spec| (Origin::default(), FromLua::Forward(spec.clone()))),
+        );
         self.0.windows.borrow_mut().insert(window, asked);
         self.send(ToLua::Open { window });
         window
@@ -169,6 +183,7 @@ impl Client {
     /// `window` has closed: what was its alone goes with it.
     pub(crate) fn leave(&self, window: u32) {
         self.0.windows.borrow_mut().remove(&window);
+        self.0.guarded.borrow_mut().remove(&window);
         (self.0.handlers.borrow_mut()).retain(|(_, scope)| scope.window() != Some(window));
         self.options().borrow_mut().forget(window);
         if self.0.focused.get() == Some(window) {
@@ -186,6 +201,17 @@ impl Client {
         }
     }
 
+    /// Notes whether a chat has Control of `window` now (see
+    /// `Desk::controlled`).
+    pub(crate) fn guard(&self, window: u32, guarded: bool) {
+        let mut windows = self.0.guarded.borrow_mut();
+        if guarded {
+            windows.insert(window);
+        } else {
+            windows.remove(&window);
+        }
+    }
+
     /// Tells Lua something. Without a Lua, or one whose thread has ended,
     /// nobody hears.
     pub(crate) fn send(&self, message: ToLua) {
@@ -195,19 +221,19 @@ impl Client {
     }
 
     /// What Lua has said for `window` since it last asked.
-    pub(crate) fn take(&self, window: u32) -> Vec<FromLua> {
+    pub(crate) fn take(&self, window: u32) -> Vec<Said> {
         let received = match &*self.0.lua.borrow() {
             Some(lua) => lua.received(),
             None => Vec::new(),
         };
-        for (to, message) in received {
-            self.route(to, message);
+        for (to, from, message) in received {
+            self.route(to, from, message);
         }
         self.queued(window)
     }
 
     /// What's queued for `window`, taken.
-    fn queued(&self, window: u32) -> Vec<FromLua> {
+    fn queued(&self, window: u32) -> Vec<Said> {
         (self.0.windows.borrow_mut().get_mut(&window))
             .map(std::mem::take)
             .unwrap_or_default()
@@ -221,7 +247,7 @@ impl Client {
         &self,
         window: u32,
         message: impl FnOnce(u64) -> ToLua,
-    ) -> (Option<bool>, Vec<FromLua>) {
+    ) -> (Option<bool>, Vec<Said>) {
         let seq = self.0.seq.get() + 1;
         self.0.seq.set(seq);
         let sent = match &*self.0.lua.borrow() {
@@ -238,14 +264,14 @@ impl Client {
                 None => Err(RecvTimeoutError::Disconnected),
             };
             match next {
-                Ok((To::Window(to), FromLua::Decided { seq: decided, stop }))
+                Ok((To::Window(to), _, FromLua::Decided { seq: decided, stop }))
                     if to == window && decided == seq =>
                 {
                     return (Some(stop), self.queued(window));
                 }
                 // An answer that came too late.
-                Ok((_, FromLua::Decided { .. })) => {}
-                Ok((to, message)) => self.route(to, message),
+                Ok((_, _, FromLua::Decided { .. })) => {}
+                Ok((to, from, message)) => self.route(to, from, message),
                 Err(RecvTimeoutError::Timeout) => {
                     log::warn!("Lua took too long to say whether a key goes on");
                     return (None, self.queued(window));
@@ -256,8 +282,8 @@ impl Client {
     }
 
     /// Keeps what Lua said for the client, or queues it for the windows
-    /// it's for.
-    fn route(&self, to: To, message: FromLua) {
+    /// it's for, with where it came from.
+    fn route(&self, to: To, from: Origin, message: FromLua) {
         let mut windows = self.0.windows.borrow_mut();
         match to {
             To::Client => {
@@ -266,11 +292,15 @@ impl Client {
             }
             To::Window(window) => {
                 if let Some(queue) = windows.get_mut(&window) {
-                    queue.push(message);
+                    queue.push((from, message));
                 }
             }
             To::All => {
+                // Kept for windows opened later only if no window refuses
+                // it now, as one a chat has Control of does.
+                let refused = from.guarded || !self.0.guarded.borrow().is_empty();
                 match &message {
+                    _ if refused => {}
                     FromLua::Connect { host, share } => {
                         let mut hosts = self.0.hosts.borrow_mut();
                         match hosts.iter_mut().find(|(asked, _)| asked == host) {
@@ -285,7 +315,7 @@ impl Client {
                     _ => {}
                 }
                 for queue in windows.values_mut() {
-                    queue.push(message.clone());
+                    queue.push((from, message.clone()));
                 }
             }
             To::Focused => {
@@ -293,7 +323,7 @@ impl Client {
                     .filter(|window| windows.contains_key(window))
                     .or_else(|| windows.keys().next().copied());
                 if let Some(queue) = focused.and_then(|window| windows.get_mut(&window)) {
-                    queue.push(message);
+                    queue.push((from, message));
                 }
             }
         }
@@ -487,7 +517,7 @@ impl Client {
     /// Waits for the config to have loaded, for tests, then returns what
     /// Lua said for `window` meanwhile.
     #[cfg(test)]
-    pub(crate) fn ready(&self, window: u32) -> Vec<FromLua> {
+    pub(crate) fn ready(&self, window: u32) -> Vec<Said> {
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while self.0.running.get().is_some() {
             let next = match &*self.0.lua.borrow() {
@@ -495,7 +525,7 @@ impl Client {
                 None => break,
             };
             match next {
-                Ok((to, message)) => self.route(to, message),
+                Ok((to, from, message)) => self.route(to, from, message),
                 Err(err) => panic!("init.lua never finished: {err}"),
             }
         }

@@ -162,6 +162,7 @@ impl Desk {
             return;
         };
         client.focus(window, !self.unfocused);
+        client.guard(window, self.controlled);
         if !client.has_lua() {
             return;
         }
@@ -214,14 +215,19 @@ impl Desk {
     /// be redrawn.
     pub(crate) fn lua_said(&mut self) -> bool {
         let said = match self.joined() {
-            Some((client, window)) => client.take(window),
+            Some((client, window)) => {
+                // Whether it's to refuse what's asked of every window, as
+                // it's told.
+                client.guard(window, self.controlled);
+                client.take(window)
+            }
             None => Vec::new(),
         };
         let followed = self.follow_client();
         let redraw = !said.is_empty() || followed;
         let guarded = self.controlled;
-        for message in said {
-            self.lua_says(message, guarded);
+        for (from, message) in said {
+            self.lua_says(message, guarded || from.guarded);
         }
         // Settings saved come back the same way.
         self.settings_saved() || redraw
@@ -238,8 +244,8 @@ impl Desk {
         // queued by itself comes too, which a chat with Control may have
         // had it say.
         let guarded = self.automating || self.controlled;
-        for message in said {
-            self.lua_says(message, guarded);
+        for (from, message) in said {
+            self.lua_says(message, guarded || from.guarded);
         }
         stop
     }
@@ -252,6 +258,8 @@ impl Desk {
             text: press.text.map(str::to_owned),
             mode: self.key_mode(),
             window,
+            // What its handlers do is refused in every window then.
+            guarded: self.automating || self.controlled,
             pane: self.shown.map(|shown| shown.pane),
             count: None,
         }
@@ -401,6 +409,7 @@ impl Desk {
                 agent: chat.agent,
                 failed,
                 window,
+                guarded: self.controlled,
             };
             client.tell_once((machine, chat.chat, chat.active), ToLua::TurnEnded(turn));
         }
@@ -440,8 +449,8 @@ impl Desk {
     #[cfg(test)]
     pub(super) fn lua_ready(&mut self) {
         let (client, window) = self.client();
-        for message in client.ready(window) {
-            self.lua_says(message, false);
+        for (from, message) in client.ready(window) {
+            self.lua_says(message, from.guarded);
         }
         self.follow_client();
     }

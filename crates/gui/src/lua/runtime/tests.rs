@@ -6,7 +6,7 @@ use super::*;
 const WINDOW: u32 = 1;
 
 /// A runtime with one window, and where what it says comes.
-fn runtime() -> (Runtime, Receiver<(To, FromLua)>) {
+fn runtime() -> (Runtime, Receiver<(To, Origin, FromLua)>) {
     let (to_windows, said) = mpsc::channel();
     let state = Rc::new(State::new(Options::default(), to_windows, Box::new(|| {})));
     state.worlds.borrow_mut().insert(WINDOW, World::default());
@@ -46,13 +46,14 @@ fn turn_ended() -> ToLua {
         failed: Some(false),
         window: WINDOW,
         pane: None,
+        guarded: false,
     })
 }
 
 /// The commands the config ran, and its mistakes, in order.
-fn commands(said: &Receiver<(To, FromLua)>) -> Vec<String> {
+fn commands(said: &Receiver<(To, Origin, FromLua)>) -> Vec<String> {
     (said.try_iter())
-        .filter_map(|(_, said)| match said {
+        .filter_map(|(_, _, said)| match said {
             FromLua::Command { line, .. } => Some(line),
             FromLua::Error(err) => Some(format!("error: {err}")),
             _ => None,
@@ -81,7 +82,7 @@ fn a_config_that_waits_as_it_loads_is_loading_until_it_ends() {
         }
         _ => None,
     };
-    let first: Vec<_> = said.try_iter().map(|(_, said)| said).collect();
+    let first: Vec<_> = said.try_iter().map(|(_, _, said)| said).collect();
     assert_eq!(
         first.iter().map(loading).collect::<Vec<_>>(),
         [Some((true, Some(1)))]
@@ -92,7 +93,7 @@ fn a_config_that_waits_as_it_loads_is_loading_until_it_ends() {
         result: Ok(PaneId(2)),
     });
     drain(&mut runtime, |_| {});
-    let after: Vec<_> = said.try_iter().map(|(_, said)| said).collect();
+    let after: Vec<_> = said.try_iter().map(|(_, _, said)| said).collect();
     assert_eq!(
         after.iter().map(loading).collect::<Vec<_>>(),
         [Some((true, Some(3))), Some((true, Some(4)))]
@@ -106,13 +107,14 @@ fn a_config_that_waits_as_it_loads_is_loading_until_it_ends() {
             text: None,
             mode: KeyMode::Normal,
             window: WINDOW,
+            guarded: false,
             pane: None,
             count: None,
         },
         binding: 1,
     });
     let later: Vec<_> = (said.try_iter())
-        .filter_map(|(_, said)| loading(&said))
+        .filter_map(|(_, _, said)| loading(&said))
         .collect();
     assert_eq!(later, [(false, Some(4))]);
 }

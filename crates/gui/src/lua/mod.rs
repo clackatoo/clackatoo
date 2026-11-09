@@ -179,6 +179,9 @@ pub(crate) struct KeyInfo {
     pub(crate) mode: KeyMode,
     /// The window it was pressed in.
     pub(crate) window: u32,
+    /// Pressed by an agent, or in a window a chat has Control of: what its
+    /// handlers do is refused in every window (see `Desk::controlled`).
+    pub(crate) guarded: bool,
     /// The pane it was pressed in.
     pub(crate) pane: Option<PaneId>,
     /// For a binding, the count typed before it, as Vim's `v:count`.
@@ -198,6 +201,9 @@ pub(crate) struct TurnEnd {
     pub(crate) window: u32,
     /// The pane showing the chat in that window, if one does.
     pub(crate) pane: Option<PaneId>,
+    /// The window that heard it is one a chat has Control of: what its
+    /// handlers do is refused in every window.
+    pub(crate) guarded: bool,
 }
 
 /// What the windows tell Lua.
@@ -251,6 +257,19 @@ pub(crate) enum To {
     /// command the config runs as it loads, in no window's handler.
     Focused,
 }
+
+/// Where something Lua says came from: the window whose event the handler
+/// saying it handles, if any, and whether that event was guarded, as a
+/// key an agent pressed is, so that what the handler does is refused in
+/// whichever window it's for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Origin {
+    pub(crate) window: Option<u32>,
+    pub(crate) guarded: bool,
+}
+
+/// Something Lua says, and where it came from.
+pub(crate) type Said = (Origin, FromLua);
 
 /// What Lua tells the windows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,7 +376,7 @@ pub(crate) enum FromLua {
 #[derive(Debug)]
 pub(crate) struct Lua {
     to: Sender<ToLua>,
-    from: Receiver<(To, FromLua)>,
+    from: Receiver<(To, Origin, FromLua)>,
     /// Set to have the handler running on the Lua thread, if it runs a
     /// slice at a time, let a key go first (see [`runtime`]).
     hurry: Arc<AtomicBool>,
@@ -415,12 +434,15 @@ impl Lua {
     }
 
     /// What Lua has said since last asked, and who to.
-    pub(crate) fn received(&self) -> Vec<(To, FromLua)> {
+    pub(crate) fn received(&self) -> Vec<(To, Origin, FromLua)> {
         self.from.try_iter().collect()
     }
 
     /// The next thing Lua says, if it says it within `wait`.
-    pub(crate) fn next_within(&self, wait: Duration) -> Result<(To, FromLua), RecvTimeoutError> {
+    pub(crate) fn next_within(
+        &self,
+        wait: Duration,
+    ) -> Result<(To, Origin, FromLua), RecvTimeoutError> {
         self.from.recv_timeout(wait)
     }
 
@@ -429,7 +451,7 @@ impl Lua {
     pub(crate) fn next(&self) -> FromLua {
         self.next_within(Duration::from_secs(5))
             .expect("Lua said something")
-            .1
+            .2
     }
 
     /// Waits until `init.lua` has run, for tests, returning what Lua said
@@ -439,8 +461,8 @@ impl Lua {
         let mut said = Vec::new();
         loop {
             match self.next_within(Duration::from_secs(5)) {
-                Ok((_, FromLua::Ready)) => return said,
-                Ok((_, message)) => said.push(message),
+                Ok((_, _, FromLua::Ready)) => return said,
+                Ok((_, _, message)) => said.push(message),
                 Err(err) => panic!("init.lua never finished: {err}"),
             }
         }
@@ -465,11 +487,11 @@ impl Lua {
         let deadline = std::time::Instant::now() + DECISION_TIME;
         loop {
             match self.next_within(deadline.saturating_duration_since(std::time::Instant::now())) {
-                Ok((_, FromLua::Decided { seq: decided, stop })) if decided == seq => {
+                Ok((_, _, FromLua::Decided { seq: decided, stop })) if decided == seq => {
                     return (Some(stop), said);
                 }
-                Ok((_, FromLua::Decided { .. })) => {}
-                Ok((_, message)) => said.push(message),
+                Ok((_, _, FromLua::Decided { .. })) => {}
+                Ok((_, _, message)) => said.push(message),
                 Err(_) => return (None, said),
             }
         }
@@ -596,6 +618,7 @@ mod tests {
             text: None,
             mode: KeyMode::Normal,
             window: WINDOW,
+            guarded: false,
             pane: Some(PaneId(pane)),
             count: None,
         }
@@ -975,6 +998,7 @@ mod tests {
             failed: None,
             window: WINDOW,
             pane: None,
+            guarded: false,
         }));
         // Well into it.
         std::thread::sleep(Duration::from_millis(30));

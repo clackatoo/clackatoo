@@ -261,3 +261,51 @@ fn a_windows_command_line_font_is_how_it_started() {
         )
     );
 }
+
+#[test]
+fn what_a_guarded_windows_key_sets_off_is_refused_in_every_window() {
+    let dir = config(
+        r#"
+        client.keys.map("n", "<C-b>t", function()
+            for _, window in client.windows do
+                if window.pane then window.pane:close() end
+            end
+            client.connect("desk")
+        end)
+        "#,
+    );
+    let (client, mut one) = first_window(&dir);
+    let mut two = window(&client);
+    two.sync_lua();
+    answer_all(&mut one);
+    answer_all(&mut two);
+    // A chat has Control of the first window: its key acts in neither.
+    one.controlled = true;
+    ctrl_b(&mut one, "t");
+    two.lua_said();
+    assert!(answer_all(&mut one).is_empty());
+    assert!(answer_all(&mut two).is_empty());
+    assert!(
+        (two.message.as_deref()).is_some_and(|said| said.contains("an agent controls")),
+        "{:?}",
+        two.message
+    );
+    assert!(one.config_hosts.is_empty() && two.config_hosts.is_empty());
+    // Nor is what it asked of every window kept for windows opened later.
+    let mut three = window(&client);
+    three.lua_said();
+    assert!(three.config_hosts.is_empty());
+    // A window that refuses it keeps it from being kept, though the
+    // others do it.
+    one.controlled = false;
+    two.controlled = true;
+    two.lua_said();
+    ctrl_b(&mut one, "t");
+    assert!(answer_all(&mut one).contains(&Request::ClosePane { pane: PaneId(1) }));
+    assert_eq!(one.config_hosts, [("desk".to_owned(), None)]);
+    two.lua_said();
+    assert!(two.config_hosts.is_empty());
+    let mut four = window(&client);
+    four.lua_said();
+    assert!(four.config_hosts.is_empty());
+}
