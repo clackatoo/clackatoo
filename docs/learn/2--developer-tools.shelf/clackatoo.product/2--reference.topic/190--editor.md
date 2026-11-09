@@ -1,5 +1,5 @@
 ---
-title: Editing files
+title: Editing Files
 type: reference
 description: An editor pane edits a file with Vim's keys. The daemon keeps the file's text and its undo history, so every window edits the same text, agents' edits and yours meet, and nothing is lost when the window closes or the daemon upgrades. How to open and write files, the languages files are colored in, language servers and the mistakes they find, line numbers, tabs and indenting, the view, Markdown rendered, the keys, and what it doesn't do.
 related:

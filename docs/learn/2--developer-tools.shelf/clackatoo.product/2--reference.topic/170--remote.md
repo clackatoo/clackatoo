@@ -1,5 +1,5 @@
 ---
-title: Another machine
+title: Another Machine
 type: reference
 description: With --remote, the window and the clackatoo command use the daemon on another machine, reached with ssh. How it connects, how it moves onto UDP to survive network changes, what the other machine needs, and what happens when the connection drops.
 related:

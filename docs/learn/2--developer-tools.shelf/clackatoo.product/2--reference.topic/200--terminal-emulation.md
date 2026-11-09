@@ -1,5 +1,5 @@
 ---
-title: Terminal emulation
+title: Terminal Emulation
 type: reference
 description: The terminal clackatoo emulates. What programs find in their environment, which escape sequences and modes it supports, which queries it answers, and what it ignores so far.
 related:

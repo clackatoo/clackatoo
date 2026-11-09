@@ -1,5 +1,5 @@
 ---
-title: What is clackatoo
+title: What Is clackatoo
 type: concept
 description: clackatoo is a terminal workspace aiming to be very fast and very light. Its daemon owns every terminal, and windows, scripts and agents are all clients of it.
 related:

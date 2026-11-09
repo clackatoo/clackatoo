@@ -1,5 +1,5 @@
 ---
-title: Tracing agents
+title: Tracing Agents
 type: how-to
 description: Keep every message clackatoo and an agent's adapter exchange over ACP, to see what went wrong in a chat, and run the tests that talk to a real Claude Code or Codex.
 related:

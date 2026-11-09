@@ -1,5 +1,5 @@
 ---
-title: The window
+title: The Window
 type: reference
 description: clackatoo's window shows your workspaces, their tabs and their panes of terminals, and sends your keys to the focused one. Insert mode types into the program; normal mode moves a cursor of clackatoo's own through history, and runs the window's commands.
 related:

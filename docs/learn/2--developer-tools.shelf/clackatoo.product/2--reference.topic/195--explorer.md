@@ -1,5 +1,5 @@
 ---
-title: The file explorer
+title: The File Explorer
 type: reference
 description: A file explorer pane shows a project's files as a tree, beside its editors and terminals. It lists folders as you open them, shows what git says of each file, opens files in the tab's editor, and makes, renames, moves, copies and deletes files without ever writing over or destroying what you didn't ask it to. What the tree shows comes from the daemon, so files a terminal or an agent makes appear at once.
 related:

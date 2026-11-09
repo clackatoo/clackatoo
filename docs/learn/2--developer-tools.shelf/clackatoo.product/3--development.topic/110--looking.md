@@ -1,5 +1,5 @@
 ---
-title: Looking at the window
+title: Looking at the Window
 type: how-to
 description: Drive the real window from a script without a desktop, and get screenshots and how long each step took to show.
 related:

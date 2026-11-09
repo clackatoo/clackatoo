@@ -1,5 +1,5 @@
 ---
-title: Quick start
+title: Quick Start
 type: how-to
 description: Install or build clackatoo, open a window on your shell, and drive terminals from the command line by starting one, typing into it, reading its screen and closing it.
 related:

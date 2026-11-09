@@ -1,5 +1,5 @@
 ---
-title: Your phone
+title: Your Phone
 type: reference
 description: "The web app the daemon serves, for your phone or any browser: setting it up over Tailscale or the network, pairing devices, notifications, and what's kept where."
 related:
