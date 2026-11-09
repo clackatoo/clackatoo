@@ -53,40 +53,39 @@ An agent runs in a process group of its own, so stopping it, or choosing Retry, 
 
 ## Gemini through Antigravity
 
-Choose **Antigravity** in the provider rail, or open `:Agent antigravity`. Clackatoo installs Google's official ACP runtime from a pinned, SHA-256-checked release for x86_64 or ARM64 Linux. It needs no Node.js. Allow about 1.1 GB for the install and another 1 GB for runtime scratch on disk.
+Select **Antigravity** in the model menu's provider rail, or open `:Agent antigravity`. clackatoo installs Google's official runtime for the Agent Client Protocol (ACP), from a pinned release checked against its SHA-256, for x86_64 or ARM64 Linux. It needs no Node.js. Allow about 1.1 GB of disk for it, and another 1 GB for the scratch files it makes as it runs.
 
-Sign in from a terminal on the machine that hosts the chat:
+To sign in, run this in a terminal on the chat's machine:
 
 ```sh
 clackatoo agent login antigravity
 ```
 
-Open the Google link it prints. On the same machine, the browser returns to the runtime and sign-in completes. From a laptop connected through federation, run the command in a terminal belonging to the desktop workspace. Open the link on your laptop; if the browser ends at an unreachable `127.0.0.1` page, copy the complete URL from its address bar, paste it into that terminal and press Enter. Input is hidden. Ctrl+C, Ctrl+D, or `cancel` followed by Enter cancels sign-in, and it gives up by itself after 10 minutes. Only one sign-in runs at a time: a second says another is already running. The return URL is accepted only for that login and only once; it never goes into chat history.
+It prints a Google link to open. On the same machine, the browser hands back to the runtime once you've signed in, and that's all. From a laptop showing the desktop's workspaces (see [Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)), run the command in a terminal in one of the desktop's workspaces, and open the link on the laptop. If the browser ends on a `127.0.0.1` page it can't reach, copy the whole address from its address bar, paste it into that terminal, and press Enter. What you paste isn't shown. Ctrl+C, Ctrl+D, or `cancel` and Enter stops signing in, and it gives up by itself after 10 minutes. One sign-in runs at a time: a second says another is running. The address the browser ends on is taken once, and only for that sign-in, and it never goes into a chat's history.
 
-This login is separate from the Antigravity IDE. Its credentials stay on the hosting machine, in the private `antigravity-profile` directory beside the installed agents. Runtime scratch lives there too, rather than in `/tmp`. Clackatoo does not import an IDE login or silently use an API key from the environment.
+This sign-in is apart from the Antigravity IDE's. Its credentials stay on the chat's machine, in the private `antigravity-profile` directory beside the installed agents, and the runtime's scratch files go there too, not in `/tmp`. clackatoo doesn't take a sign-in from the IDE, nor silently use an API key from the environment.
 
-After signing in, send a message or reopen the model picker. Models and settings come from your Google account, rather than a fixed list. Images, queued messages, provider handoffs and session restoration use the same paths as other ACP providers. Antigravity's approval modes are Default, Auto edit and YOLO; the mode names offered by the runtime appear in the permissions menu. Its running turns use Stop & continue for steering.
+Once you've signed in, send a message or open the model menu again: its models and settings are the ones your Google account has, not a fixed list. Images, the queue, [moving a chat to another agent](#moving-a-chat-to-another-agent), and reopening a session work as they do with other agents. The permissions menu lists Antigravity's approval modes by the names its runtime gives them, and a new chat starts in its default mode. A turn under way is steered with **Stop & continue** (see [Queuing and steering](#queuing-and-steering)).
 
-Click the context gauge to see Antigravity's subscription allowances alongside your other providers: Gemini, Gemini 4 Argon and shared Claude/GPT windows, when Google reports them. These use the same cached background refreshes and reset countdowns. Quota checks do not send model prompts. An untouched allowance has no countdown until Google reports a measured reset.
+Select the context gauge, and **Usage & limits** shows Antigravity's allowances beside your other agents': Gemini, Gemini 4 Argon, and `Claude & GPT (shared)`, one allowance that Claude and GPT models both count against, when Google reports them. They're kept and refreshed in the background as the others are, with the same countdowns to reset, and reading them sends the model no prompt. An allowance you haven't used has no countdown until Google reports when it resets.
 
-Antigravity uses its native file tools, including image viewing. Save editor changes before asking it to read them. File diffs, tool approvals, command output and image previews appear in the same chat history as other providers. Images open in the shared full-size viewer.
+Antigravity uses its own file tools, the one that views images included, so save what you've changed in an editor before asking it to read the file. Its changes to files, the questions it asks before using a tool, what its commands print, and its images show in the chat as other agents' do, and an image opens in the same [viewer](#viewing-images).
 
-The separate **Gemini CLI** provider remains available for existing API-key setups.
+The separate **Gemini CLI** agent is for setups that already use an API key.
 
 ## Queuing and steering
 
-While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact panel above the composer, headed Queued, or Queue paused when delivery is paused, with the count. They run in order after a successful turn. Each row has a pencil to [take it back into the box](#messages-sent-and-drafts) to edit (but one with images, or one that moves the chat to another agent), an ↑ control to send it now, and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
+While an agent works, Enter queues what you've typed, and Shift+Enter starts a new line as usual. Messages waiting to go share a small panel above the box, headed `Queued`, or `Queue paused` while they're held, with how many there are. They go in order, each after a turn that ends well. Each has a pencil to [take it back into the box](#messages-sent-and-drafts) and edit it (but not one with images, or one that moves the chat to another agent), ↑ to send it now, and × to remove it. Sending one now while a turn is under way steers that turn; with nothing under way, it sends the queue on again. Ctrl+Enter steers with what's in the box. While you type during a turn, the box shows a small **Steer** or **Stop & continue** button and a square Stop button.
 
-For text sent to the installed Claude or Codex adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used; a message that seems to mention a file says **Stop & send**, as it can only go whole (see [Mentioning files](#mentioning-files)). If the turn finishes while guidance is being delivered, that message runs once as the next turn instead. Codex uses the installed adapter with Clackatoo's steering backport; unpatched custom or PATH adapters retain Stop & continue. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
+With the Claude Code or Codex adapter clackatoo installs, **Steer** adds a message of words to the turn under way without stopping it. Codex's has clackatoo's steering backported to it; a custom adapter, or one found on `PATH`, without that patch stops and continues instead. So does a message with images, and one that moves the chat to another agent. **Stop & continue** stops the turn, waits for it to end, then sends the message. The button says which it will do. A message that seems to mention a file says **Stop & send**, as it can only go whole (see [Mentioning files](#mentioning-files)). If the turn ends while a steer is on its way, the message goes once, as the next turn. If it's unclear whether the agent took a steer, the message waits, paused, so you can check the conversation before sending it again.
 
-Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it: messages follow automatically continued work, while already paused queues and unconfirmed steering stay paused. A full daemon restart does not preserve it. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
-
+Stop, or a turn that fails, pauses the queue: ↑ sends it on again, and × throws a message away. The daemon keeps the queue, with its text, images, and agents to move to, so every window, here or on another machine, sees the same one. It lasts through an upgrade: messages go after the work the upgrade [carries on](#what-lasts), and a queue that was paused, or a steer not yet confirmed, stays paused. A full daemon restart doesn't keep it. A queue holds up to 8 messages or 32 MiB, each message's text up to 64 KiB, and its images within the [usual limits](#pasting-images).
 
 ## Viewing images
 
-Click an image in the message box, a sent message, or a tool result to open the same image viewer over the chat. Escape, Ctrl+; (the normal-mode shortcut), or the × closes it and returns you to your draft and previous mode. While it is open, typing, pasting, scrolling and clicks on the chat behind it do nothing. The × on a draft thumbnail still removes that attachment.
+Select an image in the box, in a message sent, or in a tool's result, and it opens in a viewer over the chat. <kbd>Esc</kbd>, a key that goes to normal mode from anywhere (<kbd>Ctrl</kbd>+<kbd>;</kbd>, <kbd>Shift</kbd>+<kbd>Esc</kbd>, or <kbd>Ctrl</kbd>+<kbd>&#92;</kbd>), or its × closes it, in either mode, back to your draft in the mode you were in. Selecting elsewhere doesn't close it. While it's open, typing, pasting, scrolling, and the mouse's buttons on the chat behind it do nothing. The × on a thumbnail in the box still removes that image.
 
-The viewer loads the original image when opened and shows its pixel dimensions when ready. Drafts use the local attachment; sent messages and image tools fetch the original through the daemon connection, including remote and federated chats. Chat updates still carry only small thumbnails. Each chat retains up to 32 MiB / 128 recent encoded originals across window reconnects and daemon upgrades. Older images whose original was never retained or has expired explicitly show “Original unavailable · thumbnail only”. Originals are not saved across a full daemon restart. Decoding runs in the background, with a 16-million-pixel and 8,192-pixel-per-side limit.
+The viewer fetches the original image as it opens, and says its size in pixels once it has it. An image in the box is the window's own; one in a message or a tool's result comes from the daemon, for a chat on another machine too. What the chat sends the window as it changes still carries only small thumbnails. Each chat keeps the originals of its newest images, up to 128 of them and 32 MiB encoded, through reconnects and upgrades. An older image whose original was never kept, or has been let go, says `Original unavailable · thumbnail only`. A full daemon restart keeps no originals. Images are decoded in the background, at most 16 million pixels, and 8192 on a side.
 
 ## Images returned by tools
 
@@ -873,90 +872,26 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 
 ## Native window access
 
-Native access starts **Off**. Focus the chat in the window you want to share,
-then run `:agentaccess inspect` for screenshots and visible controls, or
-`:agentaccess control` to also allow clicks, text and keys throughout that
-window. This is broad access to what the window can display and operate.
-While a chat holds access, a teal badge at the right of the top bar says
-which chat and how much, as `Agent Control · chat 3`. It's drawn by clackatoo
-itself, where no program can draw, so a program's title can't pass for it; the
-window's own title says nothing of the grant. Click the badge to go to the
-chat, and its gold `×` to revoke the access, or use `:agentaccess off` from
-any pane. Closing the window or the chat, disconnecting or upgrading also clears it.
-**Control lets the agent act as you.** It can edit and save any file the
-window can, its config included: your shell's startup files, Claude Code's or
-Codex's settings and hooks, `agents.toml`, `init.lua`. What those run later
-runs as you, unasked. Grant it only to an agent you'd let use your keyboard,
-and revoke it when it's done. `:agentaccess control` says so as it asks.
+You can let an agent see the window its chat is in, and work it as you do. Native access is **Off** until you grant it. Focus the chat in the window you want to share, then type `:agentaccess inspect` to let the agent take screenshots and see the window's controls, or `:agentaccess control` to let it also use the mouse, type, and press keys anywhere in that window. That's a lot to let it do: it sees all the window can show, and can do all the window can.
 
-The window has speed bumps on top, not a boundary. While automation's input is
-handled, it refuses what only you may do: answering a question or a form;
-changing any chat's settings, agent or provider, or forking one; granting window
-access or using its badge; typing into a terminal; starting a terminal with a command, a
-background command or a chat; sending, drafting, stopping, undoing or rewinding
-in another chat; keeping, rejecting or commenting on agents' changes in a
-review, or sending its comments; posting on a board; closing panes, tabs,
-workspaces, terminals or background tabs; pairing or revoking devices,
-unlocking pairing, `:keep`, [trusting a folder](~clackatoo/reference/editor#trusted-folders), connecting to or forgetting other machines,
-forwarding ports, installing, upgrading, `:update` and `:reload`. While a chat
-has Control, what the config's Lua does runs no commands, makes or closes no
-panes and connects to nothing: what it does by itself, and for your keys too.
-So `:reload`, run by you while a chat has Control, doesn't run the config's
-startup splits or commands either; reload again once it's revoked. Keys automation
-left to go on later, as the rest of a macro waiting for the daemon to answer,
-are dropped as each input ends. `:set` changes only this window, as ever, so
-Control can change the window's options. None of this is an operating-system
-sandbox, and an agent that runs commands without asking can reach the daemon
-itself, outside the window.
+While a chat holds access, a teal badge at the right of the top bar says which chat and how much, as `Agent Control · chat 3`. clackatoo draws it where no program can draw, so a program's title can't pass for it; the window's own title says nothing of the grant. Select the badge to go to the chat, and its gold `×` to end the access, or type `:agentaccess off` in any pane. Closing the window or the chat, disconnecting, or an upgrade ends it too.
 
-Only one chat can control a window, and one window can be granted to a chat.
-Federated mirrored chats cannot receive a grant; open a window directly on the
-remote daemon with `--remote` instead. The browser app cannot grant native access.
-Each input consumes an observed screenshot revision; changed targets or human
-input require another screenshot. These tools do not change desktop focus.
-The tools are `native_snapshot`, and with Control, `native_click`,
-`native_type` and `native_key`; a chat whose limits are read-only or no
-commands, or whose mode is Plan or Read-only, gets Inspect's alone.
+**Control lets the agent act as you.** It can edit and save any file the window can, its config included: your shell's startup files, Claude Code's or Codex's settings and hooks, `agents.toml`, and `init.lua`. What those run later runs as you, unasked. Grant it only to an agent you'd let use your keyboard, and end it when the agent is done. `:agentaccess control` says so as it asks.
+
+The window has speed bumps on top, not a boundary. While it handles the agent's input, it refuses what only you can do: answering a question or a form; changing any chat's settings, agent, or provider, or forking one; granting window access or using its badge; typing into a terminal; starting a terminal with a command, a background command, or a chat; sending, drafting, stopping, undoing, or rewinding in another chat; keeping, rejecting, or commenting on agents' changes in a review, or sending its comments; posting on a board; closing panes, tabs, workspaces, terminals, or background tabs; pairing or revoking devices, unlocking pairing, `:keep`, [trusting a folder](~clackatoo/reference/editor#trusted-folders), connecting to or forgetting other machines, forwarding ports, installing, upgrading, `:update`, and `:reload`. While a chat has control, the config's Lua runs no commands, makes or closes no panes, and connects to nothing, whether it acts by itself or for your keys. So `:reload`, run by you while a chat has control, doesn't run the config's startup splits or commands either; reload again once the access has ended. Keys the agent's input left to go on later, as the rest of a macro waiting for the daemon to answer, are dropped as each input ends. `:set` changes only this window, as it always does, so control can change the window's options. None of this is an operating-system sandbox, and an agent that runs commands without asking can reach the daemon itself, outside the window.
+
+A window is granted to one chat at a time, for inspect and control alike, and a chat holds a grant on one window: granting it another moves the grant, and the old window says so. A chat mirrored from another machine (see [Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)) can't be granted one: open a window on that machine's daemon with `--remote` instead. The web app can't grant native access. The agent's tools are `native_snapshot`, and with control, `native_click`, `native_type`, and `native_key`; a chat whose limits are read-only or no commands, or whose mode is Plan or Read-only, gets `native_snapshot` alone. Each input uses up the screenshot it was aimed by, so the agent takes a new `native_snapshot` before every input. An input is refused too if, since the screenshot, you used the window, it was resized or focus moved, something else in it changed, or the control under a click moved. The tools never move the desktop's focus.
 
 ## Managed activities and recovery
 
-Ask the agent to use a managed activity for a long build, test run, deployment
-or bounded watcher. Its persistent card shows Starting, Running, Stopping and
-the observed result in native and web chat history. Expand the card for its
-command and bounded final output. Stop requests Ctrl+C; it does not claim the
-process has exited until shell integration reports it. The background pane is
-also available through `:Background`.
+For a long build, a test run, or a deploy, a job that ends by itself (not a short command, nor a service that restarts itself), ask the agent to run it as a managed activity. It gets a card in the chat, in the window and the web app alike, that stays: `Starting`, `Running`, `Stopping`, and then how it ended, as clackatoo saw it. Open the card for its command and the end of its output. Stop sends it <kbd>Ctrl</kbd>+<kbd>C</kbd>, and the card says it's ended only once the shell's integration says so. Its terminal is a [background tab](~clackatoo/reference/window#background-tabs), so `:Background` lists it too.
 
-The harness tells agents when to use `start_activity`, `read_activities` and
-`cancel_activity`. Existing command approvals apply. A stable operation ID is
-saved before execution; asking to start the same ID, command and folder returns
-the existing record. Reusing it for a different command or folder is refused. Completion
-notifies the owning chat; a chat you stopped holds the notice until you write
-there, then hears it after your message.
+clackatoo tells agents when to use its tools `start_activity`, `read_activities`, and `cancel_activity`. Starting one asks leave as `run_in_background` does, unless the chat's Tools setting is Allow, and is refused when Tools is Off or the chat's limits are read-only. Each activity has an ID that doesn't change, kept before its command runs: asked to start the same ID, command, and folder again, the daemon answers with the one it has, and the same ID with another command or folder is refused. When an activity ends, its chat is told; a chat you stopped holds the notice until you write there, then hears it after your message.
 
-Jobs and their records survive a planned daemon upgrade. After a full restart,
-unfinished operations say **Outcome unknown** and never restart automatically.
-A command whose startup was interrupted is also marked unknown. Agents must
-inspect the record and current state before deciding what to do. This recovery
-covers managed activities, not every provider or external tool call.
+Activities, and what's kept of them, last through an upgrade. After a full restart, one that hadn't ended says `Outcome unknown`, and never runs again by itself; so does one cut off as it started. An agent must look at what's kept of it, and at how things are now, before deciding what to do. This covers managed activities only, not every agent's or other tool's calls.
 
-Activities require workspace storage and shell integration. A chat may have 8
-jobs active at once, and the daemon 64; past those, starting another is
-refused. Finished jobs are kept only as the newest 16 of each chat and 64 in
-all: an older one is let go as a new one starts, oldest first, but never before
-its agent has been told how it ended. Its ID is remembered, the last 1024 of
-each chat, so a job is never started twice: starting it again is refused, and
-the agent is told to use a new ID. Those IDs aren't kept through an upgrade or
-a restart, though the newest jobs are. A chat's jobs, and the IDs, go when the
-chat closes; what they ran goes on in its background
-tab. Results retain the end of the terminal's last 50 lines, up to 4 KiB, with
-how the command ended; the terminal keeps its own scrollback.
+Activities need the daemon to save its workspaces, and the shell's integration. A chat can have 8 running at once, and the daemon 64; past those, starting another is refused. Of those that ended, each chat keeps its newest 16, and the daemon 64 in all: an older one is let go as a new one starts, oldest first, but never before its agent has been told how it ended. Its ID is remembered, the last 1024 of each chat, so a job never starts twice: starting it again is refused, and the agent is told to use a new ID. Those IDs aren't kept through an upgrade or a restart, though the newest jobs are. A chat's activities, and their IDs, go when the chat closes; what they ran goes on in its background tab. What's kept of the result is the end of the terminal's last 50 lines, up to 4 KiB, with how the command ended; the terminal keeps its scrollback as any does.
 
 ## Inspecting capabilities
 
-`:Capabilities` shows the focused chat's tools policy, command restrictions,
-browser configuration and permission, native grant, managed activities, tool
-connection, and catalogue discovery.
-On the web, open the model selector and choose its **Tools** tab for the same report. Agents can call
-`harness_capabilities` themselves. A requested tool catalogue is reported
-separately from model acknowledgment: the harness cannot prove a model saw it.
+`:Capabilities` shows what the focused chat can use: its Tools setting, the limits on its commands, whether the browser is set up and the chat can use it, the window it's granted, its managed activities, its connection to clackatoo's tools, and whether that connection asked for the list of them. In the web app, the model menu's **Tools** tab shows the same. An agent can ask for it too, with `harness_capabilities`. That the connection asked for the list of tools says nothing of whether the model saw it, which clackatoo can't tell, so the two are shown apart.
