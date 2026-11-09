@@ -281,6 +281,9 @@ pub struct GridState {
     /// [`Block`]: clackatoo_term::Block
     pub block: Option<u32>,
     /// The agent that created this terminal and its live wait state.
+    /// Relays find its parent by counting back from the state's end
+    /// (`frame::view_agent_parent`), so a field added after it must be
+    /// counted there too.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::AGENT_TERMINALS }, _>",
         deserialize_with = "wire::since::<{ wire::AGENT_TERMINALS }, _, _>"

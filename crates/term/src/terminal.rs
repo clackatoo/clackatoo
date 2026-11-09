@@ -480,7 +480,8 @@ impl Terminal {
 
     /// What the program asked of the terminal that a
     /// [`snapshot`](Self::snapshot) doesn't keep, to carry into another
-    /// process with it: the keyboard's flags and the titles it pushed.
+    /// process with it: the keyboard's flags, the titles it pushed and
+    /// its progress.
     #[must_use]
     pub fn asked_snapshot(&self) -> AskedSnapshot {
         let emulator = &self.emulator;
