@@ -1,6 +1,7 @@
 //! Pasting the clipboard's image with Ctrl+Shift+Alt+V: into a terminal,
-//! asked of the daemon as `pasteimage` says, in any mode; never taken for
-//! Ctrl+Shift+V's text; and the bar's hint names the keys as bound.
+//! asked of the daemon as `pasteimage` says, in normal and insert mode;
+//! taken for a paste of text only while nothing binds it; and the bar's
+//! hint names the keys as bound.
 
 use clackatoo_protocol::{ChatImage, ImagePaste};
 
@@ -48,10 +49,23 @@ fn ctrl_shift_alt_v_pastes_the_clipboards_image_into_a_terminal() {
             Some(PasteTo::Terminal(TerminalId(1)))
         );
     }
-    assert!(!crate::app::is_paste(
-        &Key::Character("V".into()),
-        CTRL_SHIFT_ALT
-    ));
+    // The binding's, not a paste of text; and text again once unbound.
+    let key = Key::Character("V".into());
+    let pressed = KeyPress {
+        key: &key,
+        text: None,
+        location: KeyLocation::Standard,
+        code: None,
+        modifiers: CTRL_SHIFT_ALT,
+    };
+    assert!(crate::app::is_paste(&key, CTRL_SHIFT_ALT));
+    assert!(desk.binds(&pressed));
+    let modes = crate::keymap::parse_modes("niv").unwrap();
+    let keys = crate::keymap::parse_keys("<C-A-V>").unwrap();
+    let mut unbound = super::desk(one_tab(pane(1)));
+    snapshot(&mut unbound, 1);
+    unbound.keymap.unbind(&modes, &keys);
+    assert!(!unbound.binds(&pressed));
     desk.finish_terminal_image(TerminalId(1), Ok(Pasted::Image(image())));
     assert_eq!(pastes(&mut desk), [(TerminalId(1), ImagePaste::Path)]);
     desk.run_set("pasteimage=clipboard");
@@ -91,4 +105,36 @@ fn the_hint_names_the_keys_that_paste_an_image_as_bound() {
         desk.message.as_deref(),
         Some("the clipboard holds an image: F9 pastes it")
     );
+}
+
+#[test]
+fn keys_typed_while_the_image_is_read_go_after_it() {
+    let mut desk = desk(one_tab(pane(1)));
+    snapshot(&mut desk, 1);
+    desk.take_outbox();
+    press(&mut desk, Key::Character("V".into()), None, CTRL_SHIFT_ALT);
+    assert_eq!(
+        desk.take_image_paste(),
+        Some(PasteTo::Terminal(TerminalId(1)))
+    );
+    type_keys(&mut desk, "x");
+    let typed = |message: &ClientMessage| matches!(message, ClientMessage::Request(Request::SendInput { bytes, .. }) if bytes == b"x");
+    assert!(
+        !desk.take_outbox().iter().any(typed),
+        "held while it's read"
+    );
+    desk.finish_terminal_image(TerminalId(1), Ok(Pasted::Image(image())));
+    let sent: Vec<&str> = (desk.take_outbox().iter())
+        .filter_map(|message| match message {
+            ClientMessage::Request(Request::PasteImage { .. }) => Some("image"),
+            message if typed(message) => Some("x"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, ["image", "x"]);
+    // With no image, they go anyway.
+    press(&mut desk, Key::Character("V".into()), None, CTRL_SHIFT_ALT);
+    type_keys(&mut desk, "x");
+    desk.finish_terminal_image(TerminalId(1), Ok(Pasted::Text("words".into())));
+    assert!(desk.take_outbox().iter().any(typed));
 }

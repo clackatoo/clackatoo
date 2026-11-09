@@ -3379,12 +3379,9 @@ impl Daemon {
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
-            Request::SendInput { terminal, bytes } => {
-                self.retain_agent_terminal(terminal);
-                self.note_typed(terminal);
-                self.send_input(token, terminal, &bytes)
-                    .map(|()| Response::Done)
-            }
+            Request::SendInput { terminal, bytes } => self
+                .typed_by(token, terminal, &bytes)
+                .map(|()| Response::Done),
             Request::Capture { terminal } => self
                 .terminals
                 .get(&terminal)
@@ -3815,6 +3812,15 @@ impl Daemon {
         }
         self.forget_clipboard_asks(token, Some(id));
         self.forget_fits(token, Some(id));
+    }
+
+    /// Types `bytes` into terminal `id` for the client at `token`, as it
+    /// asked: as it typed them, or an image's path it pasted (see
+    /// [`pastes`]). An agent's terminal typed into is kept.
+    fn typed_by(&mut self, token: Token, id: TerminalId, bytes: &[u8]) -> Result<(), Error> {
+        self.retain_agent_terminal(id);
+        self.note_typed(id);
+        self.send_input(token, id, bytes)
     }
 
     /// Writes `bytes` to terminal `id`, as typed by the client at `token`.

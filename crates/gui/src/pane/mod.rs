@@ -91,6 +91,10 @@ struct Overlay {
     row: Row,
 }
 
+/// The most bytes typed that are held behind an image being read (see
+/// [`Pane::hold_input`]): past it, they're sent.
+const MOST_HELD_INPUT: usize = 64 * 1024;
+
 /// A terminal shown in the window.
 ///
 /// The pane does no I/O: messages for the daemon wait in its outbox, which
@@ -151,6 +155,9 @@ pub(crate) struct Pane {
     failed: bool,
     /// Text copied, and where the window is to put it.
     yanked: Option<Yanked>,
+    /// What's typed while the clipboard's image is read for the program,
+    /// held to go after it (see [`Pane::hold_input`]).
+    held_input: Option<Vec<u8>>,
     /// Text selected with the mouse.
     mouse_selection: Option<mouse::MouseSelection>,
     /// Text just copied to the clipboard.
@@ -204,6 +211,7 @@ impl Pane {
             status: None,
             failed: false,
             yanked: None,
+            held_input: None,
             mouse_selection: None,
             flash: None,
             keys: vim::Keys::default(),
@@ -637,8 +645,26 @@ impl Pane {
         redraw || forgot_selection
     }
 
+    /// Holds what's typed from now on, while the clipboard's image is
+    /// read, until it's pasted or isn't: so a key typed after the paste,
+    /// as Enter, never reaches the program before the image's path.
+    pub(crate) fn hold_input(&mut self) {
+        self.held_input.get_or_insert_with(Vec::new);
+    }
+
+    /// Sends what was typed while the clipboard's image was read, as the
+    /// image wasn't pasted.
+    pub(crate) fn release_input(&mut self) {
+        if let Some(held) = self.held_input.take()
+            && !held.is_empty()
+        {
+            self.send_input(held);
+        }
+    }
+
     /// Asks the daemon whose terminal this is to paste `image` into the
     /// program, as `how` says: its path, or by its clipboard and Ctrl+V.
+    /// What was typed since it was asked for goes after it.
     pub(crate) fn paste_image(
         &mut self,
         image: clackatoo_protocol::ChatImage,
@@ -654,6 +680,7 @@ impl Pane {
             Pending::Image,
         );
         self.scroll = 0;
+        self.release_input();
     }
 
     /// Sends pasted text, marked as a paste if the program asked for that.
@@ -1116,6 +1143,14 @@ impl Pane {
     /// their echo if that can be guessed. Returns whether the guesses drawn
     /// changed.
     fn send_typed(&mut self, bytes: Vec<u8>, input: predict::Input) -> bool {
+        // Behind an image being read, unless that's taking an age.
+        if let Some(held) = &mut self.held_input {
+            if held.len() + bytes.len() <= MOST_HELD_INPUT {
+                held.extend_from_slice(&bytes);
+                return false;
+            }
+            self.release_input();
+        }
         let number = self
             .predictor
             .sent(input, self.screen.as_ref(), Instant::now());

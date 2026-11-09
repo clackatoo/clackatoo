@@ -25396,6 +25396,44 @@ fn a_pasted_image_is_kept_and_its_path_typed() {
     assert_eq!(pasted_images(&pastes).len(), 1);
 }
 
+/// What a client types into the terminal just after pasting an image
+/// there, as Enter, is typed after the image's path, and answered in its
+/// turn.
+#[test]
+fn keys_typed_after_a_pasted_image_go_after_its_path() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.pastes = Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes")));
+    });
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    let (mut sender, mut receiver) = daemon.client().split().unwrap();
+    let (_, image) = pasted_png(2, 2);
+    let how = clackatoo_protocol::ImagePaste::Path;
+    let paste = Request::PasteImage {
+        terminal,
+        image,
+        how,
+    };
+    sender.send(&ClientMessage::Request(paste)).unwrap();
+    let keys = Request::SendInput {
+        terminal,
+        bytes: b"!".to_vec(),
+    };
+    sender.send(&ClientMessage::Request(keys)).unwrap();
+    let mut answers = Vec::new();
+    while answers.len() < 2 {
+        if let ServerMessage::Response(response) = receiver.receive().unwrap() {
+            answers.push(response);
+        }
+    }
+    assert_eq!(answers, [Response::Text(String::new()), Response::Done]);
+    let kept = pasted_images(&daemon.dir.path().join("pastes"));
+    let path = format!("{}!", kept[0].to_str().unwrap());
+    wait_for_screen(&mut client, terminal, |text| {
+        text.replace('\n', "").contains(&path)
+    });
+}
+
 /// At a shell's prompt, the path is quoted for it, with a space after, as
 /// a file dropped on it is.
 #[test]

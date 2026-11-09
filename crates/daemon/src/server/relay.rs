@@ -867,7 +867,13 @@ impl Daemon {
             }
             Request::SendInput { terminal, bytes } => {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
-                    return Routed::Here(Request::SendInput { terminal, bytes });
+                    // Behind an image this client is pasting there, it
+                    // waits for it; a relaying daemon's keys, too, which
+                    // reach the daemon there behind its paste.
+                    return match self.hold_behind_paste(token, terminal, bytes) {
+                        Ok(()) => Routed::Waiting,
+                        Err(bytes) => Routed::Here(Request::SendInput { terminal, bytes }),
+                    };
                 };
                 Routed::Answered(self.relay_keys(token, at, terminal, remote, bytes))
             }

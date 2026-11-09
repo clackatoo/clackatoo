@@ -20,7 +20,8 @@
 //! | `b` `l` | Lists the background tabs, as `:Background` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
 //!
-//! Ctrl+Shift+Alt+V, in any mode, pastes the clipboard's image into the
+//! Ctrl+Shift+Alt+V, in normal, insert or visual mode, pastes the
+//! clipboard's image into the
 //! focused terminal or chat (see [`super::pasting`]).
 //!
 //! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar

@@ -15,7 +15,12 @@
 //! one paste at a time, so the loop never waits for it. The client is
 //! answered in its turn among its answers, once that's done and what's to
 //! be typed is typed ([`Daemon::take_pastes`]); a paste the thread hasn't
-//! finished within [`PATIENCE`] is answered with an error, and typed never.
+//! finished within [`PATIENCE`] is answered with an error, and typed never,
+//! and the thread skips it if it hasn't begun it. What the client types
+//! into the terminal meanwhile, as Enter, is held, and typed after the
+//! paste, or once it's given up on, so it never goes before it
+//! ([`Daemon::hold_behind_paste`]). A path with a control character in it,
+//! as a line break in the folder's name, is never typed.
 //!
 //! # The folder
 //!
@@ -25,7 +30,14 @@
 //! Each file is made new there, never through a link, for the user alone
 //! (0600), named for when it was pasted, as `20261108-224501-1.png`. At
 //! each paste, files of such names older than [`KEPT_FOR`] are deleted,
-//! and the oldest past [`MOST_KEPT`] bytes; nothing else there is touched.
+//! and the oldest past [`MOST_KEPT`] bytes, however many files there are;
+//! nothing else there is touched.
+//!
+//! # The clipboard
+//!
+//! `wl-copy` or `xclip` runs with the daemon's own environment, but for
+//! the display's variables, which are the desktop's it follows: never a
+//! terminal's or an agent's.
 //!
 //! # Web devices
 //!
@@ -42,6 +54,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -62,20 +75,23 @@ pub(crate) const KEPT_FOR: Duration = Duration::from_hours(72);
 /// oldest go first.
 pub(crate) const MOST_KEPT: u64 = 256 * 1024 * 1024;
 
-/// The most files looked at in the folder at a paste: one with more is
-/// pruned a part at a time.
-const MOST_LOOKED: usize = 4096;
-
-/// The most pastes under way at once: more are refused.
+/// The most pastes under way at once, waiting for the thread or being
+/// done by it: more are refused.
 const MOST_UNDER_WAY: usize = 4;
+
+/// The most bytes a client types into a terminal while an image it pasted
+/// there is under way that are held for after it: more are refused, as a
+/// terminal's backlog is.
+const MOST_HELD: usize = 1024 * 1024;
 
 /// How long a paste may take, from when it's asked, before its client is
 /// told it failed.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
 
 /// How long `wl-copy` or `xclip` has to take the image: each goes on in
-/// the background once it has it.
-const CLIPBOARD_WAIT: Duration = Duration::from_secs(3);
+/// the background once it has it. Under the 3 s a relaying daemon waits
+/// for keys to be answered, which wait behind the paste.
+const CLIPBOARD_WAIT: Duration = Duration::from_secs(2);
 
 /// Ctrl+V, as a terminal sends it.
 const CTRL_V: u8 = 0x16;
@@ -89,6 +105,9 @@ pub(super) struct Pastes {
     done: Arc<Mutex<Vec<Finished>>>,
     /// Those under way, by number.
     under_way: HashMap<u64, Pasting>,
+    /// How many the thread has been given and hasn't finished, those given
+    /// up on included.
+    queued: Arc<AtomicUsize>,
     next: u64,
 }
 
@@ -104,11 +123,19 @@ struct Pasting {
     terminal: TerminalId,
     /// When it's given up on.
     due: Instant,
+    /// Set once it's given up on, for the thread to skip it.
+    given_up: Arc<AtomicBool>,
+    /// What the client typed into the terminal since, each with its
+    /// answer's place, to type after it.
+    after: Vec<(u64, Vec<u8>)>,
 }
 
 /// What the thread is asked to do.
 struct Job {
     number: u64,
+    /// Set once it's given up on: it's skipped, or not put on the
+    /// clipboard.
+    given_up: Arc<AtomicBool>,
     image: ChatImage,
     how: ImagePaste,
     config: PasteConfig,
@@ -162,7 +189,8 @@ impl Daemon {
             ));
         }
         self.refuse_phones_clipboard(token, how)?;
-        if self.pastes.under_way.len() >= MOST_UNDER_WAY {
+        let queued = self.pastes.queued.load(Ordering::Relaxed);
+        if queued.max(self.pastes.under_way.len()) >= MOST_UNDER_WAY {
             return Err(Error::Other(
                 "images are being pasted already: try again in a moment".into(),
             ));
@@ -180,8 +208,10 @@ impl Daemon {
         };
         let number = self.pastes.next;
         self.pastes.next += 1;
+        let given_up = Arc::new(AtomicBool::new(false));
         let job = Job {
             number,
+            given_up: Arc::clone(&given_up),
             image,
             how,
             config,
@@ -199,9 +229,67 @@ impl Daemon {
                 ticket,
                 terminal,
                 due: Instant::now() + PATIENCE,
+                given_up,
+                after: Vec::new(),
             },
         );
         Ok(())
+    }
+
+    /// Holds `bytes`, which the client at `token` typed into `terminal`
+    /// while an image it pasted there is under way, to type once that's
+    /// typed or given up on, answering in its turn: so nothing typed after
+    /// the paste, as Enter, goes before its path. Hands them back if
+    /// there's no such paste.
+    pub(super) fn hold_behind_paste(
+        &mut self,
+        token: Token,
+        terminal: TerminalId,
+        bytes: Vec<u8>,
+    ) -> Result<(), Vec<u8>> {
+        // The last, which those before it are typed before.
+        let pasting = (self.pastes.under_way.iter())
+            .filter(|(_, pasting)| pasting.token == token && pasting.terminal == terminal)
+            .map(|(&number, _)| number)
+            .max();
+        let Some(number) = pasting else {
+            return Err(bytes);
+        };
+        // Its client has gone, if there's no place for its answer.
+        let Some(ticket) = self.take_place(token) else {
+            return Ok(());
+        };
+        let Some(pasting) = self.pastes.under_way.get_mut(&number) else {
+            return Ok(());
+        };
+        let held: usize = (pasting.after.iter()).map(|(_, bytes)| bytes.len()).sum();
+        if held + bytes.len() > MOST_HELD {
+            let full = Response::Error(Error::InputBacklogFull(terminal));
+            self.hand_answer_with(token, ticket, full);
+        } else {
+            pasting.after.push((ticket, bytes));
+        }
+        Ok(())
+    }
+
+    /// Types what was held behind `pasting`, now it's typed or given up
+    /// on, answering each in its turn.
+    fn type_held(&mut self, pasting: Pasting) {
+        let Pasting {
+            token,
+            terminal,
+            after,
+            ..
+        } = pasting;
+        for (ticket, bytes) in after {
+            let answer = if self.may_see_terminal(token, terminal) {
+                self.typed_by(token, terminal, &bytes)
+                    .map_or_else(Response::Error, |()| Response::Done)
+            } else {
+                Response::Error(Error::NoSuchTerminal(terminal))
+            };
+            self.hand_answer_with(token, ticket, answer);
+        }
     }
 
     /// Refuses a phone's paste onto the clipboard, here or through this
@@ -238,6 +326,7 @@ impl Daemon {
                 Err(why) => Response::Error(Error::Other(why)),
             };
             self.hand_answer_with(pasting.token, pasting.ticket, answer);
+            self.type_held(pasting);
         }
     }
 
@@ -260,6 +349,14 @@ impl Daemon {
             let Some(path) = done.path.to_str() else {
                 return Response::Error(Error::Other("the image's path isn't text".into()));
             };
+            // A line break would run what's before it, unquoted.
+            if path.chars().any(char::is_control) {
+                return Response::Error(Error::Other(
+                    "the folder images are kept in has a control character in its path, \
+                     so the image's path isn't typed"
+                        .into(),
+                ));
+            }
             // Quoted for a shell at its prompt, with a space after, as a
             // file dropped on it is; as it is for anything else.
             let shell = slot.terminal.shell_at_prompt();
@@ -271,7 +368,7 @@ impl Daemon {
             let modes = (slot.terminal.grid()).map(clackatoo_term::Terminal::input_modes);
             clackatoo_term::paste(&text, modes.unwrap_or_default())
         };
-        match self.send_input(token, terminal, &bytes) {
+        match self.typed_by(token, terminal, &bytes) {
             Ok(()) => Response::Text(done.said),
             Err(err) => Response::Error(err),
         }
@@ -310,8 +407,10 @@ impl Daemon {
                     "pasting an image into terminal {} took too long",
                     pasting.terminal
                 );
+                pasting.given_up.store(true, Ordering::Relaxed);
                 let why = Error::Other("pasting the image took too long".into());
                 self.hand_answer_with(pasting.token, pasting.ticket, Response::Error(why));
+                self.type_held(pasting);
             }
         }
     }
@@ -323,14 +422,21 @@ impl Pastes {
         if self.jobs.is_none() {
             let (jobs, queue) = mpsc::channel::<Job>();
             let done = Arc::clone(&self.done);
+            let queued = Arc::clone(&self.queued);
             let waker = Arc::clone(waker);
             std::thread::Builder::new()
                 .name("pastes".into())
                 .spawn(move || {
                     for job in queue {
                         let number = job.number;
-                        let result = std::panic::catch_unwind(|| paste(&job))
-                            .unwrap_or_else(|_| Err("pasting the image failed".into()));
+                        // Given up on while it waited: nothing's kept.
+                        let result = if job.given_up.load(Ordering::Relaxed) {
+                            Err("pasting the image took too long".into())
+                        } else {
+                            std::panic::catch_unwind(|| paste(&job))
+                                .unwrap_or_else(|_| Err("pasting the image failed".into()))
+                        };
+                        queued.fetch_sub(1, Ordering::Relaxed);
                         (done.lock().unwrap_or_else(PoisonError::into_inner))
                             .push((number, result));
                         if let Err(err) = waker.wake() {
@@ -342,8 +448,11 @@ impl Pastes {
             self.jobs = Some(jobs);
         }
         let jobs = self.jobs.as_ref().expect("started");
-        jobs.send(job)
-            .map_err(|_| Error::Other("the image couldn't be pasted".into()))
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        jobs.send(job).map_err(|_| {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            Error::Other("the image couldn't be pasted".into())
+        })
     }
 }
 
@@ -362,7 +471,8 @@ fn paste(job: &Job) -> Result<Done, String> {
         on_clipboard: false,
         said: String::new(),
     };
-    if job.how == ImagePaste::Clipboard {
+    // Given up on while it was kept: the clipboard is left as it is.
+    if job.how == ImagePaste::Clipboard && !job.given_up.load(Ordering::Relaxed) {
         let put = file
             .rewind()
             .map_err(|err| err.to_string())
@@ -438,14 +548,14 @@ fn is_pasted(name: &[u8]) -> bool {
 }
 
 /// Deletes the pasted images in `folder` older than [`KEPT_FOR`] at
-/// `now`, and the oldest past [`MOST_KEPT`] bytes, of the first
-/// [`MOST_LOOKED`] files.
+/// `now`, and the oldest past [`MOST_KEPT`] bytes. Every name is read, but
+/// only pasted images' are looked at further.
 fn prune(folder: &OwnedFd, now: SystemTime) {
     let Ok(dir) = Dir::read_from(folder) else {
         return;
     };
     let mut kept: Vec<(SystemTime, u64, CString)> = Vec::new();
-    for entry in dir.take(MOST_LOOKED) {
+    for entry in dir {
         let Ok(entry) = entry else {
             break;
         };
@@ -691,5 +801,21 @@ mod tests {
         prune(&folder, now);
         assert!(!oldest.exists(), "the oldest went");
         assert!(older.exists() && new.exists());
+    }
+
+    #[test]
+    fn a_folder_of_many_other_files_is_pruned_all_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = open_folder(dir.path()).unwrap();
+        for number in 0..5000 {
+            File::create(dir.path().join(format!("other-{number}"))).unwrap();
+        }
+        let old = dir.path().join("20261101-000000-1.png");
+        let file = File::create(&old).unwrap();
+        let now = SystemTime::now();
+        file.set_modified(now - KEPT_FOR - Duration::from_mins(1))
+            .unwrap();
+        prune(&folder, now);
+        assert!(!old.exists());
     }
 }

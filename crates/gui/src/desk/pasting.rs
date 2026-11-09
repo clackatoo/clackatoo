@@ -1,5 +1,6 @@
 //! Pasting the clipboard's image (CLACKA-227), with the `PasteImage` key,
-//! Ctrl+Shift+Alt+V unless it's bound elsewhere: into a chat, it's
+//! Ctrl+Shift+Alt+V unless it's bound elsewhere, in normal, insert and
+//! visual mode: into a chat, it's
 //! attached to the message being written, as Ctrl+Shift+V attaches it; into
 //! a terminal, the daemon whose terminal it is, here or on another
 //! machine, keeps it in a file there and pastes its path, or puts it on
@@ -9,13 +10,17 @@
 //!
 //! Ctrl+Shift+V stays text alone. When the clipboard holds an image and
 //! no text, the bar says which keys paste the image, as they're bound.
+//! Where bindings don't reach, as the picker of a machine, the panel of
+//! keys and a connection's questions, and while nothing binds it,
+//! Ctrl+Shift+Alt+V pastes text, as Ctrl+Shift+V does.
 
 use clackatoo_protocol::{TerminalId, wire};
 
 use super::Desk;
 use super::bindings::{Action, Binding};
 use crate::clipboard_image::Pasted;
-use crate::keymap::KeyMode;
+use crate::input::KeyPress;
+use crate::keymap::{Chord, KeyMode};
 
 /// Where the clipboard's image is to go, once the window has read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +52,18 @@ impl Desk {
             self.refuse("update the daemon to paste images into terminals".into());
             return;
         }
+        // What's typed meanwhile goes after it.
+        if let Some(pane) = self.panes.get_mut(&terminal) {
+            pane.hold_input();
+        }
         self.image_paste = Some(PasteTo::Terminal(terminal));
+    }
+
+    /// Whether a binding has `press`, in the mode bindings are looked up
+    /// in now, alone or as the first of its keys: so Ctrl+Shift+Alt+V is
+    /// `PasteImage`'s, not a paste of text, while it's bound.
+    pub(crate) fn binds(&self, press: &KeyPress<'_>) -> bool {
+        Chord::of(press).is_some_and(|chord| self.keymap.intercepts(self.key_mode(), &[chord]))
     }
 
     /// Takes where the clipboard's image is to be pasted, if a key asked
@@ -73,9 +89,17 @@ impl Desk {
                 }
             }
             Ok(Pasted::Text(_)) => {
+                if let Some(pane) = self.panes.get_mut(&terminal) {
+                    pane.release_input();
+                }
                 self.refuse("the clipboard holds no image: Ctrl+Shift+V pastes its text".into());
             }
-            Err(why) => self.refuse(why),
+            Err(why) => {
+                if let Some(pane) = self.panes.get_mut(&terminal) {
+                    pane.release_input();
+                }
+                self.refuse(why);
+            }
         }
     }
 

@@ -1585,23 +1585,26 @@ impl App {
             self.request_redraw();
             return;
         }
-        let redraw =
-            if is_paste(press.key, self.modifiers) && self.desk.image_paste_target().is_some() {
-                let chat = self.desk.image_paste_target().unwrap();
-                self.paste_into_chat(chat);
-                true
-            } else if is_paste(press.key, self.modifiers) {
-                match paste_text(&mut self.clipboard, Copy::Clipboard) {
-                    Ok(text) => self.desk.paste(&text),
-                    Err(err) => {
-                        log::warn!("pasting failed: {err:#}");
-                        self.look_for_image();
-                    }
+        // With Alt too, it's a key of its own while a binding has it, as
+        // `PasteImage` has Ctrl+Shift+Alt+V.
+        let paste =
+            is_paste(press.key, self.modifiers) && !(self.modifiers.alt && self.desk.binds(press));
+        let redraw = if paste && self.desk.image_paste_target().is_some() {
+            let chat = self.desk.image_paste_target().unwrap();
+            self.paste_into_chat(chat);
+            true
+        } else if paste {
+            match paste_text(&mut self.clipboard, Copy::Clipboard) {
+                Ok(text) => self.desk.paste(&text),
+                Err(err) => {
+                    log::warn!("pasting failed: {err:#}");
+                    self.look_for_image();
                 }
-                true
-            } else {
-                self.desk.key(press)
-            };
+            }
+            true
+        } else {
+            self.desk.key(press)
+        };
         match self.desk.take_image_paste() {
             Some(crate::desk::PasteTo::Chat(chat)) => self.paste_into_chat(chat),
             Some(crate::desk::PasteTo::Terminal(terminal)) => self.paste_image_into(terminal),
@@ -3225,12 +3228,12 @@ fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
     true
 }
 
-/// Whether a key pastes: Ctrl+Shift+V. With Alt too, it's a key of its
-/// own, which pastes the clipboard's image unless bound elsewhere.
+/// Whether a key pastes: Ctrl+Shift+V, with or without Alt. Over the panes,
+/// Ctrl+Shift+Alt+V is the binding's that has it, as `PasteImage` has, if
+/// one does (see [`crate::desk::Desk::binds`]).
 pub(crate) fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
     modifiers.ctrl
         && modifiers.shift
-        && !modifiers.alt
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
 }
 
