@@ -501,27 +501,6 @@ impl Client {
         }
         self.queued(window)
     }
-
-    /// What Lua says next for `window`, waiting for it, for tests.
-    #[cfg(test)]
-    pub(crate) fn next(&self, window: u32) -> FromLua {
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(message) = (self.0.windows.borrow_mut().get_mut(&window))
-                .and_then(|queue| (!queue.is_empty()).then(|| queue.remove(0)))
-            {
-                return message;
-            }
-            let next = match &*self.0.lua.borrow() {
-                Some(lua) => lua.next_within(deadline.saturating_duration_since(Instant::now())),
-                None => panic!("no Lua"),
-            };
-            match next {
-                Ok((to, message)) => self.route(to, message),
-                Err(err) => panic!("Lua said nothing for window {window}: {err}"),
-            }
-        }
-    }
 }
 
 /// `text`, from the config, as the panel of keys can show it: on one

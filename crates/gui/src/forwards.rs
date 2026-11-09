@@ -23,7 +23,7 @@ pub(crate) fn run(
 ) -> Option<String> {
     Some(match forwarding {
         Forwarding::List => listing(&forwards.list(), machine),
-        // The config runs in every window.
+        // The config asks it of every window.
         Forwarding::Config(_) if machine.is_none() => return None,
         Forwarding::Add(spec) | Forwarding::Config(spec) => {
             let Some(machine) = machine else {

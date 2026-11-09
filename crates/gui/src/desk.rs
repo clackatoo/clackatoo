@@ -445,7 +445,8 @@ pub(crate) struct Desk {
     /// What keys are bound to, and those waiting for the rest of a
     /// binding, as after Ctrl+B.
     keymap: bindings::Bindings,
-    /// The config's Lua, if there's a config.
+    /// The window's part in the config's Lua, which every window of the
+    /// process shares.
     script: script::Script,
     /// Panes editing files.
     editors: editors::Editors,
@@ -3143,6 +3144,7 @@ mod tests {
     mod trust;
     mod typing;
     mod view;
+    mod windows;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};

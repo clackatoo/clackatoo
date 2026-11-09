@@ -122,8 +122,9 @@ pub(crate) enum SessionEvent {
     },
     /// The connection failed or closed.
     Lost(String),
-    /// The config's Lua has something for the window. Sent from the Lua
-    /// thread, not the session's.
+    /// The config's Lua has something for the windows, or a setting it
+    /// asked to save has been. Sent from the Lua thread, or the settings
+    /// writer, by way of the process of windows, not the session's.
     Lua,
     /// What's on the clipboard and the primary selection, as far as they
     /// could be read, for the editors. Sent from a thread reading them, not

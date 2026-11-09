@@ -1409,6 +1409,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Terminals' scrollback comes back after a restart, dimmed above the new prompt; :forget and :keep history off",
     },
+    News {
+        id: "setlocal",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: "One config runs for every window, :setlocal sets an option for one, and a busy handler never holds up keys",
+    },
 ];
 
 impl News {

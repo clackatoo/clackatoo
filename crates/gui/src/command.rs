@@ -341,7 +341,7 @@ pub(crate) enum Forwarding {
     Add(Spec),
     /// The same, asked by the config's `client.forward`: in a window on
     /// this machine, which has nothing to forward, nothing is said, as the
-    /// config runs in every window.
+    /// config asks it of every window.
     Config(Spec),
     /// `!`: stops forwarding this port here, or with none, every port.
     Stop(Option<u16>),

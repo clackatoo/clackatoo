@@ -69,12 +69,14 @@ impl Desk {
     /// window shares doesn't change. A window not in a client yet, as in
     /// tests, starts the options every window shares from `options` too.
     pub(crate) fn start_options(&mut self, options: options::Options, fixed: Vec<&'static Info>) {
+        let fixed: Vec<(&'static Info, Value)> = (fixed.into_iter())
+            .map(|info| (info, options.get(info)))
+            .collect();
         if !self.in_client() {
-            self.options = View::new(Store::new(options.clone()).shared(), self.options.window());
+            self.options = View::new(Store::new(options).shared(), self.options.window());
         }
         let ((), _) = self.options.change(|store, window| {
-            for info in fixed {
-                let value = options.get(info);
+            for (info, value) in fixed {
                 // The command line's are values the option can hold.
                 let _ = store.set_local(window, info, value, SetBy::STARTUP);
             }
@@ -235,9 +237,12 @@ impl Desk {
             let store = self.options.store();
             let window = self.options.window();
             let changed: Vec<&Info> = (options::ALL.iter())
-                .filter(|info| match local {
-                    true => store.local(window, info).is_some(),
-                    false => self.options.get(info) != start.get(info),
+                .filter(|info| {
+                    if local {
+                        store.local(window, info).is_some()
+                    } else {
+                        self.options.get(info) != start.get(info)
+                    }
                 })
                 .collect();
             drop(store);
@@ -316,9 +321,10 @@ impl Desk {
             .store()
             .local(self.options.window(), info)
             .is_some();
-        match own {
-            true => format!("{shown} · this window's own, {said}"),
-            false => format!("{shown} · {said}"),
+        if own {
+            format!("{shown} · this window's own, {said}")
+        } else {
+            format!("{shown} · {said}")
         }
     }
 

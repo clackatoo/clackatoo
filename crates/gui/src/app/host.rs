@@ -9,13 +9,15 @@
 //! window after; a window opening one on another machine opens it here
 //! too.
 //!
-//! What's shared is only what's slow to make and the same for every
-//! window: the GPU, and the fonts found on the system. Everything else is
-//! each window's own, as it was with a process each: its desk, its frame
-//! and glyphs (at its screen's scale), its connection to its daemon, on
-//! this machine or another, its config's Lua, and the environment and
-//! directory of the `clackatoo` that asked for it, which what it starts
-//! (the daemon, ssh, a link's opener, `clackatoo update`) is started with.
+//! What's shared is what's slow to make and the same for every window:
+//! the GPU, and the fonts found on the system; and the config, which runs
+//! once for the process, its options and bindings with it (see
+//! [`crate::client`]). Everything else is each window's own, as it was
+//! with a process each: its desk, its frame and glyphs (at its screen's
+//! scale), its connection to its daemon, on this machine or another, and
+//! the environment and directory of the `clackatoo` that asked for it,
+//! which what it starts (the daemon, ssh, a link's opener, `clackatoo
+//! update`) is started with.
 //!
 //! A window that panics closes alone: everything done for a window runs
 //! inside [`catch_unwind`], and nothing it holds is touched again. A crash

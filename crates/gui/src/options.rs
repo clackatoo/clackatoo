@@ -1736,5 +1736,18 @@ mod tests {
             })
             .collect();
         assert_eq!(listed, declared);
+        // And those `:setlocal` can set, as the schema marks them.
+        let local = section
+            .split_once("It takes what `:set` takes. These can be set so:\n\n")
+            .and_then(|(_, rest)| rest.split("\n\n").next())
+            .expect("the page lists what :setlocal sets");
+        let listed: Vec<&str> = (local.split(','))
+            .map(|name| name.trim().trim_matches('`'))
+            .collect();
+        let declared: Vec<&str> = (ALL.iter())
+            .filter(|info| info.local)
+            .map(|info| info.name)
+            .collect();
+        assert_eq!(listed, declared);
     }
 }

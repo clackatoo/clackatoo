@@ -24,7 +24,7 @@ at "mango"
 
 ## Turn wrapping off
 
-`:set nowrap` turns wrapping off: a long line runs off the pane's edge, and the view scrolls sideways to follow the cursor. Options set with `:set` apply to every pane; set them for good in your `init.lua`, as `client.opt.wrap = false`.
+`:set nowrap` turns wrapping off: a long line runs off the pane's edge, and the view scrolls sideways to follow the cursor. Options set with `:set` apply to every pane, in every window; set them for good in your `init.lua`, as `client.opt.wrap = false`.
 
 ```check
 option nowrap
@@ -60,8 +60,24 @@ said "nolinebreak · set with :set or a key"
 said "linebreak · as it starts"
 ```
 
+## Just this window
+
+`:setlocal`, or `:setl`, sets an option for this window alone, over the value every window shares, as Vim's `:setlocal` does: `:setlocal nowrap`. Any other window you have open goes on wrapping. Only some options can be set so: the font and its size, and how editors show their lines, such as `number`, `colorcolumn` and `wrap`.
+
+```check
+option nowrap
+```
+
+## Every window's again
+
+`:setlocal wrap<` takes this window's own value away, so it has every window's again, and wraps. `:set wrap` would too: `:set` in a window sets every window's value, and takes that window's own away.
+
+```check
+option wrap
+```
+
 ## Keep it
 
-`:set` lasts until the window closes. `:setpersist`, or `:setp`, sets an option and saves it as well, in `client/settings.lua` beside your `init.lua`, so every window opened after starts with it: `:setp nolinebreak`. `:setp linebreak&` takes it out again. This lesson doesn't save anything, as that changes your own config.
+`:set` lasts until clackatoo's windows have all closed. `:setpersist`, or `:setp`, sets an option and saves it as well, in `client/settings.lua` beside your `init.lua`, so every window opened after starts with it: `:setp nolinebreak`. `:setp linebreak&` takes it out again. This lesson doesn't save anything, as that changes your own config.
 
 An option your `init.lua` sets as it loads isn't saved, as `init.lua` runs after `settings.lua` and would outdo it: `:setp` sets it for now, and the bar names your line that sets it. Font, font size, `renderer` and `priority` are saved in `startup.toml` instead, as the window needs them before any Lua runs.

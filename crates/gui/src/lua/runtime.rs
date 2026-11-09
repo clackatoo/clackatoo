@@ -677,6 +677,13 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             match set() {
                 Ok((option, value)) => {
                     let window = s.window.get();
+                    // As `:set` in that window: its own value goes, so
+                    // what's read next is what was set.
+                    if let Some(window) = window.filter(|_| !by.loading)
+                        && let Some(world) = s.worlds.borrow_mut().get_mut(&window)
+                    {
+                        world.own.retain(|(info, _)| info.name != option.name);
+                    }
                     s.tell(
                         To::Client,
                         FromLua::Set {
@@ -782,7 +789,6 @@ fn binding_options(keys: &str, options: Option<Table>) -> mlua::Result<BindingOp
         match (name.as_deref(), value) {
             (Some("desc"), Value::String(text)) => *desc = Some(text.to_string_lossy()),
             (Some("propagate"), Value::Boolean(on)) => *propagate = on,
-            (Some("propagate"), Value::Nil) => {}
             (Some("propagate"), _) => wrong.push(format!(
                 "the binding of `{keys}` leaves out its `propagate`, which is true or false"
             )),
@@ -995,7 +1001,12 @@ fn reading(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `split`, `close` and `focus`.
+/// `split`, `close`, `focus`, `command`, `forward`, `connect` and
+/// `disconnect`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one core function after another, each short"
+)]
 fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
