@@ -4259,6 +4259,7 @@ fn grid_state() -> GridState {
             vs16: true,
             graphemes: true,
         },
+        pointer: Some(clackatoo_term::Pointer::ZoomOut),
     }
 }
 

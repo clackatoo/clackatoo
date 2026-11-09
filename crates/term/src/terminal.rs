@@ -18,6 +18,7 @@ use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::notify::{Notice, Notifications};
 use crate::parser::Parser;
+use crate::pointer::{self, Pointer};
 use crate::progress::TaskProgress;
 use crate::requests::{self, Request};
 use crate::row::Row;
@@ -317,6 +318,16 @@ impl Terminal {
     #[must_use]
     pub fn keyboard(&self) -> u8 {
         self.emulator.keyboard().flags()
+    }
+
+    /// The mouse pointer's shape the program on the screen shown asked
+    /// for (OSC 22), until it ends: `None` for the window's own.
+    #[must_use]
+    pub fn pointer(&self) -> Option<Pointer> {
+        match self.emulator.screen {
+            Screen::Primary => self.emulator.pointer_primary.shown(),
+            Screen::Alternate => self.emulator.pointer_alternate.shown(),
+        }
     }
 
     /// The window title the program last set, or empty.
@@ -978,6 +989,10 @@ pub(crate) struct Emulator {
     /// screen (see [`crate::keyboard`]).
     keyboard_primary: keyboard::Stack,
     keyboard_alternate: keyboard::Stack,
+    /// The pointer shapes programs asked for on each screen (see
+    /// [`crate::pointer`]).
+    pointer_primary: pointer::Stack,
+    pointer_alternate: pointer::Stack,
     /// How far the program's task has got, as it last said.
     progress: Option<TaskProgress>,
     /// The colours the terminal is drawn in, as a window said them.
@@ -1047,6 +1062,8 @@ impl Emulator {
             titles: Vec::new(),
             keyboard_primary: keyboard::Stack::default(),
             keyboard_alternate: keyboard::Stack::default(),
+            pointer_primary: pointer::Stack::default(),
+            pointer_alternate: pointer::Stack::default(),
             progress: None,
             palette: None,
             cell_pixels: None,
@@ -2055,8 +2072,10 @@ impl Emulator {
                 grid
             });
             // A program that switches to it starts with no keyboard flags,
-            // whatever one that ended without popping them left.
+            // whatever one that ended without popping them left, and with
+            // the window's own pointer.
             self.keyboard_alternate = keyboard::Stack::default();
+            self.pointer_alternate = pointer::Stack::default();
         }
         self.screen = screen;
         // A viewer was showing the other screen.
@@ -2186,6 +2205,20 @@ impl Emulator {
         match self.screen {
             Screen::Primary => &mut self.keyboard_primary,
             Screen::Alternate => &mut self.keyboard_alternate,
+        }
+    }
+
+    /// OSC 22: the mouse pointer's shape, as `payload` asks (see
+    /// [`crate::pointer`]); a question is answered `OSC 22 ; … ST`, of
+    /// known names and digits alone, ended as it was.
+    pub(crate) fn pointer_osc(&mut self, payload: &[u8], bell: bool) {
+        let stack = match self.screen {
+            Screen::Primary => &mut self.pointer_primary,
+            Screen::Alternate => &mut self.pointer_alternate,
+        };
+        if let Some(answer) = stack.osc(payload) {
+            let end = string_end(bell);
+            self.reply(format!("\x1b]22;{answer}{end}").as_bytes());
         }
     }
 
@@ -2377,6 +2410,7 @@ impl Emulator {
                 // didn't pop it, so the shell gets Ctrl+C as ^C again.
                 self.progress = None;
                 self.keyboard_primary = keyboard::Stack::default();
+                self.pointer_primary = pointer::Stack::default();
                 let block = self.blocks.prompt();
                 self.mark_cursor_row(block, false);
                 // Forget the blocks no row is marked with any more.
@@ -2593,7 +2627,7 @@ pub(crate) fn safe_reply(bytes: &[u8]) -> bool {
             byte == 0x1B
                 || byte == 0x07
                 || byte.is_ascii_alphanumeric()
-                || b";:?$+/=>|.- ".contains(&byte)
+                || b";:?$+/=>|.-, ".contains(&byte)
         };
         after_escape = byte == 0x1B && !after_escape;
         ok

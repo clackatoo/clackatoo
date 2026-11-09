@@ -338,6 +338,14 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
     )]
     pub widths: Widths,
+    /// The mouse pointer's shape the program asked for over the terminal
+    /// (OSC 22), if it asked: `None` for the window's own, and from a
+    /// daemon older than protocol 143.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
+    )]
+    pub pointer: Option<clackatoo_term::Pointer>,
 }
 
 /// Where a terminal's history kept across a restart ends (see
@@ -447,6 +455,11 @@ pub struct Run {
 
 /// A change to a view a client already has.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "made once per change, and moved straight into a frame or a view: boxing the \
+              snapshot would cost an allocation for each to save a copy of a few hundred bytes"
+)]
 pub enum ViewUpdate {
     /// The whole view: the first one a client gets, and whenever a patch
     /// can't describe the change, such as a resize. A terminal's history
@@ -613,6 +626,7 @@ impl GridState {
             restarted: (terminal.primary().restarted()).map(|(line, at)| Restarted { line, at }),
             phone: false,
             widths: terminal.widths(),
+            pointer: terminal.pointer(),
         }
     }
 }
@@ -999,6 +1013,7 @@ mod tests {
                         grid.state.progress = None;
                         grid.state.phone = false;
                         grid.state.widths = Widths::LEGACY;
+                        grid.state.pointer = None;
                     }
                     ViewUpdate::Patch(patches) => {
                         for patch in patches {
@@ -1009,6 +1024,7 @@ mod tests {
                                 state.progress = None;
                                 state.phone = false;
                                 state.widths = Widths::LEGACY;
+                                state.pointer = None;
                             }
                         }
                     }

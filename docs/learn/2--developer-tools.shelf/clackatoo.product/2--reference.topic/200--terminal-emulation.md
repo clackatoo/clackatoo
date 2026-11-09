@@ -199,7 +199,7 @@ desktop; nothing about it passes between machines.
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
 | DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 69 ([left and right margins](#left-and-right-margins)), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1016 (the mouse in pixels, as 1006 but where the pointer is in pixels from the text area's top left; a drag is told at every pixel it moves, and the wheel at its cell's top left), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)), 2048 ([resize reports](#resize-reports)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, overline (`53`, drawn along the cell's top; a window older than protocol 143 draws none), and their resets (`55` for the overline). Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
-| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)) |
+| `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)), 22 ([pointer shapes](#pointer-shapes)) |
 
 ## Queries answered
 
@@ -214,6 +214,7 @@ desktop; nothing about it passes between machines.
 | `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 and 2027 included; 2027 is answered 4, can't be set, in a terminal carried over from a build before it, whose rows are laid out the old way. |
 | `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's, and cursor's colors) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colors, as vim, bat and delta do. |
 | `OSC 4 ; <index> ; ?` (a palette entry, several pairs at once) | `OSC 4 ; <index> ; rgb:… ST` for each |
+| `OSC 22 ; ? <names> ST` (pointer shapes) | `OSC 22 ; 1,0,… ST`: whether each shape is known, and for `__current__` the shape shown. Ended as asked. |
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
 | `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels, the text area's (`14t`, as `CSI 4 ; <height> ; <width> t`) and a cell's (`16t`, as `CSI 6 ; <height> ; <width> t`), are answered once a window has said how big it draws a cell, as it does when it sizes the terminal; until then, not at all. Nor is the title read back (`21t`), which would let a program type what it set. |
 | `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say, the name said back only if it's hex, and `DCS 0 + r ST` otherwise: no answer ever says back what a program printed, which could have it type anything into the shell. It says `xterm-256color`'s name (`TN`) and colors (`Co`), 24-bit color (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and colored underlines (`Su`, `Smulx`, `Setulc`), overlines (`Smol`, `Rmol`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
@@ -274,6 +275,22 @@ pushed, and a program's progress go on through an upgrade in place. The window
 encodes keys this way; the web app on your phone sends xterm's encoding still.
 A window older than protocol 139 does too, which programs that ask still
 understand.
+
+## Pointer shapes
+
+A program can choose the mouse pointer's shape over its terminal with kitty's
+`OSC 22` (<https://sw.kovidgoyal.net/kitty/pointer-shapes/>), as a link or a
+divider in it would want: `OSC 22 ; pointer ST` sets it, by its CSS name
+(`text`, `pointer`, `crosshair`, `grab`, `ew-resize` and the rest) or an X11
+one kitty reads (`xterm`, `hand2`, `left_ptr`…); `OSC 22 ; > name,fallback
+ST` pushes the first known of a list, and `OSC 22 ; < ST` pops it. A name
+clackatoo doesn't know changes nothing, and `none` shows the arrow, as a
+program can't hide the pointer. The window shows it while the pointer is over
+the terminal's live screen, ahead of the arrow a program that takes the mouse
+gets; scrolled back, the pointer is clackatoo's again. Each screen keeps its
+own, so a full-screen program's goes with it, and the shell's next prompt
+(OSC 133 `A`) or a reset takes back what a program left. An upgrade in place
+forgets it; a window older than protocol 143 shows its own.
 
 ## Left and right margins
 

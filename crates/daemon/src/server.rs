@@ -889,6 +889,7 @@ impl Subscription {
             state.keyboard &= !clackatoo_term::keyboard::EVENT_TYPES;
             state.phone = false;
             state.widths = clackatoo_term::Widths::LEGACY;
+            state.pointer = None;
             if state.modes.mouse_encoding == clackatoo_term::mouse::MouseEncoding::SgrPixels {
                 state.modes.mouse_encoding = clackatoo_term::mouse::MouseEncoding::Sgr;
             }

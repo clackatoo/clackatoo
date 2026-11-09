@@ -441,7 +441,8 @@ gates! {
     /// window draws a cell in pixels, for programs asking a terminal's
     /// size in pixels (mode 2048, `CSI 14 t`). And mouse reports in pixels
     /// (mode 1016), `MouseEncoding::SgrPixels`, which an older peer is
-    /// sent as `Sgr`.
+    /// sent as `Sgr`. And `GridState`'s `pointer`, the mouse pointer's
+    /// shape a program asks for (OSC 22).
     TERMINAL_STANDARDS_2 = 147,
 }
 

@@ -212,6 +212,8 @@ impl Perform for Emulator {
             // (see crate::notify).
             [b"9", b"4", progress @ ..] => self.set_progress(progress),
             [b"9", text @ ..] => self.notifications.iterm(text),
+            // The mouse pointer's shape (see crate::pointer).
+            [b"22", payload @ ..] => self.pointer_osc(&payload.join(&b';'), bell_terminated),
             [b"777", params @ ..] => self.notifications.urxvt(params),
             [b"99", metadata, payload @ ..] => self.notifications.kitty(metadata, payload),
             _ => log::trace!(

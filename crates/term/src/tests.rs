@@ -820,6 +820,28 @@ mod queries {
     }
 
     #[test]
+    fn a_program_sets_the_pointer_over_it_until_it_ends() {
+        let mut t = terminal(10, 2);
+        t.advance(b"\x1b]22;pointer\x1b\\");
+        assert_eq!(t.pointer(), Some(crate::Pointer::Pointer));
+        // A full-screen program's is its own, and goes with it.
+        t.advance(b"\x1b[?1049h");
+        assert_eq!(t.pointer(), None);
+        t.advance(b"\x1b]22;>bogus,crosshair\x07");
+        assert_eq!(t.pointer(), Some(crate::Pointer::Crosshair));
+        t.advance(b"\x1b[?1049l");
+        assert_eq!(t.pointer(), Some(crate::Pointer::Pointer));
+        // Asked, it says what it knows, ended as asked.
+        t.advance(b"\x1b]22;?text,nope,__current__\x07");
+        assert_eq!(t.take_replies(), b"\x1b]22;1,0,pointer\x07");
+        // The shell's next prompt says its program has ended.
+        t.advance(b"\x1b]133;A\x07");
+        assert_eq!(t.pointer(), None);
+        t.advance(b"\x1b]22;wait\x07\x1bc");
+        assert_eq!(t.pointer(), None, "a reset takes it back");
+    }
+
+    #[test]
     fn an_overline_is_set_reset_and_said() {
         let t = after(4, 1, "a\x1b[53mb\x1b[55mc");
         let overline = |col| {
@@ -942,7 +964,7 @@ mod queries {
         }));
         for payload in payloads {
             let mut asked = Vec::new();
-            let frames: [(&[u8], &[u8]); 13] = [
+            let frames: [(&[u8], &[u8]); 14] = [
                 (b"\x1bP+q", b"\x1b\\"),
                 (b"\x1bP$q", b"\x1b\\"),
                 (b"\x1b]10;", b"\x07"),
@@ -958,6 +980,8 @@ mod queries {
                 (b"\x1b]777;notify;", b";body\x07"),
                 (b"\x1b]99;i=", b";title\x07"),
                 (b"\x1b]99;p=?:i=", b";\x07"),
+                // The pointer's shape, asked about.
+                (b"\x1b]22;?pointer,", b",__current__\x07"),
             ];
             for (start, end) in frames {
                 asked.extend_from_slice(start);

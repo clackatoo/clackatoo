@@ -90,6 +90,14 @@ impl Pane {
                 .is_some_and(|screen| screen.state.modes.mouse_tracking != MouseTracking::Off)
     }
 
+    /// The pointer's shape its program asked for (OSC 22), while its live
+    /// screen shows: scrolled back, the pointer is the window's.
+    pub(crate) fn pointer(&self) -> Option<clackatoo_term::Pointer> {
+        (self.scroll == 0)
+            .then(|| self.screen.as_ref()?.state.pointer)
+            .flatten()
+    }
+
     /// Whether the program gets the mouse in pixels (mode 1016), so
     /// moving it within a cell is news to it.
     pub(crate) fn reports_pixels(&self, shift: bool) -> bool {

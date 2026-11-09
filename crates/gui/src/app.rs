@@ -1004,6 +1004,10 @@ impl App {
             },
             // A link a click would open, with Ctrl held.
             Hit::Panes if self.desk.link_at(point, self.modifiers) => CursorIcon::Pointer,
+            // The shape a program asked for over its terminal.
+            Hit::Panes if let Some(pointer) = self.desk.program_pointer(point) => {
+                pointer_icon(pointer)
+            }
             // A program that takes the mouse gets the arrow, as clicks are
             // its, not for selecting text.
             Hit::Panes if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
@@ -3180,6 +3184,49 @@ fn single_pane() -> Layout {
 }
 
 /// The cursor for resizing the window towards `direction`.
+/// The window's cursor for the shape a program asked for (see
+/// `clackatoo_term::Pointer`). `none`, which would hide it, is the default
+/// arrow: a program can't take the pointer away.
+fn pointer_icon(pointer: clackatoo_term::Pointer) -> CursorIcon {
+    use clackatoo_term::Pointer;
+    match pointer {
+        Pointer::Default | Pointer::None => CursorIcon::Default,
+        Pointer::ContextMenu => CursorIcon::ContextMenu,
+        Pointer::Help => CursorIcon::Help,
+        Pointer::Pointer => CursorIcon::Pointer,
+        Pointer::Progress => CursorIcon::Progress,
+        Pointer::Wait => CursorIcon::Wait,
+        Pointer::Cell => CursorIcon::Cell,
+        Pointer::Crosshair => CursorIcon::Crosshair,
+        Pointer::Text => CursorIcon::Text,
+        Pointer::VerticalText => CursorIcon::VerticalText,
+        Pointer::Alias => CursorIcon::Alias,
+        Pointer::Copy => CursorIcon::Copy,
+        Pointer::Move => CursorIcon::Move,
+        Pointer::NoDrop => CursorIcon::NoDrop,
+        Pointer::NotAllowed => CursorIcon::NotAllowed,
+        Pointer::Grab => CursorIcon::Grab,
+        Pointer::Grabbing => CursorIcon::Grabbing,
+        Pointer::EResize => CursorIcon::EResize,
+        Pointer::NResize => CursorIcon::NResize,
+        Pointer::NeResize => CursorIcon::NeResize,
+        Pointer::NwResize => CursorIcon::NwResize,
+        Pointer::SResize => CursorIcon::SResize,
+        Pointer::SeResize => CursorIcon::SeResize,
+        Pointer::SwResize => CursorIcon::SwResize,
+        Pointer::WResize => CursorIcon::WResize,
+        Pointer::EwResize => CursorIcon::EwResize,
+        Pointer::NsResize => CursorIcon::NsResize,
+        Pointer::NeswResize => CursorIcon::NeswResize,
+        Pointer::NwseResize => CursorIcon::NwseResize,
+        Pointer::ColResize => CursorIcon::ColResize,
+        Pointer::RowResize => CursorIcon::RowResize,
+        Pointer::AllScroll => CursorIcon::AllScroll,
+        Pointer::ZoomIn => CursorIcon::ZoomIn,
+        Pointer::ZoomOut => CursorIcon::ZoomOut,
+    }
+}
+
 fn resize_icon(direction: ResizeDirection) -> CursorIcon {
     match direction {
         ResizeDirection::North => CursorIcon::NResize,
@@ -4440,6 +4487,14 @@ fn window_title(title: Option<&str>, host: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pointer_a_program_asks_for_is_a_cursor_but_none() {
+        use clackatoo_term::Pointer;
+        assert_eq!(pointer_icon(Pointer::None), CursorIcon::Default);
+        assert_eq!(pointer_icon(Pointer::Grab), CursorIcon::Grab);
+        assert_eq!(pointer_icon(Pointer::ZoomOut), CursorIcon::ZoomOut);
+    }
 
     #[test]
     fn the_window_title_is_filtered_as_tab_names_are_and_cut() {

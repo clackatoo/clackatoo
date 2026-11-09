@@ -1302,6 +1302,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Overlined text (SGR 53) is drawn, in windows and on the phone",
     },
     News {
+        id: "pointer-shapes",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs can choose the mouse pointer's shape over their terminal (kitty's OSC 22)",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

@@ -2649,6 +2649,13 @@ impl Desk {
             .is_some_and(|pane| pane.reports_mouse(shift))
     }
 
+    /// The pointer's shape the program of the terminal at `point` asked
+    /// for (OSC 22), while its live screen shows.
+    pub(crate) fn program_pointer(&self, point: [f32; 2]) -> Option<clackatoo_term::Pointer> {
+        let (terminal, _, _) = self.cell_at(point, None)?;
+        self.panes.get(&terminal)?.pointer()
+    }
+
     // --- Dividers -----------------------------------------------------------
 
     /// Which way the divider at `point` runs, if there is one: dragging it

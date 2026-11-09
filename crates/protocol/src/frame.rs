@@ -194,7 +194,8 @@ fn agent_parent_prefix(
         0
     };
     if wire >= wire::TERMINAL_STANDARDS_2 {
-        later += postcard::to_slice(&(state.phone, state.widths), &mut fields)?.len();
+        later +=
+            postcard::to_slice(&(state.phone, state.widths, state.pointer), &mut fields)?.len();
     }
     let end = payload
         .len()
@@ -890,7 +891,7 @@ mod tests {
                         1 + 3
                     } else {
                         0
-                    } + 3 * usize::from(wire >= wire::TERMINAL_STANDARDS_2);
+                    } + 4 * usize::from(wire >= wire::TERMINAL_STANDARDS_2);
                     let tail = 3 + countdown + fed + later;
                     assert_eq!(
                         view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),

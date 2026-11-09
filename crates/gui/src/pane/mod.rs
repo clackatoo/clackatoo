@@ -4085,6 +4085,15 @@ mod mouse_tests {
         assert_eq!(input(&mut pane), "a");
     }
 
+    #[test]
+    fn the_pointer_is_the_programs_while_its_live_screen_shows() {
+        let mut pane = pane(&terminal("\x1b]22;grab\x07"));
+        assert_eq!(pane.pointer(), Some(clackatoo_term::Pointer::Grab));
+        pane.scroll = 1;
+        assert_eq!(pane.pointer(), None, "history is the window's");
+        assert_eq!(self::pane(&terminal("")).pointer(), None);
+    }
+
     /// Presses `text`'s key, with no modifiers.
     fn key(pane: &mut Pane, text: &str) {
         let key = Key::Character(text.into());
