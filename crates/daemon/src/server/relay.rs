@@ -258,6 +258,9 @@ struct Followed {
     /// The question about the clipboard its program last asked, by its
     /// number there, and the client asked, which alone may answer.
     clipboard: Option<(u64, Token)>,
+    /// The client whose fit of it was passed on (see
+    /// [`fit_not_passed`](Daemon::fit_not_passed)).
+    fitter: Option<Token>,
 }
 
 /// A client following one of another daemon's terminals.
@@ -1030,10 +1033,49 @@ impl Daemon {
                 }
                 Routed::Here(request)
             }
+            Request::Fit {
+                terminal,
+                size,
+                renew,
+            } if let Some(answer) = self.fit_not_passed(token, terminal, size, renew) => {
+                Routed::Answered(answer)
+            }
             request => match self.route_shown(token, &request) {
                 Some(routed) => routed,
                 None => self.route_waited_for(token, request),
             },
+        }
+    }
+
+    /// The answer to the client at `token` fitting this daemon's terminal
+    /// `local`, another daemon's, to `size`, or putting its fit back, if
+    /// that isn't passed on. The daemon there sees every client here as
+    /// this daemon, so this daemon tells them apart for it, as it would
+    /// its own terminal's: a client that didn't fit it can't keep the fit
+    /// nor put it back, and once another types into it, it's put back
+    /// first (see [`relay_keys`](Self::relay_keys)). `None` if it's passed
+    /// on, noting whose fit it is now.
+    fn fit_not_passed(
+        &mut self,
+        token: Token,
+        local: TerminalId,
+        size: Option<clackatoo_protocol::Size>,
+        renew: bool,
+    ) -> Option<Response> {
+        let (at, _) = self.relayed_terminal(local)?;
+        let followed = self.links.list[at].relayed.followed.get_mut(&local)?;
+        let theirs = followed.fitter == Some(token);
+        match size {
+            None if !theirs => Some(Response::Done),
+            Some(_) if renew && !theirs => Some(Response::Error(Error::NotFitted(local))),
+            None => {
+                followed.fitter = None;
+                None
+            }
+            Some(_) => {
+                followed.fitter = Some(token);
+                None
+            }
         }
     }
 
@@ -1588,6 +1630,18 @@ impl Daemon {
                 "{host} isn't answering: keys aren't sent"
             )));
         }
+        // Another client's fit is put back first, so the program is the
+        // size the typist sees before it reads the keys.
+        let fitted = (self.links.list[at].relayed.followed.get_mut(&local))
+            .and_then(|followed| followed.fitter.take_if(|fitter| *fitter != token));
+        if fitted.is_some() {
+            let put_back = Request::Fit {
+                terminal: remote,
+                size: None,
+                renew: false,
+            };
+            let _ = self.send_upstream(at, &ClientMessage::Request(put_back), Expect::Nothing);
+        }
         let input = Request::SendInput {
             terminal: remote,
             bytes,
@@ -1937,6 +1991,24 @@ impl Daemon {
         followed.viewers.retain(|viewer| viewer.token != token);
         followed.typist.take_if(|typist| *typist == token);
         followed.clipboard.take_if(|(_, asked)| *asked == token);
+        // Its fit goes with it, as the daemon there would put it back if
+        // it were its own client.
+        let fitted = followed.fitter.take_if(|fitter| *fitter == token).is_some();
+        if fitted
+            && !followed.viewers.is_empty()
+            && let Some(remote) =
+                (self.links.list[at].relayed.mirror.terminal_numbers).remote(local.0)
+        {
+            let put_back = Request::Fit {
+                terminal: TerminalId(remote),
+                size: None,
+                renew: false,
+            };
+            let _ = self.send_upstream(at, &ClientMessage::Request(put_back), Expect::Nothing);
+        }
+        let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
+            return;
+        };
         if followed.viewers.is_empty() {
             let upstream = followed.upstream;
             self.links.list[at].relayed.followed.remove(&local);
@@ -3811,6 +3883,76 @@ mod tests {
                 terminal: remote
             })),
         );
+    }
+
+    /// A phone's fit of another machine's terminal is put back as another
+    /// client types into it, before the keys, as for this daemon's own:
+    /// the daemon there sees both as this daemon (CLACKA-118).
+    #[test]
+    fn a_fit_passed_on_is_put_back_as_another_client_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _link, mut there) = linked(dir.path());
+        let (phone, _keep) = client(&mut daemon);
+        let (window, _keep_too) = client(&mut daemon);
+        let local = terminal(&daemon);
+        let remote = TerminalId(7);
+        for token in [phone, window] {
+            daemon.route_request(token, Request::Attach { terminal: local });
+        }
+        let fit = |size, renew| Request::Fit {
+            terminal: local,
+            size,
+            renew,
+        };
+        let size = clackatoo_protocol::Size::new(40, 20).unwrap();
+        let put_back = ClientMessage::Request(Request::Fit {
+            terminal: remote,
+            size: None,
+            renew: false,
+        });
+        let typed = |bytes: &[u8]| {
+            ClientMessage::Request(Request::SendInput {
+                terminal: remote,
+                bytes: bytes.to_vec(),
+            })
+        };
+        let typing = |bytes: &[u8]| Request::SendInput {
+            terminal: local,
+            bytes: bytes.to_vec(),
+        };
+        heard(&mut there);
+        daemon.route_request(phone, fit(Some(size), false));
+        assert_eq!(
+            heard(&mut there),
+            [ClientMessage::Request(Request::Fit {
+                terminal: remote,
+                size: Some(size),
+                renew: false
+            })]
+        );
+        // The window can neither keep it nor put it back.
+        let Routed::Answered(Response::Error(Error::NotFitted(_))) =
+            daemon.route_request(window, fit(Some(size), true))
+        else {
+            panic!("the window renewed the phone's fit");
+        };
+        let Routed::Answered(Response::Done) = daemon.route_request(window, fit(None, false))
+        else {
+            panic!("the window's put back was passed on");
+        };
+        assert!(heard(&mut there).is_empty());
+        // The phone typing keeps it; the window typing puts it back, once.
+        daemon.route_request(phone, typing(b"p"));
+        assert_eq!(heard(&mut there), [typed(b"p")]);
+        daemon.route_request(window, typing(b"w"));
+        assert_eq!(heard(&mut there), [put_back.clone(), typed(b"w")]);
+        daemon.route_request(window, typing(b"w"));
+        assert_eq!(heard(&mut there), [typed(b"w")]);
+        // Fitted again, it's put back as the phone stops following it.
+        daemon.route_request(phone, fit(Some(size), false));
+        heard(&mut there);
+        daemon.route_request(phone, Request::Detach { terminal: local });
+        assert_eq!(heard(&mut there), [put_back]);
     }
 
     #[test]
