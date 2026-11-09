@@ -3317,7 +3317,7 @@ impl HostedChat {
             ToolContent::Output(output) => Some(output.as_str()),
             _ => None,
         });
-        self.outputs.heard(id, data, before.unwrap_or_default());
+        self.outputs.heard(&tool.id, data, before.unwrap_or_default());
         let text = clean_text(data);
         tool.append_output(&text);
         let output = tool.output_mut().expect("just added to");
