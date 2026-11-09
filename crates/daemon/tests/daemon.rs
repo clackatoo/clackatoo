@@ -1108,6 +1108,138 @@ fn updates_wait_for_the_last_one_to_be_drawn() {
     assert_quiet(&mut client);
 }
 
+/// A terminal whose program, `cat` with the terminal raw, prints what's
+/// typed as it comes: escape sequences and all, and nothing echoed.
+fn raw_cat(client: &mut Client) -> (TerminalId, View) {
+    let terminal = spawn(
+        client,
+        &["sh", "-c", "stty raw -echo; printf ready; exec cat"],
+    );
+    wait_for_screen(client, terminal, |text| text.starts_with("ready"));
+    let view = attach(client, terminal);
+    client.frame_done(terminal).unwrap();
+    (terminal, view)
+}
+
+/// Asserts no event arrives for `quiet`.
+fn assert_quiet_for(client: &mut Client, quiet: Duration) {
+    client.set_read_timeout(Some(quiet)).unwrap();
+    match client.next_event() {
+        Err(ClientError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("expected silence, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_frame_drawn_in_pieces_is_shown_whole() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let (terminal, mut view) = raw_cat(&mut client);
+
+    // The program starts a frame (mode 2026) and draws part of it: the
+    // terminal has it, but no window is sent it...
+    let start = Instant::now();
+    client.send_input(terminal, b"\x1b[?2026h one").unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("one"));
+    // ...for as long as the frame takes, within the 150 ms it's given.
+    let waited = start.elapsed();
+    if waited < Duration::from_millis(100) {
+        assert_quiet_for(&mut client, Duration::from_millis(100) - waited);
+    }
+    // Ended, the frame is sent whole, in one update.
+    client.send_input(terminal, b" two\x1b[?2026l").unwrap();
+    let update = next_update(&mut client, terminal);
+    view.apply(update);
+    assert!(
+        screen_text(&view).starts_with("ready one two"),
+        "{}",
+        screen_text(&view)
+    );
+    assert_eq!(view, client.capture(terminal).unwrap());
+}
+
+#[test]
+fn a_frame_never_ended_is_shown_after_150_ms_and_held_no_more() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let (terminal, mut view) = raw_cat(&mut client);
+
+    let start = Instant::now();
+    client.send_input(terminal, b"\x1b[?2026h three").unwrap();
+    let update = next_update(&mut client, terminal);
+    // Not before the frame had its time, give or take the clocks.
+    assert!(
+        start.elapsed() >= Duration::from_millis(140),
+        "shown after {:?}",
+        start.elapsed()
+    );
+    view.apply(update);
+    assert!(
+        screen_text(&view).contains("three"),
+        "{}",
+        screen_text(&view)
+    );
+
+    // The program still says it's drawing, but isn't waited for again
+    // until it starts another frame: what it prints shows at once.
+    client.frame_done(terminal).unwrap();
+    let start = Instant::now();
+    client.send_input(terminal, b" four").unwrap();
+    let update = next_update(&mut client, terminal);
+    assert!(
+        start.elapsed() < Duration::from_millis(140),
+        "held again for {:?}",
+        start.elapsed()
+    );
+    view.apply(update);
+    assert!(
+        screen_text(&view).contains("four"),
+        "{}",
+        screen_text(&view)
+    );
+
+    // Once it says that frame's done, its next is held again.
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"\x1b[?2026l six").unwrap();
+    view.apply(next_update(&mut client, terminal));
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"\x1b[?2026h five").unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("five"));
+    assert_quiet_for(&mut client, Duration::from_millis(50));
+    client.send_input(terminal, b"\x1b[?2026l").unwrap();
+    view.apply(next_update(&mut client, terminal));
+    assert!(
+        screen_text(&view).contains("five"),
+        "{}",
+        screen_text(&view)
+    );
+}
+
+#[test]
+fn programs_are_told_the_colours_the_window_said() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let mut named = [[0; 3]; 16];
+    named[1] = [0xcc, 0x66, 0x66];
+    let palette = clackatoo_protocol::Palette {
+        foreground: [0xdd, 0xe1, 0xe6],
+        background: [0x1d, 0x1f, 0x21],
+        cursor: [0xff; 3],
+        named,
+    };
+    client
+        .send(&ClientMessage::Colours { palette })
+        .expect("send");
+    // Asked with BEL, answered with it, as Neovim asks for the background.
+    let script = r"stty raw -echo; printf '\033]11;?\007'; head -c 24 | od -An -tx1; sleep 5";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    wait_for_answer(&mut client, terminal, b"\x1b]11;rgb:1d1d/1f1f/2121\x07");
+    // And a palette entry.
+    let script = r"stty raw -echo; printf '\033]4;1;?\007'; head -c 25 | od -An -tx1; sleep 5";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    wait_for_answer(&mut client, terminal, b"\x1b]4;1;rgb:cccc/6666/6666\x07");
+}
+
 #[test]
 fn a_resize_sends_a_new_snapshot() {
     let daemon = TestDaemon::start();
