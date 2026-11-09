@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026.11.16 (2026-11-09)
+
+### Features
+
+- **window:** one process for every window, so new windows open at once (81663f6c)
+- **daemon:** start the daemon and ssh as a client's origin would (fc71f67e)
+- **daemon:** fork a process apart from this one, and test origins (89eab24e)
+- **window:** clackatoo open hands its window to the process of windows (0093cd1b)
+
+### Fixes
+
+- **window:** hang up a closed window's connection while its process lives on (cdfbeced)
+- **window:** reopen a window after :update with its own arguments (ef6bf329)
+- **window:** a process of windows of its own, apart from any terminal (31aebbd2)
+- **window:** each window's own font, tutor directory and Lua output (f2865afb)
+- **window:** fork the process of windows, and hand it the window directly (e0376a60)
+- **daemon:** a forked child that can't be set apart ends at once (f0b35fa9)
+- **window:** group the odd windows, take windows while starting, count GPU losses once (4c57ef27)
+
 ## 2026.11.15 (2026-11-09)
 
 ### Features
