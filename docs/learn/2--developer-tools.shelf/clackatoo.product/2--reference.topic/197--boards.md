@@ -68,7 +68,7 @@ Each board is a file in `~/.local/share/clackatoo/boards`: JSON, one line per ch
 
 A board holds at most 10,000 changes or 8 MB, and there are at most 200 boards. A board's name is at most 64 characters, an entry's text 16 KB, and an entry links to 32 places at most. Remote windows see the same boards through the daemon.
 
-## Not yet
+## Known limits
 
 - Links in an entry can't be opened from the pane.
 - A board can't be renamed or deleted from clackatoo, and entries can't be removed.

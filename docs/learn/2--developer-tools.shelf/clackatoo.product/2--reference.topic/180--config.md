@@ -166,7 +166,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
 | `tildeop` | `top` | `~` takes a motion, as `g~` does. | off |
 | `startofline` | `sol` | These go to the line's first character that isn't blank, as Vim's do: `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, Ctrl+D, Ctrl+U, Ctrl+F, Page Down and Page Up, in editors and terminals; and in an editor, `:` and a line number, and deleting, shifting or indenting whole lines (`dd`, `dj`, `dG`, `>>`, `<<`, `==` and their kin). Off, as Neovim's are, they keep the column, as `j` and `k` do. Yanks and Ctrl+E and Ctrl+Y keep it either way, and `:d` goes to the first non-blank either way. | off |
-| `ignorecase` | `ic` | Searches ignore case, in editors, in a terminal's normal mode, in a chat's and in lists'. An editor ignores the case of plain English letters only, for now: `é` doesn't match `É`. | on |
+| `ignorecase` | `ic` | Searches ignore case, in editors, in a terminal's normal mode, in a chat's and in lists'. An editor ignores the case of plain English letters only: `é` doesn't match `É`. | on |
 | `smartcase` | `scs` | With `ignorecase`, a search with a capital letter in it matches case, in editors, terminals, chats and lists. Does nothing without `ignorecase`, as in Vim. | on |
 | `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until Esc or `:nohlsearch`. Off, only the match the search went to is lit. | on |
 | `clipboard` | `cb` | Which of the desktop's the unnamed register goes along with, for what's yanked or deleted in an editor and yanked in a terminal or a chat: the clipboard (`unnamedplus`), the primary selection (`unnamed`), or neither (`none`), keeping it the window's own but for `"+` and `"*`. | `unnamedplus` |
@@ -232,7 +232,7 @@ Windows, workspaces, tabs and panes are handles: values that stand for one of th
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
 | A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
-`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make yet, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
+`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
 
 ```lua
 client.keys.map("n", "<C-b>t", function(ev)
@@ -253,7 +253,7 @@ A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane th
 
 `print` writes to the window's log, `window.log` in clackatoo's state directory, which keeps what it prints unless `RUST_LOG` says otherwise (and to stderr, for a window opened in a process of its own).
 
-## Not yet
+## Known limits
 
 - The daemon's only config files are `agents.toml`, `machine.toml` and `web.toml`.
 - `init.lua` isn't run again when it changes: use `:reload`.

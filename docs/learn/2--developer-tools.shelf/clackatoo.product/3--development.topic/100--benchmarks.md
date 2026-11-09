@@ -62,7 +62,7 @@ ascii/alacritty         time:   [15.675 ms 15.724 ms 15.780 ms]
 
 Before benchmarking a workload, the suite plays it through both emulators and checks they end up showing the same screen. Otherwise the two wouldn't be doing the same work. One difference is expected: alacritty draws a ZWJ emoji sequence such as 👩&#x200D;💻 as two separate emoji, while clackatoo joins it into one, as kitty, WezTerm and Ghostty do. So on `unicode`, alacritty's lines wrap sooner, and the suite prints a note saying so. Any other difference prints a warning with both screens.
 
-alacritty also records which lines changed as it goes, for its renderer. clackatoo doesn't do that yet, so expect the gap to narrow a little once it does.
+alacritty also records which lines changed as it goes, for its renderer. clackatoo doesn't do that, so the gap would narrow a little if it did.
 
 ## End to end
 

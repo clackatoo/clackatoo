@@ -1,7 +1,7 @@
 ---
 title: Editing files
 type: reference
-description: An editor pane edits a file with Vim's keys. The daemon keeps the file's text and its undo history, so every window edits the same text, agents' edits and yours meet, and nothing is lost when the window closes or the daemon upgrades. How to open and write files, the languages files are colored in, language servers and the mistakes they find, line numbers, tabs and indenting, the view, Markdown rendered, the keys, and what doesn't work yet.
+description: An editor pane edits a file with Vim's keys. The daemon keeps the file's text and its undo history, so every window edits the same text, agents' edits and yours meet, and nothing is lost when the window closes or the daemon upgrades. How to open and write files, the languages files are colored in, language servers and the mistakes they find, line numbers, tabs and indenting, the view, Markdown rendered, the keys, and what it doesn't do.
 related:
   - clackatoo/reference/window
   - clackatoo/reference/cli
@@ -549,7 +549,7 @@ Letting go puts what's selected on the primary selection, which a middle click p
 
 A drag from insert mode selects in visual mode for a while, as Neovim's "(insert) VISUAL" does, and the bar says `(insert) VISUAL`: once the selection ends, by an operator, Esc or a click, the editor goes back to insert mode at the cursor; `c` types over it. A binding or macro run on it goes back to insert only once all its keys have run. `:` on it, `gra` and leaving the pane leave it in normal mode.
 
-## Not yet
+## Known limits
 
 - A window isn't told of changes that came back until it opens their file, or `:recover`; a `[No Name]` that came back isn't in `:Buffers`.
 - No `breakat` or `breakindentopt`. Typing near the start of a line of megabytes that isn't plain ASCII takes a moment, as the rest of it is laid out again.

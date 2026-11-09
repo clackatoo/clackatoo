@@ -119,7 +119,7 @@ Each line starts with a hidden mark naming its entry, so what it named is known 
 | `explorerwidth` (`ew`) | `0` | How wide an explorer opens, in columns: 0 is 30, or a quarter of the tab if that's narrower, but never under 10; otherwise 10 to 200. |
 | `explorerhidden` (`eh`) | off | Explorers show hidden files when they open. |
 
-## Not yet
+## Known limits
 
 - You can't drag files in from other programs, or out to them.
 - Only 4096 folders are watched at once; past that, `R` shows what's changed.

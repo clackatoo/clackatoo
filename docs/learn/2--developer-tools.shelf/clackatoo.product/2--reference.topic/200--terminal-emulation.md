@@ -104,7 +104,7 @@ A program asks a flag at a time:
 
 | Flag | What changes |
 |---|---|
-| 1 (disambiguate) | Esc, and keys with Ctrl or Alt, are sent as `CSI <key> ; <modifiers> u`. Enter, Tab and Backspace with no modifiers are sent as before, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without Shift is text. |
+| 1 (disambiguate) | Esc, and keys with Ctrl or Alt, are sent as `CSI <key> ; <modifiers> u`. Enter, Tab and Backspace with no modifiers are sent as they are without the flag, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without Shift is text. |
 | 4 (alternate keys) | Those sequences also say the key Shift made, and the key in a US layout, as `CSI 97:65;2u`. |
 | 8 (all keys) | Every key is a sequence, text and all. |
 | 16 (text) | With 8, each sequence also says the text its key types. |
@@ -121,7 +121,7 @@ A program that draws its screen in pieces can say it's drawing a frame (`CSI ? 2
 
 A program can say how far a long task has got with `OSC 9 ; 4 ; <state> ; <percent> ST`, as ConEmu began it and Windows Terminal, Ghostty, kitty and WezTerm show it: state 1 is under way at a percent, 2 failed, 3 busy with no telling how far, 4 paused, and 0 done. The tab it's in ends its name with ` 42%`, ` ✗` (and the percent, if given) failed, ` …` busy, or ` ‖` paused: the focused pane's, or else the first of the tab's panes to say, in a tab shown or not. It goes once the program says it's done (state 0), or once the shell's next prompt shows the program has ended (OSC 133 `A`). Any other `OSC 9`, iTerm2's notification, is ignored.
 
-## Not supported yet
+## Not supported
 
 These are ignored:
 
