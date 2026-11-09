@@ -2,8 +2,14 @@
 //! events, or with no event of its own. Each transition reads it on every
 //! frame for a moment and applies it when it moved; nothing runs on an
 //! idle page.
+//!
+//! A chat's page and a terminal's are placed the same way, by one
+//! `Placement` read for both.
 
-use super::{App, Document, HtmlInputElement, HtmlTextAreaElement, Window, with_app};
+use super::{
+    App, Document, HtmlElement, HtmlInputElement, HtmlTextAreaElement, Window, standalone, with_app,
+};
+use crate::{dom, ui::el};
 use wasm_bindgen::{JsCast as _, prelude::Closure};
 
 /// How long after a transition frames keep reading the geometry, in
@@ -22,6 +28,58 @@ pub(super) struct Tracking {
     stale: bool,
     /// The numbers shown over the page, when asked for.
     pub(super) measures: Option<super::measures::Measures>,
+    /// An element as tall as the large viewport (`100lvh`), made the
+    /// first time a Home Screen app asks.
+    large: Option<HtmlElement>,
+}
+
+/// Where a full page goes: the visual viewport, or all of the large one.
+#[derive(Clone, Copy)]
+pub(super) struct Placement {
+    top: f64,
+    height: f64,
+    /// The visual viewport is shorter than the layout under it: the
+    /// keyboard is up, or the page is zoomed.
+    keyboard: bool,
+    /// A Home Screen app with the keyboard closed, whose large viewport
+    /// reaches further down than the layout it reports: an iPhone said
+    /// both viewports were 812 tall on an 874 screen, and left a gap
+    /// under the page (CLACKA-159). The page takes the large viewport
+    /// (`.tall`, in the style sheet), keeping the home indicator's inset
+    /// at its foot. Safari's large viewport is the size with its bars
+    /// hidden, so a page in Safari never does.
+    tall: bool,
+}
+
+impl Placement {
+    /// Puts `page` there.
+    pub(super) fn apply(self, page: &HtmlElement) {
+        let classes = page.class_list();
+        let _ = classes.toggle_with_force("keyboard-open", self.keyboard);
+        let _ = classes.toggle_with_force("tall", self.tall);
+        let style = page.style();
+        if self.tall {
+            for name in ["top", "height", "--viewport-top", "--viewport-height"] {
+                let _ = style.remove_property(name);
+            }
+            return;
+        }
+        // Otherwise it fits the visible rectangle. Safari can pan it to
+        // the layout's bottom, or report innerHeight already reduced,
+        // while 100dvh still extends behind the keyboard. Neither proves
+        // that the keyboard closed. Dismissal supplies a new visible
+        // height.
+        let top = format!("{}px", self.top);
+        let height = format!("{}px", self.height);
+        for (name, value) in [
+            ("top", &top),
+            ("--viewport-top", &top),
+            ("height", &height),
+            ("--viewport-height", &height),
+        ] {
+            let _ = style.set_property(name, value);
+        }
+    }
 }
 
 /// What places the page: the visual viewport, and the layout viewport
@@ -86,6 +144,44 @@ pub(super) fn listen(window: &Window, document: &Document) {
 }
 
 impl App {
+    /// Where the pages go now, if the browser has a visual viewport.
+    pub(super) fn placement(&mut self) -> Option<Placement> {
+        let viewport = self.window.visual_viewport()?;
+        let (top, height) = (viewport.offset_top(), viewport.height());
+        let inner = (self.window.inner_height().ok())
+            .and_then(|height| height.as_f64())
+            .unwrap_or(height);
+        let layout = (self.document.document_element())
+            .map_or(inner, |root| inner.max(f64::from(root.client_height())));
+        let keyboard = height < layout - 1.0;
+        let tall = !keyboard
+            && standalone(&self.window)
+            && self
+                .large_height()
+                .is_some_and(|large| large > layout + 1.0);
+        Some(Placement {
+            top,
+            height,
+            keyboard,
+            tall,
+        })
+    }
+
+    /// How tall the large viewport is.
+    fn large_height(&mut self) -> Option<f64> {
+        if self.viewport.large.is_none() {
+            let probe: HtmlElement = dom::element_of(
+                &self.document,
+                &el("div").class("measures-probe").style("height", "100lvh"),
+            )
+            .unchecked_into();
+            self.document.body()?.append_child(&probe).ok()?;
+            self.viewport.large = Some(probe);
+        }
+        let probe = self.viewport.large.as_ref()?;
+        Some(f64::from(probe.offset_height()))
+    }
+
     /// The keyboard, the screen or the page may be moving, as `why` says:
     /// the next frame applies the geometry, and frames after it apply it
     /// again whenever it moves, for `TRACK_FOR` from now. A late

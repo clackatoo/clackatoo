@@ -42,7 +42,7 @@ impl Measures {
             ("dvh", "100dvh"),
             ("lvh", "100lvh"),
             ("inset-top", "env(safe-area-inset-top)"),
-            ("inset-bottom", "env(safe-area-inset-bottom)"),
+            ("inset-bottom", "var(--inset-bottom)"),
         ] {
             let probe: HtmlElement = dom::element_of(
                 document,
@@ -132,10 +132,18 @@ impl Measures {
             let rect = page.get_bounding_client_rect();
             let _ = write!(
                 text,
-                "page    top {:.1} bottom {:.1}",
+                "page    top {:.1} bottom {:.1} h {:.1}",
                 rect.top(),
-                rect.bottom()
+                rect.bottom(),
+                rect.height(),
             );
+            // Which height was chosen: the large viewport's, or the
+            // visual one's.
+            if page.class_list().contains("tall") {
+                text.push_str(" tall=lvh");
+            } else {
+                text.push_str(" =visual");
+            }
             if page.class_list().contains("keyboard-open") {
                 text.push_str(" keyboard-open");
             }

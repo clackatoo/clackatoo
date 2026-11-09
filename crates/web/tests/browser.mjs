@@ -78,6 +78,45 @@ try {
     assert(gap>=-1 && gap<=7,`composer bottom gap ${gap}px`);
   };
   await tightComposer();
+  // An iPhone's Home Screen numbers, in this viewport: both the visual and
+  // layout viewports 62px short of the large one, a 34px bottom inset.
+  const homeScreen=()=>page.evaluate(()=>{
+    const root=document.documentElement;
+    const short=innerHeight-62;
+    window.savedInnerHeight=Object.getOwnPropertyDescriptor(window,'innerHeight');
+    root.style.setProperty('--inset-bottom','34px');
+    Object.defineProperty(navigator,'standalone',{value:true,configurable:true});
+    Object.defineProperty(window,'innerHeight',{value:short,configurable:true});
+    Object.defineProperty(root,'clientHeight',{value:short,configurable:true});
+    Object.defineProperty(visualViewport,'height',{value:short,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  const leaveHomeScreen=()=>page.evaluate(()=>{
+    const root=document.documentElement;
+    root.style.removeProperty('--inset-bottom');
+    Object.defineProperty(window,'innerHeight',window.savedInnerHeight);
+    delete window.savedInnerHeight;delete root.clientHeight;
+    delete navigator.standalone;delete visualViewport.height;delete visualViewport.scale;
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  // The page reaches the large viewport's foot, and `last`, at its foot,
+  // ends the home indicator's inset above it.
+  const reachesLarge=async(selector,last)=>{
+    const large=await page.evaluate(()=>{
+      const probe=document.createElement('div');
+      probe.style.cssText='position:fixed;top:0;width:1px;height:100lvh;visibility:hidden';
+      document.body.append(probe);
+      const height=probe.offsetHeight;
+      probe.remove();
+      return height;
+    });
+    await page.waitForFunction(([selector,large])=>{
+      const shown=document.querySelector(selector);
+      return shown.classList.contains('tall') && Math.abs(shown.getBoundingClientRect().bottom-large)<1;
+    },[selector,large]);
+    const bottom=await page.locator(last).evaluate(e=>e.getBoundingClientRect().bottom);
+    assert(Math.abs(bottom-(large-34))<1.5,`${last} ends at ${bottom}px of a ${large}px large viewport`);
+  };
 
   // The real file input, local decode/PNG normalization, thumbnails and wire
   // submission. No provider credentials or model requests are involved.
@@ -307,41 +346,46 @@ try {
   assert(await page.locator('.chat-page').evaluate(e=>Math.abs(parseFloat(e.style.height)-420)<1),'an idle page was still read');
   await page.evaluate(()=>visualViewport.dispatchEvent(new Event('resize')));
   await tightComposer();
-  // Home Screen CSS vh can extend beyond the drawable web view. Never expand
-  // into that clipped area, even if the difference matches safe-area padding.
-  await page.evaluate(()=>{
-    document.querySelector('.chat-page').style.paddingTop='62px';
-  });
-  await page.evaluate(()=>{
-    Object.defineProperty(navigator,'standalone',{value:true,configurable:true});
-    Object.defineProperty(visualViewport,'height',{value:innerHeight-62,configurable:true});
-    visualViewport.dispatchEvent(new Event('resize'));
-  });
-  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  await tightComposer();
+  // A Home Screen iPhone says its visual and layout viewports are both 62px
+  // short of the large viewport, which it draws (CLACKA-159: 812 of 874).
+  // With the keyboard closed the page takes the large viewport, the composer
+  // clearing the home indicator's inset; with it open, or zoomed, the page
+  // still fits the visible rectangle, and in Safari it always does.
+  await homeScreen();
+  await reachesLarge('.chat-page','.composer');
+  assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')));
   await page.screenshot({path:`${output}/home-screen-composer.png`});
   await page.evaluate(()=>{
     Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
   await tightComposer();
-  assert(await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')));
+  assert(await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open') && !e.classList.contains('tall')));
   await page.evaluate(()=>{
-    Object.defineProperty(visualViewport,'height',{value:innerHeight-62,configurable:true});
+    Object.defineProperty(visualViewport,'height',{value:innerHeight,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
-  await tightComposer();
-  // Pinch zoom must still fit the visual viewport, even for a small reduction.
+  await reachesLarge('.chat-page','.composer');
+  // Pinch zoom still fits the visual viewport.
   await page.evaluate(()=>{
     Object.defineProperty(visualViewport,'scale',{value:1.1,configurable:true});
+    Object.defineProperty(visualViewport,'height',{value:innerHeight/1.1,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
   await tightComposer();
+  // Safari's large viewport is its size with the bars hidden.
   await page.evaluate(()=>{
-    document.querySelector('.chat-page').style.removeProperty('padding-top');
-    delete navigator.standalone;delete visualViewport.height;delete visualViewport.scale;
+    delete navigator.standalone;delete visualViewport.scale;
+    Object.defineProperty(visualViewport,'height',{value:innerHeight,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
+  // There the composer keeps 12px of the 34px inset under it, as before.
+  await page.waitForFunction(()=>{
+    const shown=document.querySelector('.chat-page');
+    const gap=visualViewport.height-document.querySelector('.composer').getBoundingClientRect().bottom;
+    return !shown.classList.contains('tall') && Math.abs(shown.getBoundingClientRect().bottom-visualViewport.height)<1 && Math.abs(gap-12)<1;
+  });
+  await leaveHomeScreen();
   await tightComposer();
   await page.setViewportSize({width:390,height:420});
   await page.locator('#message').focus();
@@ -382,6 +426,12 @@ try {
   const terminalFont=()=>page.locator('.grid').evaluate(e=>parseFloat(getComputedStyle(e).fontSize));
   assert(await terminalFont()>=14,'terminal text should not shrink below a readable size');
   assert(!await page.locator('.key-toolbar').isVisible(),'accessory row should be tucked away while reading');
+  // The terminal's page is placed as the chat's is.
+  await homeScreen();
+  await reachesLarge('.term-page','.keys-part');
+  await page.screenshot({path:`${output}/home-screen-terminal.png`});
+  await leaveHomeScreen();
+  await page.waitForFunction(()=>!document.querySelector('.term-page').classList.contains('tall'));
   await page.screenshot({path:`${output}/phone-terminal.png`});
   await page.getByRole('button',{name:'Terminal options',exact:true}).click();
   await page.getByRole('button',{name:'Larger terminal text',exact:true}).click();
@@ -467,6 +517,6 @@ try {
   await page.locator('.grid').getByText('Checking clackatoo-web',{exact:false}).waitFor();
   assert(actions.some(a=>a.includes('Bring { tab: TabId(23) }')));
   assert.deepEqual(errors,[]);
-  console.log('PASS: dashboard filters/search; navigation and reload drafts; photo picker/PNG normalization/removal/image-only send/rejection/async navigation; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit, text sizing, keyboard controls and single-send touch input; background tabs listed, dismissed and brought back.');
+  console.log('PASS: dashboard filters/search; navigation and reload drafts; photo picker/PNG normalization/removal/image-only send/rejection/async navigation; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/Home Screen/landscape/desktop layout; approvals; image pixels; terminal Fit, text sizing, keyboard controls and single-send touch input; background tabs listed, dismissed and brought back.');
   await context.close();
 } finally { await browser.close(); server.close(); }

@@ -390,9 +390,8 @@ impl TermPage {
         }
     }
 
-    /// Puts the page where the phone shows it, above its keyboard: the
-    /// visual viewport, `height` pixels tall, `top` pixels down the page.
-    pub(super) fn place(&self, top: f64, height: f64) {
+    /// Puts the page where the phone shows it, above its keyboard.
+    pub(super) fn place(&self, placement: super::viewport::Placement) {
         let at_bottom = self.at_bottom();
         let typing = self
             .input
@@ -400,9 +399,7 @@ impl TermPage {
             .and_then(|d| d.active_element())
             .is_some_and(|active| active == *self.input.unchecked_ref::<DomElement>());
         let _ = self.main.class_list().toggle_with_force("typing", typing);
-        let style = self.main.style();
-        let _ = style.set_property("top", &format!("{top}px"));
-        let _ = style.set_property("height", &format!("{height}px"));
+        placement.apply(&self.main);
         if self.drawn && at_bottom {
             self.to_bottom();
         }
