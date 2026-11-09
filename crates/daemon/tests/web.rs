@@ -17,8 +17,8 @@ use clackatoo_daemon::{AgentConfig, Client, CustomAgent, Daemon, DaemonConfig, S
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     AgentTools, ChatAction, ChatSummary, ClientMessage, Content, Error, Event, GridNode, Item,
-    NewAgent, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Request, Response, ServerMessage, Size,
-    TerminalId, View, ViewUpdate,
+    NewAgent, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Request, Response, ServerMessage, Side,
+    Size, TerminalId, View, ViewUpdate,
 };
 use tungstenite::client::IntoClientRequest as _;
 use tungstenite::http::HeaderValue;
@@ -1499,6 +1499,39 @@ fn a_device_can_neither_reveal_a_pane_nor_be_revealed_one() {
         matches!(&none, Response::Error(Error::Other(why)) if why.contains("no window")),
         "{none:?}"
     );
+}
+
+/// A phone looks at a terminal, one at a time: its switch to another of a
+/// zoomed tab's panes leaves the tab zoomed for the windows (CLACKA-240).
+#[test]
+fn a_devices_switch_to_a_pane_leaves_its_tab_zoomed() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let cat = || {
+        PaneTerminal::New(NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        })
+    };
+    let one = window.new_workspace(None, cat()).unwrap();
+    let two = window.split_pane(one, Side::Right, cat()).unwrap();
+    let tab = window.watch_workspaces().unwrap().list[0].tabs[0].id;
+    let zoom = Request::Zoom {
+        tab,
+        pane: Some(one),
+    };
+    assert_eq!(window.request(&zoom).unwrap(), Response::Done);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    // Even said as a switch, as an older phone app says it.
+    let focus = Request::Focus {
+        pane: two,
+        looking: false,
+    };
+    assert_eq!(phone.request(focus), Response::Done);
+    assert_eq!(window.watch_workspaces().unwrap().zoomed.len(), 1);
 }
 
 #[test]

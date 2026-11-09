@@ -3960,7 +3960,7 @@ impl Daemon {
                     Ok(Response::Done)
                 }
             },
-            Request::Focus { pane } => {
+            Request::Focus { pane, looking } => {
                 // Phones can select a background terminal without bringing
                 // its tab into the desktop. Relayed selections arrive here too.
                 if let Some(terminal) = self.terminal_of_pane(pane) {
@@ -3970,8 +3970,9 @@ impl Daemon {
                     Ok(Response::Done)
                 } else {
                     // A phone looking at a terminal leaves a tab zoomed,
-                    // as it shows one terminal at a time anyway.
-                    let unzoom = !self.is_web_device(token);
+                    // as it shows one terminal at a time anyway, here or
+                    // through a daemon relaying it.
+                    let unzoom = !looking && !self.is_web_device(token);
                     self.workspaces.focus(pane, unzoom).map(|()| {
                         self.workspaces_changed();
                         Response::Done

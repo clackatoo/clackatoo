@@ -1000,7 +1000,10 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn focus(&mut self, pane: PaneId) -> Result<(), ClientError> {
-        self.done(&Request::Focus { pane })
+        self.done(&Request::Focus {
+            pane,
+            looking: false,
+        })
     }
 
     /// Has the daemon connect to the daemon on another machine, `host`, as

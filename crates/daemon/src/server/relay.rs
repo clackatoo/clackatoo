@@ -996,14 +996,20 @@ impl Daemon {
                     None => Routed::Here(Request::Forwards { pane, forwarding }),
                 }
             }
-            Request::Focus { pane } => {
+            Request::Focus { pane, looking } => {
                 let Some((at, remote)) = self.relayed_pane(pane) else {
                     // Its own, and the active workspace is one of this
                     // daemon's again.
                     self.links.active = None;
-                    return Routed::Here(Request::Focus { pane });
+                    return Routed::Here(Request::Focus { pane, looking });
                 };
-                let focus = Request::Focus { pane: remote };
+                // A phone only looks, and the daemon there must know so,
+                // as the asker it sees is this daemon.
+                let looking = looking || self.is_web_device(token);
+                let focus = Request::Focus {
+                    pane: remote,
+                    looking,
+                };
                 let _ = self.send_upstream(at, &ClientMessage::Request(focus), Expect::Nothing);
                 let workspace = (self.links.list[at].relayed.mirror.workspaces.iter())
                     .find(|workspace| (workspace.tabs.iter()).any(|tab| tab.layout.contains(pane)))

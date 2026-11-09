@@ -3025,11 +3025,23 @@ mod keeping_whose {
         // Exercise the user Focus request, then focus elsewhere: selection stays sticky.
         let pane = daemon.workspaces.get().pane_showing(selected).unwrap();
         assert!(matches!(
-            daemon.respond(Request::Focus { pane }, mio::Token(usize::MAX)),
+            daemon.respond(
+                Request::Focus {
+                    pane,
+                    looking: false
+                },
+                mio::Token(usize::MAX)
+            ),
             Response::Done
         ));
         let parent = daemon.workspaces.get().pane_showing(chat).unwrap();
-        daemon.respond(Request::Focus { pane: parent }, mio::Token(usize::MAX));
+        daemon.respond(
+            Request::Focus {
+                pane: parent,
+                looking: false,
+            },
+            mio::Token(usize::MAX),
+        );
         let saved = daemon.hand_over_agent_terminals();
         daemon.tools.commanded.clear();
         daemon.resume_agent_terminals(Some(saved));
@@ -3393,7 +3405,13 @@ mod keeping_whose {
         );
         let before = daemon.workspaces.get().clone();
         assert!(matches!(
-            daemon.respond(Request::Focus { pane }, mio::Token(usize::MAX)),
+            daemon.respond(
+                Request::Focus {
+                    pane,
+                    looking: false
+                },
+                mio::Token(usize::MAX)
+            ),
             Response::Done
         ));
         assert!(daemon.tools.commanded[&terminal].retained);

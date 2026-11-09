@@ -1079,6 +1079,10 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 beside: Some(PaneId(1)),
             })),
             Client(ClientMessage::Request(Request::Reopen { beside: None })),
+            Client(ClientMessage::Request(Request::Focus {
+                pane: PaneId(1),
+                looking: true,
+            })),
         ]
         .map(|sample| (crate::wire::LAYOUT_EXTRAS, sample)),
     );

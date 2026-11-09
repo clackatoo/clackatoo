@@ -2026,6 +2026,14 @@ fn a_tab_zooms_to_a_pane_until_its_split_or_another_pane_is_focused() {
         }),
         Ok(Response::Error(Error::NoSuchTab(_)))
     ));
+    // A pane only looked at, as a daemon relaying a phone's switch says,
+    // leaves it zoomed.
+    let looking = Request::Focus {
+        pane: two,
+        looking: true,
+    };
+    assert_eq!(client.request(&looking).unwrap(), Response::Done);
+    assert_eq!(client.watch_workspaces().unwrap().zoomed.len(), 1);
     // Another of its panes focused puts its splits back, as tmux does.
     client.focus(two).unwrap();
     assert!(client.watch_workspaces().unwrap().zoomed.is_empty());

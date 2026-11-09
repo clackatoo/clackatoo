@@ -375,7 +375,7 @@ impl Daemon {
                 }
             }
             Request::ClosePane { pane: id }
-            | Request::Focus { pane: id }
+            | Request::Focus { pane: id, .. }
             | Request::Reveal { pane: id, .. }
             | Request::Split { pane: id, .. }
             | Request::Reopen { beside: Some(id) }

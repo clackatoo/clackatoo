@@ -905,6 +905,16 @@ pub enum Request {
     Focus {
         /// The pane switched to.
         pane: PaneId,
+        /// The asker only looks at the pane, as a phone does, rather than
+        /// moving to it: a tab zoomed to another of its panes stays zoomed
+        /// ([`Workspaces::zoomed`]). A daemon relaying a phone's switch
+        /// sets it. `false` from a client older than protocol 145, whose
+        /// switch unzooms, as a daemon that old has no zoom.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::LAYOUT_EXTRAS }, _>",
+            deserialize_with = "wire::since::<{ wire::LAYOUT_EXTRAS }, _, _>"
+        )]
+        looking: bool,
     },
     /// Renames a workspace.
     RenameWorkspace {

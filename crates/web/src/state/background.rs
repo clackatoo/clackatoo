@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(
             state.take_outbox(),
             [
-                ClientMessage::Request(Request::Focus { pane: PaneId(5) }),
+                ClientMessage::Request(Request::Focus {
+                    pane: PaneId(5),
+                    looking: true
+                }),
                 ClientMessage::Request(Request::Attach {
                     terminal: TerminalId(5)
                 }),
@@ -238,7 +241,10 @@ mod tests {
         // Reconnected, it's focused again once the workspaces say the
         // daemon is the one whose terminal 5 it was.
         state.connected();
-        let focus = ClientMessage::Request(Request::Focus { pane: PaneId(5) });
+        let focus = ClientMessage::Request(Request::Focus {
+            pane: PaneId(5),
+            looking: true,
+        });
         assert!(!state.take_outbox().contains(&focus));
         let workspaces = state.workspaces.clone();
         state.receive(ServerMessage::Response(Response::Workspaces(workspaces)));

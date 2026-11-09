@@ -908,7 +908,13 @@ impl State {
                 .map(|pane| pane.id)
         });
         if let Some(pane) = pane {
-            self.request(Request::Focus { pane }, Asked::Quiet);
+            self.request(
+                Request::Focus {
+                    pane,
+                    looking: true,
+                },
+                Asked::Quiet,
+            );
         }
     }
 

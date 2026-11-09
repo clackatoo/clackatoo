@@ -1276,7 +1276,13 @@ impl Desk {
         if !unfocused && let Some(arrived) = self.focused_pane() {
             arrived.focus_changed(true);
         }
-        self.request(Request::Focus { pane }, Asked::Quiet);
+        self.request(
+            Request::Focus {
+                pane,
+                looking: false,
+            },
+            Asked::Quiet,
+        );
         self.fit_panes();
     }
 
@@ -4390,7 +4396,10 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(2));
         assert_eq!(mode(&desk, 2), Mode::Normal, "the mode came along");
         assert_eq!(mode(&desk, 1), Mode::Normal, "the pane left kept its mode");
-        assert!(answer_all(&mut desk).contains(&Request::Focus { pane: PaneId(2) }));
+        assert!(answer_all(&mut desk).contains(&Request::Focus {
+            pane: PaneId(2),
+            looking: false
+        }));
         ctrl(&mut desk, "l");
         assert_eq!(shown_pane(&desk), PaneId(2), "nothing further right");
         ctrl(&mut desk, "h");
@@ -4643,7 +4652,10 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(1));
         let asked = answer_all(&mut desk);
         assert!(
-            asked.contains(&Request::Focus { pane: PaneId(1) }),
+            asked.contains(&Request::Focus {
+                pane: PaneId(1),
+                looking: false
+            }),
             "{asked:?}"
         );
         // A window whose tab another zoomed goes to the pane zoomed to.
@@ -4672,7 +4684,10 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(3));
         let asked = answer_all(&mut desk);
         assert!(
-            !asked.contains(&Request::Focus { pane: PaneId(1) }),
+            !asked.contains(&Request::Focus {
+                pane: PaneId(1),
+                looking: false
+            }),
             "{asked:?}"
         );
     }
@@ -11937,7 +11952,10 @@ mod tests {
         assert_eq!(
             asked,
             [
-                Request::Focus { pane: PaneId(1) },
+                Request::Focus {
+                    pane: PaneId(1),
+                    looking: false
+                },
                 Request::OpenHere {
                     pane: PaneId(1),
                     file: file("/p/a.txt"),

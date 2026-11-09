@@ -400,6 +400,7 @@ fn ids_never_handed_out_are_refused() {
         }),
         request(Request::Focus {
             pane: clackatoo_protocol::PaneId(u32::MAX),
+            looking: false,
         }),
         request(Request::Review(ReviewAction::Keep(Hunks::Turn {
             chat: terminal,
