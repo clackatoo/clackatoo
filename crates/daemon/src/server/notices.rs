@@ -10,6 +10,9 @@
 //! - **To the phone only when marked.** A terminal the user marked
 //!   ([`Request::NotifyPhone`]) has its notifications reach paired devices
 //!   too, through the same push as chats'.
+//! - **Where it's shown.** One lent to another machine, and not shown
+//!   here, is told only to that machine's daemon, as what's said of it
+//!   is.
 //! - **Bounded.** What a program says is cleaned as names are, and a
 //!   terminal shows a few at once, then one every few seconds (see
 //!   `HostedTerminal::take_notice`); one on another machine too, as its
@@ -185,12 +188,15 @@ impl Daemon {
     }
 
     /// Sends `notice`, about terminal `id`, to the windows and relaying
-    /// daemons that take it, and to the phone if `phone`.
+    /// daemons that take it and may see it, and to the phone if `phone`:
+    /// of a terminal lent to another machine, and not shown here, only to
+    /// its daemon, which says it where it's shown.
     fn notice_now_to(&mut self, id: TerminalId, notice: &Notice, phone: bool) {
         let shown = match notice {
             Notice::Show(notification) => Some(notification),
             Notice::Close => None,
         };
+        let phone = phone && self.lent_away(id).is_none();
         let told: Vec<Token> = (self.sources.iter())
             .filter_map(|(key, source)| match source {
                 Source::Client(client)
@@ -201,6 +207,7 @@ impl Daemon {
                 }
                 _ => None,
             })
+            .filter(|&token| self.may_see_terminal(token, id))
             .collect();
         for token in told {
             let event = Event::Notified {

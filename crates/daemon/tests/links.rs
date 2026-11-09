@@ -3283,6 +3283,54 @@ fn a_borrowed_chat_is_in_the_workspace_that_borrowed_it() {
 }
 
 #[test]
+fn a_lent_terminals_notifications_are_told_where_its_borrowed_alone() {
+    let mut pair = Pair::new();
+    pair.window.say_window().unwrap();
+    let mut at_laptop = pair.laptop().client();
+    at_laptop.watch_workspaces().unwrap();
+    at_laptop.say_window().unwrap();
+    let (_, content) = borrow(&mut pair, shell());
+    let terminal = terminal_of(content);
+    attach_to(&mut pair.window, terminal);
+    pair.window
+        .send_input(terminal, b"printf '\\033]9;lent\\007'\r")
+        .unwrap();
+    // Desk's window is told, through desk.
+    pair.window
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    loop {
+        match pair.window.next_event().expect("an event") {
+            Event::View {
+                terminal: viewed, ..
+            } => pair.window.frame_done(viewed).unwrap(),
+            Event::Notified {
+                terminal: told,
+                notice,
+            } => {
+                assert_eq!(told, terminal);
+                assert!(
+                    matches!(notice, clackatoo_protocol::Notice::Show(said) if said.body == "lent")
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    // Laptop's own, which doesn't show it, isn't.
+    at_laptop
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .unwrap();
+    loop {
+        match at_laptop.next_event() {
+            Ok(Event::Notified { .. }) => panic!("laptop's window was told"),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+#[test]
 fn what_a_machine_lent_is_the_borrowers_alone() {
     let mut pair = Pair::new();
     let (_, _) = borrow(&mut pair, shell());
