@@ -214,3 +214,14 @@ inherits = "release"
 lto = false
 codegen-units = 16
 incremental = true
+
+# The keystroke gate's build (crates/bench/src/e2e/gate.rs): quick's, but
+# never incremental. An incremental build inlines far less from one part
+# of a crate into another (no ThinLTO between them), and frames built by
+# one took up to 1.6 times as long as by the same code built whole
+# (CLACKA-241): the gate would compare builds, not code. Into target/gate,
+# so it leaves quick's incremental build alone.
+# `cargo bench --profile gate -p clackatoo --bench e2e -- --gate`
+[profile.gate]
+inherits = "quick"
+incremental = false

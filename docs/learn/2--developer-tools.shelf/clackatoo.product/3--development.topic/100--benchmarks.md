@@ -215,13 +215,20 @@ them against a baseline kept in the repository, `crates/bench/gate.tsv`:
 `scripts/release` runs it before making a release, and stops if it fails:
 
 ```sh
-cargo bench --profile quick -p clackatoo --bench e2e -- --gate
+CARGO_INCREMENTAL=0 cargo bench --profile gate -p clackatoo --bench e2e -- --gate
 ```
 
-It's built with the `quick` profile, an optimised build without whole-program
-optimisation, into `target/quick/`. That's quicker to build, and it leaves the
-release build in `target/release/`, which may be the one you're running,
-alone. The baseline must be measured with the same profile.
+It's built with the `gate` profile, into `target/gate/`: an optimised build
+without whole-program optimisation, as `quick` is, so it's quicker to build
+than a release, and it leaves the release build in `target/release/`, which
+may be the one you're running, alone. Unlike `quick`, it's never built
+incrementally. An incremental build inlines far less from one part of a crate
+into another, and the same code built that way took up to 1.6 times as long
+to build a frame, which would fail the gate with nothing changed. So the
+baseline must be measured with the same profile, and `--gate` and
+`--update-gate` refuse to run built with any other. Cargo's
+`CARGO_INCREMENTAL` variable overrides any profile, so the commands here set
+it to 0.
 
 ### How it keeps from crying wolf
 
@@ -279,7 +286,7 @@ quieter ones), so a check on a machine with nothing else running may come
 out slower than a baseline made on a busy one.
 
 ```sh
-cargo bench --profile quick -p clackatoo --bench e2e -- --update-gate
+CARGO_INCREMENTAL=0 cargo bench --profile gate -p clackatoo --bench e2e -- --update-gate
 ```
 
 That takes all three batches, about half a minute, and writes them to

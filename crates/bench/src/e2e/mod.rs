@@ -117,7 +117,8 @@ options:
   --gate                measure the gate group only, and fail if it's
                         slower than crates/bench/gate.tsv allows
   --update-gate         measure the gate group only, and make that
-                        crates/bench/gate.tsv
+                        crates/bench/gate.tsv; both need the gate
+                        profile: cargo bench --profile gate
   -h, --help            show this help
 
 Without either baseline option, compares with the previous run and
@@ -199,6 +200,7 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
     println!("clackatoo end-to-end benchmarks");
     println!("binary: {}", binary.display());
     if let Some(gate) = options.gate {
+        gate::check_profile()?;
         let baselines = Baselines::file(paths.gate, gate == Gate::Update);
         let mut report = Report::start(baselines, measured)?;
         let wanted = match gate {

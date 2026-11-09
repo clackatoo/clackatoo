@@ -331,3 +331,47 @@ fn load() -> String {
         .and_then(|text| text.split_whitespace().next().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
 }
+
+/// The cargo profile a gate that checks or makes the baseline must be
+/// built with: `quick`'s, but never incremental (see Cargo.toml). An
+/// incremental build of the same code built frames up to 1.6 times as
+/// slowly (CLACKA-241), so a baseline and a check built differently
+/// would compare the builds.
+const PROFILE: &str = "gate";
+
+/// Fails unless this benchmark was built with [`PROFILE`], saying how to
+/// build it.
+pub(crate) fn check_profile() -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("finding the benchmark's own binary")?;
+    anyhow::ensure!(
+        profile(&exe) == Some(PROFILE),
+        "the keystroke gate must be built as its baseline was, with `cargo bench --profile \
+         {PROFILE}`, and {} wasn't",
+        exe.display()
+    );
+    Ok(())
+}
+
+/// The profile a benchmark's binary at `exe` was built with: cargo puts
+/// it in `TARGET/PROFILE/deps`.
+fn profile(exe: &Path) -> Option<&str> {
+    exe.parent()?.parent()?.file_name()?.to_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::profile;
+
+    #[test]
+    fn a_benchmarks_profile_is_the_folder_above_deps() {
+        let profile = |path| profile(Path::new(path));
+        assert_eq!(profile("/repo/target/gate/deps/e2e-0123abcd"), Some("gate"));
+        assert_eq!(
+            profile("/repo/target/x86_64-unknown-linux-gnu/quick/deps/e2e-0123abcd"),
+            Some("quick")
+        );
+        assert_eq!(profile("e2e"), None);
+    }
+}
