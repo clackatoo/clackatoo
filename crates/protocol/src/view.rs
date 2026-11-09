@@ -285,6 +285,15 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::AGENT_TERMINALS }, _, _>"
     )]
     pub agent: Option<AgentTerminal>,
+    /// Whether no program runs in it: the daemon writes what an agent's
+    /// command printed into it, as the agent tells it, so it can't be
+    /// typed into (see [`PaneTerminal::Output`](crate::PaneTerminal::Output)).
+    /// `false` from a daemon older than protocol 136, which has none.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FED_TERMINALS }, _>",
+        deserialize_with = "wire::since::<{ wire::FED_TERMINALS }, _, _>"
+    )]
+    pub fed: bool,
 }
 
 /// Provenance and lifecycle of a terminal created by an agent.
@@ -524,6 +533,7 @@ impl GridState {
             shell: terminal.shell_state(),
             block: terminal.latest_block().map(|(block, _)| block),
             agent: None,
+            fed: false,
         }
     }
 }
@@ -856,11 +866,15 @@ mod tests {
                     ViewUpdate::Snapshot(View {
                         root: Node::Grid(grid),
                         ..
-                    }) => grid.state.agent = None,
+                    }) => {
+                        grid.state.agent = None;
+                        grid.state.fed = false;
+                    }
                     ViewUpdate::Patch(patches) => {
                         for patch in patches {
                             if let Patch::Grid { state, .. } = patch {
                                 state.agent = None;
+                                state.fed = false;
                             }
                         }
                     }

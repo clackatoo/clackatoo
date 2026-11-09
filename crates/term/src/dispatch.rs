@@ -149,6 +149,8 @@ impl Perform for Emulator {
         match params {
             // OSC 0 sets the icon name and title, OSC 2 just the title. With
             // no icons to name, both set the title.
+            // The owner's, once it keeps them (see `Terminal::keep_names`).
+            [b"0" | b"2" | b"7", ..] if self.names_kept => {}
             [b"0" | b"2", title @ ..] => {
                 self.title = String::from_utf8_lossy(&title.join(&b';')).into_owned();
             }

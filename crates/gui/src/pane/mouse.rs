@@ -75,8 +75,11 @@ pub(super) struct MouseSelection {
 impl Pane {
     /// Whether the program gets the mouse, rather than clackatoo: it asked,
     /// the pane is in insert mode on the live screen, and Shift isn't held.
+    /// A pane showing what an agent's command printed has no program to
+    /// get it, whatever the command asked, so the mouse always selects.
     pub(crate) fn reports_mouse(&self, shift: bool) -> bool {
         !shift
+            && !self.fed()
             && self.mode == Mode::Insert
             && self.scroll == 0
             && self

@@ -14,7 +14,8 @@
 //! [`Content::Terminal`]: clackatoo_protocol::Content::Terminal
 
 use clackatoo_protocol::{
-    Content, NewTerminal, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate, wire,
+    Content, NewTerminal, OpenOutput, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate,
+    wire,
 };
 
 use super::{Asked, Desk};
@@ -160,10 +161,11 @@ impl Desk {
             SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
             let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
             let (mut wanting, mut opening) = (Vec::new(), Vec::new());
-            let mut follows = Vec::new();
+            let (mut follows, mut outputs) = (Vec::new(), Vec::new());
             for (&terminal, chat) in &mut self.chats {
                 redraw |= chat.settle(fonts);
                 follows.extend(chat.take_follows().into_iter().map(|id| (terminal, id)));
+                outputs.extend(chat.take_outputs().into_iter().map(|tool| (terminal, tool)));
                 copied.extend(chat.take_copies());
                 self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
@@ -192,6 +194,11 @@ impl Desk {
             // A click on a task's line on a chat's shelf.
             for (chat, id) in follows {
                 self.follow_task(chat, &id);
+                redraw = true;
+            }
+            // A command card's button, or `go` on it.
+            for (chat, tool) in outputs {
+                self.open_output(chat, tool);
                 redraw = true;
             }
             // What a chat's `/clear` or `/diff` is for, as the window
@@ -591,12 +598,7 @@ impl Desk {
             Ok(command) => command,
             Err(why) => return self.refuse(why),
         };
-        let pane = self.shown_tab().and_then(|tab| {
-            (tab.layout.panes().iter())
-                .find(|pane| pane.content == Content::Terminal(chat))
-                .map(|pane| pane.id)
-        });
-        let Some(pane) = pane else {
+        let Some(pane) = self.chat_pane_shown(chat) else {
             return self.refuse("the chat isn't in the tab shown".to_owned());
         };
         let terminal = PaneTerminal::New(NewTerminal {
@@ -604,6 +606,40 @@ impl Desk {
             command: Some(command),
             cwd: None,
             record_to: None,
+        });
+        let split = Request::Split {
+            pane,
+            side: Side::Below,
+            terminal,
+            on: None,
+        };
+        self.request(split, Asked::Pane);
+    }
+
+    /// The pane showing chat `chat` in the tab shown, if one does.
+    fn chat_pane_shown(&self, chat: TerminalId) -> Option<PaneId> {
+        self.shown_tab().and_then(|tab| {
+            (tab.layout.panes().iter())
+                .find(|pane| pane.content == Content::Terminal(chat))
+                .map(|pane| pane.id)
+        })
+    }
+
+    /// Opens what tool call `tool` of chat `chat` printed in a new
+    /// terminal below the chat's pane, as it came, colours and all, and
+    /// as more comes: the daemon writes it there as the agent tells it,
+    /// as no program runs there (CLACKA-24).
+    pub(super) fn open_output(&mut self, chat: TerminalId, tool: String) {
+        if !self.needs_daemon("a command's output in a pane", wire::FED_TERMINALS) {
+            return;
+        }
+        let Some(pane) = self.chat_pane_shown(chat) else {
+            return self.refuse("the chat isn't in the tab shown".to_owned());
+        };
+        let terminal = PaneTerminal::Output(OpenOutput {
+            chat,
+            tool,
+            size: self.new_pane_size(Some(Side::Below)),
         });
         let split = Request::Split {
             pane,

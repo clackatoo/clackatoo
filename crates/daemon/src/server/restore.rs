@@ -469,7 +469,8 @@ impl Daemon {
     }
 
     /// Pane `id`, showing `content`, as it's kept: `None` for one that
-    /// isn't, a buffer with no file yet or a chat's browser page.
+    /// isn't, a buffer with no file yet, a chat's browser page or what an
+    /// agent's command printed.
     #[allow(clippy::too_many_lines, reason = "an arm for each kind of pane")]
     fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
         if let Some(borrowed) = self.workspaces.borrowed().get(&id) {
@@ -489,6 +490,9 @@ impl Daemon {
         let kept = self.workspaces.kept(id);
         match content {
             Content::Terminal(terminal) => match &self.terminals.get(&terminal)?.terminal {
+                // What an agent's command printed, which a restart doesn't
+                // keep: no shell should come back in its place.
+                Hosted::Pty(terminal) if terminal.is_fed() => None,
                 Hosted::Pty(terminal) => {
                     let emulator = terminal.emulator();
                     Some(Pane::Terminal {

@@ -255,6 +255,12 @@ Codex can leave a command running when its turn ends, such as a dev server it st
 
 If you have a Codex chat open, ask it to start `sleep 60` and leave it running in the background, then watch its line on the shelf.
 
+## What a command printed
+
+A command's card shows the end of its output as plain text. To read all of it as a terminal shows it, colours and all, click the `↗` at the right of the card's head, or press `go` with the cursor on the card in normal mode: a terminal opens below the chat with what the command printed so far, and goes on showing what it prints as it runs, ending with a line such as `[exited 0]`. It has scrollback, `/` search and yanks as any terminal has, but no program runs in it, so it can't be typed into: the bar says so if you try. `:q` closes it; the command goes on. Codex sends a command's output as it comes; Claude Code sends it all once the command has finished.
+
+If you have a chat open, ask it to run `ls --color=always /` and press `go` on its card.
+
 ## Slash commands
 
 Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` rewinds the conversation to before its last turn, and `/export` copies the conversation.

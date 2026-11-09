@@ -56,6 +56,10 @@ struct Flash {
 /// fewer, and it would cover too much of what's being read.
 const PILL_ROWS: u16 = 4;
 
+/// What a pane showing what an agent's command printed says to what's
+/// typed or pasted at it: no program runs there to read it.
+const FED: &str = "this shows what an agent's command printed: it can't be typed into";
+
 /// A request sent to the daemon and not yet answered. Answers arrive in
 /// the order requests were sent.
 #[derive(Debug)]
@@ -1056,8 +1060,27 @@ impl Pane {
 
     /// Sends `bytes`, typed or pasted in this window, to the program.
     fn send_keyed(&mut self, bytes: Vec<u8>) {
+        if self.fed() {
+            self.refuse_typing();
+            return;
+        }
         self.keyed = Some(Instant::now());
         self.send_input(bytes);
+    }
+
+    /// Whether no program runs in it: the daemon writes what an agent's
+    /// command printed into it, which can't be typed into.
+    pub(crate) fn fed(&self) -> bool {
+        self.screen.as_ref().is_some_and(|screen| screen.state.fed)
+    }
+
+    /// Says what's typed at a terminal the daemon writes an agent's
+    /// command's output into goes nowhere, as a command refused. Returns
+    /// that the pane must be redrawn, to say it.
+    fn refuse_typing(&mut self) -> bool {
+        self.status = Some(FED.to_owned());
+        self.failed = true;
+        true
     }
 
     /// Whether a key typed or pasted in this window reached the program
@@ -1135,6 +1158,11 @@ impl Pane {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) {
+        // No program reads it, and only what's typed or pasted says so:
+        // the mouse's and the focus's reports go nowhere.
+        if self.fed() {
+            return;
+        }
         // Guesses already drawn stay, and nothing new is drawn.
         let _ = self.send_typed(bytes, predict::Input::Other);
     }
@@ -1143,6 +1171,9 @@ impl Pane {
     /// their echo if that can be guessed. Returns whether the guesses drawn
     /// changed.
     fn send_typed(&mut self, bytes: Vec<u8>, input: predict::Input) -> bool {
+        if self.fed() {
+            return self.refuse_typing();
+        }
         // Behind an image being read, unless that's taking an age.
         if let Some(held) = &mut self.held_input {
             if held.len() + bytes.len() <= MOST_HELD_INPUT {
@@ -2905,6 +2936,33 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_pane_showing_a_commands_output_takes_no_typing_and_says_so() {
+        // A command that asked for the mouse, as a pager does.
+        let terminal = terminal("red\r\n\x1b[?1000h");
+        let mut pane = Pane::new(TerminalId(1));
+        let mut view = View::capture(&terminal);
+        if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
+            grid.state.fed = true;
+        }
+        pane.view_changed(&ViewUpdate::Snapshot(view));
+        pane.take_outbox();
+        assert!(pane.fed());
+        // Typed in insert mode, as a pane starts, or pasted: nothing goes.
+        assert_eq!(pane.mode, Mode::Insert);
+        // The mouse selects, as no program gets it.
+        assert!(!pane.reports_mouse(false));
+        keys(&mut pane, "ls");
+        pane.paste("pwd\n");
+        assert!(sent(&mut pane).is_empty());
+        assert_eq!(pane.label().as_deref(), Some(FED));
+        assert!(pane.failed);
+        // Normal mode reads it as any terminal.
+        normal_mode(&mut pane);
+        keys(&mut pane, "yy");
+        assert!(sent(&mut pane).is_empty());
     }
 
     #[test]

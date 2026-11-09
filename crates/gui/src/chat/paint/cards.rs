@@ -16,6 +16,9 @@ pub(in crate::chat) const FOLDED: usize = 8;
 pub(in crate::chat) const MOST: usize = 1000;
 /// The space round a card's text, in ems.
 const PAD: f32 = 0.8;
+/// The button on a command's card that shows what it printed in a
+/// terminal below the chat.
+const OUTPUT: &str = "↗";
 
 /// A card, laid out.
 pub(super) struct CardLaid {
@@ -33,6 +36,9 @@ pub(super) struct CardLaid {
     /// What it does: a command, or a change's title.
     head: Laid,
     chevron: Laid,
+    /// On a command's card, the button that shows what it printed in a
+    /// terminal below the chat.
+    output: Option<Laid>,
     /// How many lines a change adds and removes.
     counts: Option<(Laid, Laid)>,
     /// What goes before a change's lines.
@@ -192,7 +198,11 @@ impl ChatView {
             Look::Plain(Tone::Muted),
             inner,
         );
-        let head_wide = (head_wide - chevron.width - m.em(0.8)).max(m.em(2.0));
+        // A command's output opens in a terminal, from beside the chevron.
+        let output = matches!(card, Some(Card::Command { .. }))
+            .then(|| w.text(OUTPUT, Look::Plain(Tone::Muted), inner));
+        let output_wide = (output.as_ref()).map_or(0.0, |output| output.width + m.em(0.8));
+        let head_wide = (head_wide - chevron.width - m.em(0.8) - output_wide).max(m.em(2.0));
         let (mut title, look) = match &card {
             Some(Card::Command { command, .. }) => {
                 (format!("$ {command}"), Look::Mono(Tone::Plain))
@@ -255,6 +265,7 @@ impl ChatView {
             mark,
             head,
             chevron,
+            output,
             counts,
             gutter,
             body,
@@ -455,8 +466,10 @@ fn summary_title(text: &str) -> String {
 
 /// Draws `card`, text `key`'s card, with its top left at `origin`,
 /// `width` wide, noting its text in `drawn`, and if it folds, where it
-/// can be clicked: its head and its foot, where they're in view. Its
-/// text, between, is for selecting.
+/// can be clicked: its head and its foot, where they're in view, and on
+/// a command's, the button that shows its output. Its text, between, is
+/// for selecting.
+#[allow(clippy::too_many_lines, reason = "a card's parts, top to bottom")]
 pub(super) fn draw_card(
     canvas: &mut Canvas<'_>,
     m: Measures,
@@ -498,6 +511,12 @@ pub(super) fn draw_card(
         [right - card.chevron.width, middle(&card.chevron)],
         inner,
     );
+    // Where the button that shows a command's output in a terminal is.
+    let output_x =
+        (card.output.as_ref()).map(|output| right - card.chevron.width - m.em(0.8) - output.width);
+    if let (Some(output), Some(x)) = (&card.output, output_x) {
+        draw_laid(canvas, m, output, [x, middle(output)], inner);
+    }
     if let Some((added, removed)) = &card.counts {
         let right = right - card.chevron.width - m.em(0.8);
         let removed_x = right - removed.width;
@@ -555,6 +574,12 @@ pub(super) fn draw_card(
     let foot = [rect[0], y, rect[2], rect[1] + rect[3] - y];
     for part in std::iter::once(head).chain(card.footer.as_ref().map(|_| foot)) {
         drawn.hit(view, Hit::Card(key.turn, card.tool.id.clone()), part);
+    }
+    // Over the head, which folds: the last hit noted is the one taken.
+    if let (Some(output), Some(x)) = (&card.output, output_x) {
+        let pad = m.em(0.4);
+        let button = [x - pad, rect[1], output.width + 2.0 * pad, card.head_height];
+        drawn.hit(view, Hit::Output(card.tool.id.clone()), button);
     }
     canvas.clip = view;
     let parts = std::iter::once(0).chain(first + 1..card.parts());

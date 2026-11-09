@@ -32,6 +32,7 @@
 //! | `v` then `y`, `Y` | Yank what's selected, or its lines |
 //! | `/` `?`, `n` `N` | Search the chat's text forward or back, and again |
 //! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
+//! | `go` | Show what the command whose card is under the cursor printed, in a terminal below the chat |
 //! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
 //! | `dG` | Rewind the conversation to before the turn, keeping what follows as another branch (see [`super::branches`]) |
@@ -41,7 +42,7 @@
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 //! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
 
-use clackatoo_protocol::{ChatAction, ChatNode, Item};
+use clackatoo_protocol::{ChatAction, ChatNode, Item, Tool, ToolKind};
 use winit::keyboard::{Key, NamedKey};
 
 use super::card::Card;
@@ -95,6 +96,9 @@ pub(crate) enum ChatKey {
     /// `gf` and `gx`: the file a message mentions under the cursor, or the
     /// link there, opened.
     OpenLink,
+    /// `go`: what the command whose card is under the cursor printed,
+    /// shown in a terminal below the chat.
+    Output,
     /// `[b`, or `]b` if not `back`: the branch before or after, where the
     /// conversation's branches part.
     Branch {
@@ -155,6 +159,7 @@ impl Dialect for ChatKeys {
             } => "Scroll table left half a view",
             ChatKey::Resend => "Send the failed message again",
             ChatKey::OpenLink => "Open file, link or subagent under cursor",
+            ChatKey::Output => "Show command's output in a terminal",
             ChatKey::Branch { back: true } => "Previous branch of the conversation",
             ChatKey::Branch { back: false } => "Next branch of the conversation",
             ChatKey::Rewind { edit: false } => "Rewind the conversation to before this turn",
@@ -206,7 +211,11 @@ impl Dialect for ChatKeys {
         _keys: &mut Reader<'_>,
         _visual: bool,
     ) -> Option<Read<ChatKey>> {
-        matches!(stroke.plain()?, 'f' | 'x').then_some(Read::Yes(ChatKey::OpenLink))
+        match stroke.plain()? {
+            'f' | 'x' => Some(Read::Yes(ChatKey::OpenLink)),
+            'o' => Some(Read::Yes(ChatKey::Output)),
+            _ => None,
+        }
     }
 
     fn after_z(
@@ -759,6 +768,11 @@ impl ChatView {
                 };
                 self.mentions.opening = Some(found.target);
             }
+            ChatKey::Output => {
+                if !self.show_output() {
+                    return (false, false);
+                }
+            }
             ChatKey::Fold(fold) => return (self.fold_key(fold), false),
             ChatKey::Sideways { right, half } => {
                 let pixels = if half {
@@ -1138,6 +1152,47 @@ impl ChatView {
         }
     }
 
+    /// The card under the reading cursor, by its item in the cursor's
+    /// turn, and its tool. In a subagent's words, it's the card of the
+    /// tool that started it, as Vim's keys act on the fold around.
+    fn card_under_cursor(&self) -> Option<(usize, &Tool)> {
+        let cursor = self.cursor?;
+        let item = cursor.text.piece.checked_sub(ITEMS)?;
+        let turn = self.node.turns.get(cursor.text.turn)?;
+        let card = match turn.items.get(item) {
+            Some(Item::Nested {
+                parent,
+                item: inner,
+            }) if inner.tool().is_none() => (turn.items)
+                .iter()
+                .position(|item| item.tool().is_some_and(|tool| tool.id == *parent))?,
+            _ => item,
+        };
+        Some((card, turn.items.get(card)?.tool()?))
+    }
+
+    /// `go`: shows what the command whose card is under the cursor
+    /// printed in a terminal below the chat, for the window to open; or
+    /// says why it can't. Returns whether it will.
+    fn show_output(&mut self) -> bool {
+        let command = (self.card_under_cursor())
+            .map(|(_, tool)| (tool.id.clone(), tool.kind == ToolKind::Execute));
+        match command {
+            Some((id, true)) => {
+                self.outputs.push(id);
+                true
+            }
+            Some((_, false)) => {
+                self.say("that card runs no command, so there's no output to show".to_owned());
+                false
+            }
+            None => {
+                self.say("no command's card under the cursor".to_owned());
+                false
+            }
+        }
+    }
+
     /// Opens the tool under the reading cursor, keeping the cursor on its
     /// header when its output disappears. Returns false outside a tool.
     fn fold_tool(&mut self, open: Option<bool>) -> bool {
@@ -1147,25 +1202,7 @@ impl ChatView {
         if notice_piece(cursor.text.piece).is_some() {
             return self.fold_answer(open);
         }
-        let Some(item) = cursor.text.piece.checked_sub(ITEMS) else {
-            return false;
-        };
-        let Some(turn) = self.node.turns.get(cursor.text.turn) else {
-            return false;
-        };
-        // In a subagent's words, it's the card of the tool that started
-        // it that opens and folds, as Vim's keys act on the fold around.
-        let card = match turn.items.get(item) {
-            Some(Item::Nested {
-                parent,
-                item: inner,
-            }) if inner.tool().is_none() => (turn.items)
-                .iter()
-                .position(|item| item.tool().is_some_and(|tool| tool.id == *parent)),
-            _ => Some(item),
-        };
-        let Some((card, tool)) = card.and_then(|card| Some((card, turn.items.get(card)?.tool()?)))
-        else {
+        let Some((card, tool)) = self.card_under_cursor() else {
             return false;
         };
         let id = tool.id.clone();

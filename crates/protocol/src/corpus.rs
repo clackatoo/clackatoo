@@ -1679,6 +1679,21 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Tasks(vec![task]))]),
         })),
     ));
+    // What an agent's command printed, in a pane of its own below its
+    // chat (CLACKA-24); `grid_state` says a terminal is one.
+    samples.push((
+        crate::wire::FED_TERMINALS,
+        Client(ClientMessage::Request(Request::Split {
+            pane: PaneId(1),
+            side: Side::Below,
+            terminal: PaneTerminal::Output(crate::OpenOutput {
+                chat: TerminalId(3),
+                tool: "call_e1".into(),
+                size: size(),
+            }),
+            on: None,
+        })),
+    ));
     samples
 }
 
@@ -3806,6 +3821,7 @@ fn grid_state() -> GridState {
             retained: true,
             close_in: Some(37),
         }),
+        fed: true,
     }
 }
 

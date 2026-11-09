@@ -273,6 +273,7 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `"a` before `y` | Yanks into register `a`, or onto its end with `"A`. |
 | `/` `?`, `n` `N` | Searches the chat's text forward or back, and again (see [Searching](#searching)). |
 | `za` `zo` `zc`, Enter on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |
+| `go` | Shows what the command whose card is under the cursor printed in a terminal below the chat (see [A command's output in a terminal](#a-command-s-output-in-a-terminal)). |
 | `j` `k` in a table | The cell below or above. |
 | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways: a few characters, or half the column. |
 | `u` | Undoes what the turn under the cursor changed in files, if it's in view, or else the last turn's, keeping your edits since. The bar says which. |
@@ -348,6 +349,16 @@ While the agent works, a line just above the box says so, wherever the chat is s
 When you send a message more than half an hour after the turn before it ended, a line across the chat says when: `14:32` today, `Yesterday 09:10`, the day of the week for the five days before that, such as `Monday 18:05`, and the date before that, such as `6 Oct 14:32`, with the year if it was another year. The time is your machine's, on a 24-hour clock.
 
 While the mouse is over a turn the agent has finished, `Copy` shows under its answer and copies the answer to the clipboard as the Markdown it came as, as `yim` on it yanks it in normal mode. It says `Copied` until the mouse leaves it. When the turn changed files, it shares the line with how many and the buttons that undo and redo them.
+
+### A command's output in a terminal
+
+A command's card shows the end of what it printed as plain text. To read all of it as a terminal shows it, click the `↗` at the right of the card's head, or press `go` with the cursor on the card in normal mode. A terminal opens below the chat, on the chat's machine, with what the command has printed so far, and goes on showing what it prints as the agent sends it. When the command ends, a last line says how, as `[exited 0]`, or `[ended]` if the agent didn't say. Colours, progress bars and anything else a program draws in a terminal show as they would in a shell, and it has scrollback, `/` search and yanks as any terminal has. Its tab is named after the command, and nothing the command prints renames it, or the window, or says which folder its paths are in; links it prints open as any terminal's do. Before the last line, whatever the command left on that only a program running there would want is put back: the mouse selects again, the alternate screen is left, and pastes and keys are plain. `:q` closes it; the command goes on. Each click opens another.
+
+Once nothing more will come, the pane's terminal has ended, as `clackatoo ls` says: `exited` with the command's code, or `killed (signal 0)` when it was cut off, as when its chat closed, its turn was rewound away, or the daemon upgraded.
+
+No program runs in it: the daemon writes what the agent says the command printed, as it says it, so it can't be typed into, and a key or a paste in it only says so in the bar. Agents run their commands themselves, in their own processes, and send their output to clackatoo over ACP as they go, which is all this shows: Codex sends it as it comes, and Claude Code all at once, as the command ends. Nothing opens by itself.
+
+The daemon keeps the last 64 KB of what each command printed as it came, escapes and all, and 512 KB for each chat, letting the command that printed longest ago go first. A pane opened on one whose start wasn't kept says so on its first line. Through an upgrade, an open pane keeps what it shows, but nothing more reaches it: one whose command still runs says so on its last line, and the card goes on showing the rest. What was kept isn't handed over either, so a pane opened after an upgrade starts with the card's plain text. A restart doesn't keep these panes. A daemon older than protocol 136 can't show one, and the bar says so.
 
 ### What it runs in the background
 
@@ -809,6 +820,8 @@ A line where the agent compacted its context comes through an upgrade as words s
 The agent's [plan](#the-agent-s-plan) lasts through an upgrade. After the daemon stops, a chat going on with its session shows the plan again once the agent has told the conversation so far, if the agent tells its plans as it does: Claude Code does.
 
 An upgrade stops the browser; the next page starts it again. The daemon stopping ends what agents run in the background, as it ends the agents.
+
+A pane showing [a command's output](#a-command-s-output-in-a-terminal) keeps what it shows through an upgrade, but nothing more reaches it; a restart closes it.
 
 ### Through an upgrade
 

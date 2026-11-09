@@ -365,6 +365,11 @@ gates! {
     /// gone, which the start page lists only when asked (CLACKA-232):
     /// `AgentSession`'s `branch`. An older client is sent none of them.
     BRANCH_SESSIONS = 135,
+    /// What an agent's command printed, in a pane of its own (CLACKA-24):
+    /// `PaneTerminal::Output` (`OpenOutput`), which a client asks for only
+    /// of a daemon that has it, and `GridState`'s `fed`, that a terminal
+    /// shows what the daemon feeds it and can't be typed into.
+    FED_TERMINALS = 136,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

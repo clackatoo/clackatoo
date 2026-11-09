@@ -454,6 +454,15 @@ impl Terminal {
         self.emulator.secret = secret.map(|secret| secret.as_bytes().into());
     }
 
+    /// Takes the title and working directory as they are now as the
+    /// owner's: from now on what the program prints can't change them
+    /// (OSC 0, 2 and 7 are ignored), nor a reset clear them. For a
+    /// terminal whose owner writes into it what a program printed
+    /// elsewhere, which mustn't name the window or say where paths are.
+    pub fn keep_names(&mut self) {
+        self.emulator.names_kept = true;
+    }
+
     /// Takes block `block`'s command to be the shell's, as a
     /// [`trusted_block`](Self::trusted_block) of the terminal this one
     /// was restored from said.
@@ -761,6 +770,9 @@ pub(crate) struct Emulator {
     /// History was cleared since [`Terminal::take_history_cleared`] last
     /// asked, freeing the memory it held.
     history_cleared: bool,
+    /// The title and working directory are the owner's, which what the
+    /// program prints can't change (see [`Terminal::keep_names`]).
+    pub(crate) names_kept: bool,
     /// Prints everything through the simple per-character path, so tests can
     /// check the fast path against it.
     #[cfg(test)]
@@ -799,6 +811,7 @@ impl Emulator {
             clipboard: clipboard::Requests::default(),
             last_printed: None,
             history_cleared: false,
+            names_kept: false,
             #[cfg(test)]
             simple_print: false,
         }
@@ -1535,9 +1548,16 @@ impl Emulator {
         let renumbered = self.blocks.renumbered() + u64::from(next_block.is_none());
         let next_block = next_block.unwrap_or(0);
         let secret = self.secret.take();
+        // So do names that are the owner's.
+        let kept = (self.names_kept).then(|| (std::mem::take(&mut self.title), self.cwd.take()));
         *self = Self::new(self.size, &self.config);
         // The shell, which knows it, outlives the reset.
         self.secret = secret;
+        if let Some((title, cwd)) = kept {
+            self.names_kept = true;
+            self.title = title;
+            self.cwd = cwd;
+        }
         self.replies = replies;
         self.clipboard = clipboard;
         // Link IDs are never reused (see crate::links), nor are block

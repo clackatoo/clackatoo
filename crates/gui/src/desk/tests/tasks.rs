@@ -165,3 +165,29 @@ fn a_click_follows_the_task_it_was_on_below_its_own_chat_whichever_has_the_focus
     assert!(answer_all(&mut desk).is_empty());
     assert_eq!(note(&desk), "that task is no longer listed above the box");
 }
+
+/// A command card's button, or `go` on it, opens what the command printed
+/// in a terminal below its chat, which the daemon writes as the agent
+/// tells it, with no program in it (CLACKA-24).
+#[test]
+fn a_commands_output_opens_in_a_terminal_below_its_chat() {
+    let mut desk = chat_desk(Vec::new());
+    let chat = desk.chats.get_mut(&TerminalId(2)).unwrap();
+    chat.view_mut().outputs.push("e1".into());
+    let mut fonts = crate::chat::fixtures::fonts();
+    desk.settle_chats(&mut fonts);
+    let asked = answer_all(&mut desk);
+    let [
+        Request::Split {
+            pane,
+            side: Side::Below,
+            terminal: PaneTerminal::Output(open),
+            on: None,
+        },
+    ] = asked.as_slice()
+    else {
+        panic!("a terminal split off below: {asked:?}");
+    };
+    assert_eq!(*pane, PaneId(2));
+    assert_eq!((open.chat, open.tool.as_str()), (TerminalId(2), "e1"));
+}

@@ -242,6 +242,12 @@ impl ChatPane {
         std::mem::take(&mut self.view.follows)
     }
 
+    /// Takes the commands whose output is to be shown in a terminal,
+    /// oldest first, by their tool calls' IDs.
+    pub(crate) fn take_outputs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.view.outputs)
+    }
+
     /// Opens the agent's plan's shelf above the box, or folds it, or says
     /// why not.
     pub(crate) fn toggle_plan(&mut self) -> Result<(), String> {

@@ -1295,6 +1295,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "The start page leaves out branches of chats you've closed; b lists them",
     },
+    News {
+        id: "command-output",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "Click ↗ on a command's card, or go on it, to read what it printed in a terminal below the chat, colours and all",
+    },
 ];
 
 impl News {

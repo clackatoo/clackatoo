@@ -46,6 +46,7 @@ mod live;
 mod modes;
 mod nested;
 mod originals;
+mod outputs;
 mod plan;
 pub(crate) mod queue;
 mod relations;
@@ -59,6 +60,7 @@ use resume::Held;
 mod subagent;
 
 pub(crate) use limits::Limits;
+pub(crate) use outputs::{Feed, NOT_KEPT};
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
 pub(crate) use subagent::{Standing, Wanted, role_for};
 pub(crate) use uids::{TurnUid, number_turns_from};
@@ -598,6 +600,9 @@ pub(crate) struct HostedChat {
     /// The values its Subagents setting offers, as the daemon's limits
     /// allow (see [`Self::offer_subagents`]).
     subagents_offered: Vec<u8>,
+    /// What its agent's commands printed, as it came, and the terminals
+    /// showing it (see `chat/outputs.rs`). Not handed over.
+    outputs: outputs::Outputs,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -836,6 +841,7 @@ impl HostedChat {
             tree: branches::Tree::default(),
             forgotten: Vec::new(),
             subagents_offered: SubagentLimits::default().offered(),
+            outputs: outputs::Outputs::default(),
         }
     }
 
@@ -3305,6 +3311,13 @@ impl HostedChat {
     fn append_output(&mut self, turn: usize, at: usize, data: &str) {
         let items = &mut self.node.turns[turn].items;
         let tool = items[at].tool_mut().expect("a tool");
+        // As it came, escapes and all, for a terminal to show (see
+        // `chat/outputs.rs`).
+        let before = (tool.content.iter()).find_map(|content| match content {
+            ToolContent::Output(output) => Some(output.as_str()),
+            _ => None,
+        });
+        self.outputs.heard(id, data, before.unwrap_or_default());
         let text = clean_text(data);
         tool.append_output(&text);
         let output = tool.output_mut().expect("just added to");

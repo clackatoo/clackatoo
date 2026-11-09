@@ -170,16 +170,18 @@ fn agent_parent_prefix(
     let Some(agent) = state.agent else {
         return Ok(None);
     };
-    // AgentTerminal ends GridState: the parent's varint, three bools and,
-    // since 124, an Option<u8> (one byte for the tag and one for Some).
+    // AgentTerminal ends GridState but for, since 134, whether it's fed (a
+    // bool's byte): the parent's varint, three bools and, since 124, an
+    // Option<u8> (one byte for the tag and one for Some).
     let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
         1 + usize::from(agent.close_in.is_some())
     } else {
         0
     };
+    let fed = usize::from(wire >= wire::FED_TERMINALS);
     let end = payload
         .len()
-        .checked_sub(after.len() + 3 + countdown)
+        .checked_sub(after.len() + 3 + countdown + fed)
         .ok_or(Error::DeserializeUnexpectedEnd)?;
     let mut encoded = [0; 5];
     let width = postcard::to_slice(&agent.parent, &mut encoded)?.len();
@@ -820,6 +822,8 @@ mod tests {
                     retained: false,
                     close_in,
                 });
+                // After it, since 134.
+                grid.state.fed = true;
                 let patch = ViewUpdate::Patch(vec![
                     Patch::Title("test".into()),
                     Patch::Cwd(Some("/project".into())),
@@ -847,11 +851,12 @@ mod tests {
                     let reference = view_agent_parent(wire, payload).unwrap().unwrap();
                     assert_eq!(reference.parent, TerminalId(from));
                     // It reads only the small state prefix: even without the output.
-                    let tail = 3 + if wire >= wire::TERMINAL_COUNTDOWN {
-                        1 + usize::from(close_in.is_some())
-                    } else {
-                        0
-                    };
+                    let tail =
+                        3 + if wire >= wire::TERMINAL_COUNTDOWN {
+                            1 + usize::from(close_in.is_some())
+                        } else {
+                            0
+                        } + usize::from(wire >= wire::FED_TERMINALS);
                     assert_eq!(
                         view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),
                         Some(reference)

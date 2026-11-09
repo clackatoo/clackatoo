@@ -67,6 +67,7 @@ mod clipboard;
 mod disk;
 mod edit_log;
 mod explorers;
+mod fed;
 mod finder;
 mod fits;
 mod forwards;
@@ -818,7 +819,9 @@ impl Subscription {
         agent: Option<clackatoo_protocol::AgentTerminal>,
     ) -> Option<ViewUpdate> {
         match hosted {
-            Hosted::Pty(terminal) => self.update_agent(terminal.emulator(), wire, agent),
+            Hosted::Pty(terminal) => {
+                self.update_agent(terminal.emulator(), wire, agent, terminal.is_fed())
+            }
             Hosted::Chat(chat) => chat.catch_up(&mut self.chat),
         }
     }
@@ -828,14 +831,18 @@ impl Subscription {
     /// `None` if nothing changed.
     #[cfg(test)]
     fn update(&mut self, terminal: &Terminal, wire: u32) -> Option<ViewUpdate> {
-        self.update_agent(terminal, wire, None)
+        self.update_agent(terminal, wire, None, false)
     }
 
+    /// As [`update`](Self::update), for a terminal an agent started, as
+    /// `agent` says, or one the daemon writes an agent's command's output
+    /// into, if `fed`.
     fn update_agent(
         &mut self,
         terminal: &Terminal,
         wire: u32,
         agent: Option<clackatoo_protocol::AgentTerminal>,
+        fed: bool,
     ) -> Option<ViewUpdate> {
         // Countdown-only changes must not send identical patches to old windows.
         let agent = agent.map(|mut agent| {
@@ -847,6 +854,7 @@ impl Subscription {
         let size = terminal.size();
         let mut state = GridState::of(terminal);
         state.agent = agent;
+        state.fed = fed;
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
             self.size = Some(size);
@@ -861,6 +869,7 @@ impl Subscription {
             let mut view = View::capture(terminal);
             if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
                 grid.state.agent = agent;
+                grid.state.fed = fed;
             }
             return Some(ViewUpdate::Snapshot(view));
         }
@@ -1613,7 +1622,12 @@ impl Daemon {
         self.forget_stale_starts();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
-                Hosted::Pty(terminal) => {
+                Hosted::Pty(mut terminal) => {
+                    // Which command it shows isn't handed over, so nothing
+                    // more of it reaches it (see `server/fed.rs`).
+                    if terminal.is_fed_unended() {
+                        terminal.stop_feeding(fed::UPGRADED);
+                    }
                     let blocks = terminal.emulator().trusted_blocks();
                     let exe = terminal.exe();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
@@ -2398,6 +2412,8 @@ impl Daemon {
             if (self.chat_ref(id)).is_some_and(HostedChat::branch_told_back) {
                 self.branch_told(id);
             }
+            // What its commands printed, to the panes showing it.
+            self.feed_outputs(id);
         }
     }
 
@@ -2682,6 +2698,7 @@ impl Daemon {
                 // Its branches stay off the start page once it's gone.
                 self.note_branches_of(&chat);
                 self.close_chat(id, &chat);
+                self.outputs_closed(chat.output_terminals());
                 self.forget_glance(id);
                 self.hand_back_forked(id);
                 self.agent_files.forget(id);
@@ -2746,6 +2763,7 @@ impl Daemon {
                 self.new_terminal(&request)?
             }
             PaneTerminal::Agent(request) => self.new_chat(request, beside)?,
+            PaneTerminal::Output(open) => self.new_output(&open)?,
             PaneTerminal::File(file) => return self.open_content(file, beside),
             PaneTerminal::Files(open) => {
                 return self.new_files(open, beside).map(Content::Files);
@@ -4834,11 +4852,11 @@ mod tests {
                 close_in: Some(60),
             };
             assert!(matches!(
-                sent.update_agent(&terminal, wire, Some(agent)),
+                sent.update_agent(&terminal, wire, Some(agent), false),
                 Some(ViewUpdate::Snapshot(_))
             ));
             agent.close_in = Some(59);
-            let update = sent.update_agent(&terminal, wire, Some(agent));
+            let update = sent.update_agent(&terminal, wire, Some(agent), false);
             if wire >= wire::TERMINAL_COUNTDOWN {
                 let Some(ViewUpdate::Patch(patches)) = update else {
                     panic!("a countdown patch")
@@ -4852,10 +4870,16 @@ mod tests {
                     "old windows get no countdown-only updates"
                 );
             }
-            assert!(sent.update_agent(&terminal, wire, Some(agent)).is_none());
+            assert!(
+                sent.update_agent(&terminal, wire, Some(agent), false)
+                    .is_none()
+            );
             agent.retained = true;
             agent.close_in = None;
-            assert!(sent.update_agent(&terminal, wire, Some(agent)).is_some());
+            assert!(
+                sent.update_agent(&terminal, wire, Some(agent), false)
+                    .is_some()
+            );
         }
     }
 

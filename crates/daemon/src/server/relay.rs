@@ -1711,6 +1711,18 @@ impl Daemon {
                 Some((there, chat)) if there == at => Ok(PaneTerminal::Browser(chat)),
                 _ => Err(self.elsewhere(at, "a chat's page")),
             },
+            PaneTerminal::Output(_) if self.link_wire(at) < wire::FED_TERMINALS => {
+                Err(self.too_old(at, "a command's output in a pane"))
+            }
+            PaneTerminal::Output(open) => match self.relayed_terminal(open.chat) {
+                Some((there, chat)) if there == at => {
+                    Ok(PaneTerminal::Output(clackatoo_protocol::OpenOutput {
+                        chat,
+                        ..open.clone()
+                    }))
+                }
+                _ => Err(self.elsewhere(at, "the chat whose command it is")),
+            },
             // What's this machine's goes in another's layout only as it
             // makes it (see `held`), never passed on.
             PaneTerminal::Lent { .. } => Err(Error::Other(format!(

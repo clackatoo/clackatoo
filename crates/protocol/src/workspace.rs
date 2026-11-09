@@ -838,6 +838,26 @@ pub enum PaneTerminal {
         /// What kind of pane it is, as [`Content::Other`] names one.
         kind: PaneKind,
     },
+    /// What a command a chat's agent ran printed, in a terminal the
+    /// daemon writes itself, as the agent tells it, rather than a
+    /// program: [`GridState::fed`](crate::GridState::fed). New in protocol
+    /// 134: a client asks [`wire::daemon_has`](crate::wire::daemon_has)
+    /// with [`wire::FED_TERMINALS`](crate::wire::FED_TERMINALS) before
+    /// asking for one.
+    Output(OpenOutput),
+}
+
+/// A command's output to show in a new pane (see
+/// [`PaneTerminal::Output`]): what the agent of chat `chat` said tool
+/// `tool` printed, so far and as it goes on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOutput {
+    /// The chat.
+    pub chat: TerminalId,
+    /// The tool call that runs the command, by the agent's ID for it.
+    pub tool: String,
+    /// The terminal's size.
+    pub size: crate::Size,
 }
 
 impl Workspaces {

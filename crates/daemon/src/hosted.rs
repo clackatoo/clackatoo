@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
 
 use clackatoo_protocol::{
-    Error, NewTerminal, Size, TerminalId, TerminalInfo, TerminalStatus, View,
+    Error, NewTerminal, Node, Size, TerminalId, TerminalInfo, TerminalStatus, View,
 };
 use clackatoo_term::{ClipboardRead, ClipboardRequest, Damage, Terminal, recording};
 
@@ -68,7 +68,42 @@ pub(crate) struct HostedTerminal {
     /// started: another, as after `exec prog`, is no longer its shell.
     /// `None` if it couldn't be read.
     exe: Option<(u64, u64)>,
+    /// For a terminal no program runs in, which the daemon writes what an
+    /// agent's command printed into (see [`HostedTerminal::fed`]), where
+    /// that stands.
+    fed: Option<Fed>,
 }
+
+/// Where a terminal the daemon writes an agent's command's output into
+/// stands (see [`HostedTerminal::fed`]).
+#[derive(Debug)]
+struct Fed {
+    /// Whether it has been told the command ended, or that nothing more
+    /// will come, which it says once.
+    ended: bool,
+}
+
+/// What a terminal the daemon writes an agent's command's output into
+/// says to input: no program reads it.
+const FED_INPUT: &str = "this pane shows what an agent's command printed: it can't be typed into";
+
+/// How a terminal the daemon wrote an agent's command's output into ended
+/// when nothing said how, as when its chat closed or the daemon upgraded:
+/// cut off, by signal 0, which is none.
+pub(crate) const FED_CUT_OFF: TerminalStatus = TerminalStatus::Killed(0);
+
+/// What's written into a terminal the daemon writes an agent's command's
+/// output into before its last line, to put back what the command left
+/// set that only a program running there would want, as a shell's prompt
+/// would after it: a string or sequence left half sent ends (ST), which
+/// would otherwise swallow the line; the alternate screen is left; the
+/// scrolling region is the whole screen again, the cursor kept where it
+/// is; mouse and focus reports, bracketed paste, application keys and
+/// insert mode are off; the character set is plain again; colours are
+/// reset; and the cursor is hidden, as nothing's typed there.
+const FED_RESET: &[u8] = b"\x1b\\\x1b[?1049l\x1b7\x1b[r\x1b8\
+    \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1004l\
+    \x1b[?2004l\x1b[?1l\x1b>\x1b[4l\x0f\x1b(B\x1b[0m\x1b[?25l";
 
 /// Why a terminal's shell doesn't have it to itself, to be typed into:
 /// see [`HostedTerminal::shell_has_terminal`].
@@ -183,7 +218,117 @@ impl HostedTerminal {
             recording,
             secret,
             exe,
+            fed: None,
         })
+    }
+
+    /// A terminal no program runs in, `size`, titled `title`, that the
+    /// daemon writes what an agent's command printed into, as the agent
+    /// tells it (see [`feed`](Self::feed)): it shows it as a terminal
+    /// shows any program's output, colours and all, with history, search
+    /// and yanks, but can't be typed into. It has no PTY and no process.
+    /// Its pid is 0, which no program's is: that's how the next build
+    /// knows one handed over to it.
+    pub(crate) fn fed(id: TerminalId, size: Size, title: &str, config: &DaemonConfig) -> Self {
+        let mut emulator = Terminal::new(size, &config.terminal);
+        // Named as a program names its terminal, for its tab, after the
+        // command, which is all that names it: what the command prints
+        // can't rename the tab or the window, nor say where paths are.
+        // With no cursor, as nothing's typed there.
+        let title: String = title.chars().filter(|ch| !ch.is_control()).collect();
+        emulator.advance(format!("\x1b]2;{title}\x07\x1b[?25l").as_bytes());
+        emulator.keep_names();
+        log::info!("terminal {id} started: fed what an agent's command printed");
+        Self {
+            id,
+            emulator,
+            pty: None,
+            pid: 0,
+            process: None,
+            status: TerminalStatus::Running,
+            input: Vec::new(),
+            dropping_replies: false,
+            recording: None,
+            secret: None,
+            exe: None,
+            fed: Some(Fed { ended: false }),
+        }
+    }
+
+    /// Whether no program runs in it, and the daemon writes into it what
+    /// an agent's command printed (see [`fed`](Self::fed)).
+    pub(crate) fn is_fed(&self) -> bool {
+        self.fed.is_some()
+    }
+
+    /// Whether it's one the daemon writes into that hasn't been told the
+    /// command ended.
+    pub(crate) fn is_fed_unended(&self) -> bool {
+        self.fed.as_ref().is_some_and(|fed| !fed.ended)
+    }
+
+    /// Writes `text`, more of what the command printed, as a terminal
+    /// shows a program's output. Commands print to pipes, so a line break
+    /// goes to the next line's start, as a terminal's line discipline
+    /// takes one. Nothing's answered, as no program reads it, and nothing
+    /// it prints reaches a clipboard. Does nothing to a terminal a
+    /// program runs in.
+    pub(crate) fn feed(&mut self, text: &str) {
+        if self.fed.is_none() || text.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(text.len() + text.len() / 16);
+        for piece in text.split_inclusive('\n') {
+            match piece.strip_suffix('\n') {
+                Some(line) => {
+                    bytes.extend_from_slice(line.as_bytes());
+                    bytes.extend_from_slice(b"\r\n");
+                }
+                None => bytes.extend_from_slice(piece.as_bytes()),
+            }
+        }
+        self.emulator.advance(&bytes);
+        let _ = self.emulator.take_replies();
+        let _ = self.emulator.take_clipboard();
+    }
+
+    /// Says on a line of its own that the command ended, with its exit
+    /// code `exit`, if the agent said it, and takes that as how its
+    /// program ended: one that `failed` without saying how as 1, as the
+    /// agents' own terminals take it, and otherwise 0. Said once.
+    pub(crate) fn end(&mut self, exit: Option<i32>, failed: bool) {
+        if !self.is_fed_unended() {
+            return;
+        }
+        self.status = TerminalStatus::Exited(exit.unwrap_or(i32::from(failed)));
+        let said = match exit {
+            Some(code) => format!("[exited {code}]"),
+            None => "[ended]".to_owned(),
+        };
+        self.stop_feeding(&said);
+    }
+
+    /// Says `why`, clackatoo's own words, dim, on a line of its own after
+    /// what the command printed, as the last it's written: nothing more
+    /// comes, as the command ended, or what it prints can't reach here.
+    /// Unless [`end`](Self::end) said how it ended, it's taken as cut off
+    /// ([`FED_CUT_OFF`]): it runs no more, whatever the command does.
+    pub(crate) fn stop_feeding(&mut self, why: &str) {
+        let Some(fed) = self.fed.as_mut().filter(|fed| !fed.ended) else {
+            return;
+        };
+        fed.ended = true;
+        if self.status == TerminalStatus::Running {
+            self.status = FED_CUT_OFF;
+        }
+        self.emulator.advance(FED_RESET);
+        let start = if self.emulator.cursor().col == 0 {
+            ""
+        } else {
+            "\r\n"
+        };
+        let note = format!("{start}\x1b[2m{why}\x1b[0m");
+        self.emulator.advance(note.as_bytes());
     }
 
     /// Hands the terminal over to the next build, adding its fds to `fds`,
@@ -255,22 +400,34 @@ impl HostedTerminal {
         if let Some(block) = shell.and_then(|shell| shell.trusted) {
             emulator.trust_block(block);
         }
+        // One the daemon wrote an agent's command's output into, as only
+        // those have pid 0. What the command prints next can't reach it:
+        // which tool of which chat it showed isn't handed over. So it has
+        // ended, however the last build left it, and its names are still
+        // its own.
+        let fed = terminal.pid == 0 && terminal.pty.is_none() && terminal.process.is_none();
+        let status = match terminal.status {
+            handover::Status::Running if fed => FED_CUT_OFF,
+            handover::Status::Running => TerminalStatus::Running,
+            handover::Status::Exited(code) => TerminalStatus::Exited(code),
+            handover::Status::Killed(signal) => TerminalStatus::Killed(signal),
+        };
+        if fed {
+            emulator.keep_names();
+        }
         Ok(Self {
             id: TerminalId(terminal.id),
             emulator,
             pty,
             pid: terminal.pid,
             process,
-            status: match terminal.status {
-                handover::Status::Running => TerminalStatus::Running,
-                handover::Status::Exited(code) => TerminalStatus::Exited(code),
-                handover::Status::Killed(signal) => TerminalStatus::Killed(signal),
-            },
+            status,
             input: terminal.input.clone(),
             dropping_replies: false,
             recording: None,
             secret,
             exe: None,
+            fed: fed.then_some(Fed { ended: true }),
         })
     }
 
@@ -296,7 +453,8 @@ impl HostedTerminal {
     pub(crate) fn info(&self) -> TerminalInfo {
         TerminalInfo {
             id: self.id,
-            pid: Some(self.pid),
+            // One the daemon writes into runs no program.
+            pid: (self.fed.is_none()).then_some(self.pid),
             size: self.emulator.size(),
             title: self.emulator.title().to_owned(),
             status: self.status,
@@ -404,7 +562,11 @@ impl HostedTerminal {
     }
 
     pub(crate) fn view(&self) -> View {
-        View::capture(&self.emulator)
+        let mut view = View::capture(&self.emulator);
+        if let Node::Grid(grid) = &mut view.root {
+            grid.state.fed = self.fed.is_some();
+        }
+        view
     }
 
     pub(crate) fn emulator(&self) -> &Terminal {
@@ -575,6 +737,9 @@ impl HostedTerminal {
     }
 
     pub(crate) fn send_input(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.fed.is_some() {
+            return Err(Error::Other(FED_INPUT.to_owned()));
+        }
         if self.pty.is_none() {
             return Err(Error::TerminalExited(self.id));
         }
@@ -736,6 +901,24 @@ mod tests {
             most = most.max(terminal.input.len());
         }
         most
+    }
+
+    #[test]
+    fn a_fed_terminal_comes_through_an_upgrade_ended_and_named_as_it_was() {
+        let config = DaemonConfig::from_env();
+        let mut fed = HostedTerminal::fed(TerminalId(4), Size::new(20, 4).unwrap(), "ls", &config);
+        fed.feed("one\n");
+        assert_eq!(fed.status(), TerminalStatus::Running);
+        let mut fds = Fds::default();
+        let (handed, shell) = fed.hand_over(&mut fds);
+        assert!(shell.is_none());
+        let mut resumed = HostedTerminal::resume(&handed, None, &mut fds, &config).unwrap();
+        assert!(resumed.is_fed() && !resumed.is_fed_unended());
+        assert_eq!(resumed.status(), FED_CUT_OFF);
+        assert_eq!(resumed.info().pid, None);
+        resumed.emulator_mut().advance(b"\x1b]2;renamed\x07");
+        assert_eq!(resumed.emulator().title(), "ls");
+        assert!(resumed.send_input(b"x").is_err());
     }
 
     #[test]

@@ -1901,6 +1901,21 @@ mod hostile {
     }
 
     #[test]
+    fn names_the_owner_keeps_are_the_programs_no_more() {
+        let mut t = terminal(20, 3);
+        t.advance(b"\x1b]2;cargo test\x07\x1b]7;file:///work\x07");
+        t.keep_names();
+        t.advance(b"\x1b]0;evil\x07\x1b]2;evil\x1b\\\x1b]7;file:///etc\x07");
+        assert_eq!((t.title(), t.cwd()), ("cargo test", Some("/work")));
+        // Nor does a reset take them; links still work.
+        t.advance(b"\x1bc\x1b]8;;https://a.b\x1b\\link\x1b]8;;\x1b\\");
+        assert_eq!((t.title(), t.cwd()), ("cargo test", Some("/work")));
+        assert!(t.screen_text().contains("link"));
+        t.advance(b"\x1b]2;evil\x07");
+        assert_eq!(t.title(), "cargo test");
+    }
+
+    #[test]
     fn strings_that_go_on_and_on_are_bounded() {
         // A title of 8 MB, an OSC 8 link of 8 MB, and a DCS of 8 MB.
         let long = "x".repeat(8 << 20);

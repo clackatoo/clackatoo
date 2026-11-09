@@ -236,6 +236,9 @@ enum Hit {
     },
     /// A file in the `@` menu, by its line in view.
     Mention(usize),
+    /// The button on a command's card that shows what it printed in a
+    /// terminal below the chat, by the tool call's ID.
+    Output(String),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -499,6 +502,10 @@ pub(crate) struct ChatView {
     /// this chat, so a click opens the task it was on, whichever chat has
     /// the focus and however the shelf moves.
     pub(crate) follows: Vec<String>,
+    /// The commands whose output is to be shown in a terminal below the
+    /// chat, as their card's button or `go` asked, by their tool calls'
+    /// IDs, for the window to take.
+    pub(crate) outputs: Vec<String>,
     /// The plan the question shows, laid out, for the question, width and
     /// size it was laid out for.
     proposal_laid: Option<((u64, u32, u32), crate::markdown::layout::Laid)>,
@@ -692,6 +699,7 @@ impl ChatView {
             filling: None,
             opened: Vec::new(),
             follows: Vec::new(),
+            outputs: Vec::new(),
             proposal_laid: None,
             proposal_scroll: 0.0,
             proposal_rect: None,
@@ -2593,6 +2601,7 @@ impl ChatView {
             Some(Hit::EditQueued(id)) => self.take_back(id, settled),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
             Some(Hit::TaskOutput(id)) => self.follows.push(id),
+            Some(Hit::Output(tool)) => self.outputs.push(tool),
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::LiveAgents) => self.live_agents_open = !self.live_agents_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
@@ -4596,6 +4605,22 @@ mod tests {
         assert!(view.open_cards.contains("t"));
         view.press([10.0, 10.0], 1, false);
         view.settle(&mut fonts);
+        assert!(view.open_cards.is_empty());
+    }
+
+    #[test]
+    fn the_output_button_on_a_cards_head_shows_its_output_and_folds_nothing() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        // Over the head, as a card notes it after.
+        view.hits = vec![
+            (Hit::Card(0, "t".into()), [0.0, 0.0, 100.0, 50.0]),
+            (Hit::Output("t".into()), [80.0, 0.0, 20.0, 50.0]),
+        ];
+        assert_eq!(view.pointer([90.0, 10.0]), Pointer::Hand);
+        view.press([90.0, 10.0], 1, false);
+        view.settle(&mut fonts);
+        assert_eq!(view.outputs, ["t"]);
         assert!(view.open_cards.is_empty());
     }
 
