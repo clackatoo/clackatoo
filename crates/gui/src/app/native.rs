@@ -449,12 +449,8 @@ mod tests {
                 buffer: None,
             })
         };
-        assert!(changes(&trust(
-            clackatoo_protocol::TrustAction::Trust
-        )));
-        assert!(!changes(&trust(
-            clackatoo_protocol::TrustAction::Untrust
-        )));
+        assert!(changes(&trust(clackatoo_protocol::TrustAction::Trust)));
+        assert!(!changes(&trust(clackatoo_protocol::TrustAction::Untrust)));
     }
 
     #[test]

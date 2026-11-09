@@ -401,6 +401,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 ];
 
 /// What `line` asks for, or why it means nothing.
+#[allow(clippy::too_many_lines, reason = "a short arm for each command's word")]
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let line = line.trim();
     let (word, argument) = match line.split_once(char::is_whitespace) {

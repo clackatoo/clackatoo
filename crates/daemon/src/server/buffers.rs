@@ -395,7 +395,8 @@ impl Daemon {
         self.compare_buffer(id);
         self.watch_buffer(id);
         self.offer_install(token, id);
-        self.ask_trust(id, Some(token));
+        // Named into a folder not trusted, its windows are asked.
+        self.ask_trust(id, None);
         Ok(Response::Done)
     }
 
@@ -810,6 +811,8 @@ impl Daemon {
         log::info!("buffer {id}: moved to {shown}");
         slot.buffer.moved_to(to, disk);
         let server = slot.server.take();
+        // Its folder's trust is looked at afresh.
+        slot.untrusted = None;
         let git_dir = slot.git_dir.take();
         let parsed = std::mem::take(&mut slot.parsed);
         slot.compared = false;
@@ -849,6 +852,8 @@ impl Daemon {
         self.keep_soon();
         self.parse_buffer(id);
         self.open_in_server(id);
+        // Moved into a folder not trusted, its windows are asked.
+        self.ask_trust(id, None);
         self.compare_buffer(id);
         // Its recovery file names its file.
         self.recovery_moved(id);

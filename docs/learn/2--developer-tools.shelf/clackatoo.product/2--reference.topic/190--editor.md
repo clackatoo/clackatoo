@@ -151,10 +151,12 @@ Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 ```
 
 - **The folder is the project the server would start for** (see below), named as the daemon's machine names it, with any character that could hide or turn round what's around it shown by its number, as `<U+202E>`.
-- **It's asked while an editor showing a file of that folder has the focus**, in normal mode, with nothing half typed, and neither the command line nor the finder open; until then it waits. So a file an agent opens beside its chat asks only once you go to it.
+- **It's asked while an editor showing a file of that folder has the focus**, in normal mode, with nothing half typed, and neither the command line nor the finder open; until then it waits. So a file an agent opens beside its chat asks only once you go to it. A file moved or saved under a new name into a folder not trusted asks too. A file on another machine names it, as in `Trust ~/src/thing on desk?`, and is trusted there.
+- **A window older than the daemon's trusted folders isn't asked**, as it can't answer: its files get no servers until you run [`clackatoo trust`](~clackatoo/reference/cli#trust) for the folder, or `:trust` in a newer window.
 - **`y` trusts the folder**, and its files open get their servers at once. **`n` marks it not trusted**, and it isn't asked about again. Any other key leaves it unanswered, and does what it would have done; the bar says `:trust` runs its servers. Each window is asked once about each folder while it's connected.
 - **Only a key you press then answers it.** Not one a [macro](#macros) or a key binding types, nor one held while the window waited for something, nor one pressed in the first half second the question shows, which says to press it again: so a `y` meant for a yank, typed just as the question came, doesn't trust anything. Agents never answer it: no tool of theirs trusts a folder, and a window under an agent's [native control](~clackatoo/reference/agents) refuses to send a trust. A device on the [web app](~clackatoo/reference/remote) can't trust a folder either, and isn't asked.
 - **A folder is trusted with everything inside it**, but for a folder inside it marked not trusted: the nearest folder marked, the project's own or one it's in, decides. So `clackatoo trust ~/src` trusts every project under it, and `clackatoo untrust ~/src/cloned-thing` still keeps that one out.
+- **What's marked is the folder a server starts for**, the project's root (see below), so only a mark on that folder or one it's in counts. A Rust project's root is the outermost folder with a `Cargo.toml`: in a workspace of many crates, marking one crate's folder does nothing, as rust-analyzer starts for the workspace's folder. `:trusted` lists what's marked, and the question names the folder that counts.
 - **A folder not trusted keeps its colours**, which clackatoo's own parser gives, and every editor key that doesn't need a server; it gets no mistakes, `K`, `gd`, completion, renames or formatting.
 
 | Command | What it does |
@@ -166,7 +168,7 @@ Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 
 Only a `:trust` you type trusts a folder: one a macro, a key binding or your config runs is refused. [`clackatoo trust`](~clackatoo/reference/cli#trust) does the same from a shell. The folders marked are kept in `~/.local/state/clackatoo/trusted` (or under `$XDG_STATE_HOME`), readable by you alone, so they're remembered across restarts and upgrades. A folder whose name isn't UTF-8 is never asked about; `clackatoo trust` trusts it for the daemon's run.
 
-When a daemon from before trusted folders upgrades to one that has them, the projects of the files open then, whose servers are installed, are trusted, as their servers were running anyway; the daemon's log names each. Every other folder is asked about.
+When a daemon from before trusted folders upgrades to one that has them, the projects of the files open then, whose servers are installed, are trusted, as their servers were running anyway. The daemon's log names each, and the first window you use says how many: `trusted 3 folders whose language servers were running: :trusted lists them`. That's only ever said by an upgrade from such a daemon: deleting the file of folders, or starting the daemon afresh, trusts nothing, and every other folder is asked about.
 
 How it works:
 

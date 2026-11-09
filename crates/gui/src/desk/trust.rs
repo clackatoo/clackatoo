@@ -18,10 +18,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{BufferId, Request, TrustAction, wire};
+use clackatoo_protocol::{BufferId, MachineId, Request, TrustAction, wire};
 
 use super::{Asked, Desk};
 use crate::chrome::Status;
+use crate::editor::BufferCopy;
 use crate::input::KeyPress;
 use crate::vim::Mode;
 use crate::vim::confirm::Confirm;
@@ -44,6 +45,8 @@ struct Question {
     buffer: BufferId,
     /// The folder, as that machine names it.
     root: String,
+    /// That machine, if it's another than the daemon's.
+    machine: Option<MachineId>,
     asked: Confirm<bool>,
 }
 
@@ -52,19 +55,27 @@ impl Desk {
     /// language server would run for. Returns whether the window must be
     /// redrawn.
     pub(super) fn trust_asked(&mut self, buffer: BufferId, root: String) -> bool {
-        let questions = &mut self.trust.asked;
-        if questions.iter().any(|question| question.root == root) {
+        if (self.trust.asked.iter()).any(|question| question.root == root) {
             return false;
         }
+        // A file on another machine names it: its folder is that one's.
+        let machine = (self.editors.buffers.get(&buffer)).and_then(BufferCopy::machine);
+        let on = machine.map_or_else(String::new, |machine| {
+            let name = (self.workspaces.others.iter())
+                .find(|other| other.id == machine)
+                .map_or("another machine", |other| other.name.as_str());
+            format!(" on {}", shown(name))
+        });
         let asked = Confirm::new(format!(
-            "Trust {}? Its language servers may run its code (y/n)",
+            "Trust {}{on}? Its language servers may run its code (y/n)",
             shown(&root)
         ))
         .choice('y', "Trust the folder: start its language servers", true)
         .choice('n', "Don't trust it, and don't ask again", false);
-        questions.push(Question {
+        self.trust.asked.push(Question {
             buffer,
             root,
+            machine,
             asked,
         });
         true
@@ -85,8 +96,10 @@ impl Desk {
         }
         let (editor, copy) = self.focused_editor()?;
         let path = Path::new(copy.path());
-        (self.trust.asked.iter())
-            .find(|question| question.buffer == editor.buffer() || path.starts_with(&question.root))
+        (self.trust.asked.iter()).find(|question| {
+            question.buffer == editor.buffer()
+                || (question.machine == copy.machine() && path.starts_with(&question.root))
+        })
     }
 
     /// Whether the question is asked now, so `press` goes to it.

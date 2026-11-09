@@ -7685,6 +7685,37 @@ fn a_folder_runs_its_language_server_only_once_trusted() {
 }
 
 #[test]
+fn a_file_named_into_a_folder_not_trusted_asks_about_it() {
+    let daemon = asking_fake_language_server();
+    let dir = daemon.dir.path().canonicalize().unwrap();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client.new_workspace(None, blank(&dir)).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    let named = client.request(&Request::SaveAs {
+        buffer,
+        path: "app/b.fk".into(),
+        force: false,
+    });
+    assert!(matches!(named, Ok(Response::Done)), "{named:?}");
+    loop {
+        match next_said(&mut client) {
+            BufferUpdate::Trust { root } => {
+                assert_eq!(root, dir.join("app").display().to_string());
+                break;
+            }
+            BufferUpdate::Diagnostics { diagnostics, .. } => {
+                assert!(diagnostics.is_empty(), "a server ran: {diagnostics:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn a_folder_inside_one_trusted_is_trusted_but_for_one_marked_not() {
     use clackatoo_protocol::TrustAction;
 

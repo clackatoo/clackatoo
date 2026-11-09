@@ -89,6 +89,31 @@ fn a_folder_is_trusted_only_by_a_key_pressed_once_the_question_has_shown() {
 }
 
 #[test]
+fn a_folder_on_another_machine_is_asked_about_by_its_name() {
+    let (mut desk, buffer) = editing();
+    let desk_machine = clackatoo_protocol::MachineId([7; 16]);
+    desk.workspaces
+        .others
+        .push(clackatoo_protocol::OtherMachine {
+            id: desk_machine,
+            name: "desk".into(),
+        });
+    (desk.editors.buffers.get_mut(&buffer).unwrap()).set_machine(Some(desk_machine));
+    desk.buffer_changed(
+        buffer,
+        BufferUpdate::Trust {
+            root: "/src/app".into(),
+        },
+    );
+    assert!(
+        matches!(desk.status(), Status::Typing { text, .. }
+            if text == "Trust /src/app on desk? Its language servers may run its code (y/n)"),
+        "{:?}",
+        desk.status()
+    );
+}
+
+#[test]
 fn a_macro_or_a_binding_never_answers_whether_to_trust_a_folder() {
     let (mut desk, buffer) = editing();
     desk.buffer_changed(
