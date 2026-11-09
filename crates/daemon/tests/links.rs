@@ -6409,6 +6409,99 @@ fn original_images_are_fetched_on_demand_through_the_federated_chat() {
     ));
 }
 
+/// A window older than the image layer, on laptop, shown a chat on server
+/// through laptop's connection there, still sees a thumbnail's pixels:
+/// server keeps them for a daemon passing the chat on, which a window of
+/// the image layer is sent too, with the image's ID.
+#[test]
+fn an_older_window_sees_thumbnails_of_a_chat_passed_on_from_another_machine() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use clackatoo_protocol::frame::{self, FrameDecoder};
+    use std::io::Read as _;
+    let mut chain = Chain::new();
+    let pane = chain.window.new_tab(chain.srv.id, chat()).unwrap();
+    let shown = chain.window.watch_workspaces().unwrap();
+    let Content::Terminal(terminal) = shown.find_pane(pane).unwrap().2.content else {
+        panic!("not a chat");
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(64, 32, image::Rgb([20, 40, 60]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let preview = clackatoo_protocol::ChatPreview {
+        width: 2,
+        height: 1,
+        rgba: vec![20, 40, 60, 255, 20, 40, 60, 255].into(),
+        original: 0,
+        image: None,
+    };
+    let image = clackatoo_protocol::ChatImage {
+        data: STANDARD.encode(png.get_ref()),
+        width: 64,
+        height: 32,
+        preview: Some(preview.clone()),
+    };
+    chain
+        .window
+        .chat(
+            terminal,
+            ChatAction::SendImages {
+                text: "a picture".into(),
+                images: vec![image],
+            },
+        )
+        .unwrap();
+    // Kept in server's images, which this window is told its ID in.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let node = chain
+            .window
+            .capture(terminal)
+            .unwrap()
+            .chat()
+            .cloned()
+            .unwrap();
+        if let Some(shown) = node.turns.first().and_then(|turn| turn.previews.first())
+            && shown.image.is_some()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the image was never kept");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // A window from before the image layer, on laptop.
+    let old = clackatoo_protocol::wire::IMAGES - 1;
+    let mut stream = std::os::unix::net::UnixStream::connect(&chain.laptop.socket).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    for message in [
+        ClientMessage::Hello {
+            protocol_version: old,
+        },
+        ClientMessage::Request(Request::Capture { terminal }),
+    ] {
+        stream
+            .write_all(&frame::encode(old, &message).unwrap())
+            .unwrap();
+    }
+    let mut decoder = FrameDecoder::new();
+    let mut buffer = vec![0; 1 << 16];
+    let view = loop {
+        match decoder.decode::<ServerMessage>(old).unwrap() {
+            Some(ServerMessage::Response(Response::View(view))) => break view,
+            Some(_) => {}
+            None => {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "laptop hung up");
+                decoder.push(&buffer[..read]);
+            }
+        }
+    };
+    let node = view.chat().unwrap();
+    let shown = &node.turns[0].previews[0];
+    assert_eq!(shown.rgba, preview.rgba, "the pixels came");
+    assert!(shown.valid() && shown.image.is_none());
+}
+
 // --- Chats going on with their sessions through other machines ----------
 
 /// A new chat with the agent for tests, going on with its session

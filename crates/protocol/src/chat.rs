@@ -2137,12 +2137,13 @@ pub struct ChatPreview {
 
 impl Serialize for ChatPreview {
     /// As derived, but for the pixels, which a client of [`wire::IMAGES`]
-    /// isn't sent with an image it fetches by its ID; and for the gated
-    /// fields, left out for an older peer.
+    /// isn't sent with an image it fetches by its ID, but for a daemon
+    /// passing the chat on (see [`wire::keeping_pixels`]); and for the
+    /// gated fields, left out for an older peer.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct as _;
         let wire = wire::current();
-        let pixels = wire < wire::IMAGES || self.image.is_none();
+        let pixels = wire < wire::IMAGES || self.image.is_none() || wire::pixels_kept();
         let mut fields = serializer.serialize_struct("ChatPreview", 6)?;
         fields.serialize_field("width", &self.width)?;
         fields.serialize_field("height", &self.height)?;

@@ -437,6 +437,27 @@ pub const OLDEST: u32 = if MIN_CLIENT < MIN_DAEMON {
 thread_local! {
     /// The wire version of what's being encoded or decoded on this thread.
     static WIRE: Cell<u32> = const { Cell::new(PROTOCOL_VERSION) };
+    /// Whether thumbnails naming their images keep their pixels as they're
+    /// encoded on this thread (see [`keeping_pixels`]).
+    static PIXELS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f`, encoding chats' thumbnails with their pixels, if `keep`,
+/// even those naming their images, which a client of [`IMAGES`] fetches by
+/// them: for a daemon passing a chat on, which may have clients older than
+/// that, who have only the pixels.
+pub fn keeping_pixels<R>(keep: bool, f: impl FnOnce() -> R) -> R {
+    let before = PIXELS.replace(keep);
+    let result = f();
+    PIXELS.set(before);
+    result
+}
+
+/// Whether thumbnails are being encoded with their pixels, whatever they
+/// name (see [`keeping_pixels`]).
+#[must_use]
+pub fn pixels_kept() -> bool {
+    PIXELS.get()
 }
 
 /// The wire version of what's being encoded or decoded on this thread, or
@@ -3349,6 +3370,10 @@ mod image_tests {
         // Without an image, the pixels go to anyone.
         let plain = preview(None);
         assert_eq!(read::<ChatPreview>(IMAGES, &encode(IMAGES, &plain)), plain);
+        // For a daemon passing it on, the pixels go too.
+        let passed: ChatPreview = read(IMAGES, &keeping_pixels(true, || encode(IMAGES, &named)));
+        assert_eq!(passed, named);
+        assert!(!pixels_kept(), "only while encoding for it");
         // Neither pixels nor an image is no thumbnail.
         assert!(
             !ChatPreview {

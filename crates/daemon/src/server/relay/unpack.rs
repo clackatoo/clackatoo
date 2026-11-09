@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
-use clackatoo_protocol::{Event, ServerMessage, TerminalId};
+use clackatoo_protocol::{Event, ServerMessage, TerminalId, wire};
 
 /// What's to be done with a frame from another daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,8 +119,12 @@ pub(crate) fn unpack(payload: &[u8], wire: u32, need: &Need) -> Unpacked {
                                     (message, _) => message,
                                 })
                         });
+                        // Thumbnails keep their pixels, for clients
+                        // older than the image layer here or beyond.
                         (message.as_ref())
-                            .and_then(|message| frame::encode(to, message).ok())
+                            .and_then(|message| {
+                                wire::keeping_pixels(true, || frame::encode(to, message)).ok()
+                            })
                             .filter(|frame| !frame.is_empty())
                     };
                     (to, frame)

@@ -634,7 +634,7 @@ fn others_ready(
 /// next update is a snapshot.
 fn queue_update(
     subscription: &mut Subscription,
-    wire: u32,
+    (wire, relays): (u32, bool),
     id: TerminalId,
     update: ViewUpdate,
     outgoing: &mut Vec<u8>,
@@ -643,7 +643,9 @@ fn queue_update(
         terminal: id,
         update,
     });
-    match frame::encode(wire, &event) {
+    // A daemon passing it on may have clients that need the thumbnails'
+    // pixels.
+    match wire::keeping_pixels(relays, || frame::encode(wire, &event)) {
         Ok(bytes) if !bytes.is_empty() => {
             outgoing.extend_from_slice(&bytes);
             subscription.awaiting_ack = true;
@@ -2610,8 +2612,13 @@ impl Daemon {
                     &slot.terminal,
                     client.wire,
                     self.tools.terminal_state(id),
-                ) && queue_update(subscription, client.wire, id, update, outgoing)
-                {
+                ) && queue_update(
+                    subscription,
+                    (client.wire, client.relays),
+                    id,
+                    update,
+                    outgoing,
+                ) {
                     ready.push(Token(key));
                 }
             }
@@ -3355,14 +3362,16 @@ impl Daemon {
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
-            let mut answer = match frame::encode(client.wire, &reply) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    log::error!("encoding a response failed: {err}");
-                    client.finished = true;
-                    Vec::new()
-                }
-            };
+            let relays = client.relays;
+            let mut answer =
+                match wire::keeping_pixels(relays, || frame::encode(client.wire, &reply)) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        log::error!("encoding a response failed: {err}");
+                        client.finished = true;
+                        Vec::new()
+                    }
+                };
             answer.append(&mut client.later);
             // Behind an answer still to come from another machine.
             if client.held.is_empty() {
@@ -5182,7 +5191,7 @@ mod tests {
         let mut outgoing = Vec::new();
         assert!(queue_update(
             &mut sent,
-            PROTOCOL_VERSION,
+            (PROTOCOL_VERSION, false),
             TerminalId(1),
             update,
             &mut outgoing
@@ -5200,7 +5209,7 @@ mod tests {
         let oldest = clackatoo_protocol::wire::MIN_CLIENT;
         assert!(!queue_update(
             &mut sent,
-            oldest,
+            (oldest, false),
             TerminalId(1),
             newer,
             &mut outgoing
