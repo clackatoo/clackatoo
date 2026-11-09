@@ -542,14 +542,19 @@ in [`startup.toml`](~clackatoo/reference/frame#settings), which takes effect
 for windows opened after; the font and its size change in this one too.
 `renderer` and `priority` are only saved, for windows opened after.
 
-The font picker lists the font families installed, as `fc-list : family`
-lists them, with the system's monospace font first. A value typed, as for
+The font picker lists the monospace font families installed, those whose
+font says so or whose letters are all as wide, with the system's monospace
+font first, and the font in use whatever it is. <kbd>Tab</kbd> lists every
+family, as `fc-list : family` does, or only the monospace ones again. A value
+typed, as for
 `colorcolumn` or `showbreak`, is written as `:set` takes it after `=`.
 
 **Locked.** An option your `init.lua` sets as it loads is locked: it would
 outdo anything the menu saved, so the menu says where, as `init.lua:12` at the
 row's end, and changes nothing. <kbd>Enter</kbd> on it opens that line in an
-editor beside the focused pane.
+editor beside the focused pane, by the daemon on this machine, where your
+config is. If the window's daemon is on another machine, the bottom bar says
+so instead, and nothing opens there.
 
 **Configured and current.** An option changed since your config loaded, with
 `:set` or a key, says both: "configured 4, currently 7", and `not saved` at
@@ -577,7 +582,11 @@ client.keys.map("niv", "<A-t>", "<C-b>c", { desc = "new tab" })
 Keys your config binds as it loads are locked, as options are, and so are
 keys it binds to a function, which `settings.lua` can't hold: bind more keys
 to those in `init.lua`. `d` takes keys the menu saved out of `settings.lua`,
-and puts back what the window binds them to as it starts, if anything.
+in the row's modes, and puts back what the window binds them to as it starts,
+if anything; the bottom bar says if `settings.lua` no longer binds them. A
+row is keys bound alike in several modes by the same thing, so keys saved for
+some modes and bound otherwise in others are rows of their own. `u` after
+recording keys over ones saved before binds those again.
 
 `:mappersist`, or `:mapp`, does the same from the command line: modes, keys,
 and the keys to type, the rest of the line, as Vim's `:map` takes them:
@@ -590,9 +599,12 @@ It's refused for keys your `init.lua` binds as it loads, and the bottom bar
 names the line.
 
 Bindings in `settings.lua` go at the end of the file, after its options.
-Saving one changes only its own line, as for options: a binding of the same
-keys in the same modes is replaced where it is, and comments around it are
-kept.
+Saving one changes only the lines binding its keys, and those only in its
+modes: a line binding them in the same modes is changed where it is, keeping
+its comment; a line binding them in other modes too keeps those, as
+`client.keys.map("niv", …)` taken out in `iv` is left `"n"`. So the last line
+binding the keys in each mode, which is what counts, is always the one saved
+last.
 
 The menu is the window's own: options are the window process's, not the
 daemon's, so the [web app](~clackatoo/reference/phone) doesn't list them.
