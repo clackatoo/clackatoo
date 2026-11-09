@@ -2158,7 +2158,8 @@ mod tests {
                 "open:2",
                 "open:1",
                 "open:3",
-                "notify"
+                "notify",
+                "measures"
             ]
         );
         let text = page.all_text();
@@ -2801,7 +2802,8 @@ mod tests {
                 "filter:attention",
                 "filter:working",
                 "filter:terminals",
-                "term:2"
+                "term:2",
+                "measures"
             ]
         );
         let text = page.all_text();

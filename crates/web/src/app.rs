@@ -2015,6 +2015,7 @@ impl App {
     }
 
     /// Does what was tapped.
+    #[allow(clippy::too_many_lines, reason = "an arm for each thing a tap does")]
     fn act(&mut self, action: Action) {
         match action {
             Action::Home => self.go(""),

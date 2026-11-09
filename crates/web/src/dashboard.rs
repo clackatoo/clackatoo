@@ -152,14 +152,16 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
     if !any {
         result = result.child(empty(state.home_filter, !query.is_empty()));
     }
-    // What places the page, for a screenshot when the phone's keyboard
-    // misplaces it. The style sheet shows it only on touch screens.
-    notification_banner(result, notifications).child(
-        el("button")
-            .class("measures-toggle")
-            .action(&Action::Measures)
-            .text("Screen measurements"),
-    )
+    notification_banner(result, notifications).child(measures_toggle())
+}
+
+/// Shows what places the page, for a screenshot when the phone's keyboard
+/// misplaces it. The style sheet shows it only on touch screens.
+fn measures_toggle() -> Element {
+    el("button")
+        .class("measures-toggle")
+        .action(&Action::Measures)
+        .text("Screen measurements")
 }
 
 fn filters(state: &State) -> Element {
