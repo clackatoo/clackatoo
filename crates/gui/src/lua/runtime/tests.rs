@@ -334,3 +334,68 @@ fn a_window_that_closes_takes_its_handlers_work_with_it() {
         "the first window's alone"
     );
 }
+
+/// `client.opt` in a handler of a key reads and sets as `:set` in its
+/// window would; in a handler of a daemon's event, which is every
+/// window's, it reads and sets every window's value, leaving the window
+/// that heard it its own.
+#[test]
+fn client_opt_in_a_daemons_event_is_every_windows() {
+    let (mut runtime, said) = runtime();
+    runtime.state.worlds.borrow_mut().insert(
+        WINDOW,
+        World {
+            own: vec![(options::find("ts").unwrap(), options::Value::Number(8))],
+            ..World::default()
+        },
+    );
+    load(
+        &mut runtime,
+        r#"
+        client.on('turnend', function()
+            client.cmd(`heard {client.opt.ts}`)
+            client.opt.ts = 2
+        end)
+        client.keys.map('n', 'k', function()
+            client.cmd(`pressed {client.opt.ts}`)
+            client.opt.ts = 3
+        end)
+        "#,
+    );
+    let sets = |said: &Receiver<(To, Origin, FromLua)>| -> Vec<(Option<u32>, String)> {
+        (said.try_iter())
+            .filter_map(|(_, _, said)| match said {
+                FromLua::Set { window, .. } => Some((window, "set".to_owned())),
+                FromLua::Command { line, .. } => Some((None, line)),
+                _ => None,
+            })
+            .collect()
+    };
+    runtime.handle(turn_ended());
+    drain(&mut runtime, |_| {});
+    assert_eq!(
+        sets(&said),
+        [(None, "heard 4".to_owned()), (None, "set".to_owned())]
+    );
+    runtime.handle(ToLua::Bound {
+        seq: 1,
+        key: KeyInfo {
+            key: "k".into(),
+            keys: Some("k".into()),
+            text: None,
+            mode: KeyMode::Normal,
+            window: WINDOW,
+            guarded: false,
+            pane: None,
+            count: None,
+        },
+        binding: 2,
+    });
+    assert_eq!(
+        sets(&said),
+        [
+            (None, "pressed 8".to_owned()),
+            (Some(WINDOW), "set".to_owned())
+        ]
+    );
+}

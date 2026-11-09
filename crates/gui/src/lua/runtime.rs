@@ -90,6 +90,10 @@ struct State {
     window: Cell<Option<u32>>,
     /// Whether that event is guarded (see [`Origin`]).
     guarded: Cell<bool>,
+    /// Whether that event is a key, which `client.opt` reads and sets
+    /// options for its window as `:set` there would: not a daemon's
+    /// event, which is every window's.
+    keyed: Cell<bool>,
     /// The files of Lua that have set something, each kept once.
     files: RefCell<Vec<Arc<str>>>,
 }
@@ -107,6 +111,7 @@ impl State {
             loading: Cell::new(None),
             window: Cell::new(None),
             guarded: Cell::new(false),
+            keyed: Cell::new(false),
             files: RefCell::default(),
         }
     }
@@ -257,6 +262,8 @@ struct Job {
     loading: Option<SetFrom>,
     /// How long it's run since it started or its answer came.
     ran: Duration,
+    /// It handles a key (see [`State::keyed`]).
+    keyed: bool,
 }
 
 impl Job {
@@ -267,6 +274,7 @@ impl Job {
             origin,
             loading: None,
             ran: Duration::ZERO,
+            keyed: false,
         }
     }
 }
@@ -446,7 +454,8 @@ impl Runtime {
                         window: Some(key.window),
                         guarded: key.guarded,
                     };
-                    self.later(&handler, |runtime| runtime.decided_event(&key), origin);
+                    let event = |runtime: &Self| runtime.decided_event(&key);
+                    self.later(&handler, event, origin, true);
                 }
             }
             ToLua::Answer { request, result } => {
@@ -477,7 +486,7 @@ impl Runtime {
                         window: Some(turn.window),
                         guarded: turn.guarded,
                     };
-                    self.later(&handler, |runtime| runtime.turn_event(&turn), origin);
+                    self.later(&handler, |runtime| runtime.turn_event(&turn), origin, false);
                 }
             }
         }
@@ -489,16 +498,20 @@ impl Runtime {
     }
 
     /// Queues `handler` as background work, for the event from `origin`,
-    /// called with the event `event` makes.
+    /// a key's if `keyed`, called with the event `event` makes.
     fn later(
         &mut self,
         handler: &Function,
         event: impl FnOnce(&Self) -> mlua::Result<Table>,
         origin: Origin,
+        keyed: bool,
     ) {
         let made = event(self).and_then(|event| {
             let thread = self.lua.create_thread(handler.clone())?;
-            Ok(Job::new(thread, self.args(event), origin))
+            Ok(Job {
+                keyed,
+                ..Job::new(thread, self.args(event), origin)
+            })
         });
         match made {
             Ok(job) => self.background.push_back(job),
@@ -530,7 +543,10 @@ impl Runtime {
                         window: Some(key.window),
                         guarded: key.guarded,
                     };
-                    let job = Job::new(thread, self.args(&event), origin);
+                    let job = Job {
+                        keyed: true,
+                        ..Job::new(thread, self.args(&event), origin)
+                    };
                     self.run(job, self.budget, false);
                 }
                 Err(err) => self.report(&err),
@@ -586,6 +602,7 @@ impl Runtime {
         // ran to the end of it, or a run of yields, can come to.
         self.state.window.set(job.origin.window);
         self.state.guarded.set(job.origin.guarded);
+        self.state.keyed.set(job.keyed);
         if job.ran >= limit {
             self.report(&mlua::Error::runtime("ran too long, so it was stopped"));
             self.state.window.set(None);
@@ -608,6 +625,7 @@ impl Runtime {
         self.state.loading.set(None);
         self.state.window.set(None);
         self.state.guarded.set(false);
+        self.state.keyed.set(false);
         self.settle(job, resumed);
     }
 
@@ -684,9 +702,9 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
         "get_option",
         lua.create_function(move |lua, name: String| {
             let option = options::find(&name).map_err(mlua::Error::runtime)?;
-            // In a handler of a window's event, as that window has it, as
+            // In a handler of a window's key, as that window has it, as
             // Neovim's `vim.o` reads the current window's.
-            let own = (s.window.get()).and_then(|window| {
+            let own = (s.window.get().filter(|_| s.keyed.get())).and_then(|window| {
                 let worlds = s.worlds.borrow();
                 let world = worlds.get(&window)?;
                 let own = world.own.iter().find(|(info, _)| info.name == option.name);
@@ -717,7 +735,9 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             let by = s.set_by(lua);
             match set() {
                 Ok((option, value)) => {
-                    let window = s.window.get();
+                    // A daemon's event is every window's: what its handler
+                    // sets leaves each window's own as it is.
+                    let window = s.window.get().filter(|_| s.keyed.get());
                     // As `:set` in that window: its own value goes, so
                     // what's read next is what was set.
                     if let Some(window) = window.filter(|_| !by.loading)

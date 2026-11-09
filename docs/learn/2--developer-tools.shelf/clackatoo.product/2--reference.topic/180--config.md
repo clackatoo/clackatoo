@@ -414,8 +414,10 @@ It takes what `:set` takes. These can be set so:
 
 `:set` in a window sets the value every window shares, and takes that window's
 own value of it away, so it shows what was set; other windows keep theirs. So
-does setting `client.opt` in a handler of the window's event, once the config
-has loaded. While the config loads, it sets only the value every window shares.
+does setting `client.opt` in a handler of a key pressed in the window, once
+the config has loaded. While the config loads, and in a handler of a chat's
+turn ending, which is every window's, it sets only the value every window
+shares.
 `:setlocal` values aren't saved: `:setpersist` saves the value every window
 shares, and a reload takes them away.
 
@@ -424,9 +426,10 @@ The font a window is opened with, `--font` and `--font-size` or
 config setting the font as it loads doesn't change it, but `:set` in that window
 does. A reload, and `:set font&`, put it back.
 
-`client.opt` reads the value every window shares while the config loads; in a
-handler of a window's event, it reads that window's, its own if it has one, as
-Neovim's `vim.o` reads the current window's.
+`client.opt` reads the value every window shares while the config loads, and
+in a handler of a chat's turn ending; in a handler of a key, it reads the
+window's the key was pressed in, its own if it has one, as Neovim's `vim.o`
+reads the current window's.
 
 ### Saving options: settings.lua
 
