@@ -1455,6 +1455,52 @@ pub(in crate::server) mod tests {
         assert!(said.contains("big.txt"), "{said}");
     }
 
+    /// The next turn's tool says it's done with a big file, not yet how,
+    /// while the last turn's change to it is still worked out off the
+    /// loop: settled with what waited, it isn't settled as the end of a
+    /// turn, the last's having ended, or it'd be noted unknown before its
+    /// change is said (CI, v2026.11.19).
+    #[test]
+    fn a_big_change_worked_out_into_the_next_turn_leaves_that_turns_change_known() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        world.end_turn();
+        world.next_turn();
+        let chat = world.chat;
+        let path = world.path("big.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, "t2");
+        let uid = world.daemon.chat_ref(chat).unwrap().turn_uid(1).unwrap();
+        let said = |done, diffs| Wrote {
+            done,
+            turn: uid,
+            tool: "t2".into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs,
+        };
+        world.daemon.take_written(chat, &said(false, vec![]));
+        // The first turn's change is read; it's being worked out.
+        world.daemon.take_one_settled();
+        assert!(world.daemon.agent_files.diffing(chat));
+        std::fs::write(world.path("big.txt"), "small\n").unwrap();
+        // Done, as Claude Code's adapter says before what it changed.
+        world.daemon.take_written(chat, &said(true, vec![]));
+        world.daemon.settle_all_pending();
+        let diff = RawDiff {
+            path: path.clone(),
+            old: Some(second.as_str().into()),
+            new: "small\n".into(),
+        };
+        world.daemon.take_written(chat, &said(true, vec![diff]));
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        assert_eq!(world.undo(1, false, false), "Undid turn 2: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(second));
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(first));
+    }
+
     #[test]
     fn a_big_change_the_worker_fails_at_is_noted_unknown() {
         use crate::server::settling::{CAUGHT, GONE};

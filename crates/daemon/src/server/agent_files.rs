@@ -58,7 +58,7 @@ use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
 use super::settling::{Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, DiskStamp, Made, Prepared, PreparedStep, Refused, Unprepared};
-use crate::chat::{RawDiff, TurnUid, Wrote};
+use crate::chat::{HostedChat, RawDiff, TurnUid, Wrote};
 use crate::regular::{self, Links};
 
 /// How many files' text, as agents last read them, are kept, to merge
@@ -912,7 +912,8 @@ impl Daemon {
         if self.buffer_of(&path) == Some(open.id) {
             match open.source {
                 Source::Tools { last } => {
-                    self.settle_open(chat, &path, open.id, last || diffing.last, tries);
+                    let last = self.still_last(chat, last || diffing.last);
+                    self.settle_open(chat, &path, open.id, last, tries);
                 }
                 Source::Commands { turn } => self.commands_into(chat, turn, open.id, tries),
             }
@@ -1044,9 +1045,10 @@ impl Daemon {
     fn after_diffing(&mut self, diffing: Diffing) {
         let (chat, path) = (diffing.chat(), diffing.path);
         if diffing.again {
+            let last = self.still_last(chat, diffing.last);
             match self.buffer_of(&path) {
-                Some(id) => self.settle(chat, &path, id, diffing.last),
-                None => self.settle_closed(chat, &path, diffing.last),
+                Some(id) => self.settle(chat, &path, id, last),
+                None => self.settle_closed(chat, &path, last),
             }
         }
         let files = &mut self.agent_files;
@@ -1059,6 +1061,15 @@ impl Daemon {
                 files.captures.retain(|capture| capture.chat != chat);
             }
         }
+    }
+
+    /// Whether settling again what waited for a change worked out off the
+    /// loop is still the last of a turn, as `last` says it was when the
+    /// turn ended: not once the chat's next turn has begun, as its tools'
+    /// reports are settled with what waited, and more of them may yet
+    /// come. That turn's own end settles them all as its last.
+    fn still_last(&self, chat: TerminalId, last: bool) -> bool {
+        last && !self.chat_ref(chat).is_some_and(HostedChat::answering)
     }
 
     /// The reports of the tools of the agent in `chat` about `path`, in
