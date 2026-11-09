@@ -26,7 +26,7 @@ It opens 30 columns wide, or a quarter of the tab if that's narrower, but never 
 
 ## The tree
 
-The top line is the root. Below it is `..`, the way up: Enter on it, or a double click, makes the folder above the root the root, with the cursor on the folder you came from, as `-` does. The cursor moves onto it as onto any line, and `gg` goes to it. There's none when the root is `/`. It's drawn as a folder is. A heading too long for the pane is cut from its start, as `…/tutor/explorer`. It names no file, and nothing is read of the folder above until you go up. A root you may not read shows `..` alone, so you can still go up; it isn't asked for again until `R`.
+The top line is the root. Below it is `..`, the way up: Enter on it, or a double click, makes the folder above the root the root, with the cursor on the folder you came from, as `-` does. The cursor moves onto it as onto any line, and `gg` goes to it. There's none when the root is `/`. It's drawn as a folder is. A heading too long for the pane is cut from its start, as `…/tutor/explorer`. It names no file, and nothing is read of the folder above until you go up. A root you can't read shows `..` alone, so you can still go up; it isn't asked for again until `R`.
 
 Folders have `▸` when closed and `▾` when open, and the guides down the left show what each line is in. Folders are blue, programs green, links cyan.
 

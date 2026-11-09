@@ -19,7 +19,7 @@ CLACKATOO_ACP_TRACE=~/acp-traces clackatoo daemon
 
 Every agent the daemon starts from then on writes to a new file of its own there, named for the agent and the adapter's process ID, as `claude-12345.log`. A chat whose agent stops and starts again gets a new file. A file is never added to: if the name is taken, as when a process ID comes round again, the trace goes to `claude-12345.log.2`, `.3` and so on.
 
-The directory is made if it isn't there, readable by you only, and each file is readable by you only. A directory of your own that others may read, as one made `0755`, is fine: they can see the files' names, not what's in them. The daemon traces nowhere if the directory isn't yours, if anyone else may write in it, or if it's a symbolic link, and the log says why. Files are made in it directly, never through a link.
+The directory is made if it isn't there, readable by you only, and each file is readable by you only. A directory of your own that others can read, as one made `0755`, is fine: they can see the files' names, not what's in them. The daemon traces nowhere if the directory isn't yours, if anyone else can write in it, or if it's a symbolic link, and the log says why. Files are made in it directly, never through a link.
 
 Each line is one message or one line the adapter wrote to stderr:
 

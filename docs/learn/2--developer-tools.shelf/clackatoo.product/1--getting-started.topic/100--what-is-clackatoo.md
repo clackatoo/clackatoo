@@ -19,7 +19,7 @@ Everything else is a **client** of the daemon and talks to it over one protocol:
 
 - closing a window closes nothing, and reopening it brings everything back;
 - a script can do anything a window can, because it uses the same requests;
-- an agent is just another client. It can start terminals, type into them and read their screens.
+- an agent is one more client. It can start terminals, type into them and read their screens.
 
 The daemon's terminals live on one thread, waiting on every PTY and connection at once. A program's output goes straight from its PTY into the grid on that thread, with no locks and no handoff between threads. Slower work, such as parsing files to color them, asking git, or reading a language server's big answers, goes to threads of its own, so it never holds up a key.
 
