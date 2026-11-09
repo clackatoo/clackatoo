@@ -52,8 +52,9 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant, SystemTime};
 
 use clackatoo_protocol::{
-    BackgroundAction, ChatSummary, Error, Event, Lent, Machine, MachineId, PaneId, PaneTerminal,
-    Request, Response, ServerMessage, TerminalId, WorkspaceId, Workspaces, wire,
+    BackgroundAction, ChatSummary, Content, Error, Event, ImageFrom, Lent, Machine, MachineId,
+    PaneId, PaneTerminal, Request, Response, ServerMessage, TerminalId, WorkspaceId, Workspaces,
+    wire,
 };
 use mio::Token;
 
@@ -345,6 +346,22 @@ impl Daemon {
                 Err(Error::NoSuchWorkspace(id))
             }
         };
+        // A buffer or a picture may be had if a pane the client may have
+        // shows it, or none shows it.
+        let shown = |content: Content, refused: Error| {
+            let lents = self.workspaces.lents_showing(content);
+            if lents.is_empty() || lents.iter().any(|&lent| self.may_have(token, lent, true)) {
+                Ok(())
+            } else {
+                Err(refused)
+            }
+        };
+        let picture = |id: clackatoo_protocol::PictureId| {
+            let refused = Error::Other("there's no such picture".into());
+            shown(Content::Picture(id), refused)
+        };
+        let buffer =
+            |id: clackatoo_protocol::BufferId| shown(Content::Buffer(id), Error::NoSuchBuffer(id));
         // Nothing's lent, as nearly always: nothing to look at.
         if !self.workspaces.has_lent() {
             return Ok(());
@@ -354,7 +371,7 @@ impl Daemon {
             | Request::Resize { terminal: id, .. }
             | Request::ChatOriginal { terminal: id, .. }
             | Request::Image {
-                from: clackatoo_protocol::ImageFrom::Terminal(id),
+                from: ImageFrom::Terminal(id),
                 ..
             }
             | Request::Capture { terminal: id }
@@ -406,6 +423,17 @@ impl Daemon {
                 | BackgroundAction::Start { workspace: id, .. } => workspace(id),
                 BackgroundAction::Ports => Ok(()),
             },
+            Request::Image {
+                from: ImageFrom::Picture(id),
+                ..
+            }
+            | Request::AttachPicture { picture: id }
+            | Request::DetachPicture { picture: id } => picture(id),
+            Request::Image {
+                from: ImageFrom::Buffer(id),
+                ..
+            }
+            | Request::ImageAt { buffer: id, .. } => buffer(id),
             _ => Ok(()),
         }
     }

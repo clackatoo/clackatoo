@@ -3324,6 +3324,12 @@ fn what_a_machine_lent_is_the_borrowers_alone() {
             terminal: lent_chat,
             action: ChatAction::Stop,
         },
+        Request::Image {
+            from: clackatoo_protocol::ImageFrom::Terminal(lent_chat),
+            image: clackatoo_protocol::ImageId([1; 16]),
+            fit: None,
+            at: 0,
+        },
     ] {
         let answer = plain.request(&refused).unwrap();
         assert!(

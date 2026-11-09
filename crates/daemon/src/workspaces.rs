@@ -822,6 +822,19 @@ impl WorkspaceState {
             .any(|pane| pane.content == Content::Buffer(buffer))
     }
 
+    /// Who the workspaces of the panes showing `content` are lent to, a
+    /// pane at a time: `None` for a pane in a workspace not lent.
+    pub(crate) fn lents_showing(&self, content: Content) -> Vec<Option<Lent>> {
+        (self.workspaces.list.iter())
+            .flat_map(|workspace| {
+                (workspace.tabs.iter())
+                    .flat_map(|tab| tab.layout.panes())
+                    .filter(|pane| pane.content == content)
+                    .map(|_| workspace.lent)
+            })
+            .collect()
+    }
+
     /// Names `tab`, or with an empty name, takes its name away.
     /// Forgets the name `tab` was given, if it was: it's named after its
     /// focused pane again.

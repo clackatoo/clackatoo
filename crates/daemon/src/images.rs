@@ -19,7 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{Cursor, Read as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
