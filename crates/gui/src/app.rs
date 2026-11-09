@@ -1427,9 +1427,14 @@ impl App {
         self.desk.start_options(options, fixed);
     }
 
-    /// Starts the config's Lua.
-    pub(crate) fn start_lua(&mut self, start: crate::desk::LuaStart) {
-        self.desk.start_lua(start);
+    /// Makes the window one of `client`'s, going by its config.
+    pub(crate) fn join(&mut self, client: crate::client::Client) {
+        self.desk.join(client);
+    }
+
+    /// The window has closed: its client forgets it.
+    pub(crate) fn leave_client(&mut self) {
+        self.desk.leave_client();
     }
 
     /// Starts the tutor, with what it remembers.
@@ -3741,6 +3746,11 @@ impl App {
     /// when to wake next, if anything's waiting for a time rather than an
     /// event.
     fn idle(&mut self) -> Option<Instant> {
+        // Another window may have changed what every window shares: the
+        // options, or the bindings.
+        if self.desk.follow_client() {
+            self.request_redraw();
+        }
         // An editor may have something to ask, now typing has paused, or
         // a command to give up on, that waited too long for the grammar.
         if self.desk.tick_editors(Instant::now()) {

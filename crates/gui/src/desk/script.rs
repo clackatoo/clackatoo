@@ -1,58 +1,41 @@
 //! The desk's side of the client's Lua config: telling it about the world,
 //! asking it about keys, and doing what it says.
+//!
+//! One Lua runs for every window of the process (see [`crate::client`]);
+//! the desk is one window in it, by its number. What Lua binds, listens
+//! for and sets is the client's, kept once for every window: the desk
+//! follows it, as its count of changes moves on ([`Desk::follow_client`]).
+//! What Lua does in a window, as splitting a pane or running a command,
+//! comes to that window alone.
 
-use std::fmt;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{PaneId, Request};
+use clackatoo_protocol::{ChatState, ChatSummary, PaneId, Request};
 
 use super::{Asked, Desk};
+use crate::client::Client;
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::{self, Chord};
-use crate::lua::{
-    FromLua, INIT_TIME, KeyInfo, Lua, PaneInfo, Scope, Source, ToLua, WINDOW, Wake, World,
-};
-
-use super::bindings::Binding;
-
-/// Where the config is, to start its Lua from, and a reload to start it
-/// again, and `:setpersist` to save settings in.
-pub(crate) struct LuaStart {
-    pub(crate) source: Source,
-    /// Makes what wakes the window: when Lua has something for it, or a
-    /// setting it asked to save has been.
-    pub(crate) wake: Box<dyn Fn() -> Wake>,
-}
-
-impl LuaStart {
-    /// Starts the config's Lua, if there's a config, with the options as
-    /// the window's are.
-    fn lua(&self, options: &crate::options::Options) -> Option<Lua> {
-        Lua::start(self.source.clone(), options.clone(), (self.wake)())
-    }
-}
-
-impl fmt::Debug for LuaStart {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LuaStart")
-    }
-}
+#[cfg(test)]
+use crate::lua::Source;
+use crate::lua::{FromLua, INIT_TIME, KeyInfo, PaneInfo, Scope, ToLua, TurnEnd, World};
 
 /// The desk's part in the config's Lua.
 #[derive(Debug, Default)]
 pub(super) struct Script {
-    lua: Option<Lua>,
-    pub(super) start: Option<LuaStart>,
-    /// Lua's keypress handlers, in the order they were registered.
-    handlers: Vec<(u64, Scope)>,
+    /// The client the window is in, and its number there: until it joins
+    /// one, as in tests, one made for it alone, as it's first needed.
+    joined: Option<(Client, u32)>,
     /// The world as Lua was last told it.
     told: Option<World>,
     /// The keys waiting for the rest of a binding, as pressed.
     waiting: Vec<(KeptPress, Chord)>,
     /// Keys a binding to keys is typing are being handled.
     pub(super) typing: bool,
-    /// When `init.lua` started running, until Lua says it's finished.
-    running: Option<Instant>,
+    /// The client's counts of changes to the bindings, and of reloads, as
+    /// the window last followed them.
+    keys_seen: u64,
+    reloads_seen: u64,
 }
 
 /// How long the window takes `init.lua` to be running, at most: as long as
@@ -61,60 +44,125 @@ pub(super) struct Script {
 const RUNNING_TIME: Duration = INIT_TIME.saturating_add(Duration::from_secs(1));
 
 impl Desk {
-    /// Starts the config's Lua with `start`, which a reload starts again.
-    pub(crate) fn start_lua(&mut self, start: LuaStart) {
-        self.script.lua = start.lua(&self.options);
-        self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
-        self.script.start = Some(start);
+    /// Makes the window one of `client`'s: it goes by the client's
+    /// bindings, handlers and options from now on.
+    pub(crate) fn join(&mut self, client: Client) {
+        let window = client.join();
+        self.options = crate::options::View::new(client.options(), window);
+        self.script.joined = Some((client, window));
+        self.follow_client();
+    }
+
+    /// The client the window is in, and its number there.
+    pub(super) fn client(&mut self) -> (Client, u32) {
+        let shared = self.options.shared();
+        let (client, window) = self.script.joined.get_or_insert_with(|| {
+            let client = Client::sharing(shared);
+            let window = client.join();
+            (client, window)
+        });
+        (client.clone(), *window)
+    }
+
+    /// Whether the window is in a client yet.
+    pub(super) fn in_client(&self) -> bool {
+        self.script.joined.is_some()
+    }
+
+    /// The client the window is in, if it's in one yet.
+    pub(super) fn client_ref(&self) -> Option<&Client> {
+        self.joined().map(|(client, _)| client)
+    }
+
+    /// The client the window is in, if it's in one yet.
+    fn joined(&self) -> Option<(&Client, u32)> {
+        let (client, window) = self.script.joined.as_ref()?;
+        Some((client, *window))
+    }
+
+    /// The window has closed: the client forgets it.
+    pub(crate) fn leave_client(&mut self) {
+        if let Some((client, window)) = self.script.joined.take() {
+            client.leave(window);
+        }
     }
 
     /// Whether `init.lua` is running, on the config's first run or a
     /// reload, at `now`.
     pub(super) fn config_running(&self, now: Instant) -> bool {
-        (self.script.running).is_some_and(|since| now < since + RUNNING_TIME)
+        (self.joined().and_then(|(client, _)| client.running()))
+            .is_some_and(|since| now < since + RUNNING_TIME)
     }
 
     /// When the window stops waiting for `init.lua` to finish, if it's
     /// running still, so it's woken then to do what waited.
     pub(crate) fn config_ends(&self) -> Option<Instant> {
         let now = Instant::now();
-        (self.script.running)
+        (self.joined().and_then(|(client, _)| client.running()))
             .map(|since| since + RUNNING_TIME)
             .filter(|&ends| now < ends)
     }
 
-    /// Runs the config again from the start, in a Lua of its own: what the
-    /// old one bound, or listened for, goes with it.
+    /// Runs the config again from the start, for every window, in a Lua of
+    /// its own: what the old one bound, or listened for, goes with it.
     pub(super) fn reload_lua(&mut self) {
-        let start = self.script.start.take();
-        // The new Lua numbers its requests afresh, so answers to the old
-        // one's go nowhere.
-        for asker in &mut self.asked {
-            if let super::Asker::Window(Asked::Lua(_)) = asker {
-                // And no macro waits for them: they're as good as answered.
-                self.macros.request_answered(asker);
-                *asker = super::Asker::Window(Asked::Quiet);
-            }
-        }
-        self.script = super::script::Script::default();
-        self.keymap = super::bindings::Keys::default();
-        self.reset_options();
-        self.script.lua = start.as_ref().and_then(|start| start.lua(&self.options));
-        self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
-        self.say(match &self.script.lua {
-            Some(_) => "reloaded the config".into(),
-            None => {
-                "there's no config to reload: it's client/init.lua in clackatoo's config directory"
-                    .into()
-            }
+        let (client, _) = self.client();
+        let reloaded = client.reload();
+        self.follow_client();
+        self.say(if reloaded {
+            "reloaded the config".into()
+        } else {
+            "there's no config to reload: it's client/init.lua in clackatoo's config directory"
+                .into()
         });
-        self.script.start = start;
     }
 
-    /// Tells Lua what the world looks like, if that's changed since it was
-    /// last told.
+    /// Follows what's changed in the client since the window last looked:
+    /// a reload, the bindings, and the options. Returns whether anything
+    /// had, so the window must be redrawn.
+    pub(crate) fn follow_client(&mut self) -> bool {
+        let Some(client) = self.joined().map(|(client, _)| client.clone()) else {
+            return false;
+        };
+        let (reloads, keys) = (client.reloads(), client.keys_changes());
+        let mut changed = false;
+        if reloads != self.script.reloads_seen {
+            self.script.reloads_seen = reloads;
+            // The new Lua numbers its requests afresh, so answers to the
+            // old one's go nowhere.
+            for asker in &mut self.asked {
+                if let super::Asker::Window(Asked::Lua(_)) = asker {
+                    // And no macro waits for them: they're as good as
+                    // answered.
+                    self.macros.request_answered(asker);
+                    *asker = super::Asker::Window(Asked::Quiet);
+                }
+            }
+            // It hears the world afresh.
+            self.script.told = None;
+            changed = true;
+        }
+        if keys != self.script.keys_seen {
+            self.script.keys_seen = keys;
+            self.keymap = client.keys().map.clone();
+            self.forget_waiting();
+            changed = true;
+        }
+        if self.options.follow() {
+            self.options_changed();
+            changed = true;
+        }
+        changed
+    }
+
+    /// Tells Lua what the world looks like through the window, if that's
+    /// changed since it was last told.
     pub(crate) fn sync_lua(&mut self) {
-        if self.script.lua.is_none() {
+        let Some((client, window)) = self.joined() else {
+            return;
+        };
+        client.focus(window, !self.unfocused);
+        if !client.has_lua() {
             return;
         }
         let terminals =
@@ -131,37 +179,46 @@ impl Desk {
                 Some((id, info))
             })
             .collect();
+        let own = {
+            let store = self.options.store();
+            (crate::options::ALL.iter())
+                .filter_map(|info| Some((info, store.local(window, info)?.0.clone())))
+                .collect()
+        };
         let world = World {
             workspaces: self.workspaces.clone(),
             shown: self.shown,
             panes,
+            focused: !self.unfocused,
+            own,
         };
         if self.script.told.as_ref() == Some(&world) {
             return;
         }
-        if let Some(lua) = &self.script.lua {
-            lua.send(ToLua::World(world.clone()));
-        }
+        client.send(ToLua::World {
+            window,
+            world: world.clone(),
+        });
         self.script.told = Some(world);
     }
 
     /// Tells Lua something, if there's a Lua.
     pub(super) fn tell_lua(&self, message: ToLua) {
-        if let Some(lua) = &self.script.lua {
-            lua.send(message);
+        if let Some((client, _)) = self.joined() {
+            client.send(message);
         }
     }
 
-    /// Does what Lua has said since last asked. Returns whether the window
-    /// must be redrawn.
+    /// Does what Lua has said for the window since last asked, and follows
+    /// what it's changed for every window. Returns whether the window must
+    /// be redrawn.
     pub(crate) fn lua_said(&mut self) -> bool {
-        let said = self
-            .script
-            .lua
-            .as_ref()
-            .map(Lua::received)
-            .unwrap_or_default();
-        let redraw = !said.is_empty();
+        let said = match self.joined() {
+            Some((client, window)) => client.take(window),
+            None => Vec::new(),
+        };
+        let followed = self.follow_client();
+        let redraw = !said.is_empty() || followed;
         let guarded = self.controlled;
         for message in said {
             self.lua_says(message, guarded);
@@ -174,7 +231,9 @@ impl Desk {
     /// it does first. `None` if there's no Lua, or it didn't say in time.
     fn ask_lua(&mut self, message: impl FnOnce(u64) -> ToLua) -> Option<bool> {
         self.sync_lua();
-        let (stop, said) = self.script.lua.as_mut()?.decide(message);
+        let (client, window) = self.client();
+        let (stop, said) = client.decide(window, message);
+        self.follow_client();
         // For a key an agent pressed, it's the agent's; and what Lua had
         // queued by itself comes too, which a chat with Control may have
         // had it say.
@@ -185,12 +244,14 @@ impl Desk {
         stop
     }
 
-    fn key_info(&self, chord: Chord, keys: Option<String>, press: &KeyPress<'_>) -> KeyInfo {
+    fn key_info(&mut self, chord: Chord, keys: Option<String>, press: &KeyPress<'_>) -> KeyInfo {
+        let (_, window) = self.client();
         KeyInfo {
             key: chord.to_string(),
             keys,
             text: press.text.map(str::to_owned),
             mode: self.key_mode(),
+            window,
             pane: self.shown.map(|shown| shown.pane),
             count: None,
         }
@@ -199,16 +260,12 @@ impl Desk {
     /// Runs Lua's keypress handlers for the focused pane, if it has any.
     /// Returns whether one stopped the key.
     pub(super) fn keypress_handled(&mut self, chord: Chord, press: &KeyPress<'_>) -> bool {
-        let shown = self.shown;
-        let handlers: Vec<u64> = (self.script.handlers.iter())
-            .filter(|(_, scope)| match *scope {
-                Scope::Client => true,
-                Scope::Window(window) => window == WINDOW,
-                Scope::Tab(tab) => shown.is_some_and(|shown| shown.tab == tab),
-                Scope::Pane(pane) => shown.is_some_and(|shown| shown.pane == pane),
-            })
-            .map(|&(id, _)| id)
-            .collect();
+        let handlers = match self.joined() {
+            Some((client, window)) if client.has_lua() => {
+                client.keypress_handlers(window, self.shown)
+            }
+            _ => return false,
+        };
         if handlers.is_empty() {
             return false;
         }
@@ -230,10 +287,13 @@ impl Desk {
     /// A binding to Lua, after `count` if one was typed: runs it, telling
     /// it the count, and if it lets the keys go on, gives the focused pane
     /// each of them in order, after the count, so `5x` bound to a function
-    /// that lets it go on still deletes five.
+    /// that lets it go on still deletes five. One that said it `propagate`s
+    /// lets them go on at once, without waiting for Lua, which runs it
+    /// after.
     pub(super) fn run_lua_binding(
         &mut self,
         binding: u64,
+        propagate: bool,
         count: Option<usize>,
         chord: Chord,
         press: &KeyPress<'_>,
@@ -245,9 +305,14 @@ impl Desk {
             count,
             ..self.key_info(chord, Some(keymap::display(&chords)), press)
         };
-        let stop = self
-            .ask_lua(|seq| ToLua::Bound { seq, key, binding })
-            .unwrap_or(true);
+        let stop = if propagate {
+            self.sync_lua();
+            self.tell_lua(ToLua::Run { key, binding });
+            false
+        } else {
+            self.ask_lua(|seq| ToLua::Bound { seq, key, binding })
+                .unwrap_or(true)
+        };
         if stop {
             return;
         }
@@ -305,18 +370,53 @@ impl Desk {
     /// a pane made is in it.
     pub(super) fn answer_lua(&mut self, request: u64, result: Result<PaneId, String>) {
         self.sync_lua();
-        if let Some(lua) = &self.script.lua {
-            lua.send(ToLua::Answer { request, result });
+        self.tell_lua(ToLua::Answer { request, result });
+    }
+
+    /// Tells Lua of chats whose turn has `ended`, as the daemon said, if it
+    /// listens: once, though every window on the daemon heard it.
+    pub(super) fn tell_turns_ended(&mut self, ended: Vec<ChatSummary>) {
+        if ended.is_empty()
+            || !self
+                .joined()
+                .is_some_and(|(client, _)| client.hears_turns())
+        {
+            return;
+        }
+        // So the pane showing it is in Lua's world.
+        self.sync_lua();
+        let Some((client, window)) = self.joined() else {
+            return;
+        };
+        let machine = self.workspaces.machine.as_ref().map(|machine| machine.id);
+        for chat in ended {
+            let failed = match chat.state {
+                ChatState::Failed(_) => Some(true),
+                _ => chat.failed,
+            };
+            let turn = TurnEnd {
+                chat: chat.chat,
+                pane: self.workspaces.pane_showing(chat.chat),
+                title: chat.title,
+                agent: chat.agent,
+                failed,
+                window,
+            };
+            client.tell_once((machine, chat.chat, chat.active), ToLua::TurnEnded(turn));
         }
     }
 
-    /// Forgets Lua's handlers of panes and tabs that have gone.
+    /// Forgets Lua's handlers of the window's panes and tabs that have
+    /// gone.
     pub(super) fn forget_gone_handlers(&mut self) {
+        let Some((client, window)) = self.joined() else {
+            return;
+        };
         let workspaces = &self.workspaces;
-        self.script.handlers.retain(|(_, scope)| match *scope {
+        client.forget_gone_handlers(window, |scope| match scope {
+            Scope::Tab(_, tab) => workspaces.find_tab(tab).is_some(),
+            Scope::Pane(_, pane) => workspaces.find_pane(pane).is_some(),
             Scope::Client | Scope::Window(_) => true,
-            Scope::Tab(tab) => workspaces.find_tab(tab).is_some(),
-            Scope::Pane(pane) => workspaces.find_pane(pane).is_some(),
         });
     }
 
@@ -330,10 +430,8 @@ impl Desk {
     /// runs, for tests.
     #[cfg(test)]
     pub(super) fn lua_in(&mut self, source: Source) {
-        self.start_lua(LuaStart {
-            source,
-            wake: Box::new(|| Box::new(|| {})),
-        });
+        let (client, _) = self.client();
+        client.start(source, Box::new(|| Box::new(|| {})));
         self.lua_ready();
     }
 
@@ -341,17 +439,16 @@ impl Desk {
     /// tests.
     #[cfg(test)]
     pub(super) fn lua_ready(&mut self) {
-        let said = self.script.lua.as_ref().expect("Lua started").ready();
-        for message in said {
+        let (client, window) = self.client();
+        for message in client.ready(window) {
             self.lua_says(message, false);
         }
-        self.lua_says(FromLua::Ready, false);
+        self.follow_client();
     }
 
-    /// Does one thing Lua says, unless `guarded` and it runs commands or
-    /// changes panes or machines: then it says why it didn't (see
-    /// [`Desk::controlled`]).
-    #[allow(clippy::too_many_lines, reason = "a short arm for each thing Lua says")]
+    /// Does one thing Lua says for the window, unless `guarded` and it
+    /// runs commands or changes panes or machines: then it says why it
+    /// didn't (see [`Desk::controlled`]).
     pub(super) fn lua_says(&mut self, message: FromLua, guarded: bool) {
         if guarded
             && let FromLua::Split { .. }
@@ -369,43 +466,6 @@ impl Desk {
             return;
         }
         match message {
-            FromLua::Map {
-                modes,
-                keys,
-                binding,
-                desc,
-                by,
-            } => {
-                let desc = desc.as_deref().and_then(said_in_panel);
-                (self.keymap).bind(&modes, &keys, Binding::Lua(binding), desc.as_deref());
-                self.keymap.set_by(&modes, &keys, &by);
-                self.forget_waiting();
-            }
-            FromLua::Remap {
-                modes,
-                keys,
-                to,
-                desc,
-                by,
-            } => {
-                let desc = desc.as_deref().and_then(said_in_panel);
-                (self.keymap).bind(&modes, &keys, Binding::Keys(to), desc.as_deref());
-                self.keymap.set_by(&modes, &keys, &by);
-                self.forget_waiting();
-            }
-            FromLua::Group { modes, keys, name } => {
-                let name = name.as_deref().and_then(said_in_panel);
-                self.keymap.name_group(&modes, &keys, name.as_deref());
-            }
-            FromLua::Unmap { modes, keys, by } => {
-                self.keymap.unbind(&modes, &keys);
-                self.keymap.set_by(&modes, &keys, &by);
-                self.forget_waiting();
-            }
-            FromLua::Subscribe { handler, scope } => self.script.handlers.push((handler, scope)),
-            FromLua::Unsubscribe { handler } => {
-                self.script.handlers.retain(|&(id, _)| id != handler);
-            }
             FromLua::Split {
                 request,
                 pane,
@@ -451,25 +511,20 @@ impl Desk {
             }
             FromLua::Connect { host, share } => self.config_connects(host, share),
             FromLua::Disconnect(host) => self.config_disconnects(host),
-            FromLua::Set { option, value, by } => self.config_sets(option, value, by),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");
                 self.say(text);
             }
-            FromLua::Ready => self.script.running = None,
-            FromLua::Decided { .. } => {}
+            // The client keeps these, for every window.
+            FromLua::Map { .. }
+            | FromLua::Remap { .. }
+            | FromLua::Unmap { .. }
+            | FromLua::Group { .. }
+            | FromLua::Subscribe { .. }
+            | FromLua::Unsubscribe { .. }
+            | FromLua::Set { .. }
+            | FromLua::Ready
+            | FromLua::Decided { .. } => {}
         }
     }
-}
-
-/// `text`, from the config, as the panel of keys can show it: on one
-/// line, with nothing that changes which way text runs; or nothing, if
-/// nothing's left.
-fn said_in_panel(text: &str) -> Option<String> {
-    let said = clackatoo_term::visible(
-        (text.chars()).map(|ch| if ch.is_control() { ' ' } else { ch }),
-        usize::MAX,
-    );
-    let said = said.trim();
-    (!said.is_empty()).then(|| said.to_owned())
 }

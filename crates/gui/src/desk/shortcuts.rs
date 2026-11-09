@@ -119,7 +119,7 @@ impl Desk {
             let description = label.map_or_else(
                 || match binding {
                     Binding::Keys(keys) => format!("Type {}", crate::shortcuts::sequence(keys)),
-                    Binding::Lua(_) => "Custom Lua action".into(),
+                    Binding::Lua { .. } => "Custom Lua action".into(),
                     Binding::Window(_) => "Window action".into(),
                 },
                 str::to_owned,

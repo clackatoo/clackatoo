@@ -51,12 +51,13 @@ use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, ControlFlow, EventL
 use winit::window::WindowId;
 
 use super::{App, Gpu, Pending, Startup};
+use crate::client::Client;
 use crate::desktop::Desktop;
 use crate::fonts::Fonts;
 use crate::handoff::{self, Asked, Build, Listening};
 use crate::launch::LaunchToken;
 use crate::session::{Closed, Location, Proxy, Session, SessionEvent};
-use crate::{FontFixed, FontOptions, GraphicsApi, cmdline, desk, lua, options, tutor, updates};
+use crate::{FontFixed, FontOptions, GraphicsApi, cmdline, lua, options, tutor, updates};
 
 /// How long a window opened from another waits for the token the desktop
 /// gives the other to hand it, before opening without.
@@ -93,6 +94,8 @@ pub(crate) enum Wake {
     Asked(Asked),
     /// The GPU's device was lost.
     GpuLost,
+    /// The config's Lua has something for the windows.
+    Lua,
     /// The desktop's preferences, read again for the next window.
     Desktop(Desktop),
 }
@@ -142,7 +145,7 @@ pub(crate) struct Process {
     /// Where the daemon is, or will be started, and windows are asked for.
     pub(crate) runtime: RuntimeDir,
     /// clackatoo's config directory, whose `client/init.lua` configures
-    /// each window.
+    /// the windows, run once for them all.
     pub(crate) config: Option<PathBuf>,
     /// The graphics API the process draws with.
     pub(crate) graphics_api: GraphicsApi,
@@ -260,6 +263,9 @@ pub(crate) struct Host {
     waker: Waker,
     link: Link,
     windows: HashMap<WindowKey, App>,
+    /// What the windows share of their config: its Lua, the options and
+    /// the bindings, made for the first window.
+    client: Option<Client>,
     /// The windows by their desktop window.
     ids: HashMap<WindowId, WindowKey>,
     /// When each window asked to be woken, if it did.
@@ -300,6 +306,7 @@ impl Host {
             waker,
             link: Link(Rc::new(link)),
             windows: HashMap::new(),
+            client: None,
             ids: HashMap::new(),
             wakes: HashMap::new(),
             next: 0,
@@ -348,19 +355,6 @@ impl Host {
         // Two small files read, and a directory or so looked at.
         let tutor = tutor::Start::read(spec.remote.is_some() || spec.pick_remote);
         let recall = cmdline::recall::Start::read();
-        // The config runs alongside everything else starting.
-        let lua_start = self.process.config.clone().map(|dir| {
-            let proxy = proxy();
-            desk::LuaStart {
-                source: lua::Source::Dir(dir),
-                wake: Box::new(move || -> lua::Wake {
-                    let proxy = proxy.clone();
-                    Box::new(move || {
-                        let _ = proxy.send_event(SessionEvent::Lua);
-                    })
-                }),
-            }
-        });
         let mut session = Session::waiting(runtime, proxy()).from(spec.origin.clone());
         if !spec.pick_remote {
             session.connect(match &spec.remote {
@@ -383,17 +377,67 @@ impl Host {
             },
             ..start
         };
+        // The config runs alongside everything else starting, for the
+        // first window; later ones join it.
+        let (client, first) = self.client(&start, &fixed);
+        app.join(client.clone());
+        if first {
+            self.run_config(&client);
+        }
         app.start_options(start, fixed);
         if pick {
             app.pick_machine();
-        }
-        if let Some(start) = lua_start {
-            app.start_lua(start);
         }
         app.start_tutor(tutor);
         app.start_recall(recall);
         self.windows.insert(key, app);
         key
+    }
+
+    /// What the windows share of their config, made for the first, which
+    /// starts running the config, with `start` as the options every window
+    /// starts with, but for those the command line set for it (`fixed`),
+    /// which are its own: every window starts those as startup.toml says.
+    /// Returns it, and whether it's new.
+    fn client(
+        &mut self,
+        start: &options::Options,
+        fixed: &[&'static options::Info],
+    ) -> (Client, bool) {
+        if let Some(client) = &self.client {
+            return (client.clone(), false);
+        }
+        let mut shared = start.clone();
+        if !fixed.is_empty() {
+            let file = crate::startup::load();
+            let from_file = options::Options::drawing_with(&FontOptions {
+                family: file.font,
+                size: file.font_size.unwrap_or(FontOptions::default().size),
+            });
+            for info in fixed {
+                let _ = shared.set(info, from_file.get(info));
+            }
+        }
+        let client = Client::new(options::Store::new(shared));
+        self.client = Some(client.clone());
+        (client, true)
+    }
+
+    /// Starts running the config, if there's one, for `client`'s windows.
+    fn run_config(&self, client: &Client) {
+        let Some(dir) = self.process.config.clone() else {
+            return;
+        };
+        let waker = self.waker.clone();
+        client.start(
+            lua::Source::Dir(dir),
+            Box::new(move || -> lua::Wake {
+                let waker = waker.clone();
+                Box::new(move || {
+                    let _ = waker.wake(Wake::Lua);
+                })
+            }),
+        );
     }
 
     /// Opens the window `key` was made for. Returns why not, if it
@@ -621,6 +665,10 @@ impl Host {
         let Some(mut app) = self.windows.remove(&key) else {
             return Ok(());
         };
+        // Whatever state it's in, the client forgets it.
+        if catch_unwind(AssertUnwindSafe(|| app.leave_client())).is_err() {
+            log::error!("a window failed as it left the config");
+        }
         self.ids.retain(|_, open| *open != key);
         self.wakes.remove(&key);
         let last = self.windows.is_empty();
@@ -680,6 +728,17 @@ impl Host {
             }
             Wake::Asked(asked) => return Some(asked),
             Wake::GpuLost => self.gpu_lost(),
+            // Each window takes what's for it, and follows what's for all.
+            Wake::Lua => {
+                let keys: Vec<WindowKey> = self.windows.keys().copied().collect();
+                for key in keys {
+                    self.on_window(key, |app| {
+                        if app.session_event(SessionEvent::Lua) {
+                            app.closing = true;
+                        }
+                    });
+                }
+            }
             Wake::Desktop(desktop) => {
                 if let Some(shared) = &mut self.shared {
                     shared.desktop = desktop;

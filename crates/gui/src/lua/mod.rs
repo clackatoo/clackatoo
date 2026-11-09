@@ -1,16 +1,23 @@
-//! Config as code: the client's `init.lua`, in Luau, run on a thread of its
-//! own so that nothing it does holds up drawing.
+//! Config as code: the client's `init.lua`, in Luau, run once for the
+//! process of windows, on a thread of its own so that nothing it does holds
+//! up drawing.
 //!
-//! The window and the Lua thread only send each other messages, so neither
-//! ever waits on the other for anything but a key. The window tells Lua
-//! what the world looks like whenever it changes ([`World`]), so Lua reads
-//! fields such as a pane's kind from its own copy. Lua tells the window
-//! what it binds, what it listens for, and what it does.
+//! The windows and the Lua thread only send each other messages, so
+//! neither ever waits on the other for anything but a key. Each window
+//! tells Lua what the world looks like through it whenever that changes
+//! ([`World`]), so Lua reads fields such as a pane's kind from its own copy.
+//! Lua tells the windows what it binds, what it listens for, and what it
+//! does, addressing each message to the client as a whole, which keeps it
+//! once for every window (see [`crate::client`]), or to one window, or to
+//! every one ([`To`]).
 //!
 //! A key that Lua listens for, or is bound to Lua, waits for Lua to say
 //! whether it goes on, which takes a few microseconds, and at most
 //! [`DECISION_TIME`]. Everything Lua did before saying so arrives first,
-//! so it's done before the key goes on.
+//! so it's done before the key goes on. A handler that runs on after its
+//! key is decided, as one does once its pane is split, or one for an event
+//! nothing waits on, runs a slice at a time, so a key never waits for it
+//! long (see [`runtime`]).
 
 mod runtime;
 
@@ -18,10 +25,12 @@ pub(crate) use runtime::INIT_TIME;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use clackatoo_protocol::{PaneId, Side, TabId, Workspaces};
+use clackatoo_protocol::{PaneId, Side, TabId, TerminalId, Workspaces};
 
 use crate::command::Kind;
 use crate::desk::Shown;
@@ -31,12 +40,9 @@ use crate::options::{Info, Options, SetBy, Value};
 
 /// How long a key waits for Lua to say whether it goes on, before it goes
 /// on as if Lua had said nothing.
-const DECISION_TIME: Duration = Duration::from_millis(300);
+pub(crate) const DECISION_TIME: Duration = Duration::from_millis(300);
 
-/// The only window, until one process opens every window.
-pub(crate) const WINDOW: u32 = 1;
-
-/// Wakes the window when Lua has something for it.
+/// Wakes the windows when Lua has something for them.
 pub(crate) type Wake = Box<dyn Fn() + Send>;
 
 /// Where the config is.
@@ -108,13 +114,34 @@ impl Source {
     }
 }
 
-/// What's listened to: everywhere, or one window, tab or pane.
+/// What's listened to: everywhere, or one window, or a tab or pane of one.
+/// Tabs and panes are numbered by their daemon, and two windows can be on
+/// two daemons, so each is one window's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scope {
     Client,
     Window(u32),
-    Tab(TabId),
-    Pane(PaneId),
+    Tab(u32, TabId),
+    Pane(u32, PaneId),
+}
+
+impl Scope {
+    /// The window it's of, if it's one's.
+    pub(crate) fn window(self) -> Option<u32> {
+        match self {
+            Self::Client => None,
+            Self::Window(window) | Self::Tab(window, _) | Self::Pane(window, _) => Some(window),
+        }
+    }
+}
+
+/// What a handler listens for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Listen {
+    /// Keys pressed.
+    Keypress,
+    /// A chat's turn ending, as its daemon says it has.
+    TurnEnd,
 }
 
 /// A pane, as Lua sees it.
@@ -124,7 +151,7 @@ pub(crate) struct PaneInfo {
     pub(crate) title: Option<String>,
 }
 
-/// What the window tells Lua the world looks like.
+/// What a window tells Lua the world looks like through it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct World {
     pub(crate) workspaces: Workspaces,
@@ -132,6 +159,12 @@ pub(crate) struct World {
     pub(crate) shown: Option<Shown>,
     /// The panes the window knows more about, having shown them.
     pub(crate) panes: HashMap<PaneId, PaneInfo>,
+    /// Whether the window has the desktop's focus.
+    pub(crate) focused: bool,
+    /// The options the window has its own values of, over every window's,
+    /// as `:setlocal` and its command line set them: what `client.opt`
+    /// reads in a handler of its events.
+    pub(crate) own: Vec<(&'static Info, Value)>,
 }
 
 /// A key, as Lua sees it.
@@ -144,17 +177,38 @@ pub(crate) struct KeyInfo {
     /// The text it types, if any.
     pub(crate) text: Option<String>,
     pub(crate) mode: KeyMode,
+    /// The window it was pressed in.
+    pub(crate) window: u32,
     /// The pane it was pressed in.
     pub(crate) pane: Option<PaneId>,
     /// For a binding, the count typed before it, as Vim's `v:count`.
     pub(crate) count: Option<usize>,
 }
 
-/// What the window tells Lua.
+/// A chat's turn that's ended, as the window that heard it tells Lua.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TurnEnd {
+    pub(crate) chat: TerminalId,
+    pub(crate) title: String,
+    /// Its agent, as it's shown: "Claude Code".
+    pub(crate) agent: String,
+    /// Whether it went wrong, if the daemon says.
+    pub(crate) failed: Option<bool>,
+    /// The window that heard it.
+    pub(crate) window: u32,
+    /// The pane showing the chat in that window, if one does.
+    pub(crate) pane: Option<PaneId>,
+}
+
+/// What the windows tell Lua.
 #[derive(Debug)]
 pub(crate) enum ToLua {
-    /// The world looks like this now.
-    World(World),
+    /// A window has opened, and is this number.
+    Open { window: u32 },
+    /// A window has closed: its handlers go with it.
+    Closed { window: u32 },
+    /// The world looks like this through `window` now.
+    World { window: u32, world: World },
     /// Run these keypress handlers, in order, and say whether the key was
     /// stopped.
     Key {
@@ -168,18 +222,38 @@ pub(crate) enum ToLua {
         key: KeyInfo,
         binding: u64,
     },
+    /// Run this binding, whose keys have gone on already, as its
+    /// `propagate` said they would.
+    Run { key: KeyInfo, binding: u64 },
     /// What came of a request a handler waits on: the pane made, or why
     /// not.
     Answer {
         request: u64,
         result: Result<PaneId, String>,
     },
-    /// An option is set to this now, whoever set it.
+    /// An option is set to this for every window now, whoever set it.
     Option { option: &'static Info, value: Value },
+    /// A chat's turn has ended.
+    TurnEnded(TurnEnd),
 }
 
-/// What Lua tells the window.
-#[derive(Debug, PartialEq, Eq)]
+/// Who something Lua says is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum To {
+    /// The client as a whole: what's bound, listened for, set or loaded,
+    /// which it keeps once for every window, and each window goes by.
+    Client,
+    /// One window.
+    Window(u32),
+    /// Every window.
+    All,
+    /// The window with the desktop's focus, or else the first: as a
+    /// command the config runs as it loads, in no window's handler.
+    Focused,
+}
+
+/// What Lua tells the windows.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FromLua {
     /// Bind these keys to a function of Lua's.
     Map {
@@ -188,6 +262,8 @@ pub(crate) enum FromLua {
         binding: u64,
         /// What it does, for the panel of keys.
         desc: Option<String>,
+        /// Its keys go on at once, and it runs after.
+        propagate: bool,
         /// Where the config bound it.
         by: SetBy,
     },
@@ -212,10 +288,11 @@ pub(crate) enum FromLua {
         keys: Vec<Chord>,
         name: Option<String>,
     },
-    /// Send keypresses in `scope` to a handler of Lua's.
+    /// Send what `listen` says, in `scope`, to a handler of Lua's.
     Subscribe {
         handler: u64,
         scope: Scope,
+        listen: Listen,
     },
     Unsubscribe {
         handler: u64,
@@ -245,13 +322,14 @@ pub(crate) enum FromLua {
         by: SetBy,
     },
     /// Forward a port, as `:portforward` does, but saying nothing in a
-    /// window on this machine, which has none to forward: a config runs in
-    /// every window.
+    /// window on this machine, which has none to forward: it's asked of
+    /// every window, each as it opens.
     Forward(clackatoo_daemon::forward::Spec),
     /// Have the daemon connect to another machine, as `:connect HOST`
-    /// does, but saying nothing unless it fails: a config runs in every
-    /// window. `share` is `false` for `{share = false}`, as
-    /// `--no-share`, and `true` for `{share = true}`.
+    /// does, but saying nothing unless it fails: it's asked of every
+    /// window, each as it opens, and windows can share a daemon. `share`
+    /// is `false` for `{share = false}`, as `--no-share`, and `true` for
+    /// `{share = true}`.
     Connect {
         host: String,
         share: Option<bool>,
@@ -259,12 +337,15 @@ pub(crate) enum FromLua {
     /// Have the daemon end its connection to another machine, as
     /// `:disconnect HOST` does.
     Disconnect(String),
-    /// Set an option, to a value it can hold, as the config's line `by`
-    /// asked.
+    /// Set an option for every window, to a value it can hold, as the
+    /// config's line `by` asked; in a handler of `window`'s event, after
+    /// the config has loaded, as `:set` there would, so that window's own
+    /// value of it goes.
     Set {
         option: &'static Info,
         value: Value,
         by: SetBy,
+        window: Option<u32>,
     },
     /// Something went wrong, as this says.
     Error(String),
@@ -272,36 +353,51 @@ pub(crate) enum FromLua {
     Ready,
 }
 
-/// The window's end of the Lua thread.
+/// The windows' end of the Lua thread.
 #[derive(Debug)]
 pub(crate) struct Lua {
     to: Sender<ToLua>,
-    from: Receiver<FromLua>,
-    seq: u64,
+    from: Receiver<(To, FromLua)>,
+    /// Set to have the handler running on the Lua thread, if it runs a
+    /// slice at a time, let a key go first (see [`runtime`]).
+    hurry: Arc<AtomicBool>,
 }
 
 impl Lua {
     /// Starts running `source`'s config on a thread of its own, its
-    /// `settings.lua` then its `init.lua`, with `options` as the window's
-    /// are, or returns `None` if it has neither.
-    pub(crate) fn start(source: Source, options: Options, wake: Wake) -> Option<Self> {
+    /// `settings.lua` then its `init.lua`, with `options` as the windows
+    /// share them and `windows` open, or returns `None` if it has neither.
+    pub(crate) fn start(
+        source: Source,
+        options: Options,
+        windows: Vec<u32>,
+        wake: Wake,
+    ) -> Option<Self> {
         let chunks = source.chunks();
         if chunks.is_empty() {
             return None;
         }
         let (to, to_receiver) = mpsc::channel();
         let (from_sender, from) = mpsc::channel();
+        let hurry = Arc::new(AtomicBool::new(false));
+        let slice = hurry.clone();
         let spawned = std::thread::Builder::new()
             .name("lua".into())
             .spawn(move || {
-                let channels = (&to_receiver, from_sender);
-                runtime::run(&source, &chunks, options, channels, wake);
+                let channels = (to_receiver, from_sender);
+                let start = runtime::Start {
+                    source: &source,
+                    chunks: &chunks,
+                    options,
+                    windows,
+                };
+                runtime::run(start, channels, slice, wake);
             });
         if let Err(err) = spawned {
             log::warn!("couldn't start Lua: {err}");
             return None;
         }
-        Some(Self { to, from, seq: 0 })
+        Some(Self { to, from, hurry })
     }
 
     /// Tells Lua something. If its thread has ended, nobody hears.
@@ -309,51 +405,31 @@ impl Lua {
         let _ = self.to.send(message);
     }
 
-    /// What Lua has said since last asked.
-    pub(crate) fn received(&self) -> Vec<FromLua> {
+    /// Tells Lua something a key waits on, having whatever it's running a
+    /// slice at a time let it go first. Returns whether Lua is there to
+    /// hear it.
+    pub(crate) fn send_now(&self, message: ToLua) -> bool {
+        let sent = self.to.send(message).is_ok();
+        self.hurry.store(true, Ordering::Relaxed);
+        sent
+    }
+
+    /// What Lua has said since last asked, and who to.
+    pub(crate) fn received(&self) -> Vec<(To, FromLua)> {
         self.from.try_iter().collect()
     }
 
-    /// Sends the key `message` makes from a new sequence number, and waits
-    /// for Lua to say whether it stops. Returns that, if Lua said in time,
-    /// and everything else Lua said meanwhile, in order.
-    pub(crate) fn decide(
-        &mut self,
-        message: impl FnOnce(u64) -> ToLua,
-    ) -> (Option<bool>, Vec<FromLua>) {
-        self.seq += 1;
-        let seq = self.seq;
-        let mut said = Vec::new();
-        if self.to.send(message(seq)).is_err() {
-            return (None, said);
-        }
-        let deadline = Instant::now() + DECISION_TIME;
-        loop {
-            match self
-                .from
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
-                Ok(FromLua::Decided { seq: decided, stop }) if decided == seq => {
-                    return (Some(stop), said);
-                }
-                // An answer that came too late.
-                Ok(FromLua::Decided { .. }) => {}
-                Ok(message) => said.push(message),
-                Err(RecvTimeoutError::Timeout) => {
-                    log::warn!("Lua took too long to say whether a key goes on");
-                    return (None, said);
-                }
-                Err(RecvTimeoutError::Disconnected) => return (None, said),
-            }
-        }
+    /// The next thing Lua says, if it says it within `wait`.
+    pub(crate) fn next_within(&self, wait: Duration) -> Result<(To, FromLua), RecvTimeoutError> {
+        self.from.recv_timeout(wait)
     }
 
     /// The next thing Lua says, for tests.
     #[cfg(test)]
     pub(crate) fn next(&self) -> FromLua {
-        self.from
-            .recv_timeout(Duration::from_secs(5))
+        self.next_within(Duration::from_secs(5))
             .expect("Lua said something")
+            .1
     }
 
     /// Waits until `init.lua` has run, for tests, returning what Lua said
@@ -362,10 +438,39 @@ impl Lua {
     pub(crate) fn ready(&self) -> Vec<FromLua> {
         let mut said = Vec::new();
         loop {
-            match self.from.recv_timeout(Duration::from_secs(5)) {
-                Ok(FromLua::Ready) => return said,
-                Ok(message) => said.push(message),
+            match self.next_within(Duration::from_secs(5)) {
+                Ok((_, FromLua::Ready)) => return said,
+                Ok((_, message)) => said.push(message),
                 Err(err) => panic!("init.lua never finished: {err}"),
+            }
+        }
+    }
+
+    /// Sends the key `message` makes from `seq`, and waits for Lua to say
+    /// whether it stops, for tests, as [`crate::client::Client::decide`]
+    /// does for windows. Returns that, if Lua said in time, and everything
+    /// else Lua said meanwhile, in order.
+    #[cfg(test)]
+    pub(crate) fn decide(
+        &mut self,
+        message: impl FnOnce(u64) -> ToLua,
+    ) -> (Option<bool>, Vec<FromLua>) {
+        use std::sync::atomic::AtomicU64;
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut said = Vec::new();
+        if !self.send_now(message(seq)) {
+            return (None, said);
+        }
+        let deadline = std::time::Instant::now() + DECISION_TIME;
+        loop {
+            match self.next_within(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok((_, FromLua::Decided { seq: decided, stop })) if decided == seq => {
+                    return (Some(stop), said);
+                }
+                Ok((_, FromLua::Decided { .. })) => {}
+                Ok((_, message)) => said.push(message),
+                Err(_) => return (None, said),
             }
         }
     }
@@ -375,8 +480,13 @@ impl Lua {
 mod tests {
     use clackatoo_protocol::{Axis, Layout, Pane, Tab, Workspace, WorkspaceId};
 
+    use std::time::Instant;
+
     use super::*;
     use crate::keymap::parse_keys;
+
+    /// The one window these tests' Lua has.
+    const WINDOW: u32 = 1;
 
     /// What Lua said, with what set each thing left out, as these tests
     /// don't look at it: `provenance` tests do.
@@ -391,6 +501,9 @@ mod tests {
                 {
                     *by = SetBy::DEFAULT;
                 }
+                if let FromLua::Set { window, .. } = &mut message {
+                    *window = None;
+                }
                 message
             })
             .collect()
@@ -400,11 +513,15 @@ mod tests {
         let lua = Lua::start(
             Source::Text(config.into()),
             Options::default(),
+            vec![WINDOW],
             Box::new(|| {}),
         )
         .expect("Lua started");
         let said = plain(lua.ready());
-        lua.send(ToLua::World(world(&[1, 2])));
+        lua.send(ToLua::World {
+            window: WINDOW,
+            world: world(&[1, 2]),
+        });
         (lua, said)
     }
 
@@ -467,6 +584,8 @@ mod tests {
                     title: Some("Claude".into()),
                 },
             )]),
+            focused: true,
+            own: Vec::new(),
         }
     }
 
@@ -476,6 +595,7 @@ mod tests {
             keys: Some(key.into()),
             text: None,
             mode: KeyMode::Normal,
+            window: WINDOW,
             pane: Some(PaneId(pane)),
             count: None,
         }
@@ -518,6 +638,7 @@ mod tests {
                     keys: parse_keys("<C-b>t").unwrap(),
                     binding: 1,
                     desc: None,
+                    propagate: false,
                     by: SetBy::DEFAULT,
                 },
                 FromLua::Map {
@@ -525,6 +646,7 @@ mod tests {
                     keys: parse_keys("x").unwrap(),
                     binding: 2,
                     desc: None,
+                    propagate: false,
                     by: SetBy::DEFAULT,
                 },
                 FromLua::Unmap {
@@ -564,6 +686,7 @@ mod tests {
                     keys: parse_keys("gx").unwrap(),
                     binding: 1,
                     desc: Some("open the link".into()),
+                    propagate: false,
                     by: SetBy::DEFAULT,
                 },
                 FromLua::Remap {
@@ -578,6 +701,7 @@ mod tests {
                     keys: parse_keys("gy").unwrap(),
                     binding: 2,
                     desc: None,
+                    propagate: false,
                     by: SetBy::DEFAULT,
                 },
                 FromLua::Group {
@@ -712,27 +836,32 @@ mod tests {
             [
                 FromLua::Subscribe {
                     handler: 1,
-                    scope: Scope::Client
+                    scope: Scope::Client,
+                    listen: Listen::Keypress,
                 },
                 FromLua::Map {
                     modes: vec![KeyMode::Normal],
                     keys: parse_keys("p").unwrap(),
                     binding: 2,
                     desc: None,
+                    propagate: false,
                     by: SetBy::DEFAULT,
                 },
                 FromLua::Subscribe {
                     handler: 3,
-                    scope: Scope::Window(WINDOW)
+                    scope: Scope::Window(WINDOW),
+                    listen: Listen::Keypress,
                 },
                 FromLua::Subscribe {
                     handler: 4,
-                    scope: Scope::Client
+                    scope: Scope::Client,
+                    listen: Listen::Keypress,
                 },
                 FromLua::Unsubscribe { handler: 4 },
                 FromLua::Subscribe {
                     handler: 5,
-                    scope: Scope::Pane(PaneId(1))
+                    scope: Scope::Pane(WINDOW, PaneId(1)),
+                    listen: Listen::Keypress,
                 },
             ]
         );
@@ -777,7 +906,10 @@ mod tests {
         else {
             panic!("{said:?}")
         };
-        lua.send(ToLua::World(world(&[1, 2, 3])));
+        lua.send(ToLua::World {
+            window: WINDOW,
+            world: world(&[1, 2, 3]),
+        });
         lua.send(ToLua::Answer {
             request,
             result: Ok(PaneId(3)),
@@ -821,6 +953,47 @@ mod tests {
         );
     }
 
+    /// A handler nothing waits on, busy for a long while, runs a slice at
+    /// a time: a key coming meanwhile has its handlers run, and is
+    /// decided, at once, and the busy one goes on after.
+    #[test]
+    fn a_busy_handler_nothing_waits_on_doesnt_hold_up_a_key() {
+        let (mut lua, _) = start(
+            r#"
+            client.on("turnend", function()
+                local t = os.clock()
+                while os.clock() - t < 0.2 do end
+                client.cmd("busy for 200 ms")
+            end)
+            client.on("keypress", function(ev) ev:stop() end)
+            "#,
+        );
+        lua.send(ToLua::TurnEnded(TurnEnd {
+            chat: TerminalId(5),
+            title: "Claude".into(),
+            agent: "Claude Code".into(),
+            failed: None,
+            window: WINDOW,
+            pane: None,
+        }));
+        // Well into it.
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let (stop, said) = lua.decide(|seq| ToLua::Key {
+            seq,
+            key: key("q", 1),
+            handlers: vec![2],
+        });
+        let took = started.elapsed();
+        assert_eq!((stop, said), (Some(true), vec![]));
+        // Typically well under a millisecond; without slices, 170.
+        assert!(took < Duration::from_millis(25), "{took:?}");
+        assert!(
+            matches!(lua.next(), FromLua::Command { line, .. } if line == "busy for 200 ms"),
+            "and it went on after"
+        );
+    }
+
     #[test]
     fn a_handler_that_runs_too_long_is_stopped() {
         let (mut lua, _) = start(
@@ -861,6 +1034,7 @@ mod tests {
             option: find(name).unwrap(),
             value,
             by: SetBy::DEFAULT,
+            window: None,
         };
         assert_eq!(
             said,
@@ -925,6 +1099,7 @@ mod tests {
                 .into(),
             ),
             options,
+            vec![WINDOW],
             Box::new(|| {}),
         )
         .expect("Lua started");
@@ -932,6 +1107,7 @@ mod tests {
             option: find(name).unwrap(),
             value,
             by: SetBy::DEFAULT,
+            window: None,
         };
         let size = |number: f64| Value::Decimal(Decimal::exact(number).unwrap());
         assert_eq!(
@@ -995,6 +1171,7 @@ mod tests {
             option: find(name).unwrap(),
             value,
             by: SetBy::DEFAULT,
+            window: None,
         };
         assert_eq!(
             said,
@@ -1062,7 +1239,7 @@ mod tests {
             ),
             (
                 "client.on('click', print)",
-                "init.lua:1: there's no event called `click`: the events are keypress",
+                "init.lua:1: there's no event called `click`: the events are keypress and turnend",
             ),
         ] {
             let (_, said) = start(config);
@@ -1124,6 +1301,7 @@ mod tests {
         let mut lua = Lua::start(
             Source::Dir(dir.path().into()),
             Options::default(),
+            vec![WINDOW],
             Box::new(|| {}),
         )
         .expect("Lua started");
@@ -1132,6 +1310,7 @@ mod tests {
             option: find(name).unwrap(),
             value,
             by,
+            window: None,
         };
         let settings = |line| {
             by(
@@ -1186,7 +1365,8 @@ mod tests {
         );
         assert_eq!(*map, init(5, None));
         assert_eq!(*command, init(8, None));
-        // After it's loaded, a handler's line, as the config's.
+        // After it's loaded, a handler's line, as the config's, in the
+        // window whose key it was.
         let (_, said) = lua.decide(|seq| ToLua::Bound {
             seq,
             key: key("k", 1),
@@ -1194,11 +1374,12 @@ mod tests {
         });
         assert_eq!(
             said,
-            [set(
-                "tabstop",
-                Value::Number(8),
-                by(From::Config, false, place("client/init.lua", 6), None)
-            )]
+            [FromLua::Set {
+                option: find("tabstop").unwrap(),
+                value: Value::Number(8),
+                by: by(From::Config, false, place("client/init.lua", 6), None),
+                window: Some(WINDOW),
+            }]
         );
     }
 
@@ -1225,6 +1406,7 @@ mod tests {
             Lua::start(
                 Source::Dir(dir.path().into()),
                 Options::default(),
+                vec![WINDOW],
                 Box::new(|| {}),
             )
             .expect("Lua started")

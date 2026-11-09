@@ -116,9 +116,20 @@ impl Desk {
         // What the window saw happen, as against what it heard of as it
         // came: only that's told.
         let mut fresh = Vec::new();
+        // Chats whose turn has just ended, for the config to hear of.
+        let mut ended = Vec::new();
+        let connecting = self.watched.connecting;
         for chat in chats {
             let was = seen.remove(&chat.chat);
             let id = chat.chat;
+            if !connecting
+                && chat.state != ChatState::Answering
+                && was
+                    .as_ref()
+                    .is_some_and(|was| was.state == ChatState::Answering)
+            {
+                ended.push(chat.clone());
+            }
             if was.as_ref().is_some_and(|was| !was.asking) && chat.asking {
                 fresh.push(id);
             }
@@ -150,6 +161,7 @@ impl Desk {
             fresh.clear();
         }
         self.notify(&fresh);
+        self.tell_turns_ended(ended);
         self.marks() != before
     }
 

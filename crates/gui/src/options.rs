@@ -16,7 +16,7 @@ pub(crate) mod settings_lua;
 mod store;
 
 pub(crate) use provenance::SetBy;
-pub(crate) use store::Store;
+pub(crate) use store::{Shared, Store, View};
 
 /// An option's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,9 +155,7 @@ pub(crate) struct Info {
     /// window: `:set` refuses it, and `:setpersist` saves it for then.
     pub(crate) restart: bool,
     /// It may be set for one window alone, with `:setlocal`, over the
-    /// value every window shares, as Vim's window-local options can. None
-    /// is yet: `:setlocal` comes with one Lua for every window (CLACKA-237
-    /// phase 1b).
+    /// value every window shares, as Vim's window-local options can.
     pub(crate) local: bool,
 }
 
@@ -249,7 +247,7 @@ impl Info {
     }
 
     /// Checks `value` is one this option can hold, saying why not.
-    fn check(&self, value: &Value) -> Result<(), String> {
+    pub(super) fn check(&self, value: &Value) -> Result<(), String> {
         match (self.kind, value) {
             (Kind::Bool, Value::Bool(_)) => Ok(()),
             (Kind::Number { min, max, or_zero }, Value::Number(number))
@@ -503,17 +501,29 @@ macro_rules! restart {
     };
 }
 
+/// Whether an option's declared `local`.
+macro_rules! local {
+    () => {
+        false
+    };
+    (local) => {
+        true
+    };
+}
+
 /// Declares the options: [`Options`], with a field for each, and [`ALL`].
 /// Each is written as `name("short", "description") in Category`, then
 /// `, startup "key"` for one kept in startup.toml, with `restart` after
 /// for one only read as a window opens; then its type, with its range,
-/// and its default.
+/// and its default; then `, local` for one `:setlocal` can set for one
+/// window.
 macro_rules! options {
     ($(
         $(#[doc = $doc:literal])+
         $name:ident ($short:literal, $description:literal) in $category:ident
             $(, startup $key:literal $($restart:ident)?)?
-            : $type:ident $(($min:literal ..= $max:literal))? = $default:expr;
+            : $type:ident $(($min:literal ..= $max:literal))? = $default:expr
+            $(, $local:ident)?;
     )+) => {
         /// The value of every option.
         #[derive(Clone, Debug, PartialEq, Eq)]
@@ -542,7 +552,7 @@ macro_rules! options {
                 category: Category::$category,
                 scope: scope!($($key)?),
                 restart: restart!($($($restart)?)?),
-                local: false,
+                local: local!($($local)?),
             },
         )+];
 
@@ -578,26 +588,26 @@ options! {
     /// family that isn't installed is refused, and the font stays as it
     /// was. `--font` or `$CLACKATOO_FONT` overrides what `init.lua` sets
     /// as it runs, but not what's set after, by `:set` or a key it binds.
-    font("gfn", "Font family for terminals and editors") in Font, startup "font": String = String::new();
+    font("gfn", "Font family for terminals and editors") in Font, startup "font": String = String::new(), local;
     /// The size text is drawn at, in points, as 12 or 10.5. Changing it,
     /// or `font`, keeps the window's size, and fits as many cells in as
     /// now fit, as resizing the window does. `--font-size` or
     /// `$CLACKATOO_FONT_SIZE` overrides what `init.lua` sets as it runs,
     /// but not what's set after.
-    fontsize("fsz", "Font size in points") in Font, startup "font-size": Decimal (4..=200) = Decimal::whole(12);
+    fontsize("fsz", "Font size in points") in Font, startup "font-size": Decimal (4..=200) = Decimal::whole(12), local;
     /// Line numbers down an editor's left.
-    number("nu", "Show line numbers") in Editor: bool = true;
+    number("nu", "Show line numbers") in Editor: bool = true, local;
     /// Each line's number as how far it is from the cursor's line, so the
     /// count for a motion such as `5j` can be read off. With `number`,
     /// the cursor's line shows its own number; without, 0.
-    relativenumber("rnu", "Show line numbers relative to the cursor") in Editor: bool = true;
+    relativenumber("rnu", "Show line numbers relative to the cursor") in Editor: bool = true, local;
     /// The fewest cells the line numbers take, with the space after them.
-    numberwidth("nuw", "Minimum width of the line-number column") in Editor: u32 (1..=20) = 4;
+    numberwidth("nuw", "Minimum width of the line-number column") in Editor: u32 (1..=20) = 4, local;
     /// The cursor's line lit faintly, across the pane, so the eye finds it.
-    cursorline("cul", "Highlight the cursor’s line") in Editor: bool = true;
+    cursorline("cul", "Highlight the cursor’s line") in Editor: bool = true, local;
     /// Columns marked down an editor, such as 80, to keep lines short by.
     /// They count from 1, as the bar's column does.
-    colorcolumn("cc", "Mark guide columns in the editor") in Editor: List (1..=9999) = List::new();
+    colorcolumn("cc", "Mark guide columns in the editor") in Editor: List (1..=9999) = List::new(), local;
     /// What's wrong with a line, as its language server says, written
     /// after the line's end: the worst, if there are several.
     virtualtext("vt", "Show diagnostics beside editor lines") in Editor: bool = true;
@@ -614,21 +624,21 @@ options! {
     /// A line too long for the pane goes on over as many rows as it needs,
     /// rather than off the pane's right edge. `j` and `k` still move by
     /// line, and `gj` and `gk` by row.
-    wrap("wrap", "Wrap long lines to fit the pane") in Editor: bool = true;
+    wrap("wrap", "Wrap long lines to fit the pane") in Editor: bool = true, local;
     /// With `wrap`, a line is broken between words, after a blank or one
     /// of `!@*-+;:,./?`, rather than at the last cell that fits.
-    linebreak("lbr", "Wrap at word boundaries") in Editor: bool = true;
+    linebreak("lbr", "Wrap at word boundaries") in Editor: bool = true, local;
     /// With `wrap`, the rows a line goes on over start as far in as the
     /// line is indented, so the code's shape still shows. At least 20
     /// cells are kept for the text.
-    breakindent("bri", "Preserve indentation on wrapped rows") in Editor: bool = true;
+    breakindent("bri", "Preserve indentation on wrapped rows") in Editor: bool = true, local;
     /// With `wrap`, drawn at the start of the rows a line goes on over,
     /// after their indent: `↪ `, say. In `:set`, a space is written `\ `.
-    showbreak("sbr", "Text marking the start of wrapped rows") in Editor: String = String::new();
+    showbreak("sbr", "Text marking the start of wrapped rows") in Editor: String = String::new(), local;
     /// The fewest lines kept in view above and below the cursor, so what's
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.
-    scrolloff("so", "Lines kept visible above and below the cursor") in Editor: u32 (0..=9999) = 5;
+    scrolloff("so", "Lines kept visible above and below the cursor") in Editor: u32 (0..=9999) = 5, local;
     /// How a Markdown file opens in an editor: as its text (`raw`), or
     /// rendered, as prose, with its headings, lists, tables and code drawn
     /// as such (`rendered`). `:markdown` and `<Space>tm` turn each editor
@@ -1256,10 +1266,14 @@ pub(crate) enum Setting {
     Show(&'static Info),
     /// Put it back as the window started it: `nu&`.
     Default(&'static Info),
+    /// Take this window's own value away, so it has every window's again:
+    /// `nu<`.
+    Shared(&'static Info),
 }
 
 /// What the words after `:set` ask for, as Vim reads them: `number`,
-/// `nonumber`, `number!` or `invnumber`, `number?`, `number&`, `numberwidth=5`,
+/// `nonumber`, `number!` or `invnumber`, `number?`, `number&`, `number<`,
+/// `numberwidth=5`,
 /// `colorcolumn=80,120`, `colorcolumn=` for none, and `showbreak=>\ ` for
 /// text with a space.
 pub(crate) fn parse_set(words: &str) -> Result<Vec<Setting>, String> {
@@ -1315,6 +1329,9 @@ fn parse_setting(word: &str) -> Result<Setting, String> {
     }
     if let Some(name) = word.strip_suffix('&') {
         return Ok(Setting::Default(find(name)?));
+    }
+    if let Some(name) = word.strip_suffix('<') {
+        return Ok(Setting::Shared(find(name)?));
     }
     // `nu!`, `nonu!` and `invnu` turn it over; `nonu` turns it off.
     let (name, flip) = match word.strip_suffix('!') {

@@ -191,10 +191,12 @@ pub(crate) enum Command {
     /// `:set`: change options, or say what they are, as these words say;
     /// and with `persist`, `:setpersist`, save them where they're kept too.
     /// `verbose`, as `:verbose set` asks, says what set each it shows.
+    /// `local`, as `:setlocal`, sets this window's own values instead.
     Set {
         words: String,
         persist: bool,
         verbose: bool,
+        local: bool,
     },
     /// `:Files`, `:Grep`, `:Buffers`, `:Symbols` and the like: the finder,
     /// with this typed.
@@ -453,22 +455,32 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "reopen" => return Ok(Command::Reopen),
         "hints" => return Ok(Command::Hints),
         "reload" => return Ok(Command::Reload),
-        "set" | "se" | "setpersist" | "setp" => {
+        "set" | "se" | "setpersist" | "setp" | "setlocal" | "setl" => {
             return Ok(Command::Set {
                 words: argument.unwrap_or_default().to_owned(),
                 persist: matches!(word, "setpersist" | "setp"),
                 verbose: false,
+                local: matches!(word, "setlocal" | "setl"),
             });
         }
         "verbose" | "verb" => {
             return match argument.map(parse) {
-                Some(Ok(Command::Set { words, persist, .. })) => Ok(Command::Set {
+                Some(Ok(Command::Set {
+                    words,
+                    persist,
+                    local,
+                    ..
+                })) => Ok(Command::Set {
                     words,
                     persist,
                     verbose: true,
+                    local,
                 }),
                 Some(Err(why)) => Err(why),
-                _ => Err("only :set and :setpersist take :verbose: :verbose set number?".into()),
+                _ => Err(
+                    "only :set, :setlocal and :setpersist take :verbose: :verbose set number?"
+                        .into(),
+                ),
             };
         }
         "Registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
@@ -1058,6 +1070,7 @@ command_names! {
     "reload" => "Reload your Lua configuration",
     "set" => "View or change settings",
     "setpersist" => "Change settings and save them",
+    "setlocal" => "Change settings for this window alone",
     "verbose" => "Say where options were set: :verbose set",
     "Registers" => "Show the contents of registers",
     "nohlsearch" => "Stop highlighting the last search's matches",
@@ -1122,8 +1135,8 @@ command_names! {
 /// Arguments (paths, hosts, patterns and keys) must never pass through this.
 pub(crate) fn canonical(name: &str) -> &str {
     const ALIASES: &[&str] = &[
-        "ws", "se", "setp", "verb", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex",
-        "noh", "bd",
+        "ws", "se", "setp", "setl", "verb", "reg", "display", "di", "mes", "rec", "q", "w", "x",
+        "e", "Ex", "noh", "bd",
     ];
     NAMES
         .iter()
@@ -1171,7 +1184,7 @@ pub(crate) fn takes(word: &str) -> Takes {
     match word {
         "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" | "trust"
         | "untrust" => Takes::Path,
-        "set" | "se" | "setpersist" | "setp" => Takes::Options,
+        "set" | "se" | "setpersist" | "setp" | "setlocal" | "setl" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
         "agentaccess" => Takes::Words(&["off", "inspect", "control"]),
@@ -1263,6 +1276,8 @@ mod tests {
         ("se", "set"),
         ("setpersist", ""),
         ("setp", "setpersist"),
+        ("setlocal", ""),
+        ("setl", "setlocal"),
         ("verbose", ""),
         ("verb", "verbose"),
         ("Registers", ""),
@@ -1769,6 +1784,7 @@ mod tests {
                 words: words.into(),
                 persist,
                 verbose,
+                local: false,
             })
         };
         assert_eq!(parse("set nowrap"), set("nowrap", false, false));

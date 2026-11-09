@@ -88,8 +88,9 @@ pub(super) const CHOICES: usize = 8;
 pub(crate) enum Binding {
     /// One of the window's own actions.
     Window(Action),
-    /// A function of the config's, by its number.
-    Lua(u64),
+    /// A function of the config's, by its number. With `propagate`, its
+    /// keys go on at once, and it runs after.
+    Lua { binding: u64, propagate: bool },
     /// Keys to type into the focused pane, as if pressed, past the
     /// bindings: `client.keys.map("n", "gi", "gri")`.
     Keys(Vec<crate::keymap::Chord>),
@@ -171,23 +172,40 @@ pub(crate) enum ReviewKey {
     Comment,
 }
 
-/// The window's keymap, which starts with its own keys bound, and what
-/// last bound, or unbound, each of the config's.
-#[derive(Debug)]
+/// A keymap that starts with the window's own keys bound.
+#[derive(Clone, Debug)]
+pub(crate) struct Bindings(Keymap<Binding>);
+
+impl Default for Bindings {
+    fn default() -> Self {
+        Self(defaults())
+    }
+}
+
+impl std::ops::Deref for Bindings {
+    type Target = Keymap<Binding>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Bindings {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// The keymap every window goes by, as the client keeps it, and what last
+/// bound, or unbound, each of the config's keys (see [`crate::client`]).
+/// Each window keeps a copy of [`Keys::map`], with the keys waiting in it
+/// for the rest of a binding its own.
+#[derive(Debug, Default)]
 pub(crate) struct Keys {
-    map: Keymap<Binding>,
+    pub(crate) map: Bindings,
     /// What last bound or unbound keys in a mode, for those config has:
     /// the rest are as the window starts them.
     set_by: HashMap<(KeyMode, Vec<Chord>), SetBy>,
-}
-
-impl Default for Keys {
-    fn default() -> Self {
-        Self {
-            map: defaults(),
-            set_by: HashMap::new(),
-        }
-    }
 }
 
 impl std::ops::Deref for Keys {
@@ -519,7 +537,7 @@ impl Desk {
         self.keymap.which_keys(|binding| match binding {
             Binding::Keys(keys) => format!("types {}", crate::keymap::display(keys)),
             // The window's own are all labelled, so it's the config's.
-            Binding::Lua(_) | Binding::Window(_) => "from your config".to_owned(),
+            Binding::Lua { .. } | Binding::Window(_) => "from your config".to_owned(),
         })
     }
 
@@ -584,7 +602,7 @@ impl Desk {
                 }
             }
             Action::ToggleInlayHints => {
-                self.run_set("inlayhints!", false, false);
+                self.run_set("inlayhints!", false, false, false);
                 let on = self.options.inlayhints;
                 self.say(
                     if on {

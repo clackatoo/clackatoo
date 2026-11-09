@@ -1,9 +1,12 @@
 -- The client's API, as config sees it, over the runtime's core functions.
 --
 -- Windows, workspaces, tabs and panes are handles: tables holding an ID,
--- whose fields are looked up in the client's latest picture of the world
--- each time they're read. A handle to something that's gone raises an
--- error when read. Two handles to the same thing are equal.
+-- and the window they were found through, whose fields are looked up in
+-- that window's latest picture of the world each time they're read. Panes
+-- are numbered by their daemon, and two windows can be on two daemons, so
+-- a pane is always a window's. A handle to something that's gone raises
+-- an error when read. Two handles to the same thing in the same window are
+-- equal.
 --
 -- Waiting for the daemon, as `pane:split` does, yields the handler's
 -- coroutine with a request; the runtime resumes it with the answer.
@@ -27,17 +30,17 @@ end
 
 local Window, Workspace, Tab, Pane = {}, {}, {}, {}
 
-local function handle(class, id)
+local function handle(class, window, id)
 	if id == nil then
 		return nil
 	end
-	return setmetatable({ id = id }, class)
+	return setmetatable({ id = id, window = window }, class)
 end
 
-local function handles(class, ids)
+local function handles(class, window, ids)
 	local list = {}
 	for index, id in ipairs(ids) do
-		list[index] = handle(class, id)
+		list[index] = handle(class, window, id)
 	end
 	return list
 end
@@ -57,7 +60,7 @@ end
 -- and `methods` of its own.
 local function define(class, kind, fields, methods)
 	methods.on = function(self, event, handler)
-		return subscription(call(core.on, kind, self.id, event, handler))
+		return subscription(call(core.on, kind, self.window, self.id, event, handler))
 	end
 	class.__index = function(self, key)
 		local method = methods[key]
@@ -68,14 +71,14 @@ local function define(class, kind, fields, methods)
 		if field == nil then
 			return nil
 		end
-		local info = core.info(kind, self.id)
+		local info = core.info(kind, self.window, self.id)
 		if info == nil then
 			error(`{kind} {self.id} has closed`, 2)
 		end
-		return field(info)
+		return field(self.window, info)
 	end
 	class.__eq = function(a, b)
-		return a.id == b.id
+		return a.id == b.id and a.window == b.window
 	end
 	class.__tostring = function(self)
 		return `{kind} {self.id}`
@@ -83,65 +86,65 @@ local function define(class, kind, fields, methods)
 end
 
 define(Window, "window", {
-	workspace = function(info)
-		return handle(Workspace, info.workspace)
+	workspace = function(window, info)
+		return handle(Workspace, window, info.workspace)
 	end,
-	tab = function(info)
-		return handle(Tab, info.tab)
+	tab = function(window, info)
+		return handle(Tab, window, info.tab)
 	end,
-	pane = function(info)
-		return handle(Pane, info.pane)
+	pane = function(window, info)
+		return handle(Pane, window, info.pane)
 	end,
 }, {})
 
 define(Workspace, "workspace", {
-	name = function(info)
+	name = function(_, info)
 		return info.name
 	end,
-	tabs = function(info)
-		return handles(Tab, info.tabs)
+	tabs = function(window, info)
+		return handles(Tab, window, info.tabs)
 	end,
 }, {})
 
 define(Tab, "tab", {
-	name = function(info)
+	name = function(_, info)
 		return info.name
 	end,
-	panes = function(info)
-		return handles(Pane, info.panes)
+	panes = function(window, info)
+		return handles(Pane, window, info.panes)
 	end,
-	focused = function(info)
-		return handle(Pane, info.focused)
+	focused = function(window, info)
+		return handle(Pane, window, info.focused)
 	end,
-	workspace = function(info)
-		return handle(Workspace, info.workspace)
+	workspace = function(window, info)
+		return handle(Workspace, window, info.workspace)
 	end,
 }, {})
 
 define(Pane, "pane", {
-	kind = function(info)
+	kind = function(_, info)
 		return info.kind
 	end,
-	title = function(info)
+	title = function(_, info)
 		return info.title
 	end,
-	tab = function(info)
-		return handle(Tab, info.tab)
+	tab = function(window, info)
+		return handle(Tab, window, info.tab)
 	end,
 }, {
 	split = function(self, side, options)
 		local kind = if options and options.kind then options.kind else self.kind
-		local id, err = coroutine.yield(REQUEST, call(core.split, self.id, side, kind))
+		local id, err = coroutine.yield(REQUEST, call(core.split, self.window, self.id, side, kind))
 		if err ~= nil then
 			error(err, 2)
 		end
-		return handle(Pane, id)
+		return handle(Pane, self.window, id)
 	end,
 	close = function(self)
-		call(core.close, self.id)
+		call(core.close, self.window, self.id)
 	end,
 	focus = function(self)
-		call(core.focus, self.id)
+		call(core.focus, self.window, self.id)
 	end,
 })
 
@@ -169,7 +172,9 @@ local client = {
 	keys = table.freeze({
 		-- Binds keys to a function, or to keys to type, with options as
 		-- Neovim's `vim.keymap.set` takes them: `{desc = "…"}` says what
-		-- the binding does, in the panel of keys.
+		-- the binding does, in the panel of keys. `{propagate = true}` lets
+		-- its keys go on at once, without waiting for the function, which
+		-- runs after.
 		map = function(modes, keys, handler, options)
 			call(core.map, modes, keys, handler, options)
 		end,
@@ -185,23 +190,24 @@ local client = {
 		end,
 	}),
 	on = function(event, handler)
-		return subscription(call(core.on, "client", 0, event, handler))
+		return subscription(call(core.on, "client", 0, 0, event, handler))
 	end,
 	-- Runs a command, as if typed after `:`, as Neovim's `vim.cmd`:
 	-- `client.cmd("Files")`.
 	cmd = function(line)
 		call(core.command, line)
 	end,
-	-- Forwards a port from this machine to the daemon's, when the window
-	-- is on another machine's, as `:PortForward` does:
+	-- Forwards a port from this machine to the daemon's, in each window on
+	-- another machine's, as `:PortForward` does, now and as windows open:
 	-- `client.forward(8080)`, `client.forward("3000:8080")`.
 	forward = function(spec)
 		call(core.forward, tostring(spec))
 	end,
 	-- Has the daemon bring another machine's workspaces in, as
 	-- `:connect HOST` does, saying nothing unless it fails:
-	-- `client.connect("desk")`. The daemon keeps its connections, so
-	-- asking again, as a config does in every window, leaves one as it is.
+	-- `client.connect("desk")`. Each window asks its daemon, now and as
+	-- windows open, and again as each connects; the daemon keeps its
+	-- connections, so asking again leaves one as it is.
 	-- `client.connect("server", {share = false})` keeps it from the
 	-- daemons connected to this one, as `:connect HOST --no-share` does.
 	connect = function(host, options)
@@ -226,9 +232,14 @@ local client = {
 setmetatable(client, {
 	__index = function(_, key)
 		if key == "windows" then
-			return handles(Window, core.windows())
+			local list = {}
+			for index, window in ipairs(core.windows()) do
+				list[index] = handle(Window, window, window)
+			end
+			return list
 		elseif key == "focused" then
-			return handle(Pane, core.focused())
+			local window, pane = core.focused()
+			return handle(Pane, window, pane)
 		end
 		return nil
 	end,
@@ -245,8 +256,8 @@ return {
 			keys = info.keys,
 			text = info.text,
 			mode = info.mode,
-			window = handle(Window, info.window),
-			pane = handle(Pane, info.pane),
+			window = handle(Window, info.window, info.window),
+			pane = handle(Pane, info.window, info.pane),
 			-- The count typed before a binding's keys, 0 if none, as
 			-- Vim's `v:count`; and 1 if none, as `v:count1`.
 			count = info.count or 0,
@@ -263,5 +274,16 @@ return {
 	decide = function(event)
 		decided[event] = true
 		return stopped[event] == true
+	end,
+	-- A chat's turn having ended, from what the window that heard it says.
+	turnend = function(info)
+		return table.freeze({
+			chat = info.chat,
+			title = info.title,
+			agent = info.agent,
+			failed = info.failed,
+			window = handle(Window, info.window, info.window),
+			pane = handle(Pane, info.window, info.pane),
+		})
 	end,
 }

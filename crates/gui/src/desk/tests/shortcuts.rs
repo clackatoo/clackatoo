@@ -15,7 +15,10 @@ fn shortcut_help_shows_live_mapping_labels_and_hides_overridden_builtin_keys() {
     desk.keymap.bind(
         &[KeyMode::Normal],
         &parse_keys("j").unwrap(),
-        bindings::Binding::Lua(42),
+        bindings::Binding::Lua {
+            binding: 42,
+            propagate: false,
+        },
         Some("my action"),
     );
     let context = desk.shortcut_context();

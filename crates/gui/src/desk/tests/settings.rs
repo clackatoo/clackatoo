@@ -170,14 +170,24 @@ fn verbose_set_says_what_set_each_option_and_bindings_know_theirs() {
     let by = desk.options.set_by(ts);
     assert_eq!((by.loading, by.at.map(|at| at.line)), (false, Some(2)));
     let keys = |keys| parse_keys(keys).unwrap();
-    let bound = desk.keymap.bound_by(KeyMode::Normal, &keys("<C-b>t"));
+    let bound = desk
+        .client()
+        .0
+        .keys()
+        .bound_by(KeyMode::Normal, &keys("<C-b>t"));
     assert!(bound.loading && bound.at.is_some_and(|at| at.line == 1));
     assert_eq!(
-        desk.keymap.bound_by(KeyMode::Normal, &keys("<C-b>c")),
+        desk.client()
+            .0
+            .keys()
+            .bound_by(KeyMode::Normal, &keys("<C-b>c")),
         SetBy::DEFAULT
     );
     assert_eq!(
-        desk.keymap.bound_by(KeyMode::Insert, &keys("<C-b>t")),
+        desk.client()
+            .0
+            .keys()
+            .bound_by(KeyMode::Insert, &keys("<C-b>t")),
         SetBy::DEFAULT
     );
 }

@@ -1,18 +1,39 @@
 //! The Lua thread: Luau, the client's API, and handlers run as coroutines.
 //!
-//! Each handler runs in a coroutine of its own until it finishes or first
-//! waits, as `pane:split` does for the daemon's answer. Then the next one
-//! runs, and once they all have, whether the key stopped is decided. A
-//! waiting coroutine is resumed when its answer comes.
+//! One Lua runs for every window of the process: the config loads once, and
+//! each window tells it what the world looks like through it. Lua keeps a
+//! world for each, by the window's number.
 //!
-//! A resume that runs too long, as a loop that never ends would, is
-//! stopped by a watchdog thread, which only wakes while Lua runs.
+//! Each handler runs in a coroutine of its own. A key's handlers, those of
+//! `on("keypress")` and a binding's function, run first, each until it
+//! finishes or first waits, as `pane:split` does for the daemon's answer;
+//! then whether the key stopped is decided and said. Everything else is
+//! background work: a handler going on once its answer comes, one for an
+//! event nothing waits on, as a chat's turn ending, and a binding whose
+//! keys went on at once. Background work runs a slice at a time
+//! ([`SLICE`]), in turn: between slices, any key that has come is decided
+//! first, so however long background work takes, a key waits for it a
+//! slice at most, and usually not at all, as a key coming asks the slice
+//! running to end at once.
+//!
+//! A slice ends by Luau's interrupt yielding the handler's coroutine, as
+//! if it had called `coroutine.yield()`, which only that coroutine does:
+//! one of the handler's own, made with `coroutine.create`, would yield to
+//! the handler, not here. Luau can't yield inside a metamethod or a call
+//! from C, such as `table.sort`'s comparator; there the handler runs on,
+//! and the watchdog asks again a slice later. A handler that calls
+//! `coroutine.yield()` itself lets other work go first too.
+//!
+//! A handler that runs too long, as a loop that never ends would, is
+//! stopped by a watchdog thread, which only wakes while Lua runs: it's
+//! given [`HANDLER_TIME`] of running, counted across its slices, from when
+//! it starts or its answer comes until it finishes or waits.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +41,7 @@ use clackatoo_protocol::{Content, PaneId, Side, TabId, WorkspaceId};
 use mlua::thread::ThreadStatus;
 use mlua::{Function, Lua, MultiValue, Table, Thread, Value, VmState};
 
-use super::{Chunk, FromLua, KeyInfo, Scope, Source, ToLua, WINDOW, Wake, World};
+use super::{Chunk, FromLua, KeyInfo, Listen, Scope, Source, To, ToLua, TurnEnd, Wake, World};
 use crate::command::Kind;
 use crate::keymap::{KeyMode, parse_keys, parse_modes};
 use crate::options::provenance::{Place, Source as SetFrom};
@@ -29,33 +50,62 @@ use crate::options::{self, Options, SetBy};
 /// How long `init.lua` may run before it's stopped.
 pub(crate) const INIT_TIME: Duration = Duration::from_secs(2);
 
-/// How long a handler may run, each time it's resumed, before it's
-/// stopped. Less than the time a key waits for it.
+/// How long a handler may run, from when it starts or its answer comes
+/// until it finishes or waits, before it's stopped. Less than the time a
+/// key waits for it.
 const HANDLER_TIME: Duration = Duration::from_millis(250);
+
+/// How long background work runs before letting other work go first.
+const SLICE: Duration = Duration::from_millis(2);
 
 const PRELUDE: &str = include_str!("prelude.luau");
 
 /// What the core functions share.
 struct State {
-    world: RefCell<World>,
-    /// The options, as the window last said, and as set since.
+    /// The world through each window, by its number.
+    worlds: RefCell<BTreeMap<u32, World>>,
+    /// The options every window shares, as the windows last said, and as
+    /// set since.
     options: RefCell<Options>,
-    to_window: Sender<FromLua>,
+    to_windows: Sender<(To, FromLua)>,
     wake: Wake,
     bindings: RefCell<HashMap<u64, Function>>,
-    handlers: RefCell<HashMap<u64, (Scope, Function)>>,
+    handlers: RefCell<HashMap<u64, (Scope, Listen, Function)>>,
     next: Cell<u64>,
     /// Which of the config's files is loading, while one is.
     loading: Cell<Option<SetFrom>>,
+    /// The window whose event is being handled, while one is.
+    window: Cell<Option<u32>>,
     /// The files of Lua that have set something, each kept once.
     files: RefCell<Vec<Arc<str>>>,
 }
 
 impl State {
-    fn tell(&self, message: FromLua) {
-        if self.to_window.send(message).is_ok() {
+    fn new(options: Options, to_windows: Sender<(To, FromLua)>, wake: Wake) -> Self {
+        Self {
+            worlds: RefCell::default(),
+            options: RefCell::new(options),
+            to_windows,
+            wake,
+            bindings: RefCell::default(),
+            handlers: RefCell::default(),
+            next: Cell::new(0),
+            loading: Cell::new(None),
+            window: Cell::new(None),
+            files: RefCell::default(),
+        }
+    }
+
+    fn tell(&self, to: To, message: FromLua) {
+        if self.to_windows.send((to, message)).is_ok() {
             (self.wake)();
         }
+    }
+
+    /// Who's told what's done for the event being handled: its window, or
+    /// with none, `otherwise`.
+    fn here(&self, otherwise: To) -> To {
+        self.window.get().map_or(otherwise, To::Window)
     }
 
     fn next_id(&self) -> u64 {
@@ -112,39 +162,92 @@ impl State {
     }
 }
 
-/// Runs the config's `chunks`, `settings.lua` then `init.lua`, with
-/// `options` as the window's are, then whatever the window asks, until the
-/// window lets go of its end.
+/// What Lua starts with.
+pub(super) struct Start<'a> {
+    pub(super) source: &'a Source,
+    /// The config's files, `settings.lua` then `init.lua`.
+    pub(super) chunks: &'a [Chunk],
+    /// The options, as the windows share them.
+    pub(super) options: Options,
+    /// The windows open as it starts.
+    pub(super) windows: Vec<u32>,
+}
+
+/// Runs the config, as `start` says, then whatever the windows ask, until
+/// they let go of their end. `slice` asks background work to let other
+/// work go first, as the windows set it when a key comes.
 pub(super) fn run(
-    source: &Source,
-    chunks: &[Chunk],
-    options: Options,
-    (from_window, to_window): (&Receiver<ToLua>, Sender<FromLua>),
+    start: Start<'_>,
+    (from_windows, to_windows): (Receiver<ToLua>, Sender<(To, FromLua)>),
+    slice: Arc<AtomicBool>,
     wake: Wake,
 ) {
-    let state = Rc::new(State {
-        world: RefCell::default(),
-        options: RefCell::new(options),
-        to_window,
-        wake,
-        bindings: RefCell::default(),
-        handlers: RefCell::default(),
-        next: Cell::new(0),
-        loading: Cell::new(None),
-        files: RefCell::default(),
-    });
-    let mut runtime = match Runtime::new(source, &state) {
+    let Start {
+        source,
+        chunks,
+        options,
+        windows,
+    } = start;
+    let state = Rc::new(State::new(options, to_windows, wake));
+    // Windows open now are there as the config loads, though nothing's
+    // shown in them yet.
+    for window in windows {
+        state.worlds.borrow_mut().insert(window, World::default());
+    }
+    let mut runtime = match Runtime::new(source, &state, slice) {
         Ok(runtime) => runtime,
         Err(err) => {
-            state.tell(FromLua::Error(format!("Lua didn't start: {err}")));
-            state.tell(FromLua::Ready);
+            state.tell(To::All, FromLua::Error(format!("Lua didn't start: {err}")));
+            state.tell(To::Client, FromLua::Ready);
             return;
         }
     };
     runtime.load(chunks);
-    state.tell(FromLua::Ready);
-    while let Ok(message) = from_window.recv() {
-        runtime.handle(message);
+    state.tell(To::Client, FromLua::Ready);
+    loop {
+        // Whatever's come goes first: a key is decided before background
+        // work goes on.
+        loop {
+            match from_windows.try_recv() {
+                Ok(message) => runtime.handle(message),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        if let Some(job) = runtime.background.pop_front() {
+            runtime.run_slice(job);
+            continue;
+        }
+        match from_windows.recv() {
+            Ok(message) => runtime.handle(message),
+            Err(_) => return,
+        }
+    }
+}
+
+/// A handler's coroutine, as background work, or waiting on a request.
+struct Job {
+    thread: Thread,
+    /// What it's resumed with next: its event, to begin with; an answer;
+    /// or nothing, after a slice.
+    args: MultiValue,
+    /// The window whose event it handles, if any.
+    window: Option<u32>,
+    /// The config's file it is, if it's one still loading.
+    loading: Option<SetFrom>,
+    /// How long it's run since it started or its answer came.
+    ran: Duration,
+}
+
+impl Job {
+    fn new(thread: Thread, args: MultiValue, window: Option<u32>) -> Self {
+        Self {
+            thread,
+            args,
+            window,
+            loading: None,
+            ran: Duration::ZERO,
+        }
     }
 }
 
@@ -155,15 +258,19 @@ struct Runtime {
     /// What the prelude gives the runtime: `request`, `event`, `decide`.
     prelude: Table,
     /// Coroutines waiting on requests, by request.
-    waiting: HashMap<u64, Thread>,
-    /// The config's files that are waiting on requests as they load, and
-    /// which each is: what they set when they go on is set as they load.
-    loading: Vec<(Thread, SetFrom)>,
+    waiting: HashMap<u64, Job>,
+    /// Work to run a slice at a time, in turn, once no key waits.
+    background: VecDeque<Job>,
     watchdog: Arc<Watchdog>,
+    /// The coroutine being run a slice at a time, while one is: the only
+    /// one the interrupt yields.
+    sliced: Rc<Cell<*mut mlua::lua_State>>,
+    /// Set to end the slice running.
+    slice: Arc<AtomicBool>,
 }
 
 impl Runtime {
-    fn new(source: &Source, state: &Rc<State>) -> mlua::Result<Self> {
+    fn new(source: &Source, state: &Rc<State>, slice: Arc<AtomicBool>) -> mlua::Result<Self> {
         let lua = Lua::new();
         // `client` changes under Luau: its fields, such as `client.opt.number`
         // and `client.windows`, are read through metatables each time. Luau
@@ -174,14 +281,25 @@ impl Runtime {
                 .set_optimization_level(2)
                 .set_mutable_globals(["client"]),
         );
-        let watchdog = Watchdog::start();
+        let watchdog = Watchdog::start(slice.clone());
         let stop = watchdog.stop.clone();
-        lua.set_interrupt(move |_| {
+        let sliced: Rc<Cell<*mut mlua::lua_State>> = Rc::new(Cell::new(std::ptr::null_mut()));
+        let (ending, coroutine) = (slice.clone(), sliced.clone());
+        lua.set_interrupt(move |lua| {
             if stop.swap(false, Ordering::Relaxed) {
-                Err(mlua::Error::runtime("ran too long, so it was stopped"))
-            } else {
-                Ok(VmState::Continue)
+                return Err(mlua::Error::runtime("ran too long, so it was stopped"));
             }
+            // Only the coroutine being run a slice at a time yields here,
+            // compared by its Luau state, which is only compared: never a
+            // coroutine of the handler's own, which would yield to the
+            // handler, which would take it for its own `yield` and go
+            // wrong. mlua yields only where Luau can, and otherwise lets
+            // it run on; the watchdog sets `ending` again a slice later.
+            if ending.load(Ordering::Relaxed) && lua.state() == coroutine.get() {
+                ending.store(false, Ordering::Relaxed);
+                return Ok(VmState::Yield);
+            }
+            Ok(VmState::Continue)
         });
         let core = core(&lua, state)?;
         let prelude: Table = lua.load(PRELUDE).set_name("=prelude").call(core)?;
@@ -208,8 +326,10 @@ impl Runtime {
             state: state.clone(),
             prelude,
             waiting: HashMap::new(),
-            loading: Vec::new(),
+            background: VecDeque::new(),
             watchdog,
+            sliced,
+            slice,
         })
     }
 
@@ -224,7 +344,7 @@ impl Runtime {
                 Err(why) => {
                     let said = format!("couldn't read {}: {why}", chunk.path);
                     log::error!(target: "clackatoo::init.lua", "{said}");
-                    self.state.tell(FromLua::Error(said));
+                    self.state.tell(To::All, FromLua::Error(said));
                     continue;
                 }
             };
@@ -239,67 +359,123 @@ impl Runtime {
                     continue;
                 }
             };
-            self.state.loading.set(Some(chunk.from));
-            let resumed = self.watched(INIT_TIME, || thread.resume(()));
-            self.state.loading.set(None);
-            self.settle(&thread, resumed);
-            if thread.status() == ThreadStatus::Resumable {
-                self.loading.push((thread, chunk.from));
-            }
+            let job = Job {
+                loading: Some(chunk.from),
+                ..Job::new(thread, MultiValue::new(), None)
+            };
+            self.run(job, INIT_TIME, false);
         }
     }
 
     fn handle(&mut self, message: ToLua) {
         match message {
-            ToLua::World(world) => {
-                // A pane's or tab's handlers go with it.
+            ToLua::Open { window } => {
                 self.state
-                    .handlers
+                    .worlds
                     .borrow_mut()
-                    .retain(|_, (scope, _)| match *scope {
-                        Scope::Client | Scope::Window(_) => true,
-                        Scope::Tab(tab) => world.workspaces.find_tab(tab).is_some(),
-                        Scope::Pane(pane) => world.workspaces.find_pane(pane).is_some(),
-                    });
-                *self.state.world.borrow_mut() = world;
+                    .insert(window, World::default());
+            }
+            ToLua::Closed { window } => {
+                self.state.worlds.borrow_mut().remove(&window);
+                (self.state.handlers.borrow_mut())
+                    .retain(|_, (scope, _, _)| scope.window() != Some(window));
+            }
+            ToLua::World { window, world } => {
+                // A pane's or tab's handlers go with it.
+                (self.state.handlers.borrow_mut()).retain(|_, (scope, _, _)| match *scope {
+                    Scope::Tab(of, tab) if of == window => world.workspaces.find_tab(tab).is_some(),
+                    Scope::Pane(of, pane) if of == window => {
+                        world.workspaces.find_pane(pane).is_some()
+                    }
+                    _ => true,
+                });
+                let mut worlds = self.state.worlds.borrow_mut();
+                // Not one that's closed, as a world can cross with that.
+                if let Some(was) = worlds.get_mut(&window) {
+                    *was = world;
+                }
             }
             ToLua::Key { seq, key, handlers } => {
                 let handlers: Vec<Function> = {
                     let all = self.state.handlers.borrow();
                     (handlers.iter())
-                        .filter_map(|id| all.get(id).map(|(_, handler)| handler.clone()))
+                        .filter_map(|id| all.get(id).map(|(_, _, handler)| handler.clone()))
                         .collect()
                 };
                 let stop = self.run_event(&key, false, &handlers);
-                self.state.tell(FromLua::Decided { seq, stop });
+                self.state
+                    .tell(To::Window(key.window), FromLua::Decided { seq, stop });
             }
             ToLua::Bound { seq, key, binding } => {
                 let handler = self.state.bindings.borrow().get(&binding).cloned();
                 let stop = self.run_event(&key, true, handler.as_slice());
-                self.state.tell(FromLua::Decided { seq, stop });
+                self.state
+                    .tell(To::Window(key.window), FromLua::Decided { seq, stop });
+            }
+            ToLua::Run { key, binding } => {
+                let handler = self.state.bindings.borrow().get(&binding).cloned();
+                if let Some(handler) = handler {
+                    self.later(
+                        &handler,
+                        |runtime| runtime.decided_event(&key),
+                        Some(key.window),
+                    );
+                }
             }
             ToLua::Answer { request, result } => {
-                let Some(thread) = self.waiting.remove(&request) else {
+                let Some(mut job) = self.waiting.remove(&request) else {
                     return;
                 };
-                // A file of the config goes on loading.
-                let loading = (self.loading.iter())
-                    .find(|(loading, _)| *loading == thread)
-                    .map(|&(_, from)| from);
-                self.state.loading.set(loading);
-                let resumed = match result {
-                    Ok(pane) => self.watched(HANDLER_TIME, || thread.resume(pane.0)),
-                    Err(err) => self.watched(HANDLER_TIME, || thread.resume((Value::Nil, err))),
+                job.args = match result {
+                    Ok(pane) => self.args(pane.0),
+                    Err(err) => self.args((Value::Nil, err)),
                 };
-                self.state.loading.set(None);
-                self.settle(&thread, resumed);
-                self.loading
-                    .retain(|(loading, _)| loading.status() == ThreadStatus::Resumable);
+                // A new stretch of its running, from its answer.
+                job.ran = Duration::ZERO;
+                self.background.push_back(job);
             }
             ToLua::Option { option, value } => {
-                // The window's own value, so it suits the option.
+                // The windows' own value, so it suits the option.
                 let _ = self.state.options.borrow_mut().set(option, value);
             }
+            ToLua::TurnEnded(turn) => {
+                let mut handlers: Vec<(u64, Function)> = (self.state.handlers.borrow().iter())
+                    .filter(|(_, (_, listen, _))| *listen == Listen::TurnEnd)
+                    .map(|(&id, (_, _, handler))| (id, handler.clone()))
+                    .collect();
+                // In the order they were added.
+                handlers.sort_by_key(|&(id, _)| id);
+                for (_, handler) in handlers {
+                    self.later(
+                        &handler,
+                        |runtime| runtime.turn_event(&turn),
+                        Some(turn.window),
+                    );
+                }
+            }
+        }
+    }
+
+    /// `values`, to resume a coroutine with.
+    fn args(&self, values: impl mlua::IntoLuaMulti) -> MultiValue {
+        values.into_lua_multi(&self.lua).unwrap_or_default()
+    }
+
+    /// Queues `handler` as background work, for `window`'s event, called
+    /// with the event `event` makes.
+    fn later(
+        &mut self,
+        handler: &Function,
+        event: impl FnOnce(&Self) -> mlua::Result<Table>,
+        window: Option<u32>,
+    ) {
+        let made = event(self).and_then(|event| {
+            let thread = self.lua.create_thread(handler.clone())?;
+            Ok(Job::new(thread, self.args(event), window))
+        });
+        match made {
+            Ok(job) => self.background.push_back(job),
+            Err(err) => self.report(&err),
         }
     }
 
@@ -321,7 +497,13 @@ impl Runtime {
                 .unwrap_or(stop)
         };
         for handler in handlers {
-            self.start(handler, &event, HANDLER_TIME);
+            match self.lua.create_thread(handler.clone()) {
+                Ok(thread) => {
+                    let job = Job::new(thread, self.args(&event), Some(key.window));
+                    self.run(job, HANDLER_TIME, false);
+                }
+                Err(err) => self.report(&err),
+            }
             if !stop && ask("stopped") {
                 break;
             }
@@ -336,44 +518,72 @@ impl Runtime {
         info.set("keys", key.keys.as_deref())?;
         info.set("text", key.text.as_deref())?;
         info.set("mode", mode_letter(key.mode))?;
-        info.set("window", WINDOW)?;
+        info.set("window", key.window)?;
         info.set("pane", key.pane.map(|pane| pane.0))?;
         info.set("count", key.count)?;
         let event: Function = self.prelude.get("event")?;
         event.call((info, stop))
     }
 
-    /// Runs `function` with `args` in a coroutine of its own, until it
-    /// finishes or waits.
-    fn start(&mut self, function: &Function, args: impl mlua::IntoLuaMulti, limit: Duration) {
-        let thread = match self.lua.create_thread(function.clone()) {
-            Ok(thread) => thread,
-            Err(err) => return self.report(&err),
-        };
-        let resumed = self.watched(limit, || thread.resume(args));
-        self.settle(&thread, resumed);
+    /// An event for `key`, whose binding let it go on already: stopping it
+    /// or letting it go on is an error.
+    fn decided_event(&self, key: &KeyInfo) -> mlua::Result<Table> {
+        let event = self.event(key, false)?;
+        self.prelude
+            .get::<Function>("decide")?
+            .call::<bool>(&event)?;
+        Ok(event)
     }
 
-    /// Runs `resume` with the watchdog watching.
-    fn watched(
-        &self,
-        limit: Duration,
-        resume: impl FnOnce() -> mlua::Result<MultiValue>,
-    ) -> mlua::Result<MultiValue> {
-        self.watchdog.watch(limit);
-        let resumed = resume();
+    fn turn_event(&self, turn: &TurnEnd) -> mlua::Result<Table> {
+        let info = self.lua.create_table()?;
+        info.set("chat", turn.chat.0)?;
+        info.set("title", turn.title.as_str())?;
+        info.set("agent", turn.agent.as_str())?;
+        info.set("failed", turn.failed)?;
+        info.set("window", turn.window)?;
+        info.set("pane", turn.pane.map(|pane| pane.0))?;
+        self.prelude.get::<Function>("turnend")?.call(info)
+    }
+
+    /// Runs `job` once, at most `limit` (for the config's files as they
+    /// load) or what's left of [`HANDLER_TIME`], a slice at most if
+    /// `sliced`, then keeps it as what it's come to: finished, waiting on
+    /// a request, or to go on as background work.
+    fn run(&mut self, mut job: Job, limit: Duration, sliced: bool) {
+        self.state.loading.set(job.loading);
+        self.state.window.set(job.window);
+        if sliced {
+            self.sliced.set(job.thread.state());
+        }
+        // Whatever asked a slice to end did so of one before.
+        self.slice.store(false, Ordering::Relaxed);
+        let args = std::mem::take(&mut job.args);
+        let started = Instant::now();
+        self.watchdog.watch(limit.saturating_sub(job.ran), sliced);
+        let resumed = job.thread.resume::<MultiValue>(args);
         self.watchdog.done();
-        resumed
+        job.ran += started.elapsed();
+        self.sliced.set(std::ptr::null_mut());
+        self.state.loading.set(None);
+        self.state.window.set(None);
+        self.settle(job, resumed);
     }
 
-    /// After `thread` was resumed: keeps it to resume again if it waits on
-    /// a request, and reports it if it failed.
-    fn settle(&mut self, thread: &Thread, resumed: mlua::Result<MultiValue>) {
+    /// Runs a slice of background work.
+    fn run_slice(&mut self, job: Job) {
+        self.run(job, HANDLER_TIME, true);
+    }
+
+    /// After `job` was resumed: keeps it to resume again if it waits on a
+    /// request, or as background work if it let others go first, and
+    /// reports it if it failed.
+    fn settle(&mut self, job: Job, resumed: mlua::Result<MultiValue>) {
         let values = match resumed {
             Ok(values) => values,
             Err(err) => return self.report(&err),
         };
-        if thread.status() != ThreadStatus::Resumable {
+        if job.thread.status() != ThreadStatus::Resumable {
             return;
         }
         let request = self.prelude.get::<Table>("request").ok();
@@ -383,11 +593,15 @@ impl Runtime {
                 if request.is_some_and(|request| request == first) =>
             {
                 #[allow(clippy::cast_sign_loss)]
-                self.waiting.insert(id as u64, thread.clone());
+                self.waiting.insert(id as u64, job);
             }
-            _ => self.state.tell(FromLua::Error(
-                "a handler can only wait on the client, as pane:split does".into(),
-            )),
+            // A slice ended, or it called `coroutine.yield()` itself: it
+            // goes on after the rest.
+            (None, _) => self.background.push_back(job),
+            _ => self.state.tell(
+                self.state.here(To::All),
+                FromLua::Error("a handler can only wait on the client, as pane:split does".into()),
+            ),
         }
     }
 
@@ -398,7 +612,8 @@ impl Runtime {
         let first = (["runtime error: ", "syntax error: "].iter())
             .find_map(|kind| first.strip_prefix(kind))
             .unwrap_or(first);
-        self.state.tell(FromLua::Error(first.to_owned()));
+        self.state
+            .tell(self.state.here(To::All), FromLua::Error(first.to_owned()));
     }
 }
 
@@ -420,7 +635,6 @@ fn core(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     setting(lua, state, &core)?;
     Ok(core)
 }
-
 /// `get_option` and `set_option`, which `client.opt` reads and writes
 /// through.
 fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
@@ -429,7 +643,16 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
         "get_option",
         lua.create_function(move |lua, name: String| {
             let option = options::find(&name).map_err(mlua::Error::runtime)?;
-            Ok(match s.options.borrow().get(option) {
+            // In a handler of a window's event, as that window has it, as
+            // Neovim's `vim.o` reads the current window's.
+            let own = (s.window.get()).and_then(|window| {
+                let worlds = s.worlds.borrow();
+                let world = worlds.get(&window)?;
+                let own = world.own.iter().find(|(info, _)| info.name == option.name);
+                own.map(|(_, value)| value.clone())
+            });
+            let value = own.unwrap_or_else(|| s.options.borrow().get(option));
+            Ok(match value {
                 options::Value::Bool(value) => Value::Boolean(value),
                 options::Value::Number(value) => Value::Integer(value.into()),
                 options::Value::Decimal(value) => Value::Number(value.as_f64()),
@@ -453,7 +676,16 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             let by = s.set_by(lua);
             match set() {
                 Ok((option, value)) => {
-                    s.tell(FromLua::Set { option, value, by });
+                    let window = s.window.get();
+                    s.tell(
+                        To::Client,
+                        FromLua::Set {
+                            option,
+                            value,
+                            by,
+                            window,
+                        },
+                    );
                     Ok(())
                 }
                 // settings.lua is clackatoo's, written for whichever build
@@ -461,7 +693,8 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                 // are set all the same.
                 Err(err) if by.source == SetFrom::Settings && by.loading => {
                     let at = (by.at).map(|at| format!("{}:{}: ", at.file, at.line));
-                    s.tell(FromLua::Error(format!("{}{err}", at.unwrap_or_default())));
+                    let said = format!("{}{err}", at.unwrap_or_default());
+                    s.tell(To::All, FromLua::Error(said));
                     Ok(())
                 }
                 Err(err) => Err(mlua::Error::runtime(err)),
@@ -514,27 +747,45 @@ fn option_value(option: &options::Info, value: &Value) -> Result<options::Value,
     value.ok_or_else(|| option.wants())
 }
 
+/// What a binding's options say, as `map` was given them.
+#[derive(Default)]
+struct BindingOptions {
+    /// What it does, for the panel of keys.
+    desc: Option<String>,
+    /// Its keys go on at once, and its function runs after.
+    propagate: bool,
+    /// What's wrong with the rest, to say.
+    wrong: Vec<String>,
+}
+
 /// What a binding says it does, from the options `map` was given, as
-/// Neovim's `vim.keymap.set` takes them: `{desc = "…"}`, and what's wrong
-/// with the rest, each said for the binding of `keys`. Options that only
-/// say what clackatoo's bindings do anyway, as `silent` and `noremap` do,
-/// are passed over, so a binding written for Neovim loads as it is; any
-/// other is left out with a warning, and the binding is made all the
-/// same, so the rest of `init.lua` runs.
-fn binding_options(
-    keys: &str,
-    options: Option<Table>,
-) -> mlua::Result<(Option<String>, Vec<String>)> {
-    let mut desc = None;
-    let mut wrong = Vec::new();
+/// Neovim's `vim.keymap.set` takes them: `{desc = "…"}`, and
+/// `{propagate = true}` of clackatoo's own, and what's wrong with the
+/// rest, each said for the binding of `keys`. Options that only say what
+/// clackatoo's bindings do anyway, as `silent` and `noremap` do, are
+/// passed over, so a binding written for Neovim loads as it is; any other
+/// is left out with a warning, and the binding is made all the same, so
+/// the rest of `init.lua` runs.
+fn binding_options(keys: &str, options: Option<Table>) -> mlua::Result<BindingOptions> {
+    let mut said = BindingOptions::default();
     let Some(options) = options else {
-        return Ok((desc, wrong));
+        return Ok(said);
     };
+    let BindingOptions {
+        desc,
+        propagate,
+        wrong,
+    } = &mut said;
     for pair in options.pairs::<Value, Value>() {
         let (key, value) = pair?;
         let name = key.as_string().map(mlua::LuaString::to_string_lossy);
         match (name.as_deref(), value) {
-            (Some("desc"), Value::String(text)) => desc = Some(text.to_string_lossy()),
+            (Some("desc"), Value::String(text)) => *desc = Some(text.to_string_lossy()),
+            (Some("propagate"), Value::Boolean(on)) => *propagate = on,
+            (Some("propagate"), Value::Nil) => {}
+            (Some("propagate"), _) => wrong.push(format!(
+                "the binding of `{keys}` leaves out its `propagate`, which is true or false"
+            )),
             // Neovim's, passed over: bindings here are always quiet and
             // never set off others, and the rest change nothing that
             // matters to a binding that loads.
@@ -548,14 +799,14 @@ fn binding_options(
                 "the binding of `{keys}` leaves out `remap`: keys bound to keys never set off other bindings"
             )),
             (Some(name), _) => wrong.push(format!(
-                "the binding of `{keys}` leaves out `{name}`, which isn't one of its options: desc"
+                "the binding of `{keys}` leaves out `{name}`, which isn't one of its options: desc, propagate"
             )),
             (None, _) => wrong.push(format!(
                 "the binding of `{keys}` leaves out options that aren't named, as {{desc = \"…\"}} is"
             )),
         }
     }
-    Ok((desc, wrong))
+    Ok(said)
 }
 
 /// `map`, `unmap`, `group`, `on` and `off`.
@@ -571,12 +822,17 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             move |lua, (modes, keys, handler, options): (String, String, Value, Option<Table>)| {
                 let by = s.set_by(lua);
                 let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
-                let (desc, wrong) = binding_options(&keys, options)?;
+                let shown = keys.clone();
+                let BindingOptions {
+                    desc,
+                    propagate,
+                    mut wrong,
+                } = binding_options(&keys, options)?;
                 let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
                 // Said once the binding's made, which it is all the same.
-                let warn = |s: &State| {
+                let warn = |s: &State, wrong: Vec<String>| {
                     for warning in wrong {
-                        s.tell(FromLua::Error(warning));
+                        s.tell(s.here(To::All), FromLua::Error(warning));
                     }
                 };
                 let handler = match handler {
@@ -584,14 +840,23 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                     // Keys to type, as Vim's `noremap` maps to.
                     Value::String(to) => {
                         let to = parse_keys(&to.to_string_lossy()).map_err(mlua::Error::runtime)?;
-                        s.tell(FromLua::Remap {
-                            modes,
-                            keys,
-                            to,
-                            desc,
-                            by,
-                        });
-                        warn(&s);
+                        if propagate {
+                            wrong.push(format!(
+                                "the binding of `{shown}` leaves out `propagate`: keys bound to \
+                                 keys are typed in place of them"
+                            ));
+                        }
+                        s.tell(
+                            To::Client,
+                            FromLua::Remap {
+                                modes,
+                                keys,
+                                to,
+                                desc,
+                                by,
+                            },
+                        );
+                        warn(&s, wrong);
                         return Ok(());
                     }
                     _ => {
@@ -602,14 +867,18 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                 };
                 let binding = s.next_id();
                 s.bindings.borrow_mut().insert(binding, handler);
-                s.tell(FromLua::Map {
-                    modes,
-                    keys,
-                    binding,
-                    desc,
-                    by,
-                });
-                warn(&s);
+                s.tell(
+                    To::Client,
+                    FromLua::Map {
+                        modes,
+                        keys,
+                        binding,
+                        desc,
+                        propagate,
+                        by,
+                    },
+                );
+                warn(&s, wrong);
                 Ok(())
             },
         )?,
@@ -621,7 +890,7 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
             let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
             let by = s.set_by(lua);
-            s.tell(FromLua::Unmap { modes, keys, by });
+            s.tell(To::Client, FromLua::Unmap { modes, keys, by });
             Ok(())
         })?,
     )?;
@@ -632,7 +901,7 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             move |_, (modes, keys, name): (String, String, Option<String>)| {
                 let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
                 let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
-                s.tell(FromLua::Group { modes, keys, name });
+                s.tell(To::Client, FromLua::Group { modes, keys, name });
                 Ok(())
             },
         )?,
@@ -641,25 +910,37 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     core.set(
         "on",
         lua.create_function(
-            move |_, (kind, id, event, handler): (String, u64, String, Function)| {
-                if event != "keypress" {
-                    return Err(mlua::Error::runtime(format!(
-                        "there's no event called `{event}`: the events are keypress"
-                    )));
-                }
-                #[allow(clippy::cast_possible_truncation)]
+            move |_, (kind, window, id, event, handler): (String, u32, u32, String, Function)| {
+                let listen = match event.as_str() {
+                    "keypress" => Listen::Keypress,
+                    "turnend" => Listen::TurnEnd,
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "there's no event called `{event}`: the events are keypress and turnend"
+                        )));
+                    }
+                };
                 let scope = match kind.as_str() {
                     "client" => Scope::Client,
-                    "window" => Scope::Window(id as u32),
-                    "tab" => Scope::Tab(TabId(id as u32)),
-                    _ => Scope::Pane(PaneId(id as u32)),
+                    "window" => Scope::Window(window),
+                    "tab" => Scope::Tab(window, TabId(id)),
+                    _ => Scope::Pane(window, PaneId(id)),
                 };
+                if listen == Listen::TurnEnd && scope != Scope::Client {
+                    return Err(mlua::Error::runtime(
+                        "turnend is heard with client.on alone: a chat's turn ends for every window",
+                    ));
+                }
                 let handler_id = s.next_id();
-                s.handlers.borrow_mut().insert(handler_id, (scope, handler));
-                s.tell(FromLua::Subscribe {
-                    handler: handler_id,
-                    scope,
-                });
+                (s.handlers.borrow_mut()).insert(handler_id, (scope, listen, handler));
+                s.tell(
+                    To::Client,
+                    FromLua::Subscribe {
+                        handler: handler_id,
+                        scope,
+                        listen,
+                    },
+                );
                 Ok(handler_id)
             },
         )?,
@@ -669,7 +950,7 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
         "off",
         lua.create_function(move |_, handler: u64| {
             if s.handlers.borrow_mut().remove(&handler).is_some() {
-                s.tell(FromLua::Unsubscribe { handler });
+                s.tell(To::Client, FromLua::Unsubscribe { handler });
             }
             Ok(())
         })?,
@@ -682,18 +963,34 @@ fn reading(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "info",
-        lua.create_function(move |lua, (kind, id): (String, u32)| {
-            info(lua, &s.world.borrow(), &kind, id)
+        lua.create_function(move |lua, (kind, window, id): (String, u32, u32)| {
+            match s.worlds.borrow().get(&window) {
+                Some(world) => info(lua, world, &kind, window, id),
+                None => Ok(None),
+            }
         })?,
     )?;
     let s = state.clone();
     core.set(
         "windows",
-        lua.create_function(move |_, ()| Ok(vec![WINDOW]))?,
+        lua.create_function(move |_, ()| {
+            Ok(s.worlds.borrow().keys().copied().collect::<Vec<u32>>())
+        })?,
     )?;
+    let s = state.clone();
     core.set(
         "focused",
-        lua.create_function(move |_, ()| Ok(s.world.borrow().shown.map(|shown| shown.pane.0)))?,
+        // The pane shown in the window with the desktop's focus, or else
+        // the first window's.
+        lua.create_function(move |_, ()| {
+            let worlds = s.worlds.borrow();
+            let window =
+                (worlds.iter().find(|(_, world)| world.focused)).or_else(|| worlds.iter().next());
+            Ok(match window {
+                Some((&window, world)) => (Some(window), world.shown.map(|shown| shown.pane.0)),
+                None => (None, None),
+            })
+        })?,
     )?;
     Ok(())
 }
@@ -703,50 +1000,55 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "split",
-        lua.create_function(move |_, (pane, side, kind): (u32, String, String)| {
-            let side = match side.as_str() {
-                "right" => Side::Right,
-                "left" => Side::Left,
-                "below" => Side::Below,
-                "above" => Side::Above,
-                _ => {
-                    return Err(mlua::Error::runtime(format!(
-                        "a pane splits to the right, left, below or above, not `{side}`"
-                    )));
-                }
-            };
-            let kind = match kind.as_str() {
-                "terminal" => Kind::Terminal,
-                "chat" => Kind::Agent,
-                _ => {
-                    return Err(mlua::Error::runtime(format!(
-                        "a pane is a terminal or a chat, not `{kind}`"
-                    )));
-                }
-            };
-            let request = s.next_id();
-            s.tell(FromLua::Split {
-                request,
-                pane: PaneId(pane),
-                side,
-                kind,
-            });
-            Ok(request)
-        })?,
+        lua.create_function(
+            move |_, (window, pane, side, kind): (u32, u32, String, String)| {
+                let side = match side.as_str() {
+                    "right" => Side::Right,
+                    "left" => Side::Left,
+                    "below" => Side::Below,
+                    "above" => Side::Above,
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a pane splits to the right, left, below or above, not `{side}`"
+                        )));
+                    }
+                };
+                let kind = match kind.as_str() {
+                    "terminal" => Kind::Terminal,
+                    "chat" => Kind::Agent,
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a pane is a terminal or a chat, not `{kind}`"
+                        )));
+                    }
+                };
+                let request = s.next_id();
+                s.tell(
+                    To::Window(window),
+                    FromLua::Split {
+                        request,
+                        pane: PaneId(pane),
+                        side,
+                        kind,
+                    },
+                );
+                Ok(request)
+            },
+        )?,
     )?;
     let s = state.clone();
     core.set(
         "close",
-        lua.create_function(move |_, pane: u32| {
-            s.tell(FromLua::Close { pane: PaneId(pane) });
+        lua.create_function(move |_, (window, pane): (u32, u32)| {
+            s.tell(To::Window(window), FromLua::Close { pane: PaneId(pane) });
             Ok(())
         })?,
     )?;
     let s = state.clone();
     core.set(
         "focus",
-        lua.create_function(move |_, pane: u32| {
-            s.tell(FromLua::Focus { pane: PaneId(pane) });
+        lua.create_function(move |_, (window, pane): (u32, u32)| {
+            s.tell(To::Window(window), FromLua::Focus { pane: PaneId(pane) });
             Ok(())
         })?,
     )?;
@@ -755,7 +1057,7 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
         "command",
         lua.create_function(move |lua, line: String| {
             let by = s.set_by(lua);
-            s.tell(FromLua::Command { line, by });
+            s.tell(s.here(To::Focused), FromLua::Command { line, by });
             Ok(())
         })?,
     )?;
@@ -768,7 +1070,7 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                     "{why}: client.forward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"
                 ))
             })?;
-            s.tell(FromLua::Forward(spec));
+            s.tell(To::All, FromLua::Forward(spec));
             Ok(())
         })?,
     )?;
@@ -787,7 +1089,7 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                     ));
                 }
             };
-            s.tell(FromLua::Connect { host, share });
+            s.tell(To::All, FromLua::Connect { host, share });
             Ok(())
         })?,
     )?;
@@ -795,7 +1097,7 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     core.set(
         "disconnect",
         lua.create_function(move |_, host: String| {
-            s.tell(FromLua::Disconnect(machine(&host, "disconnect")?));
+            s.tell(To::All, FromLua::Disconnect(machine(&host, "disconnect")?));
             Ok(())
         })?,
     )?;
@@ -814,13 +1116,14 @@ fn machine(host: &str, name: &str) -> mlua::Result<String> {
     Ok(host.to_owned())
 }
 
-/// What Lua reads of a window, workspace, tab or pane, or nil if it's gone.
-fn info(lua: &Lua, world: &World, kind: &str, id: u32) -> mlua::Result<Option<Table>> {
+/// What Lua reads of a window, or a workspace, tab or pane through
+/// `window`, whose world is `world`, or nil if it's gone.
+fn info(lua: &Lua, world: &World, kind: &str, window: u32, id: u32) -> mlua::Result<Option<Table>> {
     let table = lua.create_table()?;
     let workspaces = &world.workspaces;
     match kind {
         "window" => {
-            if id != WINDOW {
+            if id != window {
                 return Ok(None);
             }
             let shown = world.shown;
@@ -910,20 +1213,24 @@ fn require(lua: &Lua, source: &Source) -> mlua::Result<Function> {
     })
 }
 
-/// Stops Lua that runs too long, waking only while it runs.
+/// Stops Lua that runs too long, and ends background work's slices,
+/// waking only while Lua runs.
 struct Watchdog {
     watch: Mutex<Watch>,
     changed: Condvar,
     /// Set when it's run too long, for the interrupt to see.
     stop: Arc<AtomicBool>,
+    /// Set when a slice has run long enough, for the interrupt to see.
+    slice: Arc<AtomicBool>,
 }
 
 impl Watchdog {
-    fn start() -> Arc<Self> {
+    fn start(slice: Arc<AtomicBool>) -> Arc<Self> {
         let watchdog = Arc::new(Self {
             watch: Mutex::new(Watch::default()),
             changed: Condvar::new(),
             stop: Arc::new(AtomicBool::new(false)),
+            slice,
         });
         let watching = watchdog.clone();
         let spawned = std::thread::Builder::new()
@@ -938,20 +1245,27 @@ impl Watchdog {
     fn run(&self) {
         let mut watch = self.watch.lock().expect("never poisoned");
         while !watch.closed {
-            watch = match watch.deadline {
+            let now = Instant::now();
+            if watch.deadline.is_some_and(|deadline| now >= deadline) {
+                self.stop.store(true, Ordering::Relaxed);
+                watch.deadline = None;
+                watch.slice = None;
+            }
+            // Asked again each slice it runs on, in case it couldn't
+            // yield where it was asked.
+            if let Some(slice) = watch.slice
+                && now >= slice
+            {
+                self.slice.store(true, Ordering::Relaxed);
+                watch.slice = Some(now + SLICE);
+            }
+            watch = match watch.deadline.into_iter().chain(watch.slice).min() {
                 None => self.changed.wait(watch).expect("never poisoned"),
-                Some(deadline) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        self.stop.store(true, Ordering::Relaxed);
-                        watch.deadline = None;
-                        watch
-                    } else {
-                        (self.changed)
-                            .wait_timeout(watch, deadline - now)
-                            .expect("never poisoned")
-                            .0
-                    }
+                Some(next) => {
+                    (self.changed)
+                        .wait_timeout(watch, next.saturating_duration_since(now))
+                        .expect("never poisoned")
+                        .0
                 }
             };
         }
@@ -962,13 +1276,22 @@ impl Watchdog {
         self.changed.notify_one();
     }
 
-    fn watch(&self, limit: Duration) {
+    /// Watches a run that may go on for `limit`, and if `sliced`, ends
+    /// its slice after [`SLICE`].
+    fn watch(&self, limit: Duration, sliced: bool) {
         self.stop.store(false, Ordering::Relaxed);
-        self.set(|watch| watch.deadline = Some(Instant::now() + limit));
+        let now = Instant::now();
+        self.set(|watch| {
+            watch.deadline = Some(now + limit);
+            watch.slice = sliced.then_some(now + SLICE);
+        });
     }
 
     fn done(&self) {
-        self.set(|watch| watch.deadline = None);
+        self.set(|watch| {
+            watch.deadline = None;
+            watch.slice = None;
+        });
     }
 }
 
@@ -977,6 +1300,8 @@ impl Watchdog {
 struct Watch {
     /// When the run being watched must end by, if one is.
     deadline: Option<Instant>,
+    /// When its slice ends, if it's run a slice at a time.
+    slice: Option<Instant>,
     /// Lua has gone, so the watchdog goes too.
     closed: bool,
 }
@@ -988,73 +1313,4 @@ impl Drop for Runtime {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `init.lua` that waits on a request as it loads, as `pane:split`
-    /// would, sets what it sets after as it loads, not later.
-    #[test]
-    fn a_config_that_waits_as_it_loads_is_loading_until_it_ends() {
-        let (to_window, said) = std::sync::mpsc::channel();
-        let state = Rc::new(State {
-            world: RefCell::default(),
-            options: RefCell::new(Options::default()),
-            to_window,
-            wake: Box::new(|| {}),
-            bindings: RefCell::default(),
-            handlers: RefCell::default(),
-            next: Cell::new(0),
-            loading: Cell::new(None),
-            files: RefCell::default(),
-        });
-        let mut runtime = Runtime::new(&Source::Text(String::new()), &state).unwrap();
-        // What `pane:split` yields, to wait on its answer.
-        let request: Table = runtime.prelude.get("request").unwrap();
-        runtime.lua.globals().set("REQUEST", request).unwrap();
-        runtime.load(&[Chunk {
-            path: "init.lua".into(),
-            text: Ok("client.opt.nu = false\n\
-                   coroutine.yield(REQUEST, 7)\n\
-                   client.opt.wrap = false\n\
-                   client.keys.map('n', 'k', function() client.opt.ts = 8 end)\n"
-                .into()),
-            from: SetFrom::Config,
-        }]);
-        let loading = |said: &FromLua| match said {
-            FromLua::Set { by, .. } | FromLua::Map { by, .. } => {
-                Some((by.loading, by.at.as_ref().map(|at| at.line)))
-            }
-            _ => None,
-        };
-        let first: Vec<_> = said.try_iter().collect();
-        assert_eq!(
-            first.iter().map(loading).collect::<Vec<_>>(),
-            [Some((true, Some(1)))]
-        );
-        // Meanwhile, a key's handler isn't the config loading.
-        runtime.handle(ToLua::Answer {
-            request: 7,
-            result: Ok(PaneId(2)),
-        });
-        let after: Vec<_> = said.try_iter().collect();
-        assert_eq!(
-            after.iter().map(loading).collect::<Vec<_>>(),
-            [Some((true, Some(3))), Some((true, Some(4)))]
-        );
-        assert!(runtime.loading.is_empty(), "it's loaded");
-        runtime.handle(ToLua::Bound {
-            seq: 1,
-            key: crate::lua::KeyInfo {
-                key: "k".into(),
-                keys: Some("k".into()),
-                text: None,
-                mode: KeyMode::Normal,
-                pane: None,
-                count: None,
-            },
-            binding: 1,
-        });
-        let later: Vec<_> = said.try_iter().filter_map(|said| loading(&said)).collect();
-        assert_eq!(later, [(false, Some(4))]);
-    }
-}
+mod tests;

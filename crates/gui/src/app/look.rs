@@ -241,19 +241,21 @@ impl Window {
         );
         let start = crate::options::Options::drawing_with(&crate::FontOptions::default());
         let font = start.font_options();
-        app.start_options(start, Vec::new());
         // The config, if there's one, as `run` starts it.
+        let client = crate::client::Client::new(crate::options::Store::new(start.clone()));
+        app.join(client.clone());
         if let Some(dir) = config {
-            app.start_lua(crate::desk::LuaStart {
-                source: crate::lua::Source::Dir(dir),
-                wake: Box::new(move || -> crate::lua::Wake {
+            client.start(
+                crate::lua::Source::Dir(dir),
+                Box::new(move || -> crate::lua::Wake {
                     let sender = sender.clone();
                     Box::new(move || {
                         let _ = sender.send(SessionEvent::Lua);
                     })
                 }),
-            });
+            );
         }
+        app.start_options(start, Vec::new());
         app.start_tutor(tutor);
         app.start_recall(crate::cmdline::recall::Start::read());
         // As the window opens: fonts loaded at a pixel a point, then

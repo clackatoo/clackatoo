@@ -36,7 +36,6 @@ use crate::other::{OtherPane, Why};
 use crate::pane::{Copy, Pane, PaneMouse};
 use crate::picture::PicturePane;
 use crate::vim::{self, Mode, Selection};
-use bindings::Binding;
 pub(crate) use updating::UpdateAsked;
 
 /// What a mouse event did, for the window.
@@ -216,9 +215,9 @@ mod trust;
 mod typing;
 mod updating;
 
+pub(crate) use bindings::{Binding, Keys};
 pub(crate) use mode::WindowMode;
 pub(crate) use pasting::PasteTo;
-pub(crate) use script::LuaStart;
 
 /// Something being typed in the palette.
 #[derive(Debug)]
@@ -445,7 +444,7 @@ pub(crate) struct Desk {
     finished: bool,
     /// What keys are bound to, and those waiting for the rest of a
     /// binding, as after Ctrl+B.
-    keymap: bindings::Keys,
+    keymap: bindings::Bindings,
     /// The config's Lua, if there's a config.
     script: script::Script,
     /// Panes editing files.
@@ -467,12 +466,10 @@ pub(crate) struct Desk {
     macros: macros::Macros,
     /// Where you've been, to go back to.
     jumps: jumps::Jumps,
-    /// The options, as config and `:set` have set them, as the window
-    /// started them, and what set each.
-    options: crate::options::Store,
-    /// The options the command line set, or the environment, which config
-    /// doesn't change as it loads: this window's own, as it was opened.
-    fixed: Vec<&'static crate::options::Info>,
+    /// The options, as config and `:set` have set them for every window,
+    /// and `:setlocal` and the command line for this one, as the client
+    /// keeps them (see [`crate::client`]).
+    options: crate::options::View,
     /// What `:setpersist` saves come back on.
     saving: settings::Saving,
     /// What sets options with `:set` while the config's command runs it,
@@ -2202,14 +2199,14 @@ impl Desk {
                     return true;
                 }
                 // Keys a binding types are past the config's bindings.
-                Pressed::Bound(Binding::Lua(_) | Binding::Keys(_)) if self.script.typing => {
+                Pressed::Bound(Binding::Lua { .. } | Binding::Keys(_)) if self.script.typing => {
                     self.type_bound(chord, press);
                     return true;
                 }
-                Pressed::Bound(Binding::Lua(binding)) => {
+                Pressed::Bound(Binding::Lua { binding, propagate }) => {
                     self.message = None;
                     let count = self.take_pane_count();
-                    self.run_lua_binding(binding, count, chord, press);
+                    self.run_lua_binding(binding, propagate, count, chord, press);
                     return true;
                 }
                 Pressed::Waiting => {
@@ -2826,7 +2823,8 @@ impl Desk {
                 words,
                 persist,
                 verbose,
-            } => return self.run_set(&words, persist, verbose),
+                local,
+            } => return self.run_set(&words, persist, verbose, local),
             Command::Update(host) => return self.ask_update(host),
             Command::Connect { host, share } => return self.ask_connect(host, share),
             Command::Disconnect(host) => return self.ask_disconnect(host),

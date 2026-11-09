@@ -101,7 +101,12 @@ regex = { version = "1.13", default-features = false, features = ["std", "perf",
 fancy-regex = "0.16"
 # Reads the agent's words in a chat as Markdown.
 pulldown-cmark = { version = "0.13", default-features = false }
-mlua = { version = "0.12.2", features = ["luau"] }
+# Pinned exactly: the Lua thread's slices compare `Lua::state()` with a
+# coroutine's `Thread::state()` (crates/gui/src/lua/runtime.rs), and
+# `Lua::state()` is `#[doc(hidden)]`, so no release promises to keep it.
+# Check it, and that an interrupt's `VmState::Yield` still yields only
+# where Luau can, before moving to another version.
+mlua = { version = "=0.12.2", features = ["luau"] }
 similar = { version = "2.7", default-features = false, features = ["text"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # Checks the files of language packs downloaded (SHA-256). Already built
