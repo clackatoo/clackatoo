@@ -842,6 +842,27 @@ mod queries {
     }
 
     #[test]
+    fn by_clusters_a_mark_or_skin_tone_after_ascii_joins_it_either_way_it_is_printed() {
+        for simple in [false, true] {
+            let mut t = terminal(10, 1);
+            if simple {
+                t.use_simple_print();
+            }
+            t.advance("\x1b[?2027ha\u{903}x\u{1F3FD}b".as_bytes());
+            let row = t.grid().row(0);
+            let text = |col| {
+                let mut text = String::new();
+                row.push_text(col, &mut text);
+                text
+            };
+            assert_eq!(text(0), "a\u{903}", "simple: {simple}");
+            assert_eq!(text(1), "x\u{1F3FD}", "simple: {simple}");
+            assert!(row.cells()[1].is_wide(), "simple: {simple}");
+            assert_eq!(text(3), "b", "simple: {simple}");
+        }
+    }
+
+    #[test]
     fn an_end_is_kept_for_its_taker_though_the_next_prompt_follows_it() {
         // A command that printed nothing, its end and the next prompt in
         // one read: the latest block is the prompt's, but the end is kept.
@@ -1740,6 +1761,13 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         Just("\u{1F1EC}\u{1F1E7}\u{1F1EF}".to_owned()),
         Just("\u{0600}1".to_owned()),
         Just("\u{1100}\u{1161}".to_owned()),
+        // After ASCII, what goes on with its cluster and takes columns: a
+        // spacing mark (Devanagari visarga) and a skin tone, alone and
+        // straight after a letter.
+        Just("\u{903}".to_owned()),
+        Just("a\u{903}".to_owned()),
+        Just("\u{1F3FB}".to_owned()),
+        Just("x\u{1F3FD}".to_owned()),
     ]
     .prop_map(String::into_bytes);
     let control = prop::sample::select(vec![

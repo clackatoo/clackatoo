@@ -1280,9 +1280,12 @@ impl Emulator {
             match width::of(ch) {
                 // Control characters never get here, but drop them if so.
                 None => {}
+                // By clusters, a character past ASCII may go on with an
+                // ASCII cell's, which `joins` doesn't say, as a spacing
+                // mark or a skin tone after a letter does.
                 Some(cells)
                     if cells == 0
-                        || (joins
+                        || ((joins || clusters)
                             && previous_cell(row, cursor).is_some_and(|col| {
                                 joins_cell(row, col, ch, clusters) && !blocked(row, col, ch)
                             })) =>
