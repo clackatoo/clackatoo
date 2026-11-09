@@ -39,6 +39,7 @@ use mio::Token;
 
 use super::Daemon;
 use super::agent_files::agent_root;
+use super::explorers::Unwatched;
 use crate::buffer::{DiskStamp, Refused};
 
 /// How long after a buffer's directory couldn't be watched it's tried
@@ -69,6 +70,10 @@ pub(super) struct Disk {
     /// When to try again to watch the directories of buffers whose
     /// directories couldn't be watched, and how long the wait was.
     rewatch: Option<(Instant, Duration)>,
+    /// Buffers whose directories couldn't be watched as the user's inotify
+    /// instances or watches are all in use, for a window opening one to
+    /// be told why.
+    starved: Vec<BufferId>,
     /// Buffers whose files changed, noted as no chat's, while an agent's
     /// change to them was being checked or merged: looked at again once
     /// it's taken in, as from outside, if it wasn't made.
@@ -114,10 +119,15 @@ impl Daemon {
         }
         let path = slot.buffer.path().to_owned();
         let watched = self.watch_buffer_file(id, &path);
-        if let Some(slot) = self.buffers.get_mut(&id) {
-            slot.watched = watched;
+        let starved = matches!(watched, Err(Unwatched::NoInstance | Unwatched::NoRoom));
+        self.disk.starved.retain(|&starving| starving != id);
+        if starved {
+            self.disk.starved.push(id);
         }
-        watched
+        if let Some(slot) = self.buffers.get_mut(&id) {
+            slot.watched = watched.is_ok();
+        }
+        watched.is_ok()
     }
 
     /// No longer watches buffer `id`'s file, as it has closed or moved,
@@ -130,6 +140,7 @@ impl Daemon {
         self.disk.noted.remove(&id);
         self.disk.touched.retain(|&touched| touched != id);
         self.disk.deferred.retain(|&deferred| deferred != id);
+        self.disk.starved.retain(|&starving| starving != id);
     }
 
     /// Notes that the watches on the files of buffers `ids` have gone, as
@@ -440,18 +451,24 @@ impl Daemon {
     /// that changes to its file won't be seen, if they won't, as the
     /// user's inotify instances or watches are all in use.
     pub(super) fn tell_if_unwatched(&mut self, token: Token, id: BufferId) {
-        let Some(slot) = self.buffers.get(&id) else {
-            return;
-        };
-        if slot.watched || slot.buffer.is_blank() {
-            return;
+        if let Some(notice) = self.unwatched_notice(id) {
+            self.tell(token, id, BufferUpdate::Notice(notice));
         }
-        let Some(why) = self.out_of_inotify() else {
-            return;
-        };
+    }
+
+    /// What a window opening buffer `id` is told, if its file isn't
+    /// watched for lack of inotify: not if it isn't for another reason, as
+    /// its directory isn't there.
+    fn unwatched_notice(&self, id: BufferId) -> Option<String> {
+        let slot = self.buffers.get(&id)?;
+        if slot.watched || slot.buffer.is_blank() || !self.disk.starved.contains(&id) {
+            return None;
+        }
+        let why = self.out_of_inotify()?;
         let file = file_name(slot.buffer.path());
-        let notice = format!("{file}: changes on disk and to git's index won't be seen, as {why}");
-        self.tell(token, id, BufferUpdate::Notice(notice));
+        Some(format!(
+            "{file}: changes on disk and to git's index won't be seen, as {why}"
+        ))
     }
 
     /// Tells the client at `to`, or else every client following buffer
@@ -672,9 +689,11 @@ pub(in crate::server) mod tests {
         std::fs::write(sub.join("b.txt"), "b\n").unwrap();
         let other = open(&mut daemon, &sub.join("b.txt"));
         assert_eq!(daemon.explorers.instance_tries, tries);
-        // Said, with the limit to raise.
+        // Said, with the limit to raise, to a window opening it too.
         let why = daemon.out_of_inotify().unwrap_or_default();
         assert!(why.contains("fs.inotify.max_user_instances"), "{why}");
+        let notice = daemon.unwatched_notice(id).unwrap_or_default();
+        assert!(notice.contains("fs.inotify.max_user_instances"), "{notice}");
         daemon.retry_watches_now();
         assert!(daemon.next_watch_retry().is_some(), "still refused");
 
@@ -692,6 +711,21 @@ pub(in crate::server) mod tests {
         assert!(daemon.buffers[&id].watched);
         assert_eq!(watched(&daemon), [id, other]);
         assert!(daemon.buffers[&id].stale(), "looked at again");
+    }
+
+    /// A buffer not watched as its directory isn't there isn't said to be
+    /// for lack of inotify, even while that's run out.
+    #[test]
+    fn a_buffer_not_watched_for_another_reason_doesnt_blame_inotify() {
+        crate::server::explorers::needs_inotify();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("none/a.txt");
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let id = open(&mut daemon, &path);
+        assert!(!daemon.buffers[&id].watched);
+        daemon.run_out_of_watches();
+        assert!(daemon.out_of_inotify().is_some());
+        assert_eq!(daemon.unwatched_notice(id), None);
     }
 
     #[test]

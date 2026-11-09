@@ -449,9 +449,10 @@ fn out_of(what: &str, sysctl: &str) -> String {
 /// Why a directory isn't watched.
 #[derive(Debug)]
 pub(super) enum Unwatched {
-    /// There's no room for more: [`MAX_WATCHES`] are, or the user's
-    /// inotify watches are all in use.
+    /// There's no room for more: [`MAX_WATCHES`] are.
     Full,
+    /// The user's inotify watches are all in use.
+    NoRoom,
     /// There's no inotify instance.
     NoInstance,
     /// It couldn't be, as when it isn't there.
@@ -462,6 +463,7 @@ impl std::fmt::Display for Unwatched {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Full => f.write_str("there's no room for more watches"),
+            Self::NoRoom => f.write_str("the user's inotify watches are all in use"),
             Self::NoInstance => f.write_str("inotify can't be used"),
             Self::Failed(err) => write!(f, "{err}"),
         }
@@ -866,20 +868,15 @@ impl Daemon {
     }
 
     /// Watches the directory buffer `id`'s file, `path`, is in, so a change
-    /// to the file is heard of, unless there's no room. Returns whether
-    /// it's watched.
-    pub(super) fn watch_buffer_file(&mut self, id: BufferId, path: &Path) -> bool {
-        let Some(dir) = path.parent() else {
-            return false;
-        };
-        let Ok(watch) = self.add_watch(dir, MAX_WATCHES, FILES_HEAR) else {
-            return false;
-        };
+    /// to the file is heard of, unless there's no room, or why not.
+    pub(super) fn watch_buffer_file(&mut self, id: BufferId, path: &Path) -> Result<(), Unwatched> {
+        let dir = path.parent().ok_or(Unwatched::Failed(Errno::NOENT))?;
+        let watch = self.add_watch(dir, MAX_WATCHES, FILES_HEAR)?;
         let watched = self.explorers.watches.entry(watch).or_default();
         if !watched.buffers.contains(&id) {
             watched.buffers.push(id);
         }
-        true
+        Ok(())
     }
 
     /// No longer watches for changes to buffer `id`'s file, taking away the
@@ -981,7 +978,7 @@ impl Daemon {
                 true
             }
             // Said once already, as inotify ran out.
-            Err(Unwatched::NoInstance | Unwatched::Full) => false,
+            Err(Unwatched::NoInstance | Unwatched::NoRoom | Unwatched::Full) => false,
             Err(Unwatched::Failed(err)) => {
                 log::debug!("{} won't be watched: {err}", git_dir.display());
                 false
@@ -1058,6 +1055,12 @@ impl Daemon {
             .chain(&explorers.display_retry))
         .map(|(due, _)| *due)
         .min()
+    }
+
+    /// Takes the user's inotify watches as all in use, for tests.
+    #[cfg(test)]
+    pub(super) fn run_out_of_watches(&mut self) {
+        self.explorers.out_of_watches = Some(out_of("watches", "max_user_watches"));
     }
 
     /// Has the instance, or the display's directories, tried again now,
@@ -1241,7 +1244,7 @@ impl Daemon {
                     self.explorers.out_of_watches = Some(why);
                     self.tell_explorers_out_of_inotify();
                 }
-                Err(Unwatched::Full)
+                Err(Unwatched::NoRoom)
             }
             Err(err) => {
                 log::debug!("{} won't be watched: {err}", dir.display());
@@ -2333,7 +2336,11 @@ mod tests {
         assert!(daemon.add_index_watch(&root));
         assert_eq!(daemon.watch_count(), before);
         // Something capped on the same watch counts it again.
-        assert!(daemon.watch_buffer_file(BufferId(1), &root.join("a.txt")));
+        assert!(
+            daemon
+                .watch_buffer_file(BufferId(1), &root.join("a.txt"))
+                .is_ok()
+        );
         assert_eq!(daemon.watch_count(), before + 1);
     }
 
