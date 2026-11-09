@@ -655,7 +655,9 @@ fn put_on_clipboard(job: &Job, file: File) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = command.spawn().map_err(|err| match err.kind() {
+    // With what the daemon runs for the user (see `crate::priority`).
+    let leaf = crate::priority::Leaf::Terminals;
+    let mut child = crate::priority::spawn(&mut command, leaf).map_err(|err| match err.kind() {
         io::ErrorKind::NotFound => format!("‘{machine}’ has no {named}"),
         _ => format!("{named} couldn't start: {err}"),
     })?;
