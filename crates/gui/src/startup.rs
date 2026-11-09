@@ -275,7 +275,7 @@ pub fn set(path: &Path, name: &str, text: &str) -> anyhow::Result<()> {
         Item::Value(text.into())
     };
     let value = check(name, info, &item).map_err(anyhow::Error::msg)?;
-    persist(path, info, Some(value))
+    locked(path, || persist(path, info, Some(value)))
 }
 
 /// `clackatoo config --unset NAME`: back to the default.
@@ -285,7 +285,15 @@ pub fn set(path: &Path, name: &str, text: &str) -> anyhow::Result<()> {
 /// If there's no such setting, or the file can't be read or written, or
 /// isn't TOML.
 pub fn unset(path: &Path, name: &str) -> anyhow::Result<()> {
-    persist(path, setting(name)?, None)
+    let info = setting(name)?;
+    locked(path, || persist(path, info, None))
+}
+
+/// Runs `change` with the file at `path`'s folder locked, as
+/// `:setpersist` locks it.
+fn locked(path: &Path, change: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let client = path.parent().context("the file is in a folder")?;
+    options::persist::locked(client, change)
 }
 
 /// Saves `info`'s option, which must be startup.toml's, as `value`, or
@@ -439,6 +447,43 @@ mod tests {
             all.contains("\n# renderer = \"vulkan\"  # the default\n"),
             "{all}"
         );
+    }
+
+    #[test]
+    fn clackatoo_config_waits_for_a_save_in_a_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client/startup.toml");
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (locked_now, locked) = std::sync::mpsc::channel();
+        let client = dir.path().join("client");
+        let window = std::thread::spawn(move || {
+            options::persist::locked(&client, || {
+                locked_now.send(()).unwrap();
+                release.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked.recv().unwrap();
+        let (set_now, setting) = std::sync::mpsc::channel();
+        let config = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                set(&path, "renderer", "opengl").unwrap();
+                set_now.send(()).unwrap();
+            })
+        };
+        let waiting = std::time::Duration::from_millis(200);
+        assert!(
+            setting.recv_timeout(waiting).is_err(),
+            "it waited for the lock"
+        );
+        held.send(()).unwrap();
+        setting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        window.join().unwrap().unwrap();
+        config.join().unwrap();
+        assert_eq!(get(&path, "renderer").unwrap(), "opengl");
     }
 
     #[test]

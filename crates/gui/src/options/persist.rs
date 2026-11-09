@@ -115,20 +115,30 @@ fn write(dir: &Path, info: &'static Info, value: Option<Value>) -> anyhow::Resul
         info.check(value).map_err(anyhow::Error::msg)?;
     }
     let client = dir.join("client");
-    std::fs::create_dir_all(&client)
-        .with_context(|| format!("couldn't make {}", client.display()))?;
-    let lock = std::fs::File::open(&client)
-        .with_context(|| format!("couldn't open {}", client.display()))?;
-    lock.lock()
-        .with_context(|| format!("couldn't lock {}", client.display()))?;
-    match info.scope {
+    locked(&client, || match info.scope {
         Scope::Window => settings_lua(&client.join("settings.lua"), info, value),
         Scope::Startup(_) => crate::startup::persist(&client.join("startup.toml"), info, value),
         Scope::Daemon => anyhow::bail!(
             "{} is the daemon's, which has no settings file yet",
             info.name
         ),
-    }
+    })
+}
+
+/// Runs `change` with the folder `client` locked, so whatever saves
+/// settings there, in any process, `:setpersist` or `clackatoo config`,
+/// can't save between another's read and its write.
+pub(crate) fn locked<T>(
+    client: &Path,
+    change: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    std::fs::create_dir_all(client)
+        .with_context(|| format!("couldn't make {}", client.display()))?;
+    let lock = std::fs::File::open(client)
+        .with_context(|| format!("couldn't open {}", client.display()))?;
+    lock.lock()
+        .with_context(|| format!("couldn't lock {}", client.display()))?;
+    change()
 }
 
 /// Saves `info`'s option in `settings.lua` at `path`.
