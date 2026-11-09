@@ -33,7 +33,7 @@ clackatoo --font "JetBrains Mono"
 
 That opens a window on your shell, starting the daemon in the background if it isn't running. Leave out `--font` for your system's monospace font, or choose one for good with `clackatoo config font "JetBrains Mono"`. Close the window and the shell keeps running; open another and you're back.
 
-Ctrl+; switches to normal mode, where you scroll, select and search history with Vim's keys, and `i` switches back. From normal mode, `:|` Enter splits the pane with a new terminal on its right, `:-` below it, and `:Terminal` opens one in a new tab. Ctrl+H, Ctrl+J, Ctrl+K and Ctrl+L move between panes, and `:1`, `:2` and so on between tabs. [The window](~clackatoo/reference/window) has all its keys.
+<kbd>Ctrl</kbd>+<kbd>;</kbd> switches to normal mode, where you scroll, select and search history with Vim's keys, and `i` switches back. From normal mode, `:|` <kbd>Enter</kbd> splits the pane with a new terminal on its right, `:-` below it, and `:Terminal` opens one in a new tab. <kbd>Ctrl</kbd>+<kbd>H</kbd>, <kbd>Ctrl</kbd>+<kbd>J</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>Ctrl</kbd>+<kbd>L</kbd> move between panes, and `:1`, `:2` and so on between tabs. [The window](~clackatoo/reference/window) has all its keys.
 
 ## Start the daemon yourself
 
@@ -57,7 +57,7 @@ The output is its ID:
 1
 ```
 
-It runs your `$SHELL` in the current directory, at 80×24. Type a command into it and press Enter with `run`:
+It runs your `$SHELL` in the current directory, at 80×24. Type a command into it and press <kbd>Enter</kbd> with `run`:
 
 ```sh
 clackatoo run 1 ls --color=always
@@ -69,7 +69,7 @@ See what it shows with `capture`. Add `--ansi` to keep the colors:
 clackatoo capture 1 --ansi
 ```
 
-`send` types text without pressing Enter, which is how you drive full-screen programs:
+`send` types text without pressing <kbd>Enter</kbd>, which is how you drive full-screen programs:
 
 ```sh
 clackatoo run 1 htop

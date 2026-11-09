@@ -20,7 +20,7 @@ A board is a list of entries that you and your agents share. An agent working on
 
 A board you make belongs to the workspace shown. One an agent makes belongs to its chat's workspace, or to every workspace if it asks.
 
-Select an entry with the mouse; double-click it to edit its text, as `e` does. Escape cancels the draft. While a draft or search is open, the mouse leaves it alone. The wheel moves by visible rows, including within entries taller than the pane.
+Select an entry with the mouse; double-click it to edit its text, as `e` does. <kbd>Escape</kbd> cancels the draft. While a draft or search is open, the mouse leaves it alone. The wheel moves by visible rows, including within entries taller than the pane.
 
 ## Entries
 
@@ -32,9 +32,9 @@ Each entry says what it is, who wrote it and how long ago, then what it says, an
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Move between entries, with a count, as every [list](~clackatoo/reference/window#lists) does. |
+| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd> <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, `zt` `zz` `zb` | Move between entries, with a count, as every [list](~clackatoo/reference/window#lists) does. |
 | `/` `?` `n` `N` | Search the entries, shown as you type, the text they match lit, as every [list](~clackatoo/reference/window#lists)'s search is. |
-| `i`, `o`, `a`, Enter | Post a note, typed in the bar. |
+| `i`, `o`, `a`, <kbd>Enter</kbd> | Post a note, typed in the bar. |
 | `r` | Post a result. |
 | `e` | Edit the entry at the cursor. What it said is kept, the last 20 edits of it. |
 | `x` | Release the claim at the cursor, whoever holds it. |

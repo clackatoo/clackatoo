@@ -81,7 +81,7 @@ Whether a key goes on is decided when the handler finishes, or first waits for s
 
 `client.keys.map(modes, keys, function)` binds keys in one or more modes, replacing what they were bound to. `client.keys.unmap(modes, keys)` takes a binding away, the window's own included.
 
-A binding can say what it does, as Neovim's `vim.keymap.set` takes it: `client.keys.map("n", "<Space>ft", function() client.cmd("Files") end, {desc = "find todos"})`. The panel of keys shows it in place of "from your config". Neovim's `silent`, `noremap`, `nowait`, `unique`, and `remap = false` are taken and change nothing; any other option is left out, with a warning in the bar, and the binding is still made. `client.keys.group(modes, keys, name)` names the keys that start several, as which-key.nvim's groups do: `client.keys.group("n", "<Space>f", "my files")` makes Space's panel say `f +my files`. A group with no name stops naming them. Keys that finish a binding of their own say what that does instead.
+A binding can say what it does, as Neovim's `vim.keymap.set` takes it: `client.keys.map("n", "<Space>ft", function() client.cmd("Files") end, {desc = "find todos"})`. The panel of keys shows it in place of "from your config". Neovim's `silent`, `noremap`, `nowait`, `unique`, and `remap = false` are taken and change nothing; any other option is left out, with a warning in the bar, and the binding is still made. `client.keys.group(modes, keys, name)` names the keys that start several, as which-key.nvim's groups do: `client.keys.group("n", "<Space>f", "my files")` makes <kbd>Space</kbd>'s panel say `f +my files`. A group with no name stops naming them. Keys that finish a binding of their own say what that does instead.
 
 Keys can be bound to other keys too, given as a string, as Vim's `noremap` maps them: `client.keys.map("n", "gi", "gri")` makes `gi` go to implementations, and `client.keys.map("n", "<Space>w", ":w<CR>")` writes the file. The keys are typed as if pressed, so the window's own keys do what they do, but the config's bindings and keypress handlers don't see them, so a binding can't set off itself or another of the config's. They're typed after any keys typed before them: a mapping to `@qx` types q's keys and then `x`, and a key among them that fails stops the rest, as in Vim.
 
@@ -91,14 +91,14 @@ Keys can be bound to other keys too, given as a string, as Vim's `noremap` maps 
 
 | Written | Is |
 |---|---|
-| `<C-b>`, `<A-h>` | Ctrl+B, Alt+H. `<M-h>` is `<A-h>`. |
-| `<C-O>`, `<C-S-o>` | Ctrl+Shift+O. Shift is part of a letter: `<C-o>` is Ctrl+O. |
-| `<S-Tab>` | Shift with a named key |
+| `<C-b>`, `<A-h>` | <kbd>Ctrl</kbd>+<kbd>B</kbd>, <kbd>Alt</kbd>+<kbd>H</kbd>. `<M-h>` is `<A-h>`. |
+| `<C-O>`, `<C-S-o>` | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>. <kbd>Shift</kbd> is part of a letter: `<C-o>` is <kbd>Ctrl</kbd>+<kbd>O</kbd>. |
+| `<S-Tab>` | <kbd>Shift</kbd> with a named key |
 | `<Esc>`, `<CR>`, `<Tab>`, `<BS>`, `<Del>`, `<Insert>`, `<Space>` | Named keys. `<Enter>` and `<Return>` are `<CR>`, and `<Escape>` is `<Esc>`. |
 | `<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<F1>`–`<F12>` | More named keys |
 | `<lt>` | `<` |
 
-Several keys in a row, such as `<C-b>"`, make a sequence. A key that starts one waits for the rest as long as it takes, as tmux's prefix does. If the next key goes on to no binding, the keys typed so far go to the pane as if nothing were bound to them, as Vim's do, so binding `gi` leaves `gg` as it was, and the next key is looked up on its own. Keys that began with Ctrl or Alt held, as `<C-b>` does, are the window's, and are dropped instead. A binding whose keys start a longer binding's, such as `<C-b>` beside `<C-b>x`, can't be reached.
+Several keys in a row, such as `<C-b>"`, make a sequence. A key that starts one waits for the rest as long as it takes, as tmux's prefix does. If the next key goes on to no binding, the keys typed so far go to the pane as if nothing were bound to them, as Vim's do, so binding `gi` leaves `gg` as it was, and the next key is looked up on its own. Keys that began with <kbd>Ctrl</kbd> or <kbd>Alt</kbd> held, as `<C-b>` does, are the window's, and are dropped instead. A binding whose keys start a longer binding's, such as `<C-b>` beside `<C-b>x`, can't be reached.
 
 `client.cmd(line)` runs a command, as if typed after `:`, so a key can do anything a command can. To find files with `<Space>ff` rather than `<Space>pf`:
 
@@ -158,21 +158,21 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `scrolloff` | `so` | The fewest lines kept in view above and below an editor's cursor. Half the pane or more keeps the cursor's line in the middle. | 5 |
 | `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
 | `tabstop` | `ts` | How wide a tab is drawn: to the next column that's a multiple of it, from 1 to 32. | 4 |
-| `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor#tabs-and-indenting) by, as does Tab where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
+| `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor#tabs-and-indenting) by, as does <kbd>Tab</kbd> where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
 | `expandtab` | `et` | Indents with spaces, not tabs, where no line nearby is indented yet. A file keeps the kind of indent it has. | on |
 | `smartindent` | `si` | A new line, and one where `}`, `]` or `)` is typed first or `:` ends `else` and the like, is [indented](~clackatoo/reference/editor#tabs-and-indenting) as its language's tree-sitter rules say, not Vim's rules for C, a moment after it's given the line before's indent. Off, it keeps the line before's. `=` indents by the rules either way. | on |
 | `autoread` | `ar` | A file changed on disk by something other than an agent is read again if it has no changes not written, as an edit `u` undoes. Off, or with changes, the bottom bar says so. | on |
-| `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. Esc puts them back; Enter keeps them, and is the search. Off, nothing moves until Enter. | on |
+| `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. <kbd>Esc</kbd> puts them back; <kbd>Enter</kbd> keeps them, and is the search. Off, nothing moves until <kbd>Enter</kbd>. | on |
 | `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
 | `tildeop` | `top` | `~` takes a motion, as `g~` does. | off |
-| `startofline` | `sol` | These go to the line's first character that isn't blank, as Vim's do: `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, Ctrl+D, Ctrl+U, Ctrl+F, Page Down and Page Up, in editors and terminals; and in an editor, `:` and a line number, and deleting, shifting or indenting whole lines (`dd`, `dj`, `dG`, `>>`, `<<`, `==`, and their kin). Off, as Neovim's are, they keep the column, as `j` and `k` do. Yanks and Ctrl+E and Ctrl+Y keep it either way, and `:d` goes to the first non-blank either way. | off |
+| `startofline` | `sol` | These go to the line's first character that isn't blank, as Vim's do: `gg`, `G` and <kbd>Ctrl</kbd>+<kbd>Home</kbd>, `H`, `M` and `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd>, <kbd>Ctrl</kbd>+<kbd>U</kbd>, <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Page Down</kbd> and <kbd>Page Up</kbd>, in editors and terminals; and in an editor, `:` and a line number, and deleting, shifting or indenting whole lines (`dd`, `dj`, `dG`, `>>`, `<<`, `==`, and their kin). Off, as Neovim's are, they keep the column, as `j` and `k` do. Yanks and <kbd>Ctrl</kbd>+<kbd>E</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd> keep it either way, and `:d` goes to the first non-blank either way. | off |
 | `ignorecase` | `ic` | Searches ignore case, in editors, in a terminal's normal mode, in a chat's and in lists'. An editor ignores the case of plain English letters only: `é` doesn't match `É`. | on |
 | `smartcase` | `scs` | With `ignorecase`, a search with a capital letter in it matches case, in editors, terminals, chats and lists. Does nothing without `ignorecase`, as in Vim. | on |
-| `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until Esc or `:nohlsearch`. Off, only the match the search went to is lit. | on |
+| `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until <kbd>Esc</kbd> or `:nohlsearch`. Off, only the match the search went to is lit. | on |
 | `clipboard` | `cb` | Which of the desktop's the unnamed register goes along with, for what's yanked or deleted in an editor and yanked in a terminal or a chat: the clipboard (`unnamedplus`), the primary selection (`unnamed`), or neither (`none`), keeping it the window's own but for `"+` and `"*`. | `unnamedplus` |
 | `osc52` | `osc52` | What programs in a terminal can do with the clipboard through OSC 52: `copy`, `paste`, `copy-paste`, or `off`. What they copy goes to `"+` and `"*` too. Reading is off unless allowed, since whatever runs in the terminal would get the clipboard. Only the window that last typed into the terminal acts, and text is capped at 1 MiB. | `copy` |
-| `pasteimage` | `pi` | How Ctrl+Shift+Alt+V [pastes an image](~clackatoo/reference/window#pasting-an-image) into a terminal: `path`, kept in a file on the terminal's machine whose path is pasted, or `clipboard`, put on that machine's clipboard and Ctrl+V typed, which needs a desktop session there. A chat attaches the image either way. | `path` |
-| `agent` | `ag` | The agent `:Agent` and Ctrl+B `a` open a chat with: `claude`, `codex`, `gemini`, or one in the daemon's [`agents.toml`](~clackatoo/reference/agents#which-agent). Empty leaves it to the daemon. | `claude` |
+| `pasteimage` | `pi` | How <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> [pastes an image](~clackatoo/reference/window#pasting-an-image) into a terminal: `path`, kept in a file on the terminal's machine whose path is pasted, or `clipboard`, put on that machine's clipboard and <kbd>Ctrl</kbd>+<kbd>V</kbd> typed, which needs a desktop session there. A chat attaches the image either way. | `path` |
+| `agent` | `ag` | The agent `:Agent` and <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` open a chat with: `claude`, `codex`, `gemini`, or one in the daemon's [`agents.toml`](~clackatoo/reference/agents#which-agent). Empty leaves it to the daemon. | `claude` |
 | `agenttools` | `agt` | What a new chat's agent can do with [clackatoo's tools](~clackatoo/reference/agents#what-the-agent-can-show-you): `ask` before running commands or typing, `allow` commands in its own terminals, or `off`. | `ask` |
 | `claudetask` | `ct` | A new Claude Code chat keeps Claude Code's own Task tool, which runs helpers inside one turn, folded under the Task's [card](~clackatoo/reference/agents#claude-code-s-own-subagents). Off, Claude hands work on only as [subagents](~clackatoo/reference/agents#subagents), which you can watch. Other agents have no such tool. | off |
 | `chatbrowser` | `cbr` | A new chat starts with its [Browser](~clackatoo/reference/agents#the-browser) setting on, so its agent can drive a headless browser with a profile of its own. Off, a chat has none until you turn it on in its settings. | off |
@@ -184,13 +184,13 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `predictecho` | `pe` | Shows what's typed in a terminal at once, underlined, before its echo comes back: `auto` for a daemon on another machine whose round trip is over 30 ms or has stalled moments before, `always`, or `never`. | `auto` |
 | `blockmarks` | `bm` | Which finished commands a terminal marks at the end of their prompt's line, where the shell says how they ended: those that failed, with a red `✗` and their exit status (`failed`), every one, with a faint `✓` for those that worked (`all`), or none (`none`). | `failed` |
 | `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
-| `whichkeydelay` | `wkd` | How long, up to 5000 milliseconds, keys that start others, as Space does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with Ctrl or Alt, as Ctrl+B, show it at once; 0 shows it at once for every key. | 400 |
+| `whichkeydelay` | `wkd` | How long, up to 5000 milliseconds, keys that start others, as <kbd>Space</kbd> does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with <kbd>Ctrl</kbd> or <kbd>Alt</kbd>, as <kbd>Ctrl</kbd>+<kbd>B</kbd>, show it at once; 0 shows it at once for every key. | 400 |
 | `explorerwidth` | `ew` | How wide a [file explorer](~clackatoo/reference/explorer) opens, in columns: 0 is 30, or a quarter of the tab if that's narrower; otherwise from 10 to 200. | 0 |
 | `explorerhidden` | `eh` | File explorers show hidden files when they open. | off |
-| `completion` | `cmp` | Asks the language server what could finish a word as you type it. Off, Ctrl+Space, Ctrl+N, and Ctrl+P still ask. | on |
+| `completion` | `cmp` | Asks the language server what could finish a word as you type it. Off, <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> still ask. | on |
 | `completedelay` | `cmpd` | How long typing pauses, up to 2000 milliseconds, before completion asks, so a burst of keys asks once. 0 asks at every key. | 40 |
-| `completeaccept` | `cmpa` | What Enter does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to Ctrl+Y. | `picked` |
-| `completetab` | `cmpt` | Tab accepts the picked item too. | off |
+| `completeaccept` | `cmpa` | What <kbd>Enter</kbd> does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to <kbd>Ctrl</kbd>+<kbd>Y</kbd>. | `picked` |
+| `completetab` | `cmpt` | <kbd>Tab</kbd> accepts the picked item too. | off |
 | `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
 | `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/editor#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
 | `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
@@ -232,7 +232,7 @@ Windows, workspaces, tabs, and panes are handles: values that stand for one of t
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
 | A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
-`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as Ctrl+B `|` does, and returns it:
+`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as <kbd>Ctrl</kbd>+<kbd>B</kbd> `|` does, and returns it:
 
 ```lua
 client.keys.map("n", "<C-b>t", function(ev)
@@ -257,6 +257,6 @@ A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane th
 
 - The daemon's only config files are `agents.toml`, `machine.toml` and `web.toml`.
 - `init.lua` isn't run again when it changes: use `:reload`.
-- Bindings made in Lua don't show in Ctrl+B's list in the bottom bar.
+- Bindings made in Lua don't show in <kbd>Ctrl</kbd>+<kbd>B</kbd>'s list in the bottom bar.
 - Keypresses are the only event.
 - There are no type definitions for editors to complete the API with.

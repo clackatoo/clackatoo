@@ -26,7 +26,7 @@ It opens 30 columns wide, or a quarter of the tab if that's narrower, but never 
 
 ## The tree
 
-The top line is the root. Below it is `..`, the way up: Enter on it, or a double click, makes the folder above the root the root, with the cursor on the folder you came from, as `-` does. The cursor moves onto it as onto any line, and `gg` goes to it. There's none when the root is `/`. It's drawn as a folder is. A heading too long for the pane is cut from its start, as `…/tutor/explorer`. It names no file, and nothing is read of the folder above until you go up. A root you can't read shows `..` alone, so you can still go up; it isn't asked for again until `R`.
+The top line is the root. Below it is `..`, the way up: <kbd>Enter</kbd> on it, or a double click, makes the folder above the root the root, with the cursor on the folder you came from, as `-` does. The cursor moves onto it as onto any line, and `gg` goes to it. There's none when the root is `/`. It's drawn as a folder is. A heading too long for the pane is cut from its start, as `…/tutor/explorer`. It names no file, and nothing is read of the folder above until you go up. A root you can't read shows `..` alone, so you can still go up; it isn't asked for again until `R`.
 
 Folders have `▸` when closed and `▾` when open, and the guides down the left show what each line is in. Folders are blue, programs green, links cyan.
 
@@ -40,10 +40,10 @@ Which folders are open, where the cursor is and what's scrolled to belong to the
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
-| `l`, Enter | Opens a file; opens a folder (Enter closes an open one); on `..`, goes up |
+| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd> <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, `zt` `zz` `zb` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
+| `l`, <kbd>Enter</kbd> | Opens a file; opens a folder (<kbd>Enter</kbd> closes an open one); on `..`, goes up |
 | `h` | Closes a folder, or goes to the one it's in |
-| `-` | Goes up: the folder above the root becomes the root, as Enter on `..` does |
+| `-` | Goes up: the folder above the root becomes the root, as <kbd>Enter</kbd> on `..` does |
 | `g?` | Lists these keys at the explorer's foot, or hides them; the bar says `g? keys` until then |
 | `zo` `zc` `za` | Opens, closes, or toggles the folder at the cursor |
 | `zR` `zM` | Opens every folder shown, one level a press; closes them all |
@@ -56,11 +56,11 @@ A click puts the cursor on a line, a double click opens it, or goes up from `..`
 
 ## Dragging with the mouse
 
-Press on a file or folder and move the mouse half a line away, holding the button, to drag it. Until then it's a click. While you drag, the bar says what letting go would do, and the folder it would go into is lit. Esc stops the drag without doing anything.
+Press on a file or folder and move the mouse half a line away, holding the button, to drag it. Until then it's a click. While you drag, the bar says what letting go would do, and the folder it would go into is lit. <kbd>Esc</kbd> stops the drag without doing anything.
 
 | Let go on | Does |
 |---|---|
-| A folder, in this explorer or another | Moves it into that folder. Hold Ctrl as you let go to copy it instead. |
+| A folder, in this explorer or another | Moves it into that folder. Hold <kbd>Ctrl</kbd> as you let go to copy it instead. |
 | A file | Moves it into the folder that file is in. |
 | `..` | Moves it into the folder above the root, out of what the explorer shows: the bar asks first, `move a.txt out of ~/p, into ~? (y/n)`, and only `y`, pressed then, does it: not one a macro types, as for a link. |
 | The explorer's heading, or below the tree | Moves it into the root. |
@@ -72,7 +72,7 @@ Every drop focuses the pane you let go on. A move or copy works like `x` or `y` 
 
 ## Opening files
 
-Enter or `l` opens a file in the editor of the tab you were last in, in place of its file, as `:e` would, and moves the focus there. With no editor in the tab, the file opens in a new one beside the explorer. Ctrl+V and Ctrl+S open it in a split beside or below that editor, and Ctrl+T in a new tab.
+<kbd>Enter</kbd> or `l` opens a file in the editor of the tab you were last in, in place of its file, as `:e` would, and moves the focus there. With no editor in the tab, the file opens in a new one beside the explorer. <kbd>Ctrl</kbd>+<kbd>V</kbd> and <kbd>Ctrl</kbd>+<kbd>S</kbd> open it in a split beside or below that editor, and <kbd>Ctrl</kbd>+<kbd>T</kbd> in a new tab.
 
 ## Making and moving files
 
@@ -83,7 +83,7 @@ Enter or `l` opens a file in the editor of the tab you were last in, in place of
 | `d` | Deletes what's at the cursor, after asking, to the trash. |
 | `x` `y`, then `p` | Cuts or copies what's at the cursor, then moves or copies it into the folder at the cursor. |
 
-`..` names no file: `r`, `d`, `x`, `y`, Ctrl+V, Ctrl+S and Ctrl+T say so and do nothing, and `a`, `p` and `e` act on the root, never the folder above.
+`..` names no file: `r`, `d`, `x`, `y`, <kbd>Ctrl</kbd>+<kbd>V</kbd>, <kbd>Ctrl</kbd>+<kbd>S</kbd> and <kbd>Ctrl</kbd>+<kbd>T</kbd> say so and do nothing, and `a`, `p` and `e` act on the root, never the folder above.
 
 Nothing is written over unless you say so. If a file is already there, the bar names it, such as "a file of 3 KB", and asks; if it changes before you answer, you're asked again. A folder is never written over, and a file open with unsaved changes can't be. Nothing can be moved or copied into itself, or over a folder it's in.
 
@@ -102,9 +102,9 @@ The daemon doesn't upgrade in the middle of a copy, move or delete. It waits up 
 - Add a line to make a file, or a folder if it ends in `/`. `a/b/c.txt` makes the folders too.
 - Copy a line, and change the copy's name, to copy what it names.
 
-Enter on a folder's line shows that folder's listing, and `-` the folder above's, so a line cut in one folder and put in another moves what it names there. Folders' lines are colored as in the tree, and a folder with nothing in it shows `empty folder: o makes a file` under its `..`. Every listing but `/`'s starts with a `..` line: Enter or a double click on it goes up, as `-` does, with the cursor on the folder you came from. `..` names nothing, so deleting it, moving it or putting it in another listing changes nothing, and `:w` leaves any line that's `..` or `../` alone. A path through `..`, such as `../notes.txt`, still means the folder above, and a change that leads outside the folder shown is listed with its full path. A `:%s` that adds to the start of every line reaches `..` too and is refused at `:w`; use `:2,$s`. Your edits to each listing are kept until you write or throw them away.
+<kbd>Enter</kbd> on a folder's line shows that folder's listing, and `-` the folder above's, so a line cut in one folder and put in another moves what it names there. Folders' lines are colored as in the tree, and a folder with nothing in it shows `empty folder: o makes a file` under its `..`. Every listing but `/`'s starts with a `..` line: <kbd>Enter</kbd> or a double click on it goes up, as `-` does, with the cursor on the folder you came from. `..` names nothing, so deleting it, moving it or putting it in another listing changes nothing, and `:w` leaves any line that's `..` or `../` alone. A path through `..`, such as `../notes.txt`, still means the folder above, and a change that leads outside the folder shown is listed with its full path. A `:%s` that adds to the start of every line reaches `..` too and is refused at `:w`; use `:2,$s`. Your edits to each listing are kept until you write or throw them away.
 
-`:w` works out what your edits come to and lists every step in the pane, under "Changes to" and the folder, then asks right under them, "Apply 3 changes?  y yes · n no", naming the keys only while the pane has the focus (otherwise "(focus to answer)"); the bottom bar asks only if the pane has no room. The steps: copies first, then renames and moves, each name freed before it's taken, swaps and rings through a name set aside, and deletes last. `y` does them, one at a time, through the same file operations as the keys above: nothing is written over, and deletes go to the trash. The first step that fails stops the rest, and the bar says what was and wasn't done, naming anything left set aside, such as `a.txt.moving`, to put back. `n`, `q`, or Esc goes back to the text. `:q!` throws your edits away.
+`:w` works out what your edits come to and lists every step in the pane, under "Changes to" and the folder, then asks right under them, "Apply 3 changes?  y yes · n no", naming the keys only while the pane has the focus (otherwise "(focus to answer)"); the bottom bar asks only if the pane has no room. The steps: copies first, then renames and moves, each name freed before it's taken, swaps and rings through a name set aside, and deletes last. `y` does them, one at a time, through the same file operations as the keys above: nothing is written over, and deletes go to the trash. The first step that fails stops the rest, and the bar says what was and wasn't done, naming anything left set aside, such as `a.txt.moving`, to put back. `n`, `q`, or <kbd>Esc</kbd> goes back to the text. `:q!` throws your edits away.
 
 Each step checks the disk first: if a file has changed since it was listed, or something else is there now, that step is refused and the rest stop. A folder that changed while you edited is refused at `y`: `:q!`, then `e` again, shows it as it is.
 

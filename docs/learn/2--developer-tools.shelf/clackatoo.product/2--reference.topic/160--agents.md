@@ -18,9 +18,9 @@ Long conversations open on recent turns. Scroll toward the top to fetch earlier 
 | | Does |
 |---|---|
 | `:Agent codex`, `:\|Agent antigravity`… | Opens a chat with that agent at once: in a new tab, or beside the focused pane, as `:|Terminal` opens a terminal. |
-| `:Agent`, `:\|Agent`, `:-Agent`…, Ctrl+B `a` | Opens the start page, for a chat in a new tab or beside the focused pane. |
+| `:Agent`, `:\|Agent`, `:-Agent`…, <kbd>Ctrl</kbd>+<kbd>B</kbd> `a` | Opens the start page, for a chat in a new tab or beside the focused pane. |
 
-Until its first message, a chat says which agent it has and the folder it works in, as `Claude Code in ~/project`, and how to start: in normal mode, "Press i to write a message · Shift+Enter for a new line".
+Until its first message, a chat says which agent it has and the folder it works in, as `Claude Code in ~/project`, and how to start: in normal mode, "Press i to write a message · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line".
 
 ### The start page
 
@@ -30,18 +30,18 @@ A chat is listed once, as the branch it shows: the sessions of its other [branch
 
 | Key | Does |
 |---|---|
-| Enter | Starts the new chat, shows the chat picked, or goes on with the session picked in a new chat. |
+| <kbd>Enter</kbd> | Starts the new chat, shows the chat picked, or goes on with the session picked in a new chat. |
 | `n` | Starts the new chat, whatever is picked. |
-| `j`, `k`, Down, Up, Ctrl+N, Ctrl+P | The next or previous row. |
-| Page Down, Page Up | A page further or back. |
-| Home, End | The new chat, or the last row. |
-| Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder. |
-| `l`, `h`, Right, Left | The picker's next or previous choice. |
+| `j`, `k`, <kbd>Down</kbd>, <kbd>Up</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> | The next or previous row. |
+| <kbd>Page Down</kbd>, <kbd>Page Up</kbd> | A page further or back. |
+| <kbd>Home</kbd>, <kbd>End</kbd> | The new chat, or the last row. |
+| <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Tab</kbd> | The new chat's next or previous picker: agent, model, folder. |
+| `l`, `h`, <kbd>Right</kbd>, <kbd>Left</kbd> | The picker's next or previous choice. |
 | `b` | Lists the branches of chats that have gone too, or leaves them out again. |
-| `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U, and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
-| Esc, Ctrl+C | Clears what's typed, or closes the page. |
+| `/`, then typing | Filters the chats and sessions, as the finder does: <kbd>Backspace</kbd>, <kbd>Ctrl</kbd>+<kbd>U</kbd>, and <kbd>Ctrl</kbd>+<kbd>W</kbd> delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
+| <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd> | Clears what's typed, or closes the page. |
 
-`j`, `k`, `n`, `h`, `l`, and `b` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
+`j`, `k`, `n`, `h`, `l`, and `b` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. <kbd>Ctrl</kbd>+<kbd>?</kbd> lists the page's keys.
 
 Going on with a session shows its conversation so far as the chat's turns, where the agent can tell it, as Claude Code and Codex can. Nothing in those turns changes your files again, asks you anything, or runs anything: they're only shown. An agent that can't goes on from where it was, and the chat says the turns before aren't shown. A message sent while the turns are coming waits until they've all come. A session another chat has open goes to that chat; one open in another workspace's chat is refused, saying where it is.
 
@@ -61,7 +61,7 @@ To sign in, run this in a terminal on the chat's machine:
 clackatoo agent login antigravity
 ```
 
-It prints a Google link to open. On the same machine, the browser hands back to the runtime once you've signed in, and that's all. From a laptop showing the desktop's workspaces (see [Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)), run the command in a terminal in one of the desktop's workspaces, and open the link on the laptop. If the browser ends on a `127.0.0.1` page it can't reach, copy the whole address from its address bar, paste it into that terminal, and press Enter. What you paste isn't shown. Ctrl+C, Ctrl+D, or `cancel` and Enter stops signing in, and it gives up by itself after 10 minutes. One sign-in runs at a time: a second says another is running. The address the browser ends on is taken once, and only for that sign-in, and it never goes into a chat's history.
+It prints a Google link to open. On the same machine, the browser hands back to the runtime once you've signed in, and that's all. From a laptop showing the desktop's workspaces (see [Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)), run the command in a terminal in one of the desktop's workspaces, and open the link on the laptop. If the browser ends on a `127.0.0.1` page it can't reach, copy the whole address from its address bar, paste it into that terminal, and press <kbd>Enter</kbd>. What you paste isn't shown. <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>D</kbd>, or `cancel` and <kbd>Enter</kbd> stops signing in, and it gives up by itself after 10 minutes. One sign-in runs at a time: a second says another is running. The address the browser ends on is taken once, and only for that sign-in, and it never goes into a chat's history.
 
 This sign-in is apart from the Antigravity IDE's. Its credentials stay on the chat's machine, in the private `antigravity-profile` directory beside the installed agents, and the runtime's scratch files go there too, not in `/tmp`. clackatoo doesn't take a sign-in from the IDE, nor silently use an API key from the environment.
 
@@ -75,7 +75,7 @@ The separate **Gemini CLI** agent is for setups that already use an API key.
 
 ## Queuing and steering
 
-While an agent works, Enter queues what you've typed, and Shift+Enter starts a new line as usual. Messages waiting to go share a small panel above the box, headed `Queued`, or `Queue paused` while they're held, with how many there are. They go in order, each after a turn that ends well. Each has a pencil to [take it back into the box](#messages-sent-and-drafts) and edit it (but not one with images, or one that moves the chat to another agent), ↑ to send it now, and × to remove it. Sending one now while a turn is under way steers that turn; with nothing under way, it sends the queue on again. Ctrl+Enter steers with what's in the box. While you type during a turn, the box shows a small **Steer** or **Stop & continue** button and a square Stop button.
+While an agent works, <kbd>Enter</kbd> queues what you've typed, and <kbd>Shift</kbd>+<kbd>Enter</kbd> starts a new line as usual. Messages waiting to go share a small panel above the box, headed `Queued`, or `Queue paused` while they're held, with how many there are. They go in order, each after a turn that ends well. Each has a pencil to [take it back into the box](#messages-sent-and-drafts) and edit it (but not one with images, or one that moves the chat to another agent), ↑ to send it now, and × to remove it. Sending one now while a turn is under way steers that turn; with nothing under way, it sends the queue on again. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> steers with what's in the box. While you type during a turn, the box shows a small **Steer** or **Stop & continue** button and a square Stop button.
 
 With the Claude Code or Codex adapter clackatoo installs, **Steer** adds a message of words to the turn under way without stopping it. Codex's has clackatoo's steering backported to it; a custom adapter, or one found on `PATH`, without that patch stops and continues instead. So does a message with images, and one that moves the chat to another agent. **Stop & continue** stops the turn, waits for it to end, then sends the message. The button says which it will do. A message that seems to mention a file says **Stop & send**, as it can only go whole (see [Mentioning files](#mentioning-files)). If the turn ends while a steer is on its way, the message goes once, as the next turn. If it's unclear whether the agent took a steer, the message waits, paused, so you can check the conversation before sending it again.
 
@@ -95,9 +95,9 @@ PNG, JPEG and BMP results are supported, up to four per result, with files limit
 
 ## Pasting images
 
-Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
+Copy a screenshot or image to the clipboard, then press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press <kbd>Enter</kbd> to send both; an image can go on its own too.
 
-Select the × on a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+Select the × on a thumbnail to remove it, or press <kbd>Backspace</kbd> while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
 
 A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The full image is sent to the agent, whose session keeps it. Clackatoo keeps small previews (up to 256 pixels on a side) across window reconnects and daemon upgrades, including on remote connections. Each chat keeps up to 4 MiB of recent previews; older messages retain their image labels. Images sent before previews were supported, or history loaded anew from an agent session after a full daemon restart, show labels only. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
 
@@ -107,18 +107,18 @@ In insert mode, what you type goes in the box at the bottom.
 
 | Key | Does |
 |---|---|
-| Enter | Sends the message, or while the agent works, [queues it](#queuing-and-steering). |
-| Ctrl+Enter | While the agent works, steers it with the message (see [Queuing and steering](#queuing-and-steering)). |
-| Shift+Enter | Starts a new line in the message. |
-| Ctrl+C | While the agent answers, asks it to stop, unless text in the message is selected, which it copies. When it's not answering, copies what's selected in the message or the conversation. |
-| Backspace, Delete | Delete a character, or with Ctrl, a word. |
-| Left, Right | Move by a character, or with Ctrl, a word. With Shift, they select. |
-| Up, Down | Move by a line. On the box's first line, Up goes back through the [messages sent](#messages-sent-and-drafts), and on its last, Down comes forward again. In an empty box, Up takes the newest queued message back to edit. With Shift, they select. |
-| Home, End | Move to the line's start or end. With Shift, they select. |
-| Ctrl+R | Opens the finder on the messages sent, to put one in. |
-| Ctrl+A | Selects the whole message. |
-| Shift+Tab | Moves the agent on to its next mode. |
-| Esc | Normal mode. There's no program in a chat to need Esc. |
+| <kbd>Enter</kbd> | Sends the message, or while the agent works, [queues it](#queuing-and-steering). |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | While the agent works, steers it with the message (see [Queuing and steering](#queuing-and-steering)). |
+| <kbd>Shift</kbd>+<kbd>Enter</kbd> | Starts a new line in the message. |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | While the agent answers, asks it to stop, unless text in the message is selected, which it copies. When it's not answering, copies what's selected in the message or the conversation. |
+| <kbd>Backspace</kbd>, <kbd>Delete</kbd> | Delete a character, or with <kbd>Ctrl</kbd>, a word. |
+| <kbd>Left</kbd>, <kbd>Right</kbd> | Move by a character, or with <kbd>Ctrl</kbd>, a word. With <kbd>Shift</kbd>, they select. |
+| <kbd>Up</kbd>, <kbd>Down</kbd> | Move by a line. On the box's first line, <kbd>Up</kbd> goes back through the [messages sent](#messages-sent-and-drafts), and on its last, <kbd>Down</kbd> comes forward again. In an empty box, <kbd>Up</kbd> takes the newest queued message back to edit. With <kbd>Shift</kbd>, they select. |
+| <kbd>Home</kbd>, <kbd>End</kbd> | Move to the line's start or end. With <kbd>Shift</kbd>, they select. |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Opens the finder on the messages sent, to put one in. |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Selects the whole message. |
+| <kbd>Shift</kbd>+<kbd>Tab</kbd> | Moves the agent on to its next mode. |
+| <kbd>Esc</kbd> | Normal mode. There's no program in a chat to need <kbd>Esc</kbd>. |
 
 Clicking in the box puts the cursor there, dragging selects, and a double or triple click selects a word or a line. A paste goes into the message whole, lines and all, without sending it. Text can be typed through an input method: what's being composed shows in the box, at the cursor, until it's committed.
 
@@ -128,12 +128,12 @@ Agents take commands in a message that begins with `/`: Claude Code's `/compact`
 
 | Key | Does |
 |---|---|
-| Down, Up; Ctrl+N, Ctrl+P | The next or previous command, round the ends. |
-| Tab | Puts the command picked in the box, with a space after it for what follows. |
-| Enter | The same; or if you've typed the whole name already, sends it. |
-| Esc | Closes the menu, staying in insert mode, until what you've typed changes. |
+| <kbd>Down</kbd>, <kbd>Up</kbd>; <kbd>Ctrl</kbd>+<kbd>N</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> | The next or previous command, round the ends. |
+| <kbd>Tab</kbd> | Puts the command picked in the box, with a space after it for what follows. |
+| <kbd>Enter</kbd> | The same; or if you've typed the whole name already, sends it. |
+| <kbd>Esc</kbd> | Closes the menu, staying in insert mode, until what you've typed changes. |
 
-Selecting a command with the mouse puts it in, as Tab does. Once there's a space after the name, the menu closes. The menu lists what the agent last said it has; a chat that has moved to another agent lists none of the old one's, and after a daemon upgrade or restart, the agent's own come back once its session opens again with your next message.
+Selecting a command with the mouse puts it in, as <kbd>Tab</kbd> does. Once there's a space after the name, the menu closes. The menu lists what the agent last said it has; a chat that has moved to another agent lists none of the old one's, and after a daemon upgrade or restart, the agent's own come back once its session opens again with your next message.
 
 Claude Code's and Codex's own terminal interfaces have commands their adapters don't, so sent to the agent they'd reach the model as words. Typed as the whole message, such as `/clear` alone, clackatoo does what each is for itself instead of sending it, unless the agent says it has a command of that name (in any case), which is then the agent's and is sent. With words after the name, as `/help me find why this test fails`, the message is words for the agent and goes as typed.
 
@@ -149,7 +149,7 @@ Claude Code's and Codex's own terminal interfaces have commands their adapters d
 | `/model` | Opens the model menu. `/model NAME` picks the agent's model of that name or value, such as `/model sonnet`; a name it hasn't is sent as words. |
 | `/export` | Copies the conversation, as text, to the clipboard. `clackatoo capture` prints all of it, older turns not loaded too. |
 
-Others, such as `/exit`, `/help`, `/config`, `/permissions` and `/login`, aren't sent either: the bar says what to use instead, such as `:q`, Ctrl+?, `:set` or the mode chip, and what you typed stays in the box. Every other message beginning with `/` goes to the agent as typed.
+Others, such as `/exit`, `/help`, `/config`, `/permissions` and `/login`, aren't sent either: the bar says what to use instead, such as `:q`, <kbd>Ctrl</kbd>+<kbd>?</kbd>, `:set` or the mode chip, and what you typed stays in the box. Every other message beginning with `/` goes to the agent as typed.
 
 A command the agent says it has (or, before it has said, one its adapter is known to do, such as `/compact`, `/init` or `/review`) goes to the agent on its own. The first message after a chat moves to another agent, or a profile's first message, usually goes after the conversation so far or the profile's instructions; a command waits with those for your next message instead, as Codex reads a command only when it comes first, Claude Code only when it comes last, and some of Claude Code's only when they come alone. Any other message starting with `/`, such as `/usr is full`, goes with them as usual, so a profile's limits are never left behind.
 
@@ -161,9 +161,9 @@ Type `@` at the start of a word and a menu of the chat's project's files opens o
 
 | Key | Does |
 |---|---|
-| Down, Up; Ctrl+N, Ctrl+P | The next or previous file, round the ends. |
-| Tab, Enter | Puts `@path` in the box in place of what you typed, from the chat's folder, with a space after it. |
-| Esc | Closes the menu, staying in insert mode, until what you've typed changes. |
+| <kbd>Down</kbd>, <kbd>Up</kbd>; <kbd>Ctrl</kbd>+<kbd>N</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> | The next or previous file, round the ends. |
+| <kbd>Tab</kbd>, <kbd>Enter</kbd> | Puts `@path` in the box in place of what you typed, from the chat's folder, with a space after it. |
+| <kbd>Esc</kbd> | Closes the menu, staying in insert mode, until what you've typed changes. |
 
 A path with a space in it is quoted, as Claude Code quotes one: `@"docs/read me.md"`. A mention can name lines, `@src/parser.rs#L12-L40` (or `#L12` for one), and you can type mentions by hand: a word starting with `@` names a file relative to the chat's folder, or from the project's root, or an absolute path or one starting `~/`. Punctuation ending a sentence after it isn't part of it.
 
@@ -188,7 +188,7 @@ From an editor, `<Space>a` in visual mode, or `:'<,'>Ask`, puts the lines select
 
 The phone shows mentions in sent messages as chips; typing `@path` by hand there works the same, as the daemon finds the files, but it has no menu.
 
-One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter [queues](#queuing-and-steering) what you typed for when it's done (with a daemon too old to queue, it stays in the box). Selecting the button with nothing being answered sends the message, as Enter does.
+One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and <kbd>Enter</kbd> [queues](#queuing-and-steering) what you typed for when it's done (with a daemon too old to queue, it stays in the box). Selecting the button with nothing being answered sends the message, as <kbd>Enter</kbd> does.
 
 ### Messages sent and drafts
 
@@ -196,46 +196,46 @@ The box remembers what you've sent in the chat, as a shell remembers commands, a
 
 | Key | Does |
 |---|---|
-| Up, on the box's first line | The message sent before, of those that start with what's typed: in an empty box, every one, newest first. The cursor goes to its end. |
-| Down, on its last line | The message sent after; past the newest, back to what you had typed. |
-| Up, in an empty box with messages queued | Takes the newest queued message out of the queue and puts it in the box to edit, as Claude Code's Up does. |
-| Ctrl+R | Opens the finder on the messages sent, newest first: type to narrow them, and Enter puts the one picked in at the cursor. `:Prompts` opens it too. |
+| <kbd>Up</kbd>, on the box's first line | The message sent before, of those that start with what's typed: in an empty box, every one, newest first. The cursor goes to its end. |
+| <kbd>Down</kbd>, on its last line | The message sent after; past the newest, back to what you had typed. |
+| <kbd>Up</kbd>, in an empty box with messages queued | Takes the newest queued message out of the queue and puts it in the box to edit, as Claude Code's <kbd>Up</kbd> does. |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Opens the finder on the messages sent, newest first: type to narrow them, and <kbd>Enter</kbd> puts the one picked in at the cursor. `:Prompts` opens it too. |
 
-Up on a message's other lines moves the cursor up a line, so on a message of several lines, Up goes to its first line before it goes back to the one before. Typing anything forgets where Up had gone: the next Up goes back from what's typed then. In normal mode, `k` and `j` still move through the conversation.
+<kbd>Up</kbd> on a message's other lines moves the cursor up a line, so on a message of several lines, <kbd>Up</kbd> goes to its first line before it goes back to the one before. Typing anything forgets where <kbd>Up</kbd> had gone: the next <kbd>Up</kbd> goes back from what's typed then. In normal mode, `k` and `j` still move through the conversation.
 
-The messages Up recalls are your own, in this chat: not another chat's agent's, nor clackatoo's notices. They're worked out from the conversation itself, so every window and the phone have the same ones, and they last through upgrades, and after a restart once the chat has told its conversation again. Up to the newest 200 are kept, each once, and at most 128 KiB of them, those over 16 KiB left out. A message with images recalls its words. Messages from other chats aren't recalled.
+The messages <kbd>Up</kbd> recalls are your own, in this chat: not another chat's agent's, nor clackatoo's notices. They're worked out from the conversation itself, so every window and the phone have the same ones, and they last through upgrades, and after a restart once the chat has told its conversation again. Up to the newest 200 are kept, each once, and at most 128 KiB of them, those over 16 KiB left out. A message with images recalls its words. Messages from other chats aren't recalled.
 
-The pencil on a queued message, or Up in an empty box, has the daemon move it out of the queue and into the chat's draft in one step, and puts it in your box before what you've typed there, so it's never both waiting and being edited, and never only in a window: if the window closes first, the next to open the chat starts with it. What's typed in other boxes stays in them. If it was sent meanwhile, the bar says so. A queued message with images, or one that moves the chat to another agent, has no pencil and isn't taken back: send or remove it. Taking messages back needs a daemon that keeps drafts.
+The pencil on a queued message, or <kbd>Up</kbd> in an empty box, has the daemon move it out of the queue and into the chat's draft in one step, and puts it in your box before what you've typed there, so it's never both waiting and being edited, and never only in a window: if the window closes first, the next to open the chat starts with it. What's typed in other boxes stays in them. If it was sent meanwhile, the bar says so. A queued message with images, or one that moves the chat to another agent, has no pencil and isn't taken back: send or remove it. Taking messages back needs a daemon that keeps drafts.
 
 What you've typed but not sent is kept by the daemon too, as the chat's draft: a window, or the phone, tells it as you pause typing, as the box empties, and as it closes, and the daemon keeps the last told. A box takes it only while it's empty and you haven't typed in it there: as a window first shows the chat, after closing the window, after an upgrade, on another machine, or as the phone's page loads (over what the page kept itself, unless you've typed since it loaded). Typing isn't mirrored from box to box: a box you've typed in, or emptied, is never changed by what's typed elsewhere, nor by a reconnect, and with two boxes typed in at once, the last told is what the next window starts with. Sending a message, from any box, empties the draft, and every other box holding only that message empties too; a box holding anything else keeps it. Only the text is kept, up to 64 KiB: images attached stay in the window. A full daemon restart doesn't keep it, and a chat on another machine whose daemon is older keeps no draft: the box is the window's alone there, and the phone keeps its own copy.
 
 
 ## The agent's settings
 
-The rounded message box has its model and reasoning effort at the lower left, followed by one permissions control showing the current approval mode. At the right, a small context gauge sits beside Send, or Stop while the agent answers. Paste images with Ctrl+Shift+V.
+The rounded message box has its model and reasoning effort at the lower left, followed by one permissions control showing the current approval mode. At the right, a small context gauge sits beside Send, or Stop while the agent answers. Paste images with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>.
 
 The permissions menu groups three separate settings: the agent's approval mode, access to clackatoo's tools, and browser access. Changing one leaves the others as they were. For Claude Code, Manual asks before every change, Accept edits makes edits without asking, Plan plans before it acts, and Auto lets Claude decide what needs asking about. A new Claude chat starts in Auto.
 
 The circular gauge shows context used as a percentage in its center. Its ring fills clockwise: quiet while there is room, amber past 80%, red past 95%. A Claude account limit above those thresholds also raises its warning color; the details identify which limit needs attention. When the context capacity is unknown, the gauge shows a dash.
 
-Hover over the gauge for the conversation's token counts and any account limits reported during that chat. Select it, or press `K` in normal mode, to open **Usage & limits**. The modal separates conversation context from account allowances and lists the installed providers, including those whose adapters cannot report limits. Escape, Ctrl+;, the close button, or selecting outside it dismisses it without changing the draft. Scroll or use the arrow and page keys for more windows.
+Hover over the gauge for the conversation's token counts and any account limits reported during that chat. Select it, or press `K` in normal mode, to open **Usage & limits**. The modal separates conversation context from account allowances and lists the installed providers, including those whose adapters cannot report limits. <kbd>Escape</kbd>, <kbd>Ctrl</kbd>+<kbd>;</kbd>, the close button, or selecting outside it dismisses it without changing the draft. Scroll or use the arrow and page keys for more windows.
 
 Claude Code, Codex, and Antigravity can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance has a bordered card with a prominent percentage left and a provider-colored bar. The hatched part is the allowance already used, and the badge inside the bar counts down to reset. Wide windows place the figure beside the bar; narrow panes stack them. Update times beside provider names use the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
 
 The daemon collects these readings, so windows connected remotely see the accounts on that daemon's machine. It caches readings after the first completed message, then refreshes every three completed messages across chats (or on the next completion after five minutes). Opening the modal shows cached values immediately and requests a refresh, as does **Refresh**. All refreshes have a one-minute minimum interval and concurrent windows share the work; nothing polls while chats are idle. New chats receive the same cached readings. Failed reads retain the last successful values and their update time; expired windows say they need a refresh rather than guessing that usage is zero. Readings are collected again after a daemon upgrade.
 
-Select a setting to open its menu, immediately above that button. Up and Down move through it, Enter or the mouse picks, and Esc or selecting elsewhere closes it. Shift+Tab steps through the modes without opening the menu.
+Select a setting to open its menu, immediately above that button. <kbd>Up</kbd> and <kbd>Down</kbd> move through it, <kbd>Enter</kbd> or the mouse picks, and <kbd>Esc</kbd> or selecting elsewhere closes it. <kbd>Shift</kbd>+<kbd>Tab</kbd> steps through the modes without opening the menu.
 
-The model and effort share a searchable menu. Type to filter by model, provider or description, including pinned versions hidden inside families. Up and Down move through results, Enter picks, and Esc closes it without changing your draft. The mouse wheel scrolls the picker independently of the conversation.
+The model and effort share a searchable menu. Type to filter by model, provider or description, including pinned versions hidden inside families. <kbd>Up</kbd> and <kbd>Down</kbd> move through results, <kbd>Enter</kbd> picks, and <kbd>Esc</kbd> closes it without changing your draft. The mouse wheel scrolls the picker independently of the conversation.
 
 The picker opens on favorites if you have any, otherwise the current provider. The left rail switches between favorites and individual providers. Search always covers every provider, placing matching favorites first; clearing the search returns to the previous page. The popup keeps a fixed height, with the provider rail and model list scrolling independently. Select a star beside a model to add or remove a favorite; favorites are saved on this machine and shared across its windows. Each row shows the provider below the model and a tick on the current model.
 
 The menu includes:
 
 - **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks. Picking a family picks its newest version, and keeps up as new ones come out.
-- **A family's versions:** the `▸` button at the end of its row, or Right, shows its other versions, to pin the chat to one. Left hides them. A chat on a pinned version opens the menu with that version shown and ticked.
+- **A family's versions:** the `▸` button at the end of its row, or <kbd>Right</kbd>, shows its other versions, to pin the chat to one. <kbd>Left</kbd> hides them. A chat on a pinned version opens the menu with that version shown and ticked.
 - **Fast mode:** the lightning bolt in the rail beside reasoning effort toggles fast mode. It appears only when the current model advertises support, and fills in while enabled. The adapter controls its availability and account restrictions.
-- **Named effort choices**, from Low to Max: select a choice, or with the effort row selected, press Left and Right. The menu stays open as you change it. Default leaves effort to Claude Code, which picks it for each model.
+- **Named effort choices**, from Low to Max: select a choice, or with the effort row selected, press <kbd>Left</kbd> and <kbd>Right</kbd>. The menu stays open as you change it. Default leaves effort to Claude Code, which picks it for each model.
 
 Models from another agent are grouped only when one choice in a family always means its newest version, as Claude Code's `opus` does. Otherwise they're listed one per row.
 
@@ -251,7 +251,7 @@ The new agent hears the conversation with your next message, before it, fenced o
 Undoing turns, reviewing changes, boards, clackatoo's tools and the `claudetask` choice stay the chat's, whichever agent answered. The mode and effort carry over where the new agent has one by the same name; where it hasn't, it uses its own, and a chat an agent started gets the new agent's safest mode; the line across the chat says which. The new agent doesn't see the old one's thinking or the whole output of its tools, only what the chat shows, and its first answer costs more, as nothing of the conversation is cached for it yet. You can stage a handoff while the agent is answering, but must wait until it finishes or stop it before sending. Pending choices stay in this window with the draft; closing the window discards them. Turn numbers, as in `:agentundo 3`, skip the lines where the chat moved.
 ## Normal mode
 
-In normal mode, a solid cursor moves through the conversation's text, and the view follows it. Coming into normal mode puts it on the last line in view, unless it's in view already. Keys are read as a terminal's and an editor's are, so a count goes before a move (`3j`, `2w`), a command half typed shows at the start of the bar, and Ctrl+? lists them:
+In normal mode, a solid cursor moves through the conversation's text, and the view follows it. Coming into normal mode puts it on the last line in view, unless it's in view already. Keys are read as a terminal's and an editor's are, so a count goes before a move (`3j`, `2w`), a command half typed shows at the start of the bar, and <kbd>Ctrl</kbd>+<kbd>?</kbd> lists them:
 
 | Key | Does |
 |---|---|
@@ -266,26 +266,26 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
 | `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](#mentioning-files)). |
-| Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
-| `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops; `gv` restores the last selection, or swaps it with the current one. |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd>, <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Page Down</kbd> <kbd>Page Up</kbd> | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
+| `v` `V` | Select characters, or lines. `o` goes to the other end, <kbd>Esc</kbd> stops; `gv` restores the last selection, or swaps it with the current one. |
 | `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, whole lines, or to the line's end, into the registers (see [Yanking](#yanking)), `Y` as `y$`, as Neovim's. In visual mode, `y` yanks what's selected and `Y` its lines. |
 | `"a` before `y` | Yanks into register `a`, or onto its end with `"A`. |
 | `/` `?`, `n` `N` | Searches the chat's text forward or back, and again (see [Searching](#searching)). |
-| `za` `zo` `zc`, Enter on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |
+| `za` `zo` `zc`, <kbd>Enter</kbd> on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |
 | `go` | Shows what the command whose card is under the cursor printed in a terminal below the chat (see [A command's output in a terminal](#a-command-s-output-in-a-terminal)). |
 | `j` `k` in a table | The cell below or above. |
 | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways: a few characters, or half the column. |
 | `u` | Undoes what the turn under the cursor changed in files, if it's in view, or else the last turn's, keeping your edits since. The bar says which. |
-| Ctrl+R | Makes it again. |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Makes it again. |
 | `dG` | Rewinds the conversation to before the turn under the cursor, or the last (see [Rewinding and branches](#rewinding-and-branches)). Other `d` and `c` commands say what the chat takes instead. |
 | `cc` `S` | Edits your message under the cursor: rewinds to before it, and puts it in the box to change and send. |
 | `[b` `]b` | The branch before or after where the conversation's branches part, at the turn under the cursor or the nearest above; with a count, that many. |
-| `K` | Opens Usage & limits. Escape or Ctrl+; closes it. |
+| `K` | Opens Usage & limits. <kbd>Escape</kbd> or <kbd>Ctrl</kbd>+<kbd>;</kbd> closes it. |
 | `R` | Sends the last message again, if its turn failed (see [When a turn fails](#when-a-turn-fails)). |
 | `gl` | Signs in to the agent again in a new tab, if the last turn failed for want of it (see [When a turn fails](#when-a-turn-fails)). |
 | `gC` | Starts a new chat with the same agent in the same folder, in a new tab, if the last turn hit the model's limit. |
 | `q` `@`, `m` `'` and `` ` ``, Ctrl+O Ctrl+I | Macros, marks and jumps, as in every pane (see [Macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes)). |
-| `i`, `a`, `I`, `A`, `o`, Enter | Back to insert mode. |
+| `i`, `a`, `I`, `A`, `o`, <kbd>Enter</kbd> | Back to insert mode. |
 
 The mouse wheel scrolls in either mode. While you're at the end, the view follows the answer as it grows. Scrolled up, it stays put, and the bottom bar says so.
 
@@ -310,11 +310,11 @@ What's yanked goes into the window's registers as an editor's yank does: into th
 
 ### Searching
 
-`/` types a search in the bottom bar, and Enter goes to the first match after the cursor; `?` searches back. Enter with nothing typed searches for the last search again. `n` searches again the same way and `N` the other way, round the chat's ends, and the bar says when it goes round; a count goes that many matches, before `n` or before `/`, as `3/x`. The search is edited as the command line is: Up and Down bring back searches typed before, and Ctrl+R and a register's name puts in what the register holds. The pattern is Vim's, as an editor's search reads it, and its case follows the `ignorecase` and `smartcase` options.
+`/` types a search in the bottom bar, and <kbd>Enter</kbd> goes to the first match after the cursor; `?` searches back. <kbd>Enter</kbd> with nothing typed searches for the last search again. `n` searches again the same way and `N` the other way, round the chat's ends, and the bar says when it goes round; a count goes that many matches, before `n` or before `/`, as `3/x`. The search is edited as the command line is: <kbd>Up</kbd> and <kbd>Down</kbd> bring back searches typed before, and <kbd>Ctrl</kbd>+<kbd>R</kbd> and a register's name puts in what the register holds. The pattern is Vim's, as an editor's search reads it, and its case follows the `ignorecase` and `smartcase` options.
 
-A search looks through the text the chat shows, block by block: messages, the agent's words and thinking without their Markdown, and the lines of cards. A match is never across two blocks. It looks in folded work too, as Vim's search opens folds: a match in a turn's folded work opens the work, and one in a tool's folded card opens the card. Only the turns the chat has loaded are searched; scroll up to load older ones. The cursor goes to the match, and every match in view is lit up, as Vim's `hlsearch` lights them, the match the search, `n` or `N` went to brighter than the rest, wherever the cursor goes after, until Esc (but one leaving visual mode) or `:nohlsearch` (`:noh`), and again at the next search, `n` or `N`. Only the text drawn is looked through for them, with 4 KiB around it, and at most 512 are lit in a block, and only again when what's drawn or the search changes. With the [option](~clackatoo/reference/config#options) `hlsearch` off, only the match found is lit, until Esc or `:noh`.
+A search looks through the text the chat shows, block by block: messages, the agent's words and thinking without their Markdown, and the lines of cards. A match is never across two blocks. It looks in folded work too, as Vim's search opens folds: a match in a turn's folded work opens the work, and one in a tool's folded card opens the card. Only the turns the chat has loaded are searched; scroll up to load older ones. The cursor goes to the match, and every match in view is lit up, as Vim's `hlsearch` lights them, the match the search, `n` or `N` went to brighter than the rest, wherever the cursor goes after, until <kbd>Esc</kbd> (but one leaving visual mode) or `:nohlsearch` (`:noh`), and again at the next search, `n` or `N`. Only the text drawn is looked through for them, with 4 KiB around it, and at most 512 are lit in a block, and only again when what's drawn or the search changes. With the [option](~clackatoo/reference/config#options) `hlsearch` off, only the match found is lit, until <kbd>Esc</kbd> or `:noh`.
 
-While you type the search, the cursor goes to the match it would find from where you started, opening the work or card it's in, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). It's worked out once after each key, as one step of a search, within the same bounds. Esc puts the cursor, the view, and anything it opened back; Enter keeps them, and is the search. With the [option](~clackatoo/reference/config#options) `incsearch` off, nothing moves until Enter.
+While you type the search, the cursor goes to the match it would find from where you started, opening the work or card it's in, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). It's worked out once after each key, as one step of a search, within the same bounds. <kbd>Esc</kbd> puts the cursor, the view, and anything it opened back; <kbd>Enter</kbd> keeps them, and is the search. With the [option](~clackatoo/reference/config#options) `incsearch` off, nothing moves until <kbd>Enter</kbd>.
 
 A card shows at most 1,000 lines of output: a match only in lines it leaves out is said to be there, rather than not found.
 
@@ -335,13 +335,13 @@ A change's card has what the agent did at its head, such as `Edit Cargo.toml`, a
 
 Lines are numbered by where they are in the file: added and unchanged lines by where they are now, and removed lines by where they were. Before the change is made, as while the agent asks to make it, an edit's lines have no numbers yet. A new file is numbered from 1.
 
-Select a row's header to open or close it. In normal mode, Enter or `za` on a tool toggles it, `zo` opens it and `zc` closes it. Open output and diffs wrap, with up to 1,000 lines shown. Long open cards also have a Collapse button at the bottom. Whether a card is open belongs to the window. Copying the whole tool keeps the complete command and retained output.
+Select a row's header to open or close it. In normal mode, <kbd>Enter</kbd> or `za` on a tool toggles it, `zo` opens it and `zc` closes it. Open output and diffs wrap, with up to 1,000 lines shown. Long open cards also have a Collapse button at the bottom. Whether a card is open belongs to the window. Copying the whole tool keeps the complete command and retained output.
 
 The daemon keeps the last 32 KB of a command's output, and the first 256 KB of each side of a change.
 
-Once the agent has answered, everything before its answer folds under one line: `Worked for 42s ›`. Select it, or press Enter on it, to open it, and again to fold it. While the agent works, the turn is open and the line says `Working`, or `Waiting for you` while it asks you something. When it's done, it folds itself, unless you've opened or folded it yourself. A turn that's only words has no line. Whether a turn is open belongs to the window. A turn the agent didn't finish says why: `Stopped.`, or what went wrong. The tab is named after the title the agent gives the conversation.
+Once the agent has answered, everything before its answer folds under one line: `Worked for 42s ›`. Select it, or press <kbd>Enter</kbd> on it, to open it, and again to fold it. While the agent works, the turn is open and the line says `Working`, or `Waiting for you` while it asks you something. When it's done, it folds itself, unless you've opened or folded it yourself. A turn that's only words has no line. Whether a turn is open belongs to the window. A turn the agent didn't finish says why: `Stopped.`, or what went wrong. The tab is named after the title the agent gives the conversation.
 
-A table is a grid: its head in bold over a line, each column as wide as its widest cell and lined up as the table says. One wider than the column scrolls sideways, with `‹` or `›` at a cut edge: Shift and the wheel over it, `zl` and `zh` in normal mode, or the cursor going to a cell out of view. Copied, its cells are a tab apart and its rows a line.
+A table is a grid: its head in bold over a line, each column as wide as its widest cell and lined up as the table says. One wider than the column scrolls sideways, with `‹` or `›` at a cut edge: <kbd>Shift</kbd> and the wheel over it, `zl` and `zh` in normal mode, or the cursor going to a cell out of view. Copied, its cells are a tab apart and its rows a line.
 
 Code in a fenced block that names its language is colored by the daemon's grammars, as `K`'s is, once the block's closing fence has come; until then, and in a language that isn't installed, it's plain. Code in the agent's thinking stays plain.
 
@@ -400,7 +400,7 @@ Commands' output, file changes, and images show as usual. To have none of this a
 
 ### Claude Code's own subagents
 
-With `:set claudetask`, Claude Code can hand work to a helper of its own with its Task tool, which it calls Agent. What the helper says and the tools it uses go under the Task's card, not into the turn as Claude Code's own. The card starts folded, with a line under its title saying what the helper is doing now and how many tools it has used, as `↳ Reading src/parse.rs · 3 tool uses`, and once it's done, `↳ Done · 12 tool uses`. Every file it set out to change, command it started and other tool that might change something, as an MCP server's, is counted there too, however it went and its own helpers' included, as `· edited 2 files · ran 1 command · used 1 other tool`: nothing that might have changed something is out of sight. When Claude Code asks you about one of the helper's tools, as before an edit in Manual mode, the cards it's under open, here and on the phone, so you see what you're asked about. Open it as any card, by selecting its head, or Enter, `za` or `zo` on it in normal mode, and the helper's words and tool rows show under it, indented, in the order they came. `za` or `zc` in the helper's words folds the card again. Searching finds what's folded in a card and opens it; yanking and motions go through what shows. The line above the box says what the helper is doing while it works.
+With `:set claudetask`, Claude Code can hand work to a helper of its own with its Task tool, which it calls Agent. What the helper says and the tools it uses go under the Task's card, not into the turn as Claude Code's own. The card starts folded, with a line under its title saying what the helper is doing now and how many tools it has used, as `↳ Reading src/parse.rs · 3 tool uses`, and once it's done, `↳ Done · 12 tool uses`. Every file it set out to change, command it started and other tool that might change something, as an MCP server's, is counted there too, however it went and its own helpers' included, as `· edited 2 files · ran 1 command · used 1 other tool`: nothing that might have changed something is out of sight. When Claude Code asks you about one of the helper's tools, as before an edit in Manual mode, the cards it's under open, here and on the phone, so you see what you're asked about. Open it as any card, by selecting its head, or <kbd>Enter</kbd>, `za` or `zo` on it in normal mode, and the helper's words and tool rows show under it, indented, in the order they came. `za` or `zc` in the helper's words folds the card again. Searching finds what's folded in a card and opens it; yanking and motions go through what shows. The line above the box says what the helper is doing while it works.
 
 Each Task keeps the last 200 of its helpers' steps, its helpers' own helpers counted with them, and 1 MB of them; past either, the oldest go, each with all that's under it, and a line at the top says how many, as `12 earlier steps not shown`. What comes later for a step that went is dropped and counted in that line. Words or tools marked as a helper's that's not in the turn show on their own, never run on into Claude Code's answer. clackatoo's own rows, such as what an agent asks to type, are never folded under a card. The phone folds the helper's work under the card the same way. A window older than protocol 117 shows the helper's work as Claude Code's own.
 
@@ -416,7 +416,7 @@ Once every step is done, the list stays, as `Plan · all 5 done`, until your nex
 
 ### Turns the agent takes by itself
 
-An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and might commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. Thinking, or a tool it starts, while the chat is idle opens such a turn for any agent. An agent that doesn't say when it starts or ends such a turn opens one with its words too, except what's shaped as its own adapter's notices to a client that can't show them, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn doesn't end it: the agent goes on through the upgrade, and so does its turn. Only an upgrade that stops the agent, as described [below](#through-an-upgrade), ends it there. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
+An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and might commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. <kbd>Ctrl</kbd>+<kbd>C</kbd> stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. Thinking, or a tool it starts, while the chat is idle opens such a turn for any agent. An agent that doesn't say when it starts or ends such a turn opens one with its words too, except what's shaped as its own adapter's notices to a client that can't show them, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; <kbd>Ctrl</kbd>+<kbd>C</kbd> ends it at once. A daemon upgrade in the middle of such a turn doesn't end it: the agent goes on through the upgrade, and so does its turn. Only an upgrade that stops the agent, as described [below](#through-an-upgrade), ends it there. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
 
 ### When a turn fails
 
@@ -464,13 +464,13 @@ An image the agent shows in its words, rather than from a tool, shows in a row o
 
 In Manual mode, before it does anything that changes something, such as writing a file or running a command that isn't only reading, the agent asks. Other modes ask about less, and Auto leaves it to Claude. Its question takes the box's place, with an answer on each button: the first way to say yes in the accent color, and the ways to say no quieter.
 
-Select an answer to give it. In insert mode, press an answer's number to give it, or Esc to say no. In normal mode, a number picks its answer out with a ring, and the bar says what it is: the same number again, or Enter, gives it, from 0.3 seconds after to five seconds after, so a count such as `22j` typed in one go can't answer by chance; any other key, a mouse button, the wheel or leaving the window drops it, and Esc leaves the question be. A number pressed within half a second of the question coming, of you arriving at its chat, or of the last key you typed, doesn't answer it; the bar says to press it again. Ctrl+C says no and stops the answer. Other keys go nowhere while it asks, and the bar says which numbers answer it.
+Select an answer to give it. In insert mode, press an answer's number to give it, or <kbd>Esc</kbd> to say no. In normal mode, a number picks its answer out with a ring, and the bar says what it is: the same number again, or <kbd>Enter</kbd>, gives it, from 0.3 seconds after to five seconds after, so a count such as `22j` typed in one go can't answer by chance; any other key, a mouse button, the wheel or leaving the window drops it, and <kbd>Esc</kbd> leaves the question be. A number pressed within half a second of the question coming, of you arriving at its chat, or of the last key you typed, doesn't answer it; the bar says to press it again. <kbd>Ctrl</kbd>+<kbd>C</kbd> says no and stops the answer. Other keys go nowhere while it asks, and the bar says which numbers answer it.
 
 clackatoo's own questions about its tools say Reject, as Claude Code's do, and show what the agent wrote as code, so nothing in it can pass for clackatoo's words.
 
 Nothing in a question can hide what it says. A character that reorders the text around it, as the right-to-left override does, or that shows nothing itself, as a tag character or a zero-width space, shows as its code, such as `<U+202E>`, wherever the agent's text is: the question, its answers, and the titles of the tools in the conversation. So the command you read is the one that runs, in the window and on the phone.
 
-An answer of a kind clackatoo doesn't know, which an agent might offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent color, and Esc never picks it. A window from before this is shown the other answers only, or, if every answer is of a kind not known, a Decline that says no.
+An answer of a kind clackatoo doesn't know, which an agent might offer, shows as the agent names it, plainly: it's never taken for yes or for no, never the one in the accent color, and <kbd>Esc</kbd> never picks it. A window from before this is shown the other answers only, or, if every answer is of a kind not known, a Decline that says no.
 
 Questions wait their turn, 16 at most of each kind, the agent's own, clackatoo's tools' and forms, so many of one kind never hold up another: one more is turned down at once, and the chat says so. A question shows at most 64 answers, an answer's name at most 256 characters, and a title past 4096 characters, as a long command, says how many more there are.
 
@@ -481,19 +481,19 @@ What it asks about follows the agent's own settings. Claude Code reads its usual
 An agent can ask you something rather than ask leave: Claude Code's multiple-choice questions (its AskUserQuestion tool), Codex's questions, an MCP server's form, a link to sign in to an MCP server, or whether to try again with another model when one turns a request down. ACP calls these elicitations. The question takes the box's place as a form: the agent's message, then each field's title and what it asks, then a row for each option, a yes-or-no, or a box to type in, and at the end Submit and Decline.
 
 - A choice of one shows a dot by each option (`◉` picked, `○` not); a choice of several a box to tick (`☑`, `☐`). Options are numbered, and an option's meaning shows under it.
-- `j` and `k`, the arrows, Tab and Shift+Tab, or Ctrl+N and Ctrl+P move between rows, in either mode: in normal mode they move through the form, not the conversation. The row picked is lit.
-- `1` to `9` pick that option of the field you're in. Space or `x` picks, ticks, or flips the row picked. Enter does the same, moves on from a box, or presses Submit, Decline or Open the link.
-- In a box, in insert mode, keys type, Backspace, Ctrl+W and Ctrl+U delete, and Tab, Down, Up or Enter move on. In normal mode, `i`, `a` or Enter go into it. A secret shows as dots; a number's box takes only what a number holds. A paste goes into the box picked. Select a row to pick it, or a box to type in it.
+- `j` and `k`, the arrows, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>, or <kbd>Ctrl</kbd>+<kbd>N</kbd> and <kbd>Ctrl</kbd>+<kbd>P</kbd> move between rows, in either mode: in normal mode they move through the form, not the conversation. The row picked is lit.
+- `1` to `9` pick that option of the field you're in. <kbd>Space</kbd> or `x` picks, ticks, or flips the row picked. <kbd>Enter</kbd> does the same, moves on from a box, or presses Submit, Decline or Open the link.
+- In a box, in insert mode, keys type, <kbd>Backspace</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and <kbd>Ctrl</kbd>+<kbd>U</kbd> delete, and <kbd>Tab</kbd>, <kbd>Down</kbd>, <kbd>Up</kbd> or <kbd>Enter</kbd> move on. In normal mode, `i`, `a` or <kbd>Enter</kbd> go into it. A secret shows as dots; a number's box takes only what a number holds. A paste goes into the box picked. Select a row to pick it, or a box to type in it.
 - Claude Code puts a box called Other after each of its questions: type your own answer there instead of picking, or a note beside what you picked.
 - Submit sends only answers that fit what the agent asked; otherwise the bar says what's missing or wrong. A required field shows `*`. clackatoo checks them again before the agent hears them.
-- Esc never declines a form: it goes to normal mode, as it does from the message box, so what you've typed stays. Decline says no, and the agent goes on without. Ctrl+C stops the agent, which takes the form away.
+- <kbd>Esc</kbd> never declines a form: it goes to normal mode, as it does from the message box, so what you've typed stays. Decline says no, and the agent goes on without. <kbd>Ctrl</kbd>+<kbd>C</kbd> stops the agent, which takes the form away.
 - As with other questions, Submit, Decline and Open don't answer within half a second of the form coming, or of you arriving at its chat; the bar says to press again.
 
 A link to open, such as an MCP server's sign-in, shows whole, with where it goes on a line of its own, as plain text apart from the agent's message, then Open the link, which hands it to your desktop's browser and tells the agent it's open, and Decline. Only a plain web link is shown: one that isn't `http` or `https`, isn't plain ASCII, names a user (`user@host`), holds a space, a control character or `%` in its host, names an address as a number other than a plain dotted quad (such as `0x7F.1`), or hides anything is declined, and each window checks it again before it opens it. If the agent says it's done with a link you never opened, it goes by itself. The browser opens on the window's machine; a sign-in whose page sends you back to `localhost` needs the window on the daemon's machine.
 
 When the agent asks to leave Plan mode, as Claude Code's ExitPlanMode or Codex's plan review do, the plan shows above the question as Markdown, in a frame at most half the pane high that scrolls with the wheel over it, or `j` and `k` in normal mode. The question says "Go ahead with this plan?", and the answers are the agent's own, such as "Yes, and use auto mode" or "No, keep planning".
 
-A form waits until it's answered, from this window or any other, the phone included, and is still there if the window reconnects or you open the chat elsewhere. It goes, answered as canceled, if you stop the chat (Ctrl+C or Stop), even between turns, or move it to another agent; it goes if the agent stops waiting for it, or if the agent or its session stops. One that comes between turns, as a sign-in can, waits past the end of the turn. One that comes while a past session is being loaded, as an MCP sign-in can, is declined: no one is there to answer it. While a form waits, its agent waits too: a chat an agent started, that no one is watching, stays stuck on it, as on a question asking leave, until you answer it. Its text is shown with nothing hidden in it, as other agents' words are, and a form asking more than 256 KiB of text all told is declined, with a notice in the chat, said once until you next write. A window older than these forms shows only a question naming what the agent asks, with one answer, Decline.
+A form waits until it's answered, from this window or any other, the phone included, and is still there if the window reconnects or you open the chat elsewhere. It goes, answered as canceled, if you stop the chat (<kbd>Ctrl</kbd>+<kbd>C</kbd> or Stop), even between turns, or move it to another agent; it goes if the agent stops waiting for it, or if the agent or its session stops. One that comes between turns, as a sign-in can, waits past the end of the turn. One that comes while a past session is being loaded, as an MCP sign-in can, is declined: no one is there to answer it. While a form waits, its agent waits too: a chat an agent started, that no one is watching, stays stuck on it, as on a question asking leave, until you answer it. Its text is shown with nothing hidden in it, as other agents' words are, and a form asking more than 256 KiB of text all told is declined, with a notice in the chat, said once until you next write. A window older than these forms shows only a question naming what the agent asks, with one answer, Decline.
 
 ACP has no way to send words back with a "no". Claude Code takes a refusal of its plan as "keep planning", and stops the turn: send your feedback as the next message. For its questions, the Other box is where your own words go.
 
@@ -505,7 +505,7 @@ Saying it can show forms changes what the agents do, beyond asking:
 
 ### Selecting and copying
 
-Drag across the conversation to select its text, or double-click a word or triple-click a line. Letting go copies it to the primary selection, which a middle click pastes. Drag past the top or bottom of the conversation and it scrolls, faster the further past you go, selecting as it goes. While it's selected, the bar says VISUAL, and `y` in normal mode yanks it into the registers, as visual mode's does, after a count or a register too; any other key forgets it. Ctrl+Shift+C, or Ctrl+C while the agent isn't answering, copies it to the clipboard, where `"+` and the unnamed register have it too. What's copied is the text as shown, without its Markdown. A turn's folded work isn't copied, only its message and its answer. Over a block of code, a Copy button copies the code.
+Drag across the conversation to select its text, or double-click a word or triple-click a line. Letting go copies it to the primary selection, which a middle click pastes. Drag past the top or bottom of the conversation and it scrolls, faster the further past you go, selecting as it goes. While it's selected, the bar says VISUAL, and `y` in normal mode yanks it into the registers, as visual mode's does, after a count or a register too; any other key forgets it. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>, or <kbd>Ctrl</kbd>+<kbd>C</kbd> while the agent isn't answering, copies it to the clipboard, where `"+` and the unnamed register have it too. What's copied is the text as shown, without its Markdown. A turn's folded work isn't copied, only its message and its answer. Over a block of code, a Copy button copies the code.
 
 ### Desktop notifications
 
@@ -538,7 +538,7 @@ Under each turn that changed files, a compact summary shows how many, with Undo 
 
 ### Rewinding and branches
 
-Undoing a turn takes it out of the files, but the agent still remembers it. Rewinding takes turns out of the conversation too, so the agent goes on as if they'd never been, as Claude Code's `/rewind` and Codex's Esc Esc do. What you rewind from isn't lost: it stays in the same chat as another branch, and the chat never splits into a pile of chats.
+Undoing a turn takes it out of the files, but the agent still remembers it. Rewinding takes turns out of the conversation too, so the agent goes on as if they'd never been, as Claude Code's `/rewind` and Codex's <kbd>Esc</kbd> <kbd>Esc</kbd> do. What you rewind from isn't lost: it stays in the same chat as another branch, and the chat never splits into a pile of chats.
 
 | Key / command | Does |
 |---|---|
@@ -548,7 +548,7 @@ Undoing a turn takes it out of the files, but the agent still remembers it. Rewi
 | `:rewind! N` | The same, undoing the files without asking, leaving out any that can't be. |
 | `[b` `]b`, selecting ‹ or › | Shows the branch before or after where branches part. |
 | `:branch N` | Shows branch N where they part, at the turn under the cursor or the nearest above. |
-| `:branches` | The finder over every branch: where it parts, its first message, its turns, when it was last shown. Enter shows it. |
+| `:branches` | The finder over every branch: where it parts, its first message, its turns, when it was last shown. <kbd>Enter</kbd> shows it. |
 | `:fork N`, `:fork` | Copies the branch shown, up to turn N or all of it, into a new chat in this pane; the chat copied goes to the start page's chats in no pane. `:\|fork` and `:-fork` put the copy beside instead. `/fork` and `/branch`, typed as the whole message, are `:fork`. |
 
 A rewind always asks first, naming the turn and quoting its message, as in `Rewind to before turn 7 ("fix the lint…")? (y/n)`: `dG` and `cc` are a key or two, and fall back to the last turn when the turn under the cursor isn't in view. Only `:rewind!` doesn't ask. If the turns taken out changed files, the same question asks whether to undo them: `y` undoes them, newest first, as undoing each turn does, `n` leaves them and rewinds all the same, and any other key changes nothing. The `rewindfiles` option (`ask`, `undo`, or `keep`) answers about the files for you. A turn whose files can't be undone, as when you've changed the same lines since, stops the rewind before anything is rewound; the turns after it that were undone stay undone, and the chat says so. If the agent runs anything in the background, the bar says leaving the branch stops it, and asks first. Nothing can be rewound while the agent is answering or asking you something, and a chat another agent started can't be rewound.
@@ -567,10 +567,10 @@ Lines an agent changed that you haven't looked at yet get a bar of their own bes
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F, `zt` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
+| `j` `k`, `gg` `G`, `H` `M` `L`, <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> <kbd>Ctrl</kbd>+<kbd>F</kbd>, `zt` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
 | `]h` `[h`, `]f` `[f` | The next change or the one before, the next file or the one before; a count goes that many |
 | `/` `?` `n` `N` | Searches the lines, the files' names and the comments, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
-| Enter | Goes to the line in the editor |
+| <kbd>Enter</kbd> | Goes to the line in the editor |
 | `a`, `A` | Keeps the change, or every change in its file: its color goes |
 | `x`, `X` | Rejects the change, or every change in its file; `x` on a comment takes it back |
 | `gc` | Comments on the line, for the agent |
@@ -600,7 +600,7 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 
 The first pane an agent opens goes to its chat's right, and the next ones stack below that. An agent's tools reach only its chat's workspace.
 
-Agent-created terminals have the same compact teal band as subagent panes, aligned when they sit beside each other. It names the chat that started the terminal and says whether an agent is actively waiting for it. Select the band, or press Ctrl+B `u`, to return to that chat.
+Agent-created terminals have the same compact teal band as subagent panes, aligned when they sit beside each other. It names the chat that started the terminal and says whether an agent is actively waiting for it. Select the band, or press <kbd>Ctrl</kbd>+<kbd>B</kbd> `u`, to return to that chat.
 
 A terminal that has **never been selected** closes automatically 60 seconds after its command finishes. Its band counts down the remaining seconds, such as `closes in 59s`, using the daemon's closing deadline. Selecting it once keeps it open permanently, even after you move elsewhere; marking it to keep running does too. This applies to agent-created background terminals as well. A new command resets the timer. If the shell cannot report completion, the terminal stays open. Selection and remaining time survive a daemon upgrade; terminals carried over from older builds stay open because their selection history is unknown.
 
@@ -610,7 +610,7 @@ The same holds for a shell inside another, at the far end of `ssh` or `docker ex
 
 No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a-terminal-running), and `run_in_terminal` and `run_in_background` refuse a command line that runs `clackatoo keep` or `clackatoo bg`. That's a guard against mistakes, not a boundary: whatever an agent types into a terminal, or a script it runs there, follows the rules below, and could do what you could at that shell.
 
-Before running a command or typing into a terminal, the agent asks: Allow, Always allow commands, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Where the command would run shows as code too, as the folder it is, and a folder that isn't there is refused without asking. Always allow commands sets the chat's Tools to Allow, below: the agent runs commands, and types into terminals it started, without asking. Typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project; as Tools has no say in those, their questions offer only Allow, for this once, and Reject. The tools that only show or read inside the project, and those that start and message chats, never ask.
+Before running a command or typing into a terminal, the agent asks: Allow, Always allow commands, or Reject. The question shows exactly what would be typed, with keys such as <kbd>Enter</kbd> shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Where the command would run shows as code too, as the folder it is, and a folder that isn't there is refused without asking. Always allow commands sets the chat's Tools to Allow, below: the agent runs commands, and types into terminals it started, without asking. Typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project; as Tools has no say in those, their questions offer only Allow, for this once, and Reject. The tools that only show or read inside the project, and those that start and message chats, never ask.
 
 The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. Off refuses the agent's calls at once; as the agent is given no tools at all while it's Off, turning them back on reaches it only when its session next opens. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools. While the agent's mode changes nothing, as Claude Code's Plan or Codex's Read-only, the tools that run or type commands refuse, whatever Tools says, as they do for a chat with [limits](#profiles): the mode's promise holds for clackatoo's tools too. Turning Tools off, or picking such a mode, takes back the questions about clackatoo's tools still waiting that it now rules out, refusing those calls, and an Allow is checked against the chat's settings again as you give it.
 
@@ -666,25 +666,25 @@ What another chat's agent said reaches an agent quoted, each line after `| `, in
 
 A chat that started another and isn't waiting for it hears when it finishes: a notice from clackatoo, starting `[chat 7 finished]`, comes to it as a message would, as a turn of its own if it's idle. It's framed as clackatoo's, and each chat's answer in it sits between lines of its own that the answer can't end, so no agent can pass one off. There's one notice at most waiting in a chat: what it says is worked out as it begins, every answer the chat hasn't had by then, so several finishing while the chat is busy come together, and an answer the chat has had meanwhile, through `wait_for_chat` or `read_chat`, isn't told again. A turn you had with that chat yourself isn't told. What a chat goes on to do after a notice, as reporting what its own subagent found, answers the message that started its work, so the chat above hears it too.
 
-Your chat doesn't show you that text, which is for the agent. It shows a card in the subagents' teal, headed `↳ 2 subagents finished in 3m 4s`, or `· 1 failed`, or `↳ 1 subagent failed`, with a line for each chat: its number, its profile, or else its agent, how long it worked on the message it answered, how that went if not well, and what it was asked, such as `chat 7 · explore · 1m 20s — Find where turns are drawn`. Under each line is the first line of its answer. Select the line, or press Enter or `za` on it in normal mode, to read the whole answer under it, and again to fold it; `zR` and `zM` open and fold them all with the turns' work. Select a chat's number, or press `gx` on its line, to open that chat beside yours. Searching the chat finds words in the answers, opening the one it finds them in, and yanking takes what the card shows (`yim` on a line, its answer whole). The agent's own answer to the notice shows under the card as any answer does. Clackatoo's other notices, such as that an [activity](#managed-activities-and-recovery) ended, show quoted down the left under `Clackatoo · Activity completion`. A window or phone older than these cards shows the text the agent was told. A notice from before a daemon upgrade shows that text, quoted under `Clackatoo · Subagents finished`: what the card says isn't carried through one.
+Your chat doesn't show you that text, which is for the agent. It shows a card in the subagents' teal, headed `↳ 2 subagents finished in 3m 4s`, or `· 1 failed`, or `↳ 1 subagent failed`, with a line for each chat: its number, its profile, or else its agent, how long it worked on the message it answered, how that went if not well, and what it was asked, such as `chat 7 · explore · 1m 20s — Find where turns are drawn`. Under each line is the first line of its answer. Select the line, or press <kbd>Enter</kbd> or `za` on it in normal mode, to read the whole answer under it, and again to fold it; `zR` and `zM` open and fold them all with the turns' work. Select a chat's number, or press `gx` on its line, to open that chat beside yours. Searching the chat finds words in the answers, opening the one it finds them in, and yanking takes what the card shows (`yim` on a line, its answer whole). The agent's own answer to the notice shows under the card as any answer does. Clackatoo's other notices, such as that an [activity](#managed-activities-and-recovery) ended, show quoted down the left under `Clackatoo · Activity completion`. A window or phone older than these cards shows the text the agent was told. A notice from before a daemon upgrade shows that text, quoted under `Clackatoo · Subagents finished`: what the card says isn't carried through one.
 
 Agents are told to use `start_chat` or `start_chats`, with a profile, for all subagent work. Claude Code's own Task tool, whose helpers work inside one turn, [folded under its card](#claude-code-s-own-subagents), is off unless you `:set claudetask`. A chat keeps its choice through an upgrade, and the chats it starts take it too.
 
 ### Subagents
 
-A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working · 12s ›", with "· 1 needs you" when one asks you something. Select it, or press Enter on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Select a line, or press Enter on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
+A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working · 12s ›", with "· 1 needs you" when one asks you something. Select it, or press <kbd>Enter</kbd> on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Select a line, or press <kbd>Enter</kbd> on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
 
 When the conversation continues with another message, subagents from earlier turns that are still working also appear in a compact shelf above the message box. Select the heading to expand it and a row to open that chat. Subagents waiting for your answer and those with background tasks still running stay there too. The shelf disappears once all that work ends; the original cards remain in the conversation.
 
 #### A subagent's pane
 
-A subagent in a pane, one its agent asked to show or one you opened from its card, has a teal band across the top that says what it is: `↳ subagent of chat 12 · explore`, the chat that started it and the profile it was started as. Select the band, or press Ctrl+B `u`, to go to that chat, whichever tab or workspace it's in.
+A subagent in a pane, one its agent asked to show or one you opened from its card, has a teal band across the top that says what it is: `↳ subagent of chat 12 · explore`, the chat that started it and the profile it was started as. Select the band, or press <kbd>Ctrl</kbd>+<kbd>B</kbd> `u`, to go to that chat, whichever tab or workspace it's in.
 
 | Command | Does |
 |---|---|
-| `:q`, `:q!`, `:close`, Ctrl+B `x` | In a subagent's pane, closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. Closing its tab or workspace does the same. |
+| `:q`, `:q!`, `:close`, <kbd>Ctrl</kbd>+<kbd>B</kbd> `x` | In a subagent's pane, closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. Closing its tab or workspace does the same. |
 | `:bd` (`:bdelete`) | Closes the focused chat for good, pane and all, a subagent's too. `clackatoo close N` does the same from a shell, and the card then says it's closed. |
-| Ctrl+B `u` | Goes from a subagent's pane to the chat that started it. |
+| <kbd>Ctrl</kbd>+<kbd>B</kbd> `u` | Goes from a subagent's pane to the chat that started it. |
 
 The daemon decides, so every window and client, and another machine's daemon relaying for its windows, all close a subagent's pane the same way. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it, as for any chat. A daemon older than protocol 109 closes the chat with its pane, and its windows' bands don't name the profile; so does a window older than 109, to which closing a pane meant closing its chat, as it still does.
 
@@ -771,7 +771,7 @@ clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.co
 
 Each agent uses its own sign-in: run `claude`, `codex login` or `gemini` once in a terminal, or for Antigravity, [its own](#gemini-through-antigravity). A chat with an agent no one's signed in to says what to run. With a subscription, chats count toward its limits.
 
-If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it might be waiting on: most often an MCP server in the agent's config that needs you to sign in. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`, `claude mcp list`, or `gemini mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx might be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which Esc picks, **Retry**, which stops the agent and starts it again, or **Stop**; Ctrl+C stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
+If an agent hasn't opened a chat's session after 30 seconds, the chat says so, and what it might be waiting on: most often an MCP server in the agent's config that needs you to sign in. For Codex that's `~/.codex/config.toml` (or `$CODEX_HOME`), and the chat names the servers there reached over the network; for Claude Code, its settings in `~/.claude.json` or the project's `.mcp.json`; for Gemini CLI, `~/.gemini/settings.json`. `codex mcp list`, `claude mcp list`, or `gemini mcp list` in a terminal shows which can't start. An agent that hasn't answered at all is said not to have started; one run through `npx` is given two minutes, as npx might be fetching it. The chat goes on waiting, and asks whether to **Keep waiting**, which <kbd>Esc</kbd> picks, **Retry**, which stops the agent and starts it again, or **Stop**; <kbd>Ctrl</kbd>+<kbd>C</kbd> stops it too. A session that comes after you stop is closed unseen, and the next message asks again. While another chat is in the middle of a turn with the same agent, Retry only asks again rather than starting it again, which would cut that turn off. The model menu says the same of an agent that doesn't say what models it has within 20 seconds.
 
 An agent that stops listening, say because its input broke, is still read for a moment for the rest of what it says, but nothing more is sent to it: a message to it ends at once, saying the agent stopped, and so does stopping the chat or changing a setting. A chat that tries to start it meanwhile waits, saying it's stopping, and starts it again once it has gone, sending any message you typed.
 
@@ -828,7 +828,7 @@ A [subagent](#subagents) in a pane comes back a subagent of its chat, if that ch
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
 
-What you've typed but not sent in a chat's box, and the [messages sent](#messages-sent-and-drafts) Up recalls, last through an upgrade.
+What you've typed but not sent in a chat's box, and the [messages sent](#messages-sent-and-drafts) <kbd>Up</kbd> recalls, last through an upgrade.
 
 A line where the agent compacted its context comes through an upgrade as words saying so; a command's exit code, what turns spent and the agent's own words for a failure don't.
 
@@ -857,16 +857,16 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 
 ## Known limits
 
-- The phone's chats don't color code. Sideways swipes on a trackpad don't scroll tables: use Shift and the wheel.
+- The phone's chats don't color code. Sideways swipes on a trackpad don't scroll tables: use <kbd>Shift</kbd> and the wheel.
 - Moving a file in the explorer forgets which of its lines agents changed. Rejecting every change of a file an agent made leaves it empty, rather than in the trash. Reviews of everything since the base stop past about 8 MB of changes: narrow them with `:Review turn` or `chat`.
 - A file the agent changed with a command, or that clackatoo couldn't read before the agent wrote it, can't be undone. The chat says which.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
 - Agents don't see what you've selected in an editor until you send it with `<Space>a` or `:Ask`. Commands Claude Code runs with its own tool, rather than `run_in_terminal`, show their output once they're done; Codex's show it as it comes.
 - Gemini CLI and custom adapters have no read-only subscription probes.
 - A board's link to a chat's turn names the turn by its number, so after a rewind or a switch it goes to whatever turn has that number on the branch shown. Switching branches from the phone, and a summary of a branch from where it parts, are still to come.
-- Ctrl+? doesn't list a form's keys. What an input method is composing doesn't show in a form's box until it's committed.
+- <kbd>Ctrl</kbd>+<kbd>?</kbd> doesn't list a form's keys. What an input method is composing doesn't show in a form's box until it's committed.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
-- Codex's commands in the background (its `/ps`) aren't listed: its adapter lists them only to a client that asks as JetBrains' AIR does, which leaves every command's output out of its row. Shift+Tab steps through Codex's modes, not its Plan mode.
+- Codex's commands in the background (its `/ps`) aren't listed: its adapter lists them only to a client that asks as JetBrains' AIR does, which leaves every command's output out of its row. <kbd>Shift</kbd>+<kbd>Tab</kbd> steps through Codex's modes, not its Plan mode.
 - You can't use the mouse or type in a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.
 

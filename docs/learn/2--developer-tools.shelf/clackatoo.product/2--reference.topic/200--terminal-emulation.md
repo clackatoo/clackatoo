@@ -98,20 +98,20 @@ A program that asks faster than it reads the answers, as one at the far end of a
 
 ## Keyboard
 
-Keys are sent as xterm sends them, which nearly every program understands, until a program asks for the kitty keyboard protocol (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>), as fish 4, Neovim, Helix and Kakoune do. xterm's encoding can't tell some keys apart: Esc from the start of a sequence, Ctrl+I from Tab, Shift+Enter from Enter. The protocol sends those as sequences of their own.
+Keys are sent as xterm sends them, which nearly every program understands, until a program asks for the kitty keyboard protocol (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>), as fish 4, Neovim, Helix and Kakoune do. xterm's encoding can't tell some keys apart: <kbd>Esc</kbd> from the start of a sequence, <kbd>Ctrl</kbd>+<kbd>I</kbd> from <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Enter</kbd> from <kbd>Enter</kbd>. The protocol sends those as sequences of their own.
 
 A program asks a flag at a time:
 
 | Flag | What changes |
 |---|---|
-| 1 (disambiguate) | Esc, and keys with Ctrl or Alt, are sent as `CSI <key> ; <modifiers> u`. Enter, Tab and Backspace with no modifiers are sent as they are without the flag, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without Shift is text. |
-| 4 (alternate keys) | Those sequences also say the key Shift made, and the key in a US layout, as `CSI 97:65;2u`. |
+| 1 (disambiguate) | <kbd>Esc</kbd>, and keys with <kbd>Ctrl</kbd> or <kbd>Alt</kbd>, are sent as `CSI <key> ; <modifiers> u`. <kbd>Enter</kbd>, <kbd>Tab</kbd> and <kbd>Backspace</kbd> with no modifiers are sent as they are without the flag, so a shell a program left with the flag on can still be typed `reset` into. Text typed with or without <kbd>Shift</kbd> is text. |
+| 4 (alternate keys) | Those sequences also say the key <kbd>Shift</kbd> made, and the key in a US layout, as `CSI 97:65;2u`. |
 | 8 (all keys) | Every key is a sequence, text and all. |
 | 16 (text) | With 8, each sequence also says the text its key types. |
 
-Flag 2, key repeats and releases, isn't kept, so a program asking for it sees from `CSI ? u` that it isn't there: windows send presses alone. Nor are Super, Hyper, Meta, Caps Lock and Num Lock sent as modifiers, or modifier keys pressed alone. The keypad's keys have numbers of their own, but type their text without Ctrl or Alt.
+Flag 2, key repeats and releases, isn't kept, so a program asking for it sees from `CSI ? u` that it isn't there: windows send presses alone. Nor are <kbd>Super</kbd>, Hyper, Meta, Caps Lock and Num Lock sent as modifiers, or modifier keys pressed alone. The keypad's keys have numbers of their own, but type their text without <kbd>Ctrl</kbd> or <kbd>Alt</kbd>.
 
-A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets (1), adds (2) or takes away (3) flags in effect. Each screen keeps a stack of its own, sixteen deep, so a full-screen program leaves the shell's alone, and a full reset (`ESC c`) ends them all. A program switching to the alternate screen starts with none, whatever one before it left there, and the shell's next prompt (OSC 133 `A`) drops what a program left on the primary screen, so a program that dies with the protocol on doesn't leave Ctrl+C reaching the shell as `CSI 99;5u`: a shell that wants it, as fish 4 does, asks again after its prompt. They, the titles pushed, and a program's progress go on through an upgrade in place. The window encodes keys this way; the web app on your phone sends xterm's encoding still. A window older than protocol 139 does too, which programs that ask still understand.
+A program pushes the flags it wants (`CSI > flags u`) and pops them as it ends (`CSI < count u`), leaving what was there before; `CSI = flags ; mode u` sets (1), adds (2) or takes away (3) flags in effect. Each screen keeps a stack of its own, sixteen deep, so a full-screen program leaves the shell's alone, and a full reset (`ESC c`) ends them all. A program switching to the alternate screen starts with none, whatever one before it left there, and the shell's next prompt (OSC 133 `A`) drops what a program left on the primary screen, so a program that dies with the protocol on doesn't leave <kbd>Ctrl</kbd>+<kbd>C</kbd> reaching the shell as `CSI 99;5u`: a shell that wants it, as fish 4 does, asks again after its prompt. They, the titles pushed, and a program's progress go on through an upgrade in place. The window encodes keys this way; the web app on your phone sends xterm's encoding still. A window older than protocol 139 does too, which programs that ask still understand.
 
 ## Synchronized output
 
@@ -128,7 +128,7 @@ These are ignored:
 - The kitty graphics protocol (`APC G`), sixels and other images.
 - Setting colors: `OSC 4`, `10`, `11`, `12`, `104`, and the others. Asking about them is [answered](#queries-answered).
 - Desktop notifications from programs: `OSC 99`, `OSC 777`, and iTerm2's `OSC 9`.
-- Key repeats and releases (the kitty keyboard protocol's flag 2), and Super, Hyper and Meta as modifiers.
+- Key repeats and releases (the kitty keyboard protocol's flag 2), and <kbd>Super</kbd>, Hyper and Meta as modifiers.
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).
 - Variation selector 16 does not widen the character before it.
