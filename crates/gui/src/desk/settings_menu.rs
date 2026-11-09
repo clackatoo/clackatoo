@@ -4,9 +4,9 @@
 //! itself). `:mappersist` binds keys and saves them, as the menu's keys
 //! section does.
 
-use super::Desk;
-use crate::command::Place;
-use crate::finder::Opening;
+use clackatoo_protocol::{FileLocation, OpenFile, PaneTerminal, Request, Side};
+
+use super::{Asked, Desk};
 use crate::finder::view::FinderView;
 use crate::input::KeyPress;
 use crate::options::persist::Change;
@@ -150,17 +150,47 @@ impl Desk {
             }
             Outcome::Open(place) => {
                 self.settings = None;
-                let opening = Opening {
-                    path: place.file.to_string(),
-                    at: Some((u64::from(place.line.saturating_sub(1)), 0)),
-                    place: Place::Beside(clackatoo_protocol::Side::Right),
-                };
-                if self.shown.is_none() {
-                    return self.refuse(format!("{} needs a workspace to open in", place.file));
-                }
-                self.open_picked(opening);
+                self.open_config_line(&place);
             }
         }
+    }
+
+    /// Opens the config's line at `place` in an editor beside the focused
+    /// pane. The config is this machine's, so it's opened only by a daemon
+    /// on this machine: another machine's would open a file of its own of
+    /// that path, if it had one.
+    fn open_config_line(&mut self, place: &crate::options::provenance::Place) {
+        let path = place.file.to_string();
+        let name = (std::path::Path::new(&path).file_name())
+            .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+        let Some(shown) = self.shown else {
+            return self.refuse(format!("{name} needs a workspace to open in"));
+        };
+        let own = self.own_machine().map(|own| own.id);
+        // A pane of another machine's makes panes there, unless the daemon
+        // can be told this one.
+        let elsewhere = own.is_none() && self.pane_machine(shown.pane).is_some();
+        if self.remote || elsewhere {
+            return self.refuse(format!(
+                "{name} is on this machine; the workspace's daemon is on another"
+            ));
+        }
+        let landing = FileLocation {
+            path: path.clone(),
+            line: u64::from(place.line.saturating_sub(1)),
+            col: 0,
+            offset: None,
+            text: String::new(),
+        };
+        self.request(
+            Request::Split {
+                pane: shown.pane,
+                side: Side::Right,
+                terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+                on: own,
+            },
+            Asked::PaneAt(Some(landing)),
+        );
     }
 
     /// Binds `mapping`'s keys for every window, and saves them in

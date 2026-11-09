@@ -452,7 +452,7 @@ impl Desk {
     }
 
     /// Opens what was picked in the finder.
-    pub(super) fn open_picked(&mut self, opening: Opening) {
+    fn open_picked(&mut self, opening: Opening) {
         let Some(shown) = self.shown else { return };
         let Opening { path, at, place } = opening;
         let landing = at.map(|(line, col)| FileLocation {

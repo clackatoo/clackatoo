@@ -71,7 +71,7 @@ impl Desk {
     }
 
     /// The daemon's own machine, if it has said.
-    fn own_machine(&self) -> Option<&clackatoo_protocol::Machine> {
+    pub(super) fn own_machine(&self) -> Option<&clackatoo_protocol::Machine> {
         self.workspaces.machine.as_ref()
     }
 

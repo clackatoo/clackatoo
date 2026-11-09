@@ -176,6 +176,17 @@ fn an_option_init_lua_sets_is_locked_and_enter_opens_its_line() {
     assert_eq!(desk.options.numberwidth, 6, "nothing changed");
     assert!(!dir.path().join("client/settings.lua").exists());
     answer_all(&mut desk);
+    // Not by a daemon on another machine, which has files of its own.
+    desk.remote = true;
+    named(&mut desk, NamedKey::Enter);
+    assert!(desk.settings.is_none());
+    assert_eq!(
+        desk.message.as_deref(),
+        Some("init.lua is on this machine; the workspace's daemon is on another")
+    );
+    assert!(answer_all(&mut desk).is_empty());
+    desk.remote = false;
+    command(&mut desk, "Settings numberwidth");
     named(&mut desk, NamedKey::Enter);
     assert!(desk.settings.is_none());
     let init = dir.path().join("client/init.lua");
