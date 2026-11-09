@@ -1692,7 +1692,7 @@ impl Editor {
     ) -> Done {
         let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
-        let command = self.by_visual_lines(command);
+        let command = self.lines_operator(command);
         self.cut_count = None;
         if !again {
             self.start_change(command, copy);
@@ -1941,7 +1941,7 @@ impl Editor {
     /// `command`, but in visual mode by characters or lines, `D` and `C`
     /// as the operators on the lines selected they are in Vim: in a block
     /// they take each line from its left edge on, as their own.
-    fn by_visual_lines(&self, command: Command) -> Command {
+    fn lines_operator(&self, command: Command) -> Command {
         match (command.action, self.mode) {
             (Action::DeleteToEnd { change }, Mode::Visual(kind)) if kind != Selection::Block => {
                 let operator = if change {
@@ -1989,7 +1989,7 @@ impl Editor {
             // `D` is `d$` and `C` is `c$`, as Vim's: over lines from a
             // line's start `D` takes them whole (`2D`), and with a count
             // past the last line, they fail. In visual mode by characters
-            // or lines, they're operators by now (see `by_visual_lines`).
+            // or lines, they're operators by now (see `lines_operator`).
             Action::DeleteToEnd { change } => {
                 let (to_end, count) = (Target::Motion(Motion::LineEnd), command.count);
                 let operator = if change {
