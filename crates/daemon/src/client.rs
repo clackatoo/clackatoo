@@ -712,7 +712,7 @@ impl Client {
 
     /// Says the client is a window, which panes the user opens from
     /// outside are revealed in (see [`Request::Window`]). Only to a daemon
-    /// of protocol 128 or later.
+    /// of protocol 130 or later.
     ///
     /// # Errors
     ///

@@ -334,15 +334,15 @@ gates! {
     /// asks for that (CLACKA-59): `Request::AttachFiles`' `changes`, and
     /// `FilesUpdate::Changed`, which nothing older asks for or is sent.
     FILES_CHANGES = 127,
-    /// A window told to switch to a pane and come to the front, for the
-    /// user opening something from outside it, as from a file manager
-    /// (CLACKA-223): `Request::Reveal`, `Request::Window` and
-    /// `Event::Reveal`.
-    REVEAL = 128,
     /// The secret an agent's MCP server shows to serve a chat's tools
     /// (CLACKA-215): `Request::CarryMcp`'s `token`. The daemon refuses a
     /// request without one.
     MCP_TOKEN = 129,
+    /// A window told to switch to a pane and come to the front, for the
+    /// user opening something from outside it, as from a file manager
+    /// (CLACKA-223): `Request::Reveal`, `Request::Window` and
+    /// `Event::Reveal`.
+    REVEAL = 130,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

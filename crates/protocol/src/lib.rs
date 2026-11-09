@@ -147,7 +147,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 129;
+pub const PROTOCOL_VERSION: u32 = 130;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -650,7 +650,7 @@ pub enum Event {
     },
     /// The user asked, from outside any window, to see this pane
     /// ([`Request::Reveal`]): switch to it, wherever it is, and come to
-    /// the front. Sent to one window alone, and only one of protocol 128
+    /// the front. Sent to one window alone, and only one of protocol 130
     /// or later. The pane is in the workspaces sent before this.
     Reveal {
         /// The pane.
@@ -1529,7 +1529,7 @@ pub enum Request {
     /// Asked only on this machine's socket, never by another machine's
     /// daemon or client, nor a phone. Answered with [`Response::Done`]
     /// once one is told, or an error if none is open. Only to a daemon of
-    /// protocol 128 or later ([`wire::REVEAL`]).
+    /// protocol 130 or later ([`wire::REVEAL`]).
     Reveal {
         /// The pane, in one of the daemon's own workspaces' tabs.
         pane: PaneId,
@@ -1539,7 +1539,7 @@ pub enum Request {
     },
     /// Says the client is a window, showing the user the workspaces: the
     /// only kind of client [`Event::Reveal`] is sent to. Answered with
-    /// [`Response::Done`]. Only to a daemon of protocol 128 or later
+    /// [`Response::Done`]. Only to a daemon of protocol 130 or later
     /// ([`wire::REVEAL`]).
     Window,
 }
