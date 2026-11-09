@@ -277,7 +277,12 @@ fn middle_and_tail(samples: &[f64]) -> (f64, f64) {
 /// busier than when the baseline was made. One the baseline or this run
 /// lacks, as frames without a GPU, is said and passed over.
 fn check(report: &Report) -> Verdict {
-    println!("\nkeystroke gate: the least round of each, against the baseline's");
+    // The table above compares the rounds' medians, which a busy machine
+    // moves; the gate judges only by these.
+    println!(
+        "\nkeystroke gate, judged on the least round of each (not the medians above), against \
+         the baseline's"
+    );
     let busier = report
         .least(YARDSTICK)
         .map(|(now, base)| (now - base) / base)
