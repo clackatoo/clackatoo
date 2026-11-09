@@ -1166,11 +1166,13 @@ impl FinishedChat {
     /// turns are drawn", and how it went if not well.
     #[must_use]
     pub fn label(&self) -> String {
-        let mut label = format!(
-            "chat {} · {}",
-            self.chat,
-            self.profile.as_deref().unwrap_or(&self.agent)
-        );
+        let mut label = format!("chat {}", self.chat);
+        // A chat closed before a notice's cards were read back from its
+        // text has no agent known.
+        let what = self.profile.as_deref().unwrap_or(&self.agent);
+        if !what.is_empty() {
+            let _ = write!(label, " · {what}");
+        }
         if self.started > 0 && self.ended >= self.started {
             let _ = write!(label, " · {}", duration(self.ended - self.started));
         }
@@ -3228,6 +3230,16 @@ mod tests {
             "chat 9 · Claude Code · 1m 20s · failed: it broke — Find where turns are drawn"
         );
         assert_eq!(done.first_line(), "In `paint.rs`.");
+        // One read back from a notice's text, of a chat since closed.
+        let read_back = FinishedChat {
+            agent: String::new(),
+            profile: None,
+            asked: String::new(),
+            started: 0,
+            ended: 0,
+            ..chat(9, Some(Outcome::Done))
+        };
+        assert_eq!(read_back.label(), "chat 9");
         let told = Turn {
             notice: Some(notice),
             sent: 5,
