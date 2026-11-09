@@ -72,7 +72,8 @@ pub enum FilesAction {
     Collapse(String),
     /// Makes the directory at this path the explorer's root, as going up
     /// past it does. Every client attached is told the new
-    /// [`FilesUpdate::Root`]; what they have expanded stays so.
+    /// [`FilesUpdate::Root`]; what they have expanded stays so. If it's
+    /// the root already, the client that asked is told it again.
     Root(String),
     /// Lists every directory the client has expanded again, and asks git
     /// again, for changes the daemon can't see, such as on a file system
@@ -84,7 +85,7 @@ pub enum FilesAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilesUpdate {
     /// The directory at the explorer's root: sent first, and again
-    /// whenever it changes.
+    /// whenever it changes, or a client asks for the one it is.
     Root {
         /// The directory, made absolute and real.
         path: String,

@@ -12702,6 +12702,31 @@ fn project(dir: &Path) -> PathBuf {
 }
 
 #[test]
+fn rooting_an_explorer_where_it_is_rooted_tells_the_asker_its_root_again() {
+    let daemon = TestDaemon::start();
+    let root = project(daemon.dir.path());
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &root);
+    let rooted = |client: &mut Client| loop {
+        if let FilesUpdate::Root { path, .. } = next_files_update(client) {
+            break PathBuf::from(path);
+        }
+    };
+    // As `:Explore! DIR` asks, with DIR its root already, written as the
+    // window may write it: the window waits to hear the root.
+    files_action(&mut client, files, FilesAction::Root(".".into()));
+    assert_eq!(rooted(&mut client), root);
+    // And another root is told as before.
+    let below = root.join("b");
+    files_action(
+        &mut client,
+        files,
+        FilesAction::Root(below.display().to_string()),
+    );
+    assert_eq!(rooted(&mut client), below);
+}
+
+#[test]
 fn an_explorer_lists_what_is_expanded_and_shows_files_made_and_deleted_there() {
     let daemon = TestDaemon::start();
     let root = project(daemon.dir.path());
