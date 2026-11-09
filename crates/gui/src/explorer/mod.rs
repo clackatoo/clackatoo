@@ -182,8 +182,13 @@ enum Prompt {
     Add { dir: String, name: String },
     /// The new name of what's at `from`.
     Rename { from: String, name: String },
-    /// Whether to do the operation, as the question asks.
-    Confirm(crate::vim::confirm::Confirm<FileOp>),
+    /// Whether to do the operation, as the question asks; answered only by
+    /// a key pressed just now if `now`, as a drop's question is (see
+    /// [`Explorer::asks_a_key_now`]).
+    Confirm {
+        asked: crate::vim::confirm::Confirm<FileOp>,
+        now: bool,
+    },
 }
 
 /// A pane showing a file explorer.
@@ -237,9 +242,6 @@ pub(crate) struct Explorer {
     /// How far its scrolling keys go.
     paging: Paging,
     prompt: Option<Prompt>,
-    /// The question asked is about a drop, which only a key pressed just
-    /// now answers, as a link's (see [`Explorer::asks_a_key_now`]).
-    asked_of_a_drop: bool,
     /// The search being typed, the last, and what's lit.
     search: list::ListSearch,
     cursorline: bool,
@@ -322,7 +324,6 @@ impl Explorer {
             keys: Keys::default(),
             paging: Paging::default(),
             prompt: None,
-            asked_of_a_drop: false,
             search: list::ListSearch::of(options),
             cursorline: options.cursorline,
             reveal: None,
@@ -485,7 +486,7 @@ impl Explorer {
                 list::paste_into(name, text);
                 true
             }
-            Some(Prompt::Confirm(_)) => false,
+            Some(Prompt::Confirm { .. }) => false,
             None => self.search.paste(text),
         }
     }
@@ -514,21 +515,20 @@ impl Explorer {
     /// key doesn't, as for the explorer's own questions; but only a key
     /// pressed just now answers it (see [`Self::asks_a_key_now`]).
     pub(crate) fn ask_of_a_drop(&mut self, question: String, op: FileOp) {
-        self.prompt = Some(confirm(question, op));
-        self.asked_of_a_drop = true;
+        let asked = crate::vim::confirm::Confirm::new(question).choice('y', "Confirm", op);
+        self.prompt = Some(Prompt::Confirm { asked, now: true });
     }
 
     /// Whether the bar asks what only a key pressed just now answers: one
     /// a macro or a binding types, or one held while something was waited
     /// for, can't have been pressed for it.
     pub(crate) fn asks_a_key_now(&self) -> bool {
-        self.asked_of_a_drop && matches!(self.prompt, Some(Prompt::Confirm(_)))
+        matches!(self.prompt, Some(Prompt::Confirm { now: true, .. }))
     }
 
     /// Gives up the question asked, as a key that doesn't answer it does.
     pub(crate) fn give_up_asking(&mut self) {
         self.prompt = None;
-        self.asked_of_a_drop = false;
         self.message = Some("nothing was done".to_owned());
     }
 
@@ -554,7 +554,7 @@ impl Explorer {
             Some(Prompt::Rename { from, name }) => {
                 return format!("rename {} to: {name}▏", self.shown(from));
             }
-            Some(Prompt::Confirm(asked)) => return asked.question().to_owned(),
+            Some(Prompt::Confirm { asked, .. }) => return asked.question().to_owned(),
             None => {}
         }
         if let Some(message) = &self.message {
@@ -1114,8 +1114,7 @@ impl Explorer {
 
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
-        if let Some(Prompt::Confirm(asked)) = &self.prompt {
-            self.asked_of_a_drop = false;
+        if let Some(Prompt::Confirm { asked, .. }) = &self.prompt {
             if let Some(op) = asked.answer(stroke) {
                 self.asks.push(Ask::Op(op));
             } else {
@@ -1126,7 +1125,7 @@ impl Explorer {
         }
         if let Some(prompt) = list::prompt_key(&mut self.prompt, stroke, |prompt| match prompt {
             Prompt::Add { name, .. } | Prompt::Rename { name, .. } => Some(name),
-            Prompt::Confirm(_) => None,
+            Prompt::Confirm { .. } => None,
         }) {
             self.prompted(prompt);
         }
@@ -1161,7 +1160,7 @@ impl Explorer {
                     self.asks.push(Ask::Op(op));
                 }
             }
-            Prompt::Confirm(_) => {}
+            Prompt::Confirm { .. } => {}
         }
     }
 
@@ -2152,7 +2151,7 @@ impl Explorer {
             return context;
         }
         match &self.prompt {
-            Some(Prompt::Confirm(asked)) => {
+            Some(Prompt::Confirm { asked, .. }) => {
                 return crate::shortcuts::bindings::list(
                     "Confirm file operation",
                     None,
@@ -2175,7 +2174,8 @@ impl Explorer {
 /// The question asking whether to do `op`: `y` does it, and any other key
 /// doesn't.
 fn confirm(question: String, op: FileOp) -> Prompt {
-    Prompt::Confirm(crate::vim::confirm::Confirm::new(question).choice('y', "Confirm", op))
+    let asked = crate::vim::confirm::Confirm::new(question).choice('y', "Confirm", op);
+    Prompt::Confirm { asked, now: false }
 }
 
 impl ListPane for Explorer {

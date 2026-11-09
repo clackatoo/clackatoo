@@ -1507,3 +1507,36 @@ fn saved_paths_reveal_hidden_items_and_refuse_known_deleted_items() {
     assert!(!explorer.show_place(&saved));
     assert_eq!(at(&mut explorer), "/p/visible");
 }
+
+#[test]
+fn only_a_drops_question_wants_a_key_pressed_now_not_one_asked_after_it() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, project());
+    let moved = FileOp::Move {
+        from: "/p/a.txt".into(),
+        to: "/a.txt".into(),
+        overwrite: None,
+        expect: None,
+    };
+    explorer.ask_of_a_drop("move a.txt out of ~/p, into /? (y/n)".into(), moved.clone());
+    assert!(explorer.asks_a_key_now());
+    // A question an answer asks in its place is the explorer's own.
+    let there = FileOpError::Exists {
+        path: "/a.txt".into(),
+        what: "a file of 3 KB".into(),
+        stamp: clackatoo_protocol::FileStamp {
+            device: 1,
+            inode: 2,
+            len: 3000,
+            seconds: 4,
+            nanoseconds: 5,
+        },
+    };
+    explorer.answered(0, moved, Err(there));
+    assert!(
+        explorer.label().contains("write over it"),
+        "{}",
+        explorer.label()
+    );
+    assert!(!explorer.asks_a_key_now());
+}
