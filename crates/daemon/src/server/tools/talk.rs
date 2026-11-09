@@ -837,10 +837,14 @@ impl Daemon {
         let more_subagents = self.subagents_cap(to) > self.subagents_cap(chat);
         // The browser on, or let open pages without asking, where this
         // one's isn't; or access to a window, which a window gives one
-        // chat at a time, so never this one too.
+        // chat at a time, so never this one too. Not between a chat and
+        // one it started itself, either way: what the user let that one
+        // do, they let it do working for this one. The agents' own
+        // "allow always" rules aren't known here, so aren't compared.
+        let kin = own.relations().parent == Some(to) || target.relations().parent == Some(chat);
         let more_browser =
-            target.browser() && (!own.browser() || (target.browsing() && !own.browsing()));
-        let window = self.tools.native.contains_key(&to);
+            !kin && target.browser() && (!own.browser() || (target.browsing() && !own.browsing()));
+        let window = !kin && self.tools.native.contains_key(&to);
         (reach(target.tools()) > reach(own.tools())
             || limits(target) < limits(own)
             || mode_looser
@@ -2434,14 +2438,17 @@ mod tests {
 
     /// A chat with the browser on, or let open pages without asking, may
     /// do more than one without, and so may one a window gave access to:
-    /// no chat gains them through another (CLACKA-220).
+    /// no chat gains them through another (CLACKA-220); but a chat and
+    /// one it started itself message each other whatever they hold, as
+    /// what the user let the one do, it did working for the other.
     #[test]
     fn a_chat_with_the_browser_or_a_window_may_do_more() {
         use clackatoo_protocol::{ChatAction, NativeAccess};
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, _) = daemon_with_chat(dir.path());
-        let pm = idle_chat(&mut daemon, 2);
-        let builder = answered_chat(&mut daemon, 3, (pm, pm, 1));
+        let parent = idle_chat(&mut daemon, 2);
+        let builder = answered_chat(&mut daemon, 3, (parent, parent, 1));
+        let pm = answered_chat(&mut daemon, 4, (parent, parent, 1));
         assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
         let browser = |on: &str| ChatAction::Set {
             setting: "clackatoo.browser".into(),
@@ -2451,6 +2458,7 @@ mod tests {
         let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
         assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+        assert_eq!(daemon.talk_refused(parent, &send(pm)), None, "its own");
         // Both on, but one let open pages without asking.
         drop(daemon.chat(builder).unwrap().act(browser("on")));
         assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
@@ -2476,6 +2484,11 @@ mod tests {
         let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
         assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+        // Between a chat and one it started, either way, it doesn't count.
+        assert_eq!(daemon.talk_refused(parent, &send(pm)), None);
+        (daemon.tools.native).insert(parent, (mio::Token(8), NativeAccess::Control));
+        assert_eq!(daemon.talk_refused(pm, &send(parent)), None);
+        assert!(daemon.talk_refused(builder, &send(parent)).is_none());
     }
 
     /// Shows the chat `id` in a workspace of its own.
