@@ -13096,6 +13096,41 @@ fn what_git_says_goes_as_what_changed_to_a_client_that_asks() {
 }
 
 #[test]
+fn an_explorer_rooted_somewhere_else_keeps_none_of_the_marks_of_where_it_was() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\n", "changed\n").canonicalize().unwrap();
+    let plain = dir.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let plain = plain.canonicalize().unwrap();
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &repo);
+    let attach = Request::AttachFiles {
+        files,
+        changes: true,
+        git_changes: true,
+    };
+    assert!(matches!(client.request(&attach), Ok(Response::Done)));
+    let mut marks = Vec::new();
+    while marks.is_empty() {
+        marks = next_marks_from(&mut client, &marks).0;
+    }
+
+    // Rooted in no repository: told git says nothing, whole.
+    let root = |dir: &Path| FilesAction::Root(dir.display().to_string());
+    files_action(&mut client, files, root(&plain));
+    let (now, whole) = next_marks_from(&mut client, &marks);
+    assert!(whole && now.is_empty(), "{now:?}");
+
+    // Back in it: what git says of it, whole, never as changes to what
+    // was said of somewhere else.
+    files_action(&mut client, files, root(&repo));
+    let (back, whole) = next_marks_from(&mut client, &now);
+    assert!(whole);
+    assert_eq!(back, marks);
+}
+
+#[test]
 fn a_repository_inside_another_has_git_asked_about_it_once_its_expanded() {
     let daemon = TestDaemon::start();
     let dir = daemon.dir.path();

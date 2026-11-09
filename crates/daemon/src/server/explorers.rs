@@ -197,6 +197,9 @@ struct Explorer {
     /// What they say changed while it was, so it's merged again once it's
     /// done.
     merge_again: bool,
+    /// How many times it's been rooted somewhere else: a merge from before
+    /// the last is of another root's repositories, and is dropped.
+    rooted: u64,
     /// The top of the work tree its root is in, once found, if it's in one.
     repo: Option<PathBuf>,
     /// The tops of the repositories found inside folders expanded in it,
@@ -329,6 +332,7 @@ impl Daemon {
             marks_sent: Vec::new(),
             merging: false,
             merge_again: false,
+            rooted: 0,
             repo: None,
             nested: Vec::new(),
         };
@@ -545,6 +549,12 @@ impl Daemon {
             return;
         }
         explorer.root.clone_from(&root);
+        // What git said of the old root's is sent whole once it's said of
+        // the new root's, or as nothing if it's in no repository: no merge
+        // of the old one's lands, nor are changes to it sent.
+        explorer.rooted += 1;
+        explorer.marks = None;
+        explorer.marks_sent.clear();
         let old = explorer.repo.take();
         let nested = std::mem::take(&mut explorer.nested);
         let viewers = explorer.viewers.clone();
@@ -1065,9 +1075,10 @@ impl Daemon {
                 Done::Status { top, marks } => self.marked(&top, marks),
                 Done::Merged {
                     files,
+                    rooted,
                     marks,
                     changes,
-                } => self.marks_merged(files, &marks, changes),
+                } => self.marks_merged(files, rooted, &marks, changes),
                 Done::Op {
                     ticket,
                     changed,
@@ -1281,7 +1292,19 @@ impl Daemon {
                 explorer.nested.retain(|nested| nested != root);
             }
         }
-        let Some((top, git_dir)) = found else { return };
+        let Some((top, git_dir)) = found else {
+            // Explorers rooted here say so, as one rooted somewhere else
+            // before may have marks from there.
+            let unmarked: Vec<FilesId> = (self.explorers.list.iter())
+                .filter(|(_, explorer)| explorer.root == root && explorer.repo.is_none())
+                .filter(|(_, explorer)| explorer.nested.is_empty())
+                .map(|(&files, _)| files)
+                .collect();
+            for files in unmarked {
+                self.no_marks(files);
+            }
+            return;
+        };
         let mut used = false;
         for explorer in self.explorers.list.values_mut() {
             if explorer.root == root && explorer.repo.is_none() {
@@ -1352,12 +1375,20 @@ impl Daemon {
             explorer.merge_again = true;
             return;
         }
+        let rooted = explorer.rooted;
+        // The first, a sort and no more, is merged here, so it never waits
+        // behind a slow repository's git on the thread.
+        if explorer.marks.is_none() {
+            let marks = Arc::new(said.merged());
+            self.marks_merged(files, rooted, &marks, None);
+            return;
+        }
         // What changed is worked out only for those who asked.
         let changes =
             (explorer.marks_sent.iter()).any(|token| explorer.git_changes.contains(token));
         let before = explorer.marks.clone();
         let merging = (self.explorers.workers.as_ref())
-            .is_some_and(|workers| workers.merge(files, said, before, changes));
+            .is_some_and(|workers| workers.merge(files, rooted, said, before, changes));
         if let Some(explorer) = self.explorers.list.get_mut(&files) {
             explorer.merging = merging;
         }
@@ -1366,13 +1397,26 @@ impl Daemon {
     /// Sends what explorer `files`' repositories say, merged, `marks`, to
     /// every client following it that hasn't had it: to one that was sent
     /// the merge before and asked for changes, as what `changes` says
-    /// changed since, if it says.
-    fn marks_merged(&mut self, files: FilesId, marks: &Arc<Marks>, changes: Option<MarksChanges>) {
+    /// changed since, if it says. One merged before the explorer was
+    /// rooted where it is, the `rooted`th time, is dropped.
+    fn marks_merged(
+        &mut self,
+        files: FilesId,
+        rooted: u64,
+        marks: &Arc<Marks>,
+        changes: Option<MarksChanges>,
+    ) {
         let Some(explorer) = self.explorers.list.get_mut(&files) else {
             return;
         };
         explorer.merging = false;
         let again = std::mem::take(&mut explorer.merge_again);
+        if rooted != explorer.rooted {
+            if again {
+                self.send_marks_to(files);
+            }
+            return;
+        }
         // Those sent what it last said, who have what changes change.
         let had = std::mem::replace(&mut explorer.marks_sent, explorer.viewers.clone());
         let mut viewers = explorer.viewers.clone();
@@ -1407,6 +1451,20 @@ impl Daemon {
         }
         if again {
             self.send_marks_to(files);
+        }
+    }
+
+    /// Tells every client following explorer `files` that git says
+    /// nothing of its files, as its root is in no repository.
+    fn no_marks(&mut self, files: FilesId) {
+        let Some(explorer) = self.explorers.list.get_mut(&files) else {
+            return;
+        };
+        explorer.marks = Some(Arc::new(Vec::new()));
+        explorer.marks_sent.clone_from(&explorer.viewers);
+        let viewers = explorer.viewers.clone();
+        for viewer in viewers {
+            self.tell_files(viewer, files, FilesUpdate::Git(Vec::new()));
         }
     }
 

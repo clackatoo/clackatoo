@@ -76,11 +76,13 @@ pub(crate) enum Done {
         marks: Option<Arc<Marks>>,
     },
     /// What git says of explorer `files`' files, merged from what its
-    /// repositories say: the merge it was worked out against itself, if
-    /// it's the same; and what changed since that, if that was asked for
-    /// and is less than it whole.
+    /// repositories say, while it was rooted where the loop numbered
+    /// `rooted`: the merge it was worked out against itself, if it's the
+    /// same; and what changed since that, if that was asked for and is
+    /// less than it whole.
     Merged {
         files: FilesId,
+        rooted: u64,
         marks: Arc<Marks>,
         changes: Option<MarksChanges>,
     },
@@ -148,7 +150,7 @@ impl Said {
     /// What it comes to: what the outer repository says, but for what's in
     /// the repositories inside it, and what they say of themselves; in
     /// order.
-    fn merged(&self) -> Marks {
+    pub(crate) fn merged(&self) -> Marks {
         let inside = |path: &str| (self.nested.iter()).any(|top| Path::new(path).starts_with(top));
         let mut marks = Marks::new();
         if let Some(outer) = &self.outer {
@@ -288,14 +290,16 @@ impl Workers {
         });
     }
 
-    /// Merges what explorer `files`' repositories say, `said`, and works
-    /// out whether it's the same as `before`, the last merge, and if
-    /// `changes`, what changed since: here, not on the loop, as a big
-    /// repository's marks are long. Returns whether the thread took it.
+    /// Merges what explorer `files`' repositories say, `said`, while it's
+    /// rooted where the loop numbered `rooted`, and works out whether it's
+    /// the same as `before`, the last merge, and if `changes`, what
+    /// changed since: here, not on the loop, as a big repository's marks
+    /// are long. Returns whether the thread took it.
     #[must_use]
     pub(crate) fn merge(
         &self,
         files: FilesId,
+        rooted: u64,
         said: Said,
         before: Option<Arc<Marks>>,
         changes: bool,
@@ -315,6 +319,7 @@ impl Workers {
             };
             Done::Merged {
                 files,
+                rooted,
                 marks,
                 changes,
             }
@@ -603,7 +608,7 @@ mod tests {
     /// What the thread for git makes of merging `said` against `before`.
     fn merge(said: Said, before: Option<Arc<Marks>>) -> (Arc<Marks>, Option<MarksChanges>) {
         let workers = Workers::start(|| {}).unwrap();
-        assert!(workers.merge(FilesId(1), said, before, true));
+        assert!(workers.merge(FilesId(1), 0, said, before, true));
         loop {
             for done in workers.take() {
                 if let Done::Merged { marks, changes, .. } = done {
