@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Code points in one Unicode plane.
 const PLANE_LEN: usize = 0x1_0000;
@@ -131,6 +131,49 @@ pub fn visible(text: impl IntoIterator<Item = char>, most: usize) -> String {
     shown
 }
 
+/// The rules a terminal lays its cells out by, beyond each character's
+/// own width ([`of`]): which cells a character joining them makes wide.
+/// Fixed for a terminal's life, as its rows are rebuilt from their text
+/// by them (see [`RowBuilder`](crate::RowBuilder)), so whatever lays a
+/// terminal's rows out again, a window or the next build, must use the
+/// same. The default is the rules before there were any: no cell widens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Widths {
+    /// A character with an emoji form that variation selector 16
+    /// (U+FE0F) follows takes two columns, as kitty and Ghostty draw it:
+    /// ❤ is one column, ❤️ two.
+    pub vs16: bool,
+}
+
+impl Widths {
+    /// The rules before there were any: what a terminal restored from a
+    /// build before them was laid out by.
+    pub const LEGACY: Self = Self { vs16: false };
+
+    /// Whether a cell holding `first`, a character one column wide, then
+    /// `rest`, takes two columns by these rules.
+    pub(crate) fn widens(self, first: char, rest: &[char]) -> bool {
+        match rest.first() {
+            Some('\u{FE0F}') if self.vs16 => emoji_form(first),
+            _ => false,
+        }
+    }
+}
+
+/// Whether `ch` has an emoji form that variation selector 16 asks for,
+/// as `unicode-width` reads the pair, taking two columns: ❤, ☺, ✔, but
+/// not a letter.
+fn emoji_form(ch: char) -> bool {
+    if of(ch) != Some(1) {
+        return false;
+    }
+    let mut pair = [0; 8];
+    let len = ch.encode_utf8(&mut pair).len();
+    '\u{FE0F}'.encode_utf8(&mut pair[len..]);
+    std::str::from_utf8(&pair[..len + 3]).is_ok_and(|pair| pair.width() == 2)
+}
+
 /// The columns `ch` takes: 0 for combining characters, 2 for wide ones, and
 /// `None` for controls.
 ///
@@ -180,6 +223,20 @@ mod tests {
         }
         assert_eq!('\u{17D8}'.width(), Some(3), "unicode-width still says 3");
         assert_eq!(of('\u{17D8}'), Some(2));
+    }
+
+    #[test]
+    fn vs16_widens_only_what_has_an_emoji_form() {
+        let vs16 = Widths { vs16: true };
+        for ch in ['❤', '☺', '✔', '☝'] {
+            assert!(vs16.widens(ch, &['\u{FE0F}']), "{ch:?}");
+            assert!(!Widths::LEGACY.widens(ch, &['\u{FE0F}']), "{ch:?}");
+            assert!(!vs16.widens(ch, &['\u{301}', '\u{FE0F}']), "{ch:?}");
+        }
+        for ch in ['a', 'é', '中'] {
+            assert!(!vs16.widens(ch, &['\u{FE0F}']), "{ch:?}");
+        }
+        assert!(!vs16.widens('❤', &['\u{FE0E}']), "VS15 asks for text");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::snapshot::{Captured, Line, LineLinks, RestoreError};
 use crate::style::Style;
+use crate::width::Widths;
 
 /// A screen of rows and the history above it.
 ///
@@ -25,6 +26,8 @@ pub struct Grid {
     damage: Damage,
     width: usize,
     height: usize,
+    /// The rules its rows are laid out by: the terminal's.
+    widths: Widths,
 }
 
 impl Grid {
@@ -40,7 +43,15 @@ impl Grid {
             damage: Self::all_damaged(),
             width,
             height,
+            widths: Widths::LEGACY,
         }
+    }
+
+    /// Lays its rows out by `widths`, and its history's as it rebuilds
+    /// them, as the terminal does.
+    pub(crate) fn set_widths(&mut self, widths: Widths) {
+        self.widths = widths;
+        self.scrollback.set_widths(widths);
     }
 
     /// The screen's rows and its history's, oldest first, for a snapshot,
@@ -66,26 +77,29 @@ impl Grid {
         width: usize,
         screen: &[Line],
         mut links: LineLinks<'_>,
-        history: Scrollback,
+        mut history: Scrollback,
+        widths: Widths,
     ) -> Result<Self, RestoreError> {
         let rows = screen
             .iter()
             .enumerate()
             .map(|(number, line)| {
                 if usize::from(line.width) == width {
-                    line.to_linked_row(&links.of(number)?)
+                    line.to_linked_row(&links.of(number)?, widths)
                 } else {
                     Err(RestoreError("a screen line isn't as wide as the screen"))
                 }
             })
             .collect::<Result<VecDeque<_>, _>>()?;
         links.finish()?;
+        history.set_widths(widths);
         Ok(Self {
             height: rows.len(),
             rows,
             scrollback: history,
             damage: Self::all_damaged(),
             width,
+            widths,
         })
     }
 
@@ -462,7 +476,9 @@ impl Grid {
                 if cell.is_wide_spacer() {
                     continue;
                 }
-                let cells = if cell.is_wide() { 2 } else { 1 };
+                // One its row had no room to widen may have it now.
+                let wide = cell.is_wide() || row.wants_wide(col, self.widths);
+                let cells = if wide { 2 } else { 1 };
                 if cells > width {
                     continue;
                 }
@@ -507,7 +523,7 @@ impl Grid {
                         (rows.len(), (out_col + cursor.1 - col).min(width - 1))
                     };
                 }
-                copy_cell(&mut out, out_col, row, col);
+                copy_cell(&mut out, out_col, row, col, wide);
                 out_col += cells;
             }
             if let Some(mark) = mark {
@@ -577,7 +593,7 @@ impl Grid {
                         continue;
                     }
                     if cell != crate::Cell::BLANK {
-                        copy_cell(&mut cropped, col, row, col);
+                        copy_cell(&mut cropped, col, row, col, cell.is_wide());
                     }
                 }
                 cropped
@@ -685,9 +701,9 @@ fn content_end(row: &Row) -> usize {
 
 /// Copies the cell at `src_col` of `src`, with its style and grapheme, to
 /// `dst_col` of `dst`.
-fn copy_cell(dst: &mut Row, dst_col: usize, src: &Row, src_col: usize) {
+fn copy_cell(dst: &mut Row, dst_col: usize, src: &Row, src_col: usize, wide: bool) {
     let cell = src.cells()[src_col];
-    dst.write(dst_col, cell.ch(), cell.is_wide(), src.style(cell));
+    dst.write(dst_col, cell.ch(), wide, src.style(cell));
     if let Some(extra) = src.grapheme(src_col) {
         for &ch in extra {
             dst.append_to_grapheme(dst_col, ch);

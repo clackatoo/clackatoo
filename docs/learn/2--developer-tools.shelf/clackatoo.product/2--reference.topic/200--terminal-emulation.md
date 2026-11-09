@@ -174,6 +174,17 @@ desktop; nothing about it passes between machines.
 - **Combining characters** (accents, variation selectors) join the character
   before them. So do characters after a zero-width joiner, so emoji sequences
   such as 👩&#x200D;💻 stay one character.
+- **Variation selector 16** (U+FE0F), after a character that has an emoji
+  form one column wide, as ❤ or ✔ has, makes it two columns wide, as kitty
+  and Ghostty draw it: the cursor moves on a column more, over what was
+  there. In the last column, with no room, it stays one column wide until a
+  resize gives it some. `vs16 = false` in `daemon/machine.toml`'s
+  [`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) keeps
+  it one column, for programs that count it so; each terminal keeps the rule
+  it started with, through upgrades too, and one carried over from a build
+  before the rule keeps the old one. A window older than protocol 143 gets
+  each widened emoji's second column as a space, so what follows it stays in
+  its column.
 
 ## Supported sequences
 
@@ -345,4 +356,3 @@ These are ignored:
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and
   mouse reports in pixels (mode 1016).
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).
-- Variation selector 16 does not widen the character before it.

@@ -516,7 +516,10 @@ impl Pane {
             }
             (Some(Pending::History(asked, generation)), Response::History(lines)) => {
                 let shown = self.shown_history();
-                self.history.receive(&lines, &asked, generation, &shown);
+                let widths = (self.screen.as_ref())
+                    .map_or_else(Default::default, |screen| screen.state.widths);
+                self.history
+                    .receive(&lines, &asked, generation, &shown, widths);
                 self.changes += 1;
                 if generation == self.history.generation() {
                     self.learn_links(&lines.links);

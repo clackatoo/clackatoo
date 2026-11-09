@@ -290,6 +290,59 @@ impl Row {
         }
     }
 
+    /// Makes the character at `col`, one column wide, two columns wide,
+    /// as a character joining it can (see [`Widths`](crate::Widths)): the
+    /// cell after it, which must be in the row, becomes its spacer.
+    pub(crate) fn widen(&mut self, col: usize) {
+        debug_assert!(col + 1 < self.width(), "a wide character needs two cells");
+        debug_assert!(!self.cells[col].is_wide() && !self.cells[col].is_wide_spacer());
+        self.allocate();
+        let style = self.cells[col].style();
+        self.unlink_wide(col + 1);
+        self.set_cell(col + 1, Cell::new(' ', style, CellFlags::WIDE_SPACER));
+        self.cells[col].add_flags(CellFlags::WIDE);
+    }
+
+    /// Whether the cell at `col`, one column wide, takes two by `widths`,
+    /// as what joined it says (see [`Widths`](crate::Widths)), if there's
+    /// room for it.
+    pub(crate) fn wants_wide(&self, col: usize, widths: crate::Widths) -> bool {
+        let cell = self.cells()[col];
+        !cell.is_wide()
+            && !cell.is_wide_spacer()
+            && cell.has_grapheme()
+            && (self.grapheme(col)).is_some_and(|rest| widths.widens(cell.ch(), rest))
+    }
+
+    /// Appends the text of the cell at `col` to `out` as a terminal laid
+    /// out by [`Widths::LEGACY`](crate::Widths::LEGACY) would rebuild it
+    /// in the same columns: its first character and what joins it by
+    /// those rules (zero-width characters, and a character after a ZWJ),
+    /// and for a cell widened by what joined it, a space after, filling
+    /// its second column. What a newer rule joined that the old one
+    /// wouldn't is left out. For a peer from before the rules.
+    pub fn push_text_as_before(&self, col: usize, out: &mut String) {
+        let cell = self.cells()[col];
+        if cell.is_wide_spacer() {
+            return;
+        }
+        let first = cell.ch();
+        out.push(first);
+        let mut joins = false;
+        for &ch in self.grapheme(col).unwrap_or_default() {
+            if !joins && crate::width::of(ch) != Some(0) {
+                break;
+            }
+            out.push(ch);
+            joins = ch == crate::terminal::ZWJ;
+        }
+        // A space after a ZWJ would join it.
+        if cell.is_wide() && crate::width::of(first) == Some(1) {
+            out.truncate(out.trim_end_matches(crate::terminal::ZWJ).len());
+            out.push(' ');
+        }
+    }
+
     /// The last codepoint of the cell at `col`.
     pub(crate) fn last_char(&self, col: usize) -> char {
         self.grapheme(col)

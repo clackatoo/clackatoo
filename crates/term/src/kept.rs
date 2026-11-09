@@ -194,7 +194,8 @@ impl KeptLines {
             .collect()
     }
 
-    /// The lines as history for a terminal made with `config`, followed by
+    /// The lines as history for a terminal made with `config`, laid out by
+    /// its rules (see [`Widths`](crate::Widths)), followed by
     /// one more, `divider`, dimmed, which says where the restart was: made
     /// where it won't hold up the terminal's own thread, as each line is
     /// made a row again and compacted.
@@ -204,7 +205,7 @@ impl KeptLines {
     /// If a line can't be made a row, as one with no columns.
     pub fn history(&self, config: &Config, divider: &str) -> Result<KeptHistory, RestoreError> {
         let rows = self.lines.iter().map(|kept| {
-            let mut row = kept.line.to_linked_row(&[])?;
+            let mut row = kept.line.to_linked_row(&[], config.widths)?;
             row.add_hints(Hints::from_bits_truncate(kept.hints) - Hints::NOSAVE);
             Ok(row)
         });
@@ -227,6 +228,7 @@ impl KeptLines {
             config.scrollback_compaction,
             rows.chain(std::iter::once(Ok(divider))),
             0,
+            config.widths,
         )?;
         Ok(KeptHistory { history })
     }

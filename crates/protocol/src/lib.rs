@@ -79,7 +79,7 @@ use std::fmt;
 pub use clackatoo_term::{
     Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Notice,
     Notification, Palette, Position, Selection, ShellState, Size, Style, TaskProgress, Underline,
-    Urgency, Which,
+    Urgency, Which, Widths,
 };
 use serde::{Deserialize, Serialize};
 

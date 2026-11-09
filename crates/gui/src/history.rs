@@ -101,6 +101,7 @@ impl History {
         asked: &Range<u64>,
         generation: u64,
         view: &Range<u64>,
+        widths: clackatoo_protocol::Widths,
     ) {
         if generation != self.generation {
             return;
@@ -118,7 +119,7 @@ impl History {
         }
         for (number, line) in (lines.first..).zip(&lines.lines) {
             self.rows
-                .insert(number, line.line.to_row(usize::from(line.width)));
+                .insert(number, line.line.to_row(usize::from(line.width), widths));
             self.prompts.remove(&number);
         }
         self.prompts.extend(
@@ -137,6 +138,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clackatoo_protocol::Widths;
 
     #[test]
     fn answers_to_fetches_from_before_a_clear_are_dropped() {
@@ -151,7 +153,7 @@ mod tests {
             links: Vec::new(),
             marks: clackatoo_protocol::BlockMarks::default(),
         };
-        history.receive(&answer, &asked, generation, &(90..100));
+        history.receive(&answer, &asked, generation, &(90..100), Widths::LEGACY);
         assert_eq!(history.start, None);
         assert_eq!(history.fetch(40..50, 50), Some(0..50));
     }
@@ -175,7 +177,13 @@ mod tests {
                 exits: vec![(7, 2)],
             },
         };
-        history.receive(&answer, &asked, history.generation(), &(10..14));
+        history.receive(
+            &answer,
+            &asked,
+            history.generation(),
+            &(10..14),
+            Widths::LEGACY,
+        );
         assert_eq!(
             history.prompts(0..20).collect::<Vec<_>>(),
             [(11, 7), (13, 8)]

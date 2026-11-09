@@ -29,7 +29,7 @@ use crate::snapshot::{
 };
 use crate::style::Style;
 use crate::tabs::TabStops;
-use crate::width;
+use crate::width::{self, Widths};
 
 /// Settings fixed when a terminal is created.
 #[derive(Clone, Debug)]
@@ -43,6 +43,9 @@ pub struct Config {
     /// as a link to a local file, `file:///path`, so a window anywhere
     /// knows it's on the daemon's machine.
     pub local_host: Option<String>,
+    /// The rules its cells are laid out by (see [`Widths`]): by default,
+    /// variation selector 16 widens an emoji, as in kitty and Ghostty.
+    pub widths: Widths,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             scrollback_lines: 10_000,
             scrollback_compaction: Compaction::default(),
             local_host: None,
+            widths: Widths { vs16: true },
         }
     }
 }
@@ -263,6 +267,13 @@ impl Terminal {
         }
     }
 
+    /// The rules its cells are laid out by, which whatever rebuilds its
+    /// rows from their text must use too (see [`Widths`]).
+    #[must_use]
+    pub fn widths(&self) -> Widths {
+        self.emulator.config.widths
+    }
+
     /// The kitty keyboard protocol's flags in effect: how the program on
     /// the screen shown wants keys encoded, beyond
     /// [`input_modes`](Self::input_modes) (see [`crate::keyboard`]). 0
@@ -432,18 +443,32 @@ impl Terminal {
         let history = Scrollback::restored(
             config.scrollback_lines,
             config.scrollback_compaction,
-            (snapshot.history.iter().enumerate())
-                .map(|(number, line)| line.to_linked_row(&history_links.of(number)?)),
+            (snapshot.history.iter().enumerate()).map(|(number, line)| {
+                line.to_linked_row(&history_links.of(number)?, config.widths)
+            }),
             snapshot.history_end,
+            config.widths,
         )?;
         history_links.finish()?;
         let mut emulator = Emulator::new(size, config);
         let primary_links = LineLinks::new(&links.primary, &table);
-        emulator.primary = Grid::restored(width, &snapshot.primary, primary_links, history)?;
+        emulator.primary = Grid::restored(
+            width,
+            &snapshot.primary,
+            primary_links,
+            history,
+            config.widths,
+        )?;
         let alternate_links = LineLinks::new(&links.alternate, &table);
         emulator.alternate = if let Some(screen) = snapshot.alternate.as_deref() {
             let history = Scrollback::new(0, Compaction::Off);
-            Some(Grid::restored(width, screen, alternate_links, history)?)
+            Some(Grid::restored(
+                width,
+                screen,
+                alternate_links,
+                history,
+                config.widths,
+            )?)
         } else {
             alternate_links.finish()?;
             None
@@ -895,15 +920,17 @@ pub(crate) struct Emulator {
 impl Emulator {
     fn new(size: Size, config: &Config) -> Self {
         let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
+        let mut primary = Grid::new(
+            width,
+            height,
+            config.scrollback_lines,
+            config.scrollback_compaction,
+        );
+        primary.set_widths(config.widths);
         Self {
             size,
             config: config.clone(),
-            primary: Grid::new(
-                width,
-                height,
-                config.scrollback_lines,
-                config.scrollback_compaction,
-            ),
+            primary,
             alternate: None,
             screen: Screen::Primary,
             cursor: CursorState::default(),
@@ -1028,8 +1055,10 @@ impl Emulator {
             screen,
             cursor,
             last_printed,
+            config,
             ..
         } = self;
+        let widths = config.widths;
         let grid = match screen {
             Screen::Primary => primary,
             Screen::Alternate => alternate.as_mut().expect(ALTERNATE_EXISTS),
@@ -1075,6 +1104,12 @@ impl Emulator {
                     joins = match previous_cell(row, cursor) {
                         Some(col) => {
                             row.append_to_grapheme(col, ch);
+                            // What joined it may make it wide, if there's
+                            // room: the cursor is then past both halves.
+                            if col + 1 < width && row.wants_wide(col, widths) {
+                                row.widen(col);
+                                advance(cursor, 1, width, autowrap);
+                            }
                             // Not just `ch == ZWJ`: a full grapheme drops
                             // what's appended.
                             ends_in_zwj(row, col)
@@ -1157,11 +1192,25 @@ impl Emulator {
         self.last_printed = Some(ch);
     }
 
-    /// Adds a zero-width codepoint to the character before the cursor.
+    /// Adds a zero-width codepoint to the character before the cursor,
+    /// which it may make wide (see [`Widths`]): then the cursor is past
+    /// both halves, and in insert mode, the rest of the line moves right.
     fn print_zero_width(&mut self, ch: char) {
-        if let Some(col) = self.previous_cell() {
-            let line = self.cursor.line;
-            self.grid_mut().row_mut(line).append_to_grapheme(col, ch);
+        let Some(col) = self.previous_cell() else {
+            return;
+        };
+        let (width, widths) = (self.width(), self.config.widths);
+        let autowrap = self.modes.contains(Modes::AUTOWRAP);
+        let insert = self.modes.contains(Modes::INSERT);
+        let CursorState { line, pen, .. } = self.cursor;
+        let row = self.grid_mut().row_mut(line);
+        row.append_to_grapheme(col, ch);
+        if col + 1 < width && row.wants_wide(col, widths) {
+            if insert {
+                row.insert_blanks(col + 1, 1, &pen);
+            }
+            row.widen(col);
+            advance(&mut self.cursor, 1, width, autowrap);
         }
     }
 
@@ -1639,8 +1688,12 @@ impl Emulator {
         }
         if alternate {
             let (width, height) = (self.width(), self.height());
-            self.alternate
-                .get_or_insert_with(|| Grid::new(width, height, 0, Compaction::Off));
+            let widths = self.config.widths;
+            self.alternate.get_or_insert_with(|| {
+                let mut grid = Grid::new(width, height, 0, Compaction::Off);
+                grid.set_widths(widths);
+                grid
+            });
             // A program that switches to it starts with no keyboard flags,
             // whatever one that ended without popping them left.
             self.keyboard_alternate = keyboard::Stack::default();

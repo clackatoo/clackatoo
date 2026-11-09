@@ -54,6 +54,89 @@ fn red_bg() -> Style {
 mod printing {
     use super::*;
 
+    /// The cells of row `line`: each one's text, `*` for a wide one's
+    /// spacer.
+    fn texts(t: &Terminal, line: usize) -> Vec<String> {
+        let row = t.grid().row(line);
+        (0..row.width())
+            .map(|col| {
+                if row.cells()[col].is_wide_spacer() {
+                    return "*".to_owned();
+                }
+                let mut text = String::new();
+                row.push_text(col, &mut text);
+                text
+            })
+            .collect()
+    }
+
+    #[test]
+    fn variation_selector_16_widens_an_emoji_and_moves_the_cursor_on() {
+        let t = after(6, 2, "\u{2764}\u{FE0F}x\u{2764}y");
+        assert_eq!(
+            texts(&t, 0),
+            ["\u{2764}\u{FE0F}", "*", "x", "\u{2764}", "y", " "]
+        );
+        assert!(t.grid().row(0).cells()[0].is_wide());
+        assert_eq!(cursor(&t), (0, 5));
+        // Over what was there, a wide character's half included.
+        let t = after(6, 2, "a字\r\u{2764}\u{FE0F}");
+        assert_eq!(texts(&t, 0), ["\u{2764}\u{FE0F}", "*", " ", " ", " ", " "]);
+        // A letter isn't widened, nor what's a VS16 apart.
+        let t = after(6, 2, "a\u{FE0F}\u{2764}\u{301}\u{FE0F}");
+        assert_eq!(cursor(&t), (0, 2));
+    }
+
+    #[test]
+    fn with_no_room_an_emoji_stays_narrow_until_a_resize_gives_it_some() {
+        let mut t = after(3, 2, "ab\u{2764}\u{FE0F}");
+        assert_eq!(texts(&t, 0), ["a", "b", "\u{2764}\u{FE0F}"]);
+        assert!(!t.grid().row(0).cells()[2].is_wide());
+        // Rewrapped wider, it's laid out as if printed there.
+        t.resize(Size::new(5, 2).unwrap());
+        assert_eq!(texts(&t, 0), ["a", "b", "\u{2764}\u{FE0F}", "*", " "]);
+        t.assert_invariants();
+    }
+
+    #[test]
+    fn insert_mode_makes_room_for_the_wider_half() {
+        let t = after(6, 2, "abc\r\x1b[4h\u{2764}\u{FE0F}");
+        assert_eq!(texts(&t, 0), ["\u{2764}\u{FE0F}", "*", "a", "b", "c", " "]);
+        assert_eq!(cursor(&t), (0, 2));
+    }
+
+    #[test]
+    fn a_terminal_laid_out_as_before_never_widens() {
+        let size = Size::new(6, 2).unwrap();
+        let config = Config {
+            widths: crate::Widths::LEGACY,
+            ..Config::default()
+        };
+        let mut t = Terminal::new(size, &config);
+        t.advance("\u{2764}\u{FE0F}x".as_bytes());
+        assert_eq!(cursor(&t), (0, 2));
+        assert_eq!(t.widths(), crate::Widths::LEGACY);
+    }
+
+    #[test]
+    fn widened_rows_come_back_the_same_from_history_and_snapshots() {
+        let mut t = after(
+            4,
+            1,
+            "a\u{2764}\u{FE0F}b\r\n\u{2764}\u{FE0F}\u{2764}\u{FE0F}\r\n",
+        );
+        t.compact_scrollback();
+        let history: Vec<String> = t.grid().scrollback().map(|row| row.text()).collect();
+        assert_eq!(
+            history,
+            ["a\u{2764}\u{FE0F}b", "\u{2764}\u{FE0F}\u{2764}\u{FE0F}"]
+        );
+        let row = t.grid().scrollback().next().unwrap();
+        assert!(row.cells()[1].is_wide() && row.cells()[3].ch() == 'b');
+        let restored = Terminal::restore(&t.snapshot(), &Config::default()).unwrap();
+        assert_eq!(cells(&restored), cells(&t));
+    }
+
     #[test]
     fn a_character_said_to_be_three_columns_wide_is_drawn_two_wide() {
         // unicode-width gives U+17D8 a width of 3; cells hold at most 2.
@@ -1346,6 +1429,9 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         Just("\u{301}".to_owned()),
         Just("\u{200D}".to_owned()),
         Just("αβ😀".to_owned()),
+        // Variation selector 16 after what it widens, and alone.
+        Just("❤\u{FE0F}".to_owned()),
+        Just("\u{FE0F}".to_owned()),
     ]
     .prop_map(String::into_bytes);
     let control = prop::sample::select(vec![
@@ -1455,6 +1541,7 @@ proptest! {
         t.advance(&bytes);
         for row in t.grid().rows() {
             let mut history = crate::scrollback::Scrollback::new(1, Compaction::Eager);
+            history.set_widths(t.widths());
             history.push(row.clone());
             let stored = history.rows().next().expect("one row was stored");
             prop_assert_eq!(row_contents(&stored), row_contents(row));

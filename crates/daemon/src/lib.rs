@@ -549,9 +549,14 @@ impl DaemonConfig {
             .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty());
+        let mut widths = clackatoo_term::Config::default().widths;
+        if let Some(vs16) = config_dir().and_then(|dir| machine::configured_vs16(&dir)) {
+            widths.vs16 = vs16;
+        }
         Self {
             terminal: clackatoo_term::Config {
                 local_host,
+                widths,
                 ..clackatoo_term::Config::default()
             },
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),

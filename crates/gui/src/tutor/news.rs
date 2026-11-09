@@ -1260,6 +1260,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "A command that ran 10 s or more ends with a notification, if you weren't looking: what failed, and how long it took",
     },
     News {
+        id: "vs16-wide",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "An emoji with variation selector 16 (❤️) takes two columns, as in kitty and Ghostty; vs16 = false to keep one",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

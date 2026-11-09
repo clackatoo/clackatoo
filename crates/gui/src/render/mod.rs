@@ -2048,6 +2048,59 @@ mod tests {
         assert_eq!(renderer.shaped[Variant::Regular as usize].len(), cached);
     }
 
+    #[test]
+    fn an_emoji_widened_by_vs16_is_drawn_over_both_its_cells() {
+        let Some((device, _)) = crate::tests::gpu() else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        let mut fonts = crate::tests::fonts(1.0);
+        if fonts.glyph('👍', Variant::Regular).is_none() {
+            eprintln!("no emoji font; skipping");
+            return;
+        }
+        let widths = clackatoo_term::Widths { vs16: true };
+        let mut builder = clackatoo_term::RowBuilder::with_widths(20, widths);
+        builder.push("\u{2764}\u{FE0F}x", &clackatoo_term::Style::DEFAULT, false);
+        let row = builder.finish(false);
+        assert!(row.cells()[0].is_wide());
+        let rows = [&row];
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        #[allow(clippy::cast_precision_loss)]
+        let cell = fonts.cell.width as f32;
+        let picture = Picture {
+            scenes: &[Scene {
+                scroll: None,
+                origin: [0.0; 2],
+                #[allow(clippy::cast_precision_loss)]
+                size: [20.0 * cell, fonts.cell.height as f32],
+                rows: &rows,
+                cursor: None,
+                normal_mode: false,
+                highlights: &[],
+            }],
+            fills: &[],
+            over: &[],
+            texts: &[],
+            glyphs: &[],
+            over_glyphs: &[],
+            images: &[],
+            transparent: false,
+        };
+        renderer.build(&picture, &mut fonts);
+        let drawn: Vec<(f32, f32, u32)> = (renderer.glyph_instances.iter())
+            .map(|glyph| (glyph.origin[0], glyph.size[0], glyph.colored))
+            .collect();
+        assert_eq!(drawn.len(), 2, "{drawn:?}");
+        let (heart, x) = (drawn[0], drawn[1]);
+        assert_eq!(heart.2, 1, "the emoji form, in colour");
+        assert!(heart.1 > cell * 1.2, "wider than a cell: {heart:?}");
+        assert!(
+            ((x.0 / cell).floor() - 2.0).abs() < f32::EPSILON,
+            "after both its cells: {x:?}"
+        );
+    }
+
     /// A row `width` cells wide holding `text`, continuing on the next if
     /// `wrapped`.
     fn row_of(width: usize, text: &str, wrapped: bool) -> clackatoo_term::Row {

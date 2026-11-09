@@ -112,6 +112,7 @@ notify_after = 30
 | Key | What it does | Default |
 |---|---|---|
 | `notify_after` | How many seconds a command must run for its end to be [told in a notification](~clackatoo/reference/terminal-emulation#long-commands) while you aren't looking at its terminal. 0 tells none. | `10` |
+| `vs16` | Whether [variation selector 16](~clackatoo/reference/terminal-emulation#screen-behavior) widens an emoji to two columns. Terminals already open keep what they started with. | `true` |
 
 It's read when the daemon starts or upgrades.
 

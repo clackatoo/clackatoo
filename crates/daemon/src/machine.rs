@@ -484,6 +484,24 @@ pub(crate) fn configured_long_command(config: &Path) -> Option<Option<std::time:
     Some((seconds > 0).then(|| std::time::Duration::from_secs(seconds)))
 }
 
+/// Whether `daemon/machine.toml` in `config` says variation selector 16
+/// widens an emoji in the terminals the daemon starts, if it says:
+/// `[terminals] vs16 = false` keeps them as wide as the emoji alone (see
+/// [`clackatoo_term::Widths`]). Read as the daemon starts or upgrades; a
+/// terminal keeps the rule it started with.
+pub(crate) fn configured_vs16(config: &Path) -> Option<bool> {
+    let (path, document) = machine_toml(config)?;
+    let vs16 = document.get("terminals")?.get("vs16")?;
+    let Some(vs16) = vs16.as_bool() else {
+        log::warn!(
+            "`vs16` in {}'s [terminals] is true or false",
+            path.display()
+        );
+        return None;
+    };
+    Some(vs16)
+}
+
 /// `daemon/machine.toml` in `config`, and where it is, if it's there and
 /// can be read. One that can't, or isn't TOML, is said in the log.
 fn machine_toml(config: &Path) -> Option<(PathBuf, toml_edit::DocumentMut)> {
@@ -714,6 +732,11 @@ mod tests {
         assert_eq!(configured_long_command(dir.path()), Some(None));
         fs::write(&file, "[terminals]\nnotify_after = -3\n").unwrap();
         assert_eq!(configured_long_command(dir.path()), None);
+        assert_eq!(configured_vs16(dir.path()), None);
+        fs::write(&file, "[terminals]\nvs16 = false\n").unwrap();
+        assert_eq!(configured_vs16(dir.path()), Some(false));
+        fs::write(&file, "[terminals]\nvs16 = \"no\"\n").unwrap();
+        assert_eq!(configured_vs16(dir.path()), None);
         fs::write(&file, "priority = \"off\"\n").unwrap();
         assert_eq!(configured_priority(dir.path()), None);
     }

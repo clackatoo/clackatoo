@@ -886,6 +886,7 @@ impl Subscription {
         }
         if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS_2 {
             state.phone = false;
+            state.widths = clackatoo_term::Widths::LEGACY;
         }
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
@@ -898,7 +899,7 @@ impl Subscription {
             // ended, and history how those it holds did.
             self.settled = BlockMarks::settled(terminal);
             self.damage.clear();
-            let mut view = View::capture(terminal);
+            let mut view = View::capture_for(terminal, wire);
             if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
                 grid.state.agent = agent;
                 grid.state.fed = fed;
@@ -925,7 +926,7 @@ impl Subscription {
         self.damage.clear();
         let row = |line: u16| grid.row(usize::from(line));
         let lines: Vec<(u16, Line)> = (damaged.iter())
-            .map(|&line| (line, Line::from_row(row(line))))
+            .map(|&line| (line, Line::from_row_for(row(line), wire)))
             .collect();
         // Only a window that reads them is told where prompts are, or how
         // blocks ended: a look at each line sent, and at the blocks after
@@ -1404,7 +1405,11 @@ impl Daemon {
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
             let shell = (state.shells.iter()).find(|shell| shell.terminal == terminal.id);
-            let resumed = HostedTerminal::resume(terminal, shell, fds, &daemon.config)
+            // Its rows were laid out by its own rules, which it keeps.
+            let widths = (state.marks.iter())
+                .find(|marks| marks.terminal == terminal.id)
+                .map_or(clackatoo_term::Widths::LEGACY, handover::Marks::widths);
+            let resumed = HostedTerminal::resume(terminal, shell, fds, &daemon.config, widths)
                 .map_err(|err| err.to_string())
                 .and_then(|terminal| daemon.add_terminal(terminal).map_err(|err| err.to_string()));
             if let Err(err) = resumed {
@@ -1754,13 +1759,13 @@ impl Daemon {
                     let programs_asked = terminal.emulator().asked_snapshot();
                     histories.extend(self.hand_over_history(terminal.id(), terminal.emulator()));
                     let phone = terminal.phone();
+                    let widths = terminal.emulator().widths();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
-                    if phone {
-                        marks.push(handover::Marks {
-                            terminal: terminal.id,
-                            phone,
-                        });
-                    }
+                    marks.push(handover::Marks {
+                        terminal: terminal.id,
+                        phone,
+                        vs16: widths.vs16,
+                    });
                     if programs_asked != clackatoo_term::AskedSnapshot::default() {
                         asked.push(handover::Asked {
                             terminal: terminal.id,
@@ -3738,9 +3743,10 @@ impl Daemon {
                 terminal,
                 end,
                 count,
-            } => self
-                .grid(terminal)
-                .map(|grid| Response::History(history(grid, end, count))),
+            } => {
+                let wire = self.client_wire(token).unwrap_or(PROTOCOL_VERSION);
+                (self.grid(terminal)).map(|grid| Response::History(history(grid, end, count, wire)))
+            }
             Request::Text {
                 terminal,
                 from,
@@ -5012,8 +5018,9 @@ fn write_out(
     Ok(written)
 }
 
-/// Up to `count` of `terminal`'s history lines, ending before line `end`.
-fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
+/// Up to `count` of `terminal`'s history lines, ending before line `end`,
+/// as a peer that speaks `wire` rebuilds them.
+fn history(terminal: &Terminal, end: u64, count: u16, wire: u32) -> HistoryLines {
     let history = terminal.primary();
     let start = end.saturating_sub(u64::from(count));
     let mut first = None;
@@ -5023,7 +5030,7 @@ fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
             first.get_or_insert(number);
             HistoryLine {
                 width: u16::try_from(row.width()).expect("rows are at most Size::MAX wide"),
-                line: Line::from_row(&row),
+                line: Line::from_row_for(&row, wire),
             }
         })
         .collect::<Vec<_>>();
@@ -5333,7 +5340,12 @@ mod tests {
 
         // Lines scrolled into history bring theirs when fetched.
         terminal.advance(b"\r\n\r\n");
-        let fetched = history(&terminal, terminal.primary().scrollback_end(), 10);
+        let fetched = history(
+            &terminal,
+            terminal.primary().scrollback_end(),
+            10,
+            PROTOCOL_VERSION,
+        );
         assert_eq!(fetched.lines[0].line.text(), "docs");
         assert_eq!(
             uris(&fetched.links),
@@ -5377,7 +5389,7 @@ mod tests {
         assert_eq!(marks.exits.first(), Some(&(44, 44 % 3)));
         assert_eq!(marks.exits.last(), Some(&(299, 299 % 3)));
         // Older ones come with their history.
-        let fetched = history(&terminal, 50, 10);
+        let fetched = history(&terminal, 50, 10, PROTOCOL_VERSION);
         assert_eq!(fetched.marks.exits.first(), Some(&(40, 40 % 3)));
         terminal.take_damage(&mut sent.damage);
         terminal.advance(b"y");

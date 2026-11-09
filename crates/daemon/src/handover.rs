@@ -364,12 +364,24 @@ pub(crate) struct State {
     pub(crate) marks: Vec<Marks>,
 }
 
-/// What terminal `terminal` was marked with. Since version 51.
+/// What terminal `terminal` was marked with, and the rules it lays its
+/// cells out by. Since version 51, for every terminal; a terminal handed
+/// over by an older build has no marks, and lays its cells out as before
+/// ([`Widths::LEGACY`](clackatoo_term::Widths::LEGACY)), as its rows were.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Marks {
     pub(crate) terminal: u32,
     /// Its notifications reach the phone too.
     pub(crate) phone: bool,
+    /// Variation selector 16 widens an emoji in it.
+    pub(crate) vs16: bool,
+}
+
+impl Marks {
+    /// The rules the terminal lays its cells out by.
+    pub(crate) fn widths(&self) -> clackatoo_term::Widths {
+        clackatoo_term::Widths { vs16: self.vs16 }
+    }
 }
 
 /// What's kept of terminal `terminal`'s history across a restart beyond
@@ -4809,6 +4821,7 @@ mod tests {
             marks: vec![Marks {
                 terminal: 1,
                 phone: true,
+                vs16: true,
             }],
             images: Some(images()),
             histories: vec![History {
@@ -6256,6 +6269,7 @@ mod tests {
         let read = State::read(&mut file).unwrap();
         assert_eq!(read.marks.len(), 1);
         assert_eq!((read.marks[0].terminal, read.marks[0].phone), (1, true));
+        assert!(read.marks[0].vs16);
         assert!(read.layout.is_some());
         // Version 50 had none.
         let mut file = tempfile::tempfile().unwrap();

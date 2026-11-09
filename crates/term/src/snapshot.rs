@@ -509,16 +509,20 @@ impl Line {
     /// The line as a row, without links.
     #[cfg(test)]
     pub(crate) fn to_row(&self) -> Result<Row, RestoreError> {
-        self.to_linked_row(&[])
+        self.to_linked_row(&[], crate::Widths::LEGACY)
     }
 
-    /// The line as a row, its runs part of the links `links` gives by run
-    /// number, in order.
-    pub(crate) fn to_linked_row(&self, links: &[(u32, LinkId)]) -> Result<Row, RestoreError> {
+    /// The line as a row, laid out by `widths`, its runs part of the
+    /// links `links` gives by run number, in order.
+    pub(crate) fn to_linked_row(
+        &self,
+        links: &[(u32, LinkId)],
+        widths: crate::Widths,
+    ) -> Result<Row, RestoreError> {
         if self.width == 0 {
             return Err(RestoreError("a line has no columns"));
         }
-        let mut builder = RowBuilder::new(usize::from(self.width));
+        let mut builder = RowBuilder::with_widths(usize::from(self.width), widths);
         let text = |start: u32, end: u32| {
             self.text
                 .get(span(start, end))

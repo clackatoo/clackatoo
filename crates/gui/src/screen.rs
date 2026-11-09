@@ -66,7 +66,9 @@ impl Screen {
             cwd: view.cwd.clone(),
             size: grid.size,
             state: grid.state,
-            rows: grid.lines.iter().map(|line| line.to_row(width)).collect(),
+            rows: (grid.lines.iter())
+                .map(|line| line.to_row(width, grid.state.widths))
+                .collect(),
             links: grid.links.iter().cloned().collect(),
             prompts: vec![None; grid.lines.len()],
             exits: Exits::default(),
@@ -137,7 +139,7 @@ impl Screen {
                     self.state = *state;
                     for (index, line) in lines {
                         if let Some(row) = self.rows.get_mut(usize::from(*index)) {
-                            *row = line.to_row(width);
+                            *row = line.to_row(width, state.widths);
                         }
                         // What it starts, if anything, is in the marks.
                         if let Some(prompt) = self.prompts.get_mut(usize::from(*index)) {

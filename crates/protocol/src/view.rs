@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use clackatoo_term::{
     CursorShape, InputModes, LinkId, Progress, Row, RowBuilder, ShellState, Size, Style,
-    TaskProgress, Terminal,
+    TaskProgress, Terminal, Widths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -330,6 +330,14 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
     )]
     pub phone: bool,
+    /// The rules the terminal lays its cells out by, which its lines must
+    /// be rebuilt by (see [`Line::to_row`]): [`Widths::LEGACY`] from a
+    /// daemon older than protocol 143, which had none.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
+    )]
+    pub widths: Widths,
 }
 
 /// Where a terminal's history kept across a restart ends (see
@@ -483,10 +491,17 @@ impl View {
     /// What `terminal` is showing.
     #[must_use]
     pub fn capture(terminal: &Terminal) -> Self {
+        Self::capture_for(terminal, crate::PROTOCOL_VERSION)
+    }
+
+    /// What `terminal` is showing, its lines as a peer that speaks `wire`
+    /// rebuilds them (see [`Line::from_row_for`]).
+    #[must_use]
+    pub fn capture_for(terminal: &Terminal, wire: u32) -> Self {
         Self {
             title: terminal.title().to_owned(),
             cwd: terminal.cwd().map(str::to_owned),
-            root: Node::Grid(GridNode::capture(terminal)),
+            root: Node::Grid(GridNode::capture_for(terminal, wire)),
         }
     }
 
@@ -558,8 +573,18 @@ impl GridNode {
     /// What `terminal`'s screen shows.
     #[must_use]
     pub fn capture(terminal: &Terminal) -> Self {
+        Self::capture_for(terminal, crate::PROTOCOL_VERSION)
+    }
+
+    /// What `terminal`'s screen shows, its lines as a peer that speaks
+    /// `wire` rebuilds them (see [`Line::from_row_for`]).
+    #[must_use]
+    pub fn capture_for(terminal: &Terminal, wire: u32) -> Self {
         let grid = terminal.grid();
-        let lines: Vec<Line> = grid.rows().map(Line::from_row).collect();
+        let lines: Vec<Line> = grid
+            .rows()
+            .map(|row| Line::from_row_for(row, wire))
+            .collect();
         Self {
             size: terminal.size(),
             state: GridState::of(terminal),
@@ -587,6 +612,7 @@ impl GridState {
             progress: terminal.progress(),
             restarted: (terminal.primary().restarted()).map(|(line, at)| Restarted { line, at }),
             phone: false,
+            widths: terminal.widths(),
         }
     }
 }
@@ -609,6 +635,24 @@ impl Line {
     /// `row`'s text and styles.
     #[must_use]
     pub fn from_row(row: &Row) -> Self {
+        Self::from_row_by(row, Row::push_text)
+    }
+
+    /// `row`'s text and styles for a peer that speaks `wire`: as
+    /// [`from_row`](Self::from_row), or for one from before protocol 143,
+    /// which lays rows out by [`Widths::LEGACY`](clackatoo_term::Widths),
+    /// as it would rebuild them in the same columns (see
+    /// [`Row::push_text_as_before`]).
+    #[must_use]
+    pub fn from_row_for(row: &Row, wire: u32) -> Self {
+        if wire >= wire::TERMINAL_STANDARDS_2 {
+            Self::from_row(row)
+        } else {
+            Self::from_row_by(row, Row::push_text_as_before)
+        }
+    }
+
+    fn from_row_by(row: &Row, push_text: impl Fn(&Row, usize, &mut String)) -> Self {
         let cells = row.cells();
         let is_blank = |col: usize| {
             let cell = cells[col];
@@ -625,12 +669,12 @@ impl Line {
                 // A cell after one ending in a ZWJ starts its own run, marked
                 // separate, or rebuilding the row would join the two.
                 Some(run) if run.style == style && !run.text.ends_with(ZWJ) => {
-                    row.push_text(col, &mut run.text);
+                    push_text(row, col, &mut run.text);
                 }
                 last => {
                     let separate = last.is_some_and(|run| run.text.ends_with(ZWJ));
                     let mut text = String::new();
-                    row.push_text(col, &mut text);
+                    push_text(row, col, &mut text);
                     // A wide character's spacer pushes no text. Its style
                     // matches the character before it, so it only lands
                     // here after a ZWJ, and then must not open a run.
@@ -650,10 +694,12 @@ impl Line {
         }
     }
 
-    /// The line as a row `width` cells wide, filled by the emulator's rules.
+    /// The line as a row `width` cells wide, filled by the emulator's
+    /// rules, as a terminal laid out by `widths` lays its cells out (see
+    /// [`GridState::widths`]).
     #[must_use]
-    pub fn to_row(&self, width: usize) -> Row {
-        let mut builder = RowBuilder::new(width);
+    pub fn to_row(&self, width: usize, widths: Widths) -> Row {
+        let mut builder = RowBuilder::with_widths(width, widths);
         for run in &self.runs {
             builder.push(&run.text, &run.style, run.separate);
         }
@@ -760,7 +806,7 @@ mod tests {
         let t = terminal(4, 1, "\x1b[2Gb\x1b[1Ga\u{200D}");
         let line = Line::from_row(t.grid().row(0));
         assert!(line.runs[1].separate);
-        assert_eq!(line.to_row(4).cells()[1].ch(), 'b');
+        assert_eq!(line.to_row(4, Widths::LEGACY).cells()[1].ch(), 'b');
     }
 
     /// Each cell's text, flags and style, plus whether the row wraps.
@@ -784,7 +830,7 @@ mod tests {
                     "ab", "字", "e\u{301}", "👩\u{200D}💻", "\u{200D}", "\u{301}",
                     "\x1b[31m", "\x1b[1;44m", "\x1b[0m", "\x1b[K", "\x1b[3G", "\x1b[1G",
                     "\x1b[D", "\r\n", " ", "\x1b]8;;https://a/\x07", "\x1b]8;id=b;https://b/\x07",
-                    "\x1b]8;;\x07",
+                    "\x1b]8;;\x07", "\u{2764}\u{FE0F}", "\u{FE0F}",
                 ]),
                 0..30,
             ),
@@ -792,8 +838,15 @@ mod tests {
         ) {
             let t = terminal(cols, 3, &fragments.concat());
             for row in t.grid().rows() {
-                let rebuilt = Line::from_row(row).to_row(row.width());
+                let rebuilt = Line::from_row(row).to_row(row.width(), t.widths());
                 proptest::prop_assert_eq!(cells(&rebuilt), cells(row));
+                // A peer from before the rules gets each character in the
+                // same column.
+                let before = Line::from_row_for(row, wire::TERMINAL_STANDARDS_2 - 1)
+                    .to_row(row.width(), Widths::LEGACY);
+                for col in (0..row.width()).filter(|&col| !row.cells()[col].is_wide_spacer()) {
+                    proptest::prop_assert_eq!(before.cells()[col].ch(), row.cells()[col].ch());
+                }
             }
         }
     }
@@ -925,6 +978,7 @@ mod tests {
                         grid.state.keyboard = 0;
                         grid.state.progress = None;
                         grid.state.phone = false;
+                        grid.state.widths = Widths::LEGACY;
                     }
                     ViewUpdate::Patch(patches) => {
                         for patch in patches {
@@ -934,6 +988,7 @@ mod tests {
                                 state.keyboard = 0;
                                 state.progress = None;
                                 state.phone = false;
+                                state.widths = Widths::LEGACY;
                             }
                         }
                     }

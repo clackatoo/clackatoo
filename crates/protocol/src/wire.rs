@@ -433,7 +433,11 @@ gates! {
     /// Round two of the terminal standards (CLACKA-238): notifications
     /// programs ask for, `Event::Notified`, sent only to a window of
     /// this protocol, and the mark that has a terminal's reach the phone,
-    /// `Request::NotifyPhone` and `GridState`'s `phone`.
+    /// `Request::NotifyPhone` and `GridState`'s `phone`; and `GridState`'s
+    /// `widths`, the rules a terminal's lines are rebuilt by, as
+    /// variation selector 16 widening an emoji. An older peer is sent
+    /// lines as the rules before would rebuild them in the same columns
+    /// (`Line::from_row_for`).
     TERMINAL_STANDARDS_2 = 147,
 }
 

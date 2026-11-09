@@ -471,6 +471,7 @@ impl HostedTerminal {
         shell: Option<&handover::Shell>,
         fds: &mut Fds,
         config: &DaemonConfig,
+        widths: clackatoo_term::Widths,
     ) -> Result<Self, HandoverError> {
         // First, so a file the shell hasn't read is removed if the rest
         // fails.
@@ -488,8 +489,12 @@ impl HostedTerminal {
             .pty
             .map(|pty| fds.take(pty).map(Pty::from_fd))
             .transpose()?;
+        let config = clackatoo_term::Config {
+            widths,
+            ..config.terminal.clone()
+        };
         let mut emulator =
-            Terminal::restore_with_links(&terminal.screen, &terminal.links, &config.terminal)?;
+            Terminal::restore_with_links(&terminal.screen, &terminal.links, &config)?;
         emulator.restore_blocks(&terminal.blocks);
         emulator.expect_secret(secret.as_ref().map(|secret| secret.text.as_str()));
         if let Some(block) = shell.and_then(|shell| shell.trusted) {
@@ -1185,7 +1190,14 @@ mod tests {
         let mut fds = Fds::default();
         let (handed, shell) = fed.hand_over(&mut fds);
         assert!(shell.is_none());
-        let mut resumed = HostedTerminal::resume(&handed, None, &mut fds, &config).unwrap();
+        let mut resumed = HostedTerminal::resume(
+            &handed,
+            None,
+            &mut fds,
+            &config,
+            clackatoo_term::Widths::LEGACY,
+        )
+        .unwrap();
         assert!(resumed.is_fed() && !resumed.is_fed_unended());
         assert_eq!(resumed.status(), FED_CUT_OFF);
         assert_eq!(resumed.info().pid, None);

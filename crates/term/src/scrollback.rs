@@ -34,6 +34,7 @@ use crate::row::{Row, RowBuilder};
 use crate::snapshot::{self, Captured, Line};
 use crate::style::Style;
 use crate::terminal::ZWJ;
+use crate::width::Widths;
 
 /// Once a page's text reaches this size, the next record starts a new page.
 /// Big enough that per-page overhead vanishes, small enough that evicting
@@ -98,6 +99,8 @@ pub(crate) struct Scrollback {
     compaction: Compaction,
     /// Where each style is in the last page's palette, to avoid searching it.
     style_indices: StyleIndices,
+    /// The rules rows are rebuilt from their records by: the terminal's.
+    widths: Widths,
     /// The held lines a shell marked, by number, oldest first.
     marks: VecDeque<(u64, Mark)>,
     /// The held lines with hints of how private they are (see
@@ -168,7 +171,14 @@ impl Scrollback {
             marks: VecDeque::new(),
             hints: VecDeque::new(),
             restarted: None,
+            widths: Widths::LEGACY,
         }
+    }
+
+    /// Rows are rebuilt from their records by `widths`, as the terminal
+    /// lays them out.
+    pub(crate) fn set_widths(&mut self, widths: Widths) {
+        self.widths = widths;
     }
 
     /// Lines held.
@@ -322,7 +332,7 @@ impl Scrollback {
             return raw;
         }
         let page = self.pages.back_mut().expect("there is a newest line");
-        let row = page.decode(page.records.len() - 1);
+        let row = page.decode(page.records.len() - 1, self.widths);
         page.records.pop();
         self.records -= 1;
         let (text_end, runs_end) = page
@@ -487,6 +497,7 @@ impl Scrollback {
             marks: VecDeque::new(),
             hints: self.hints_from(first).collect(),
             restarted: None,
+            widths: self.widths,
         }
     }
 
@@ -497,10 +508,9 @@ impl Scrollback {
 
     /// Every line as a row, oldest first, at the width it had.
     pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = Row> + '_ {
-        let records = self
-            .pages
-            .iter()
-            .flat_map(|page| (page.first..page.records.len()).map(move |index| page.decode(index)));
+        let records = self.pages.iter().flat_map(move |page| {
+            (page.first..page.records.len()).map(move |index| page.decode(index, self.widths))
+        });
         ExactLen {
             inner: records.chain(self.raw.iter().cloned()),
             remaining: self.len(),
@@ -539,6 +549,7 @@ impl Scrollback {
         compaction: Compaction,
         rows: impl IntoIterator<Item = Result<Row, E>>,
         end: u64,
+        widths: Widths,
     ) -> Result<Self, E> {
         // Nothing is printing, so lazy history needn't wait to compact:
         // each row is compacted as it comes, so they're never all held raw.
@@ -547,6 +558,7 @@ impl Scrollback {
             Compaction::Lazy | Compaction::Eager => Compaction::Eager,
         };
         let mut history = Self::new(limit, restoring);
+        history.widths = widths;
         for row in rows {
             history.push(row?);
         }
@@ -575,12 +587,13 @@ impl Scrollback {
 
         let records = start.min(self.records)..end.min(self.records);
         let mut skipped = 0;
+        let widths = self.widths;
         let compacted = self.pages.iter().flat_map(move |page| {
             let held = page.records.len() - page.first;
             let page_start = skipped;
             skipped += held;
             let wanted = records.start.max(page_start)..records.end.min(page_start + held);
-            wanted.map(move |offset| page.decode(page.first + offset - page_start))
+            wanted.map(move |offset| page.decode(page.first + offset - page_start, widths))
         });
         let raw = start.saturating_sub(self.records)..end.saturating_sub(self.records);
         let raw = self.raw.range(raw).cloned();
@@ -784,8 +797,8 @@ impl Page {
         (line, runs.iter().map(|run| run.style).collect())
     }
 
-    /// Record `index` as a row.
-    fn decode(&self, index: usize) -> Row {
+    /// Record `index` as a row, laid out by `widths`.
+    fn decode(&self, index: usize, widths: Widths) -> Row {
         let record = self.records[index];
         let (text_start, runs_start) = match index.checked_sub(1) {
             Some(previous) => {
@@ -799,7 +812,7 @@ impl Page {
         };
         let runs = &self.runs[span(runs_start, record.runs_end)];
 
-        let mut builder = RowBuilder::new(usize::from(record.width));
+        let mut builder = RowBuilder::with_widths(usize::from(record.width), widths);
         // Text before the first run is in the default style.
         let first = runs.first().map_or(record.text_end, |run| run.start);
         builder.push(text(text_start, first), &Style::DEFAULT, false);

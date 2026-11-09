@@ -3,7 +3,7 @@
 use super::Row;
 use crate::style::Style;
 use crate::terminal::ZWJ;
-use crate::width;
+use crate::width::{self, Widths};
 
 /// Builds a [`Row`] from the text it shows, filling cells by the rules the
 /// emulator prints by: a wide character takes two cells, and zero-width
@@ -20,16 +20,26 @@ pub struct RowBuilder {
     /// Whether the next character joins the previous cell, because that
     /// one ends in a ZWJ.
     joins: bool,
+    /// Which cells what joins them widens.
+    widths: Widths,
 }
 
 impl RowBuilder {
     /// A builder for a blank row of `width` cells.
     #[must_use]
     pub fn new(width: usize) -> Self {
+        Self::with_widths(width, Widths::LEGACY)
+    }
+
+    /// A builder for a blank row of `width` cells, laid out by `widths`,
+    /// as a terminal laid its own out: a terminal's rows are rebuilt so.
+    #[must_use]
+    pub fn with_widths(width: usize, widths: Widths) -> Self {
         Self {
             row: Row::new(width),
             col: 0,
             joins: false,
+            widths,
         }
     }
 
@@ -47,6 +57,11 @@ impl RowBuilder {
                     };
                     self.row.append_to_grapheme(previous, ch);
                     self.joins = self.row.last_char(previous) == ZWJ;
+                    // As the terminal widened it, if there was room.
+                    if self.col < self.row.width() && self.row.wants_wide(previous, self.widths) {
+                        self.row.widen(previous);
+                        self.col += 1;
+                    }
                 }
                 Some(cells) => {
                     if self.col + cells > self.row.width() {

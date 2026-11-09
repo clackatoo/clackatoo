@@ -191,7 +191,11 @@ impl TermPage {
                 shape: cursor.shape,
             });
             let failed = u16::try_from(index).ok().and_then(|row| term.failed(row));
-            dom::element_of(document, &grid::row(&grid.lines[index], cols, on, failed))
+            let widths = grid.state.widths;
+            dom::element_of(
+                document,
+                &grid::row(&grid.lines[index], cols, widths, on, failed),
+            )
         };
         if dirty.all || self.screen.child_element_count() as usize != grid.lines.len() {
             self.screen.set_text_content(None);
@@ -221,6 +225,9 @@ impl TermPage {
     /// drawn, keeping what's on screen in place.
     fn draw_history(&self, document: &Document, term: &OpenTerminal, at_bottom: bool) {
         let history = &term.history;
+        let widths = (term.view.as_ref())
+            .and_then(clackatoo_protocol::View::grid)
+            .map_or_else(Default::default, |grid| grid.state.widths);
         if history.cleared {
             self.history.set_text_content(None);
         }
@@ -228,7 +235,7 @@ impl TermPage {
         let row = |index: usize| {
             let line = &history.lines[index];
             let failed = history.failed(history.first + index as u64);
-            let row = grid::row(&line.line, usize::from(line.width), None, failed);
+            let row = grid::row(&line.line, usize::from(line.width), widths, None, failed);
             dom::element_of(document, &row)
         };
         // Lines drawn before whose marks changed, as when a command ends

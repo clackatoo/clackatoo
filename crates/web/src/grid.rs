@@ -9,7 +9,7 @@
 //! policy refuses `style` attributes.
 
 use clackatoo_protocol::{
-    Attributes, Color, CursorShape, ImageId, Line, Style, TerminalId, Underline,
+    Attributes, Color, CursorShape, ImageId, Line, Style, TerminalId, Underline, Widths,
 };
 use clackatoo_term::CellFlags;
 
@@ -34,8 +34,14 @@ pub struct Cursor {
 /// style sheet draws it from the span's `data-mark`, and what a style
 /// sheet draws can't be selected or copied.
 #[must_use]
-pub fn row(line: &Line, width: usize, cursor: Option<Cursor>, failed: Option<i32>) -> Element {
-    let row = line.to_row(width.max(1));
+pub fn row(
+    line: &Line,
+    width: usize,
+    widths: Widths,
+    cursor: Option<Cursor>,
+    failed: Option<i32>,
+) -> Element {
+    let row = line.to_row(width.max(1), widths);
     let cells = row.cells();
     let blank = |col: usize| {
         let cell = cells[col];
@@ -288,6 +294,7 @@ mod tests {
         let row = row(
             &line(&[(Style::DEFAULT, "ab"), (red(), "cd")]),
             10,
+            Widths::LEGACY,
             None,
             None,
         );
@@ -309,7 +316,7 @@ mod tests {
             attributes: Attributes::BOLD,
             ..Style::DEFAULT
         };
-        let row = row(&line(&[(style, "x")]), 4, None, None);
+        let row = row(&line(&[(style, "x")]), 4, Widths::LEGACY, None, None);
         let Node::Element(span) = &row.children[0] else {
             panic!("a span");
         };
@@ -331,7 +338,13 @@ mod tests {
             col: 4,
             shape: CursorShape::Block,
         };
-        let row = row(&line(&[(Style::DEFAULT, "ab")]), 10, Some(cursor), None);
+        let row = row(
+            &line(&[(Style::DEFAULT, "ab")]),
+            10,
+            Widths::LEGACY,
+            Some(cursor),
+            None,
+        );
         assert_eq!(row.all_text(), "ab   ");
         let Node::Element(cell) = row.children.last().unwrap() else {
             panic!("the cursor");
@@ -344,7 +357,13 @@ mod tests {
             ..Style::DEFAULT
         };
         let cursor = Cursor { col: 0, ..cursor };
-        let row = super::row(&line(&[(inverse, "z")]), 10, Some(cursor), None);
+        let row = super::row(
+            &line(&[(inverse, "z")]),
+            10,
+            Widths::LEGACY,
+            Some(cursor),
+            None,
+        );
         let Node::Element(cell) = &row.children[0] else {
             panic!("the cursor");
         };
@@ -353,7 +372,13 @@ mod tests {
 
     #[test]
     fn wide_characters_take_two_columns_and_the_cursor_on_either_half() {
-        let row = row(&line(&[(Style::DEFAULT, "字b")]), 6, None, None);
+        let row = row(
+            &line(&[(Style::DEFAULT, "字b")]),
+            6,
+            Widths::LEGACY,
+            None,
+            None,
+        );
         let Node::Element(wide) = &row.children[0] else {
             panic!("a span");
         };
@@ -364,7 +389,13 @@ mod tests {
             col: 1,
             shape: CursorShape::Bar,
         };
-        let row = super::row(&line(&[(Style::DEFAULT, "字b")]), 6, Some(cursor), None);
+        let row = super::row(
+            &line(&[(Style::DEFAULT, "字b")]),
+            6,
+            Widths::LEGACY,
+            Some(cursor),
+            None,
+        );
         let Node::Element(wide) = &row.children[0] else {
             panic!("a span");
         };
@@ -386,21 +417,21 @@ mod tests {
         let said = |text: &str, mark: Option<&str>| (text.to_owned(), mark.map(str::to_owned));
         let prompt = line(&[(Style::DEFAULT, "$ false")]);
         assert_eq!(
-            marked(&row(&prompt, 20, None, Some(1))),
+            marked(&row(&prompt, 20, Widths::LEGACY, None, Some(1))),
             said("$ false", Some("  ✗ 1")),
             "the blanks before it are the mark's, and neither is text"
         );
         // Exactly as wide as the row, or a cell short.
         assert_eq!(
-            marked(&row(&prompt, 12, None, Some(1))),
+            marked(&row(&prompt, 12, Widths::LEGACY, None, Some(1))),
             said("$ false", Some("  ✗ 1"))
         );
         assert_eq!(
-            marked(&row(&prompt, 11, None, Some(1))),
+            marked(&row(&prompt, 11, Widths::LEGACY, None, Some(1))),
             said("$ false", None)
         );
         assert_eq!(
-            marked(&row(&prompt, 13, None, Some(127))),
+            marked(&row(&prompt, 13, Widths::LEGACY, None, Some(127))),
             said("$ false", None)
         );
         // The cursor past the text, where it would go, keeps it off.
@@ -409,19 +440,19 @@ mod tests {
             shape: CursorShape::Block,
         };
         assert_eq!(
-            marked(&row(&prompt, 20, Some(cursor), Some(1))),
+            marked(&row(&prompt, 20, Widths::LEGACY, Some(cursor), Some(1))),
             said("$ false   ", None)
         );
         let cursor = Cursor { col: 8, ..cursor };
         assert_eq!(
-            marked(&row(&prompt, 20, Some(cursor), Some(1))),
+            marked(&row(&prompt, 20, Widths::LEGACY, Some(cursor), Some(1))),
             said("$ false  ", Some("✗ 1"))
         );
     }
 
     #[test]
     fn a_blank_row_is_empty() {
-        let row = row(&Line::default(), 80, None, None);
+        let row = row(&Line::default(), 80, Widths::LEGACY, None, None);
         assert!(row.children.is_empty());
     }
 
