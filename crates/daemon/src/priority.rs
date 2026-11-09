@@ -45,7 +45,11 @@
 //! fork and exec anyway (a terminal's, the browser's), moving itself
 //! there, and putting a raised nice back, before that hook (see `spawn`
 //! and `ready_first`). Those started before the daemon has leaves are
-//! noted, and moved once it has.
+//! noted, and moved once it has. The daemon's moves are made off its
+//! loop, by a thread of their own, as one can take milliseconds (see
+//! `start_mover`). Anything a program starts before it's moved stays in
+//! the daemon's leaf, and only that: in practice nothing, as the move
+//! follows its start within milliseconds, before it's done starting up.
 //!
 //! The scope ends with the user manager, which stops when the user's last
 //! login does, unless they linger (`loginctl enable-linger`). A daemon
@@ -75,7 +79,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -395,6 +399,10 @@ fn settle(loop_thread: Pid, scope: Option<String>, runtime: Option<&Path>) -> Se
 /// outside the scope. Returns the scope's unit.
 fn settle_into(leaves: Leaves, user: Option<&mut Bus>) -> String {
     let unit = leaves.unit.clone();
+    match Movers::of(&leaves) {
+        Ok(movers) => start_mover(movers),
+        Err(err) => log::warn!("programs go in {unit}'s leaves from the daemon's loop: {err}"),
+    }
     let early = match std::mem::replace(&mut *lock(&PLACE), Place::Leaves(leaves)) {
         Place::Pending(early) => early,
         _ => Vec::new(),
@@ -671,23 +679,115 @@ pub(crate) fn spawned(child: &Child, leaf: Leaf, readied: Readied) {
 /// Puts `pid`, a child that has just started and isn't reaped yet, in
 /// `leaf`: now, if there are leaves, or once there are.
 pub(crate) fn started(pid: u32, leaf: Leaf) {
+    // As the daemon always was, as in tests: nothing to note.
+    if !NOTING.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return;
     };
-    match &mut *lock(&PLACE) {
-        Place::Pending(early) => early.push(Early {
-            pid,
-            leaf,
-            since: start_time(pid),
-        }),
-        // It started with the daemon, in its leaf, unless just before the
-        // daemon went there, which is passed over.
-        Place::Leaves(leaves) => {
-            if let Err(err) = write_pid(leaves.procs(leaf), pid) {
-                log::debug!("pid {pid} couldn't go in {}: {err}", leaf.name());
-            }
+    let early = Early {
+        pid,
+        leaf,
+        since: start_time(pid),
+    };
+    let mut place = lock(&PLACE);
+    let now = match &mut *place {
+        Place::Pending(noted) => {
+            noted.push(early);
+            false
         }
-        Place::Nowhere => {}
+        Place::Leaves(_) => true,
+        Place::Nowhere => false,
+    };
+    drop(place);
+    if now {
+        move_later(early);
+    }
+}
+
+/// Copies of the leaves' `cgroup.procs`, kept by the thread that moves
+/// programs into them, at [`LEAF_FDS`] or above too.
+#[derive(Debug)]
+struct Movers {
+    terminals: OwnedFd,
+    agents: OwnedFd,
+}
+
+impl Movers {
+    fn of(leaves: &Leaves) -> io::Result<Self> {
+        Ok(Self {
+            terminals: rustix::io::fcntl_dupfd_cloexec(&leaves.terminals, LEAF_FDS)?,
+            agents: rustix::io::fcntl_dupfd_cloexec(&leaves.agents, LEAF_FDS)?,
+        })
+    }
+
+    /// Moves `early` into its leaf, if it's still the program that
+    /// started then.
+    fn move_in(&self, early: &Early) -> io::Result<()> {
+        if early.since.is_none() || start_time(early.pid) != early.since {
+            return Ok(());
+        }
+        let procs = match early.leaf {
+            Leaf::Terminals => &self.terminals,
+            Leaf::Agents => &self.agents,
+        };
+        write_pid(procs, early.pid)
+    }
+}
+
+/// Where the moves the daemon hands its mover go: see [`start_mover`].
+static MOVES: OnceLock<mpsc::Sender<Early>> = OnceLock::new();
+
+/// Starts the thread that moves programs into their leaves for the
+/// daemon, with `movers`. Moving one takes the kernel's lock on every
+/// cgroup's processes, which waits for a grace period of the kernel's
+/// RCU (read-copy-update) unless another move came just before: measured
+/// here, a move a third of a second after the last takes 8 ms, and 17 ms
+/// at the 99th percentile, against 12 to 27 µs one after another. Far too
+/// long for the daemon's loop, which only hands the pid over: the
+/// program runs in the daemon's leaf meanwhile.
+fn start_mover(movers: Movers) {
+    let (send, moving) = mpsc::channel::<Early>();
+    let started = std::thread::Builder::new()
+        .name("priority-moves".into())
+        .spawn(move || {
+            for early in moving {
+                if let Err(err) = movers.move_in(&early) {
+                    log::debug!(
+                        "pid {} couldn't go in {}: {err}",
+                        early.pid,
+                        early.leaf.name()
+                    );
+                }
+            }
+        });
+    match started {
+        Ok(_) => {
+            let _ = MOVES.set(send);
+        }
+        Err(err) => log::warn!("programs go in their leaves from the daemon's loop: {err}"),
+    }
+}
+
+/// Moves `early` into its leaf, off the daemon's loop, through the mover,
+/// or else at once.
+fn move_later(early: Early) {
+    if let Some(moves) = MOVES.get()
+        && moves.send(early).is_ok()
+    {
+        return;
+    }
+    if let Place::Leaves(leaves) = &*lock(&PLACE)
+        && early.since.is_some()
+        && start_time(early.pid) == early.since
+        && let Err(err) = write_pid(leaves.procs(early.leaf), early.pid)
+    {
+        log::debug!(
+            "pid {} couldn't go in {}: {err}",
+            early.pid,
+            early.leaf.name()
+        );
     }
 }
 
@@ -745,21 +845,29 @@ fn start_time_in(stat: &str) -> Option<u64> {
 /// where the daemon started, which isn't the user's to change. One that
 /// has ended meanwhile, its pid perhaps another's by now, is passed over.
 fn move_early(early: &[Early], unit: &str, user: Option<&mut Bus>) {
-    let still = |early: &Early| early.since.is_some() && start_time(early.pid) == early.since;
-    let place = lock(&PLACE);
-    let Place::Leaves(leaves) = &*place else {
+    let Some(user) = user else {
+        // On the loop, after an upgrade: as those started from now on.
+        for early in early {
+            move_later(*early);
+        }
         return;
     };
+    // On the thread setting the daemon up, without holding `PLACE`, as a
+    // move can take milliseconds (see `start_mover`).
+    let movers = match &*lock(&PLACE) {
+        Place::Leaves(leaves) => Movers::of(leaves),
+        _ => return,
+    };
+    let Ok(movers) = movers else {
+        return;
+    };
+    let still = |early: &Early| early.since.is_some() && start_time(early.pid) == early.since;
     let mut elsewhere = Vec::new();
     for early in early.iter().filter(|early| still(early)) {
-        if write_pid(leaves.procs(early.leaf), early.pid).is_err() {
+        if movers.move_in(early).is_err() {
             elsewhere.push(*early);
         }
     }
-    drop(place);
-    let Some(user) = user else {
-        return;
-    };
     for early in elsewhere.iter().filter(|early| still(early)) {
         if let Err(err) = attach(user, unit, early.pid, early.leaf) {
             log::debug!(
