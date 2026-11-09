@@ -60,6 +60,11 @@ const HANDLER_TIME: Duration = Duration::from_millis(250);
 /// How long background work runs before letting other work go first.
 const SLICE: Duration = Duration::from_millis(2);
 
+/// The most background work waiting: past it, a new handler of an event
+/// nothing waits on is left out, saying so. Work already started always
+/// goes on.
+const MOST_BACKGROUND: usize = 64;
+
 const PRELUDE: &str = include_str!("prelude.luau");
 
 /// The last request any Lua of the process made. Numbered across them, so
@@ -264,6 +269,10 @@ struct Job {
     ran: Duration,
     /// It handles a key (see [`State::keyed`]).
     keyed: bool,
+    /// The binding it runs, if it runs one whose keys went on at once.
+    binding: Option<u64>,
+    /// It's been resumed at least once.
+    started: bool,
 }
 
 impl Job {
@@ -275,6 +284,8 @@ impl Job {
             loading: None,
             ran: Duration::ZERO,
             keyed: false,
+            binding: None,
+            started: false,
         }
     }
 }
@@ -455,7 +466,7 @@ impl Runtime {
                         guarded: key.guarded,
                     };
                     let event = |runtime: &Self| runtime.decided_event(&key);
-                    self.later(&handler, event, origin, true);
+                    self.later(&handler, event, origin, Some(binding));
                 }
             }
             ToLua::Answer { request, result } => {
@@ -486,7 +497,7 @@ impl Runtime {
                         window: Some(turn.window),
                         guarded: turn.guarded,
                     };
-                    self.later(&handler, |runtime| runtime.turn_event(&turn), origin, false);
+                    self.later(&handler, |runtime| runtime.turn_event(&turn), origin, None);
                 }
             }
         }
@@ -498,23 +509,44 @@ impl Runtime {
     }
 
     /// Queues `handler` as background work, for the event from `origin`,
-    /// a key's if `keyed`, called with the event `event` makes.
+    /// called with the event `event` makes: a key's, if it's `binding`'s.
+    /// The same binding waiting to start runs once, for its latest keys;
+    /// and past [`MOST_BACKGROUND`], it's left out, saying so.
     fn later(
         &mut self,
         handler: &Function,
         event: impl FnOnce(&Self) -> mlua::Result<Table>,
         origin: Origin,
-        keyed: bool,
+        binding: Option<u64>,
     ) {
+        let waiting = (self.background.iter())
+            .position(|job| binding.is_some() && job.binding == binding && !job.started);
+        if waiting.is_none() && self.background.len() >= MOST_BACKGROUND {
+            log::warn!(target: "clackatoo::init.lua", "background work left out");
+            self.state.window.set(origin.window);
+            self.report(&mlua::Error::runtime(
+                "too much of the config's work waits to run, so a handler was left out",
+            ));
+            self.state.window.set(None);
+            return;
+        }
         let made = event(self).and_then(|event| {
+            let args = self.args(event);
+            if let Some(job) = waiting.and_then(|at| self.background.get_mut(at)) {
+                job.args = args;
+                job.origin = origin;
+                return Ok(None);
+            }
             let thread = self.lua.create_thread(handler.clone())?;
-            Ok(Job {
-                keyed,
-                ..Job::new(thread, self.args(event), origin)
-            })
+            Ok(Some(Job {
+                keyed: binding.is_some(),
+                binding,
+                ..Job::new(thread, args, origin)
+            }))
         });
         match made {
-            Ok(job) => self.background.push_back(job),
+            Ok(Some(job)) => self.background.push_back(job),
+            Ok(None) => {}
             Err(err) => self.report(&err),
         }
     }
@@ -616,6 +648,7 @@ impl Runtime {
         // Whatever asked a slice to end did so of one before.
         self.slice.store(false, Ordering::Relaxed);
         let args = std::mem::take(&mut job.args);
+        job.started = true;
         let started = Instant::now();
         self.watchdog.watch(limit.saturating_sub(job.ran), sliced);
         let resumed = job.thread.resume::<MultiValue>(args);

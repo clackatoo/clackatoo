@@ -149,7 +149,10 @@ handler of an event nothing waits on, such as a chat's turn ending, and a
 binding with `propagate`. Background work runs a slice of a couple of
 milliseconds at a time, in turn, and a key that comes meanwhile is decided
 first, so a busy handler in one window never holds up keys in another: a key
-waits a fraction of a millisecond for it.
+waits a fraction of a millisecond for it. A binding with `propagate` pressed
+again before its function has started runs it once, for the latest keys. At
+most 64 handlers wait their turn; past that, a new one is left out, and the
+bottom bar says so.
 
 A handler that calls `coroutine.yield()` itself lets other work go first, and
 goes on after. A coroutine of its own, made with `coroutine.create` or

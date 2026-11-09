@@ -399,3 +399,53 @@ fn client_opt_in_a_daemons_event_is_every_windows() {
         ]
     );
 }
+
+/// Background work is bounded: a binding whose keys went on at once,
+/// pressed again before it's started, runs once, for the latest keys; and
+/// past a limit, new handlers are left out, saying so, while work already
+/// started goes on.
+#[test]
+fn background_work_is_bounded() {
+    let (mut runtime, said) = runtime();
+    load(
+        &mut runtime,
+        r#"
+        client.keys.map('n', 'k', function(ev) client.cmd(`count {ev.count}`) end,
+            {propagate = true})
+        client.on('turnend', function() client.cmd('heard') end)
+        "#,
+    );
+    let key = |count| KeyInfo {
+        key: "k".into(),
+        keys: Some("k".into()),
+        text: None,
+        mode: KeyMode::Normal,
+        window: WINDOW,
+        guarded: false,
+        pane: None,
+        count: Some(count),
+    };
+    for count in 1..=3 {
+        runtime.handle(ToLua::Run {
+            key: key(count),
+            binding: 1,
+        });
+    }
+    assert_eq!(runtime.background.len(), 1);
+    drain(&mut runtime, |_| {});
+    assert_eq!(commands(&said), ["count 3"]);
+    for _ in 0..MOST_BACKGROUND + 2 {
+        runtime.handle(turn_ended());
+    }
+    assert_eq!(runtime.background.len(), MOST_BACKGROUND);
+    drain(&mut runtime, |_| {});
+    let said = commands(&said);
+    assert_eq!(
+        said.iter().filter(|said| *said == "heard").count(),
+        MOST_BACKGROUND
+    );
+    assert_eq!(
+        said.iter().filter(|said| said.contains("left out")).count(),
+        2
+    );
+}
