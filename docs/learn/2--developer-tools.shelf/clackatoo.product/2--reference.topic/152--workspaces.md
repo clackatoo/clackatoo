@@ -80,6 +80,24 @@ sessions, a [subagent](~clackatoo/reference/agents-lasting#what-lasts) still
 its chat's. Scrollback and running programs don't. An editor whose file has
 been deleted is left out.
 
+A shutdown or reboot keeps them too, even though it ends your shells along
+with the daemon. Before the machine shuts down, systemd's login manager,
+logind, tells the daemon and waits for it. The daemon writes the workspaces as
+they are, lets the shutdown go on, and then writes nothing more, so shells
+that end with everything else don't take their panes or workspaces with them.
+It also writes them before the machine sleeps. If logind can't be asked, as on
+a system without systemd, the daemon's log says why in one line;
+`CLACKATOO_LOGIND=off` in the daemon's environment stops it asking, as
+`CLACKATOO_DISPLAY=off` does for tests. A terminal
+whose shell a signal ended (SIGTERM, SIGHUP or SIGKILL, which a shutdown or
+`systemctl stop` sends) keeps its pane for 2 seconds. If the daemon is asked
+to stop in that time, the pane is kept and comes back like any other, in the
+folder its shell was in. Otherwise it closes. A shell that exits by itself,
+with `exit` or <kbd>Ctrl</kbd>+<kbd>D</kbd>, still closes its pane at once.
+Signing out stops nothing while you
+[linger](~clackatoo/reference/cli#lingering), and a daemon that isn't in a
+scope of its own outlives your sign-outs too.
+
 A terminal whose shell was running a command shows "was running: cargo watch"
 at its bottom right. In normal mode, `R` puts the command at the new shell's
 prompt, where you read it and press <kbd>Enter</kbd> to run it; <kbd>Esc</kbd>

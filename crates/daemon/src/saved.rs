@@ -56,6 +56,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -659,10 +660,14 @@ pub(crate) fn keep_previous(path: &Path) -> io::Result<()> {
     write(&previous, &bytes)
 }
 
+/// What the thread is to write: a state, its number, and what's let go
+/// once it's written, as logind's lock (see `crate::inhibit`).
+type Job = (u64, State, Option<OwnedFd>);
+
 /// The thread that writes the file, started with the first write.
 #[derive(Debug)]
 pub(crate) struct Writer {
-    states: Sender<(u64, State)>,
+    states: Sender<Job>,
     written: Receiver<u64>,
     serial: std::cell::Cell<u64>,
     /// Says when the thread has finished.
@@ -684,7 +689,7 @@ impl Writer {
         failed: Arc<AtomicBool>,
         notify: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        let (states, receive) = mpsc::channel::<(u64, State)>();
+        let (states, receive) = mpsc::channel::<Job>();
         let (stop, stopped) = mpsc::channel();
         let (complete, written) = mpsc::channel();
         std::thread::Builder::new()
@@ -695,7 +700,15 @@ impl Writer {
                     while gate.as_ref().is_some_and(|gate| !gate.exists()) {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    let (serial, newest) = receive.try_iter().last().unwrap_or(first);
+                    // What those passed over held is let go once the
+                    // newest is written.
+                    let mut held = Vec::new();
+                    let mut newest = first;
+                    for next in receive.try_iter() {
+                        held.extend(std::mem::replace(&mut newest, next).2);
+                    }
+                    let (serial, newest, lock) = newest;
+                    held.extend(lock);
                     if let Err(err) = write(&path, &newest.encode()) {
                         log::error!(
                             "the workspaces couldn't be kept in {}: {err}",
@@ -707,6 +720,7 @@ impl Writer {
                         let _ = complete.send(serial);
                         notify();
                     }
+                    drop(held);
                 }
                 let _ = stop.send(());
             })?;
@@ -720,11 +734,12 @@ impl Writer {
 
     /// Has the thread write `state` as the file, once it has written what
     /// it's writing now, if it is. Only the newest of those waiting then is
-    /// written.
-    pub(crate) fn write(&self, state: State) -> u64 {
+    /// written. `lock`, if given, is let go once it's written, or failed
+    /// to be.
+    pub(crate) fn write(&self, state: State, lock: Option<OwnedFd>) -> u64 {
         let serial = self.serial.get() + 1;
         self.serial.set(serial);
-        let _ = self.states.send((serial, state));
+        let _ = self.states.send((serial, state, lock));
         serial
     }
 
@@ -1301,9 +1316,9 @@ mod tests {
         let failed = Arc::new(AtomicBool::new(false));
         let writer = Writer::start(path.clone(), None, Arc::clone(&failed), || {}).unwrap();
         let mut state = state();
-        writer.write(state.clone());
+        writer.write(state.clone(), None);
         state.active = Some(1);
-        writer.write(state.clone());
+        writer.write(state.clone(), None);
         assert!(writer.stop(Duration::from_secs(5)));
         assert_eq!(read(&path).unwrap(), Some(state));
         let mode = fs::metadata(&path).unwrap().permissions().mode();

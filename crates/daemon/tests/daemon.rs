@@ -127,6 +127,7 @@ impl TestDaemon {
             machine_name: None,
             display: None,
             pastes: None,
+            logind: None,
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         change(dir.path(), &mut config);

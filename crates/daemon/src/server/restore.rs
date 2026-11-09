@@ -103,6 +103,10 @@ pub(super) struct Keeping {
     places: HashMap<PaneId, (BufferId, Place)>,
     /// What each terminal's shell last said.
     shells: HashMap<TerminalId, Shell>,
+    /// Whether the machine is shutting down, as logind said: the
+    /// workspaces were written as they were, and nothing more is, as what
+    /// follows is everything ending (see `server/shutdown.rs`).
+    held: bool,
 }
 
 /// What a shell last said: its directory, and its latest block's number
@@ -220,12 +224,42 @@ impl Daemon {
     /// they've changed since they were last written, or the last write
     /// failed.
     pub(super) fn keep(&mut self) {
+        self.keep_with(None, false);
+    }
+
+    /// Has the writer's thread write the workspaces as they are now,
+    /// changed or not, with `lock`, logind's, let go once they're on disk
+    /// (or failed to be): as the machine is about to sleep, or shut down,
+    /// with `hold`, after which nothing more is written, unless the
+    /// shutdown is called off (see `server/shutdown.rs`). Without
+    /// anywhere to keep them, the lock is let go at once.
+    pub(super) fn keep_now(&mut self, lock: Option<std::os::fd::OwnedFd>, hold: bool) {
+        self.keep_with(lock, true);
+        self.keeping.held |= hold;
+    }
+
+    /// Keeps the workspaces again as they change, the shutdown that held
+    /// them called off.
+    pub(super) fn keep_on(&mut self) {
+        if std::mem::take(&mut self.keeping.held) {
+            self.keep_soon();
+        }
+    }
+
+    /// Has the writer's thread write the workspaces as they are now, if
+    /// they've changed since they were last written, the last write
+    /// failed, or `always`, with `lock` let go once it has. Nothing while
+    /// they're held.
+    fn keep_with(&mut self, lock: Option<std::os::fd::OwnedFd>, always: bool) {
         let Some(path) = self.keeping.path.clone() else {
             return;
         };
+        if self.keeping.held {
+            return;
+        }
         self.write_failed();
         let state = self.kept_state();
-        if self.keeping.last.as_ref() == Some(&state) {
+        if !always && self.keeping.last.as_ref() == Some(&state) {
             return;
         }
         if self.keeping.writer.is_none() {
@@ -245,7 +279,7 @@ impl Daemon {
             }
         }
         if let Some(writer) = &self.keeping.writer {
-            self.keeping.serial = writer.write(state.clone());
+            self.keeping.serial = writer.write(state.clone(), lock);
             self.keeping.last = Some(state);
         }
     }
@@ -488,6 +522,7 @@ impl Daemon {
         }
         let restored = self.workspaces.restored(id);
         let kept = self.workspaces.kept(id);
+        let graced = matches!(content, Content::Terminal(terminal) if self.in_grace(terminal));
         match content {
             Content::Terminal(terminal) => match &self.terminals.get(&terminal)?.terminal {
                 // What an agent's command printed, which a restart doesn't
@@ -503,13 +538,16 @@ impl Daemon {
                         // runs, with the terminal's secret, never what a
                         // program printed: or for a background tab's
                         // terminal whose shell has ended, what it ran last.
-                        // One kept running is written as offered too, for
-                        // a build from before then.
+                        // A shell a signal ended just now, its pane kept
+                        // as the daemon may be stopping too, is kept as
+                        // one running. One kept running is written as
+                        // offered too, for a build from before then.
                         ran: (kept.map(|kept| kept.command.clone()))
                             .or_else(|| restored.and_then(|restored| restored.ran.clone()))
                             .or_else(|| {
                                 match terminal.status() {
                                     TerminalStatus::Running => emulator.trusted_running_command(),
+                                    _ if graced => emulator.trusted_running_command(),
                                     _ => emulator.trusted_last_command(),
                                 }
                                 .and_then(kept_command)

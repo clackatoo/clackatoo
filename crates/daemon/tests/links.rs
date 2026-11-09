@@ -204,6 +204,7 @@ impl World {
             machine_name: Some(host.to_owned()),
             display: None,
             pastes: Some(clackatoo_daemon::PasteConfig::in_dir(dir.join("pastes"))),
+            logind: None,
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),

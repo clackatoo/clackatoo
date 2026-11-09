@@ -72,6 +72,9 @@ pub(crate) struct HostedTerminal {
     /// agent's command printed into (see [`HostedTerminal::fed`]), where
     /// that stands.
     fed: Option<Fed>,
+    /// The directory its program was last found in, kept for once it has
+    /// ended, when `/proc` has none (see [`HostedTerminal::own_directory`]).
+    directory: std::cell::RefCell<Option<String>>,
 }
 
 /// Where a terminal the daemon writes an agent's command's output into
@@ -222,6 +225,7 @@ impl HostedTerminal {
             recording,
             secret,
             exe,
+            directory: std::cell::RefCell::default(),
             fed: None,
         })
     }
@@ -255,6 +259,7 @@ impl HostedTerminal {
             recording: None,
             secret: None,
             exe: None,
+            directory: std::cell::RefCell::default(),
             fed: Some(Fed { ended: false }),
         }
     }
@@ -431,6 +436,7 @@ impl HostedTerminal {
             recording: None,
             secret,
             exe: None,
+            directory: std::cell::RefCell::default(),
             fed: fed.then_some(Fed { ended: true }),
         })
     }
@@ -571,10 +577,18 @@ impl HostedTerminal {
     }
 
     /// The directory the terminal's own program is in: for a shell, where
-    /// it last changed to, whatever runs in front of it.
+    /// it last changed to, whatever runs in front of it. Once it has
+    /// ended, where it was last found, as the workspaces were last kept,
+    /// if it was: so a shell a shutdown ended comes back where it was,
+    /// even one that doesn't say where it is (CLACKA-236).
     pub(crate) fn own_directory(&self) -> Option<String> {
+        if self.process.is_none() {
+            return self.directory.borrow().clone();
+        }
         let cwd = std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
-        cwd.into_os_string().into_string().ok()
+        let cwd = cwd.into_os_string().into_string().ok()?;
+        self.directory.replace(Some(cwd.clone()));
+        Some(cwd)
     }
 
     pub(crate) fn view(&self) -> View {

@@ -89,6 +89,7 @@ mod restore;
 mod reveal;
 mod review;
 mod settling;
+mod shutdown;
 mod signs;
 mod stopping;
 mod symbols;
@@ -1092,6 +1093,12 @@ pub struct Daemon {
     /// chats' conversations, kept from one run to the next in a file of
     /// their own (see [`crate::unlisted`]).
     unlisted: crate::unlisted::Unlisted,
+    /// The thread hearing from logind that the machine is about to shut
+    /// down or sleep, if it's asked (see `server/shutdown.rs`).
+    inhibitor: Option<crate::inhibit::Inhibitor>,
+    /// Terminals whose programs a signal ended, with when their panes
+    /// close, unless the daemon stops first (see `server/shutdown.rs`).
+    graced: BTreeMap<TerminalId, Instant>,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -1180,6 +1187,14 @@ impl Daemon {
             (config.machine.as_deref()).map(crate::unlisted::Unlisted::beside),
         );
         let display = config.display.clone().map(crate::display::Display::start);
+        let inhibitor = config.logind.clone().map(|address| {
+            let waker = Arc::clone(&waker);
+            crate::inhibit::Inhibitor::start(address, move || {
+                if let Err(err) = waker.wake() {
+                    log::warn!("waking the event loop for logind's news failed: {err}");
+                }
+            })
+        });
         Ok(Self {
             poll,
             listener,
@@ -1254,6 +1269,8 @@ impl Daemon {
             links,
             display,
             unlisted,
+            inhibitor,
+            graced: BTreeMap::new(),
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1951,6 +1968,7 @@ impl Daemon {
                     .chain(self.next_restart_due())
                     .chain(self.next_restate_due())
                     .chain(self.next_paste_due())
+                    .chain(self.next_grace_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1964,6 +1982,13 @@ impl Daemon {
             if let Some(web) = &mut self.web {
                 web.new_turn();
             }
+            // A signal asking the daemon to stop, and logind saying the
+            // machine is shutting down, are taken before anything else that
+            // came, as programs ending with them (see `server/shutdown.rs`).
+            if crate::signals::asked_to_stop() {
+                self.take_signals();
+            }
+            self.take_logind_news();
             // What came while a flood was being read came before what epoll
             // has now.
             std::mem::swap(&mut waiting, &mut self.waiting);
@@ -2001,6 +2026,7 @@ impl Daemon {
             self.take_found();
             self.take_ports();
             self.restart_kept();
+            self.end_graces();
             self.tell_restated();
             self.explore();
             self.retry_watches();
@@ -2686,9 +2712,12 @@ impl Daemon {
             self.background_ended(id);
             // So does a shell lent another daemon as a background tab.
             let lent_background = self.lent_background_of(id).is_some();
+            // Unless the daemon is stopping, or may be about to, as when a
+            // shutdown ended the program (see `server/shutdown.rs`).
             if !again
                 && !lent_background
                 && self.workspaces.get().pane_showing(id).is_some()
+                && !self.keeps_pane_as_it_ended(id)
                 && let Err(err) = self.close_terminal(id)
             {
                 log::error!("terminal {id}: closing its pane failed: {err}");
@@ -2783,6 +2812,7 @@ impl Daemon {
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         self.tools_closed(id);
+        self.graced.remove(&id);
         self.unread.retain(|&unread| unread != Flood::Terminal(id));
         self.compactions.remove(&id);
         self.frames.remove(&id);

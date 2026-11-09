@@ -13,13 +13,21 @@
 //! D-Bus specification's:
 //! <https://dbus.freedesktop.org/doc/dbus-specification.html>.
 //!
+//! A connection can also be one that's passed file descriptors (see
+//! [`Bus::connect_passing_fds`]), as logind passes the daemon its lock
+//! on shutting down (see [`crate::inhibit`]).
+//!
 //! Everything here blocks, so it only ever runs on threads of its own,
 //! never the window's or the daemon's event loop.
 
-use std::io::{self, Read, Write};
+use std::io::{self, IoSliceMut, Read, Write};
+use std::mem::MaybeUninit;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
+
+use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
 
 /// The bus's own name, path and interface, for `Hello` and `AddMatch`,
 /// and the sender of its own signals.
@@ -34,6 +42,10 @@ const LARGEST: usize = 128 << 20;
 
 /// How long writing to the bus may take before it's given up on.
 const WRITE_WAIT: Duration = Duration::from_secs(5);
+
+/// The most file descriptors kept from one read of a connection that's
+/// passed them: logind passes one, and the bus allows a message 16.
+const MOST_FDS: usize = 16;
 
 /// The system bus's address, unless `$DBUS_SYSTEM_BUS_ADDRESS` says.
 const SYSTEM_BUS: &str = "unix:path=/run/dbus/system_bus_socket";
@@ -89,9 +101,24 @@ impl Bus {
     ///
     /// If none of its addresses can be reached, or the bus won't have it.
     pub fn connect(address: &str) -> io::Result<Self> {
+        Self::connect_as(address, false)
+    }
+
+    /// Connects to the bus at `address` as [`Bus::connect`] does, saying
+    /// it takes file descriptors passed with messages, as an answer of
+    /// type `h` is: read them with [`Bus::receive`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Bus::connect`], and if the bus won't pass them.
+    pub fn connect_passing_fds(address: &str) -> io::Result<Self> {
+        Self::connect_as(address, true)
+    }
+
+    fn connect_as(address: &str, fds: bool) -> io::Result<Self> {
         let mut last = io::Error::new(io::ErrorKind::NotFound, "no Unix address to connect to");
         for each in address.split(';') {
-            match connect_to(each).and_then(login) {
+            match connect_to(each).and_then(|stream| login(stream, fds)) {
                 Ok(stream) => return Ok(Self { stream, serial: 0 }),
                 Err(err) => last = err,
             }
@@ -223,6 +250,52 @@ impl Bus {
     }
 }
 
+impl Bus {
+    /// Reads the next message, with the file descriptors that came with
+    /// it, on a connection no other thread reads, as long as it takes:
+    /// `None` for one too big to keep, as [`read_message`] says. Those
+    /// passed are closed in every program the daemon starts.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_message`].
+    pub fn receive(&mut self) -> io::Result<(Option<Message>, Vec<OwnedFd>)> {
+        self.stream.set_read_timeout(None)?;
+        let mut passed = Passed {
+            stream: &self.stream,
+            fds: Vec::new(),
+        };
+        let message = read_message(&mut passed)?;
+        Ok((message, passed.fds))
+    }
+}
+
+/// A connection read with the file descriptors that come with what's
+/// read, which a plain read would close unseen.
+struct Passed<'a> {
+    stream: &'a UnixStream,
+    fds: Vec<OwnedFd>,
+}
+
+impl Read for Passed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MOST_FDS))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let received = rustix::net::recvmsg(
+            self.stream,
+            &mut [IoSliceMut::new(buf)],
+            &mut control,
+            RecvFlags::CMSG_CLOEXEC,
+        )?;
+        for message in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(fds) = message {
+                self.fds.extend(fds);
+            }
+        }
+        Ok(received.bytes)
+    }
+}
+
 impl Drop for Bus {
     /// Ends the connection, so the thread reading it stops too.
     fn drop(&mut self) {
@@ -277,8 +350,9 @@ fn unescape(value: &str) -> Option<Vec<u8>> {
 }
 
 /// Logs in on `stream` as its user, with EXTERNAL: the bus checks the
-/// socket's credentials against the user id said.
-fn login(mut stream: UnixStream) -> io::Result<UnixStream> {
+/// socket's credentials against the user id said. With `fds`, it asks
+/// for file descriptors to be passed with messages.
+fn login(mut stream: UnixStream, fds: bool) -> io::Result<UnixStream> {
     stream.set_write_timeout(Some(WRITE_WAIT))?;
     stream.set_read_timeout(Some(WRITE_WAIT))?;
     // This process's user, without libc: /proc/self is owned by it.
@@ -294,6 +368,16 @@ fn login(mut stream: UnixStream) -> io::Result<UnixStream> {
             io::ErrorKind::PermissionDenied,
             format!("the bus wouldn't log in: {answer}"),
         ));
+    }
+    if fds {
+        stream.write_all(b"NEGOTIATE_UNIX_FD\r\n")?;
+        let answer = read_line(&mut stream)?;
+        if answer != "AGREE_UNIX_FD" {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("the bus won't pass file descriptors: {answer}"),
+            ));
+        }
     }
     stream.write_all(b"BEGIN\r\n")?;
     stream.set_read_timeout(None)?;
@@ -508,6 +592,8 @@ impl Body {
 pub struct Message {
     /// Its kind's number: see [`Kind`].
     pub kind: u8,
+    /// Its number, which a reply to it gives back.
+    pub serial: u32,
     /// The call it answers, for a reply or an error.
     pub reply_serial: Option<u32>,
     /// The interface of the signal or call.
@@ -596,8 +682,9 @@ pub fn read_message(stream: &mut impl Read) -> io::Result<Option<Message>> {
     stream.read_exact(&mut rest)?;
     let mut whole = fixed.to_vec();
     whole.extend_from_slice(&rest);
+    let serial = number(8);
     parse(&whole, big, fields_len, header_len)
-        .map(Some)
+        .map(|message| Some(Message { serial, ..message }))
         .ok_or_else(|| bad("a message from the bus is malformed"))
 }
 
@@ -937,7 +1024,7 @@ mod tests {
             theirs.read_exact(&mut begin).unwrap();
             (String::from_utf8(said).unwrap(), begin)
         });
-        login(ours).unwrap();
+        login(ours, false).unwrap();
         let (said, begin) = bus.join().unwrap();
         let uid = std::fs::metadata("/proc/self").unwrap().uid();
         let hex: String = (uid.to_string().bytes())
@@ -945,5 +1032,75 @@ mod tests {
             .fold(String::new(), |hex, byte| hex + &byte);
         assert_eq!(said, format!("\0AUTH EXTERNAL {hex}\r\n"));
         assert_eq!(&begin, b"BEGIN\r\n");
+    }
+
+    /// Reads a line of the login, as a bus would, `\r\n` and all.
+    fn line(stream: &mut UnixStream) -> String {
+        let mut said = Vec::new();
+        let mut byte = [0];
+        while !said.ends_with(b"\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            said.push(byte[0]);
+        }
+        String::from_utf8(said).unwrap()
+    }
+
+    /// A connection that takes file descriptors asks for them before it
+    /// begins, and what it reads comes with those passed: a pipe's end
+    /// here, as logind passes its lock.
+    #[test]
+    fn a_connection_passed_fds_asks_for_them_and_has_them_with_the_message() {
+        use std::os::fd::AsFd as _;
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let bus = std::thread::spawn(move || {
+            line(&mut theirs);
+            theirs.write_all(b"OK 0123456789abcdef\r\n").unwrap();
+            let asked = line(&mut theirs);
+            theirs.write_all(b"AGREE_UNIX_FD\r\n").unwrap();
+            let begun = line(&mut theirs);
+            let (read, write) = rustix::pipe::pipe().unwrap();
+            let message = signal(false, "PrepareForShutdown", "h", &[0, 0, 0, 0]);
+            let fds = [write.as_fd()];
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+            assert!(control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
+            rustix::net::sendmsg(
+                &theirs,
+                &[io::IoSlice::new(&message)],
+                &mut control,
+                rustix::net::SendFlags::empty(),
+            )
+            .unwrap();
+            (asked, begun, read)
+        });
+        let mut ours = Bus {
+            stream: login(ours, true).unwrap(),
+            serial: 0,
+        };
+        let (asked, begun, read) = bus.join().unwrap();
+        assert_eq!(asked, "NEGOTIATE_UNIX_FD\r\n");
+        assert_eq!(begun, "BEGIN\r\n");
+        let (message, fds) = ours.receive().unwrap();
+        assert_eq!(message.unwrap().args("h").unwrap().u32(), Some(0));
+        assert_eq!(fds.len(), 1);
+        // The only other copy of the pipe's write end: once it's closed,
+        // the pipe has ended.
+        drop(fds);
+        let mut byte = [0];
+        assert_eq!(rustix::io::read(&read, &mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_bus_that_wont_pass_fds_is_refused() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let bus = std::thread::spawn(move || {
+            line(&mut theirs);
+            theirs.write_all(b"OK 0123456789abcdef\r\n").unwrap();
+            line(&mut theirs);
+            theirs.write_all(b"ERROR\r\n").unwrap();
+        });
+        let err = login(ours, true).unwrap_err();
+        bus.join().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 }

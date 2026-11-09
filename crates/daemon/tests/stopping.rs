@@ -958,3 +958,136 @@ fn what_bash_runs_is_offered_after_a_restart_whether_it_started_before_an_upgrad
         .collect();
     assert_eq!(offered, [Some("sleep 601")]);
 }
+
+/// The pid of terminal `id`'s program.
+fn pid_of(client: &mut Client, id: TerminalId) -> Pid {
+    let pid = (client.list_terminals().unwrap().iter())
+        .find(|info| info.id == id)
+        .and_then(|info| info.pid)
+        .expect("a pid");
+    Pid::from_raw(i32::try_from(pid).unwrap()).unwrap()
+}
+
+/// Whether terminal `id`'s program has ended, as the daemon says, or the
+/// terminal has gone.
+fn ended(client: &mut Client, id: TerminalId) -> bool {
+    (client.list_terminals().unwrap().iter())
+        .find(|info| info.id == id)
+        .is_none_or(|info| info.status != clackatoo_protocol::TerminalStatus::Running)
+}
+
+/// A shutdown signals the programs in the daemon's terminals as well as
+/// the daemon, in no order the daemon can count on (CLACKA-236): systemd
+/// signals the leaves of the daemon's scope one by one, the daemon's last.
+/// Shells killed just before the daemon is asked to stop keep their panes,
+/// and their workspaces, which come back at the next start as at any
+/// restart, each a new shell in the directory it was in, whether its
+/// shell said where that was or not. A shell killed while the daemon goes
+/// on closes its pane a moment later, and one that exits by itself, at
+/// once.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, start to restart")]
+fn shells_killed_just_before_the_daemon_stops_come_back_with_their_workspaces() {
+    if !Path::new("/bin/bash").exists() {
+        eprintln!("/bin/bash isn't installed: skipped");
+        return;
+    }
+    let setup = Setup {
+        shell: Some("/bin/bash"),
+        ..Setup::default()
+    };
+    let mut daemon = Process::start(&setup);
+    let mut client = daemon.client();
+    let dir = |name: &str| {
+        let dir = daemon.root().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    };
+    let (project, quiet) = (dir("project"), dir("quiet"));
+    let shell = |cwd: &Path, command: Option<&str>| {
+        PaneTerminal::New(NewTerminal {
+            size: Size::new(80, 10).unwrap(),
+            command: command.map(|command| vec![command.to_owned()]),
+            cwd: Some(cwd.display().to_string()),
+            record_to: None,
+        })
+    };
+    // bash says where it is, as the shell integration has it; sh doesn't.
+    let names = ["shells", "quiet", "lapses", "exits"];
+    for (name, cwd, command) in [
+        (names[0], &project, None),
+        (names[1], &quiet, Some("/bin/sh")),
+        (names[2], &project, None),
+        (names[3], &project, None),
+    ] {
+        client
+            .new_workspace(Some(name.into()), shell(cwd, command))
+            .unwrap();
+    }
+    let list = client.watch_workspaces().unwrap().list;
+    let terminals: Vec<TerminalId> = (list.iter())
+        .map(|workspace| workspace.terminals()[0])
+        .collect();
+    let [shells, sh, lapses, exits] = terminals[..] else {
+        panic!("four terminals");
+    };
+    for terminal in [shells, lapses, exits] {
+        eventually("bash shows its prompt", || {
+            client.capture(terminal).is_ok_and(|view| {
+                let lines = &view.grid().expect("a grid").lines;
+                lines.iter().any(|line| line.text().contains('$'))
+            })
+        });
+    }
+    let kept = daemon.root().join("state/clackatoo/workspaces");
+    let says = |what: &Path| {
+        let text = std::fs::read_to_string(&kept).unwrap_or_default();
+        text.contains(&format!("{}\"", what.display()))
+    };
+    eventually("the shells' directories are kept", || {
+        says(&project) && says(&quiet)
+    });
+
+    // A shell that exits by itself closes its pane, and its workspace, at
+    // once.
+    let asked = Instant::now();
+    client.send_input(exits, b"exit\r").unwrap();
+    eventually("the workspace of the shell that exited goes", || {
+        !workspace_names(&mut client).contains(&names[3].to_owned())
+    });
+    assert!(asked.elapsed() < Duration::from_millis(1500));
+
+    // One a signal ended while the daemon goes on stays a moment, then
+    // closes, its workspace with it.
+    let killed = Instant::now();
+    rustix::process::kill_process(pid_of(&mut client, lapses), Signal::HUP).unwrap();
+    eventually("the daemon sees bash go", || ended(&mut client, lapses));
+    assert!(workspace_names(&mut client).contains(&names[2].to_owned()));
+    eventually("the workspace of the shell killed goes", || {
+        !workspace_names(&mut client).contains(&names[2].to_owned())
+    });
+    assert!(killed.elapsed() >= Duration::from_millis(1500));
+
+    // The others end by signals, as at a shutdown, and the daemon is asked
+    // to stop once it has seen them go.
+    rustix::process::kill_process(pid_of(&mut client, shells), Signal::HUP).unwrap();
+    rustix::process::kill_process(pid_of(&mut client, sh), Signal::KILL).unwrap();
+    eventually("the daemon sees them go", || {
+        ended(&mut client, shells) && ended(&mut client, sh)
+    });
+    drop(client);
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+
+    let mut client = daemon.client();
+    let log = daemon.log();
+    assert_eq!(workspace_names(&mut client), names[..2], "{log}");
+    // New shells, each in the directory the last was in.
+    let list = client.watch_workspaces().unwrap().list;
+    for (workspace, cwd) in list.iter().zip([&project, &quiet]) {
+        let pid = pid_of(&mut client, workspace.terminals()[0]);
+        eventually("the new shell is where the last was", || {
+            std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|now| &now == cwd)
+        });
+    }
+}

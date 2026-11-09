@@ -1361,6 +1361,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "The daemon and window run ahead of your builds on a busy machine; what they start never does",
     },
+    News {
+        id: "shutdown-kept",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Workspaces of terminals come back after a shutdown again: the daemon saves them before logind shuts down",
+    },
 ];
 
 impl News {

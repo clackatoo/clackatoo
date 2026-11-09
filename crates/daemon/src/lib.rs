@@ -39,6 +39,7 @@ mod handoff;
 mod handover;
 mod hosted;
 mod ignores;
+mod inhibit;
 mod known;
 pub mod launch;
 mod lsp;
@@ -237,6 +238,10 @@ pub struct DaemonConfig {
     /// the desktop's clipboard (see `Request::PasteImage`). `None` keeps
     /// none: pasting an image is refused.
     pub pastes: Option<PasteConfig>,
+    /// The system bus logind is asked on to wait for the workspaces to be
+    /// kept before the machine shuts down or sleeps, as a D-Bus address
+    /// (see `inhibit.rs`). `None` asks nothing.
+    pub logind: Option<String>,
 }
 
 /// Where images pasted into terminals are kept, and the programs that put
@@ -463,7 +468,9 @@ impl DaemonConfig {
     /// follow the desktop's login (see [`display`]), and
     /// `$CLACKATOO_PASTES`, the folder images pasted into terminals are
     /// kept in, or `off` for none (or else `clackatoo/pastes` in
-    /// [`cache_dir`]).
+    /// [`cache_dir`]), and `$CLACKATOO_LOGIND`: the D-Bus address of the
+    /// system bus logind is asked on, or `off` to ask nothing (or else the
+    /// system bus, but with `$CLACKATOO_DISPLAY` off, as for tests).
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
     pub fn from_env() -> Self {
@@ -614,6 +621,12 @@ impl DaemonConfig {
                     cache_dir().map(|dir| PasteConfig::in_dir(dir.join("clackatoo/pastes")))
                 }
                 None => cache_dir().map(|dir| PasteConfig::in_dir(dir.join("clackatoo/pastes"))),
+            },
+            logind: match non_empty("CLACKATOO_LOGIND") {
+                Some(off) if off == "off" => None,
+                Some(address) => Some(address.to_string_lossy().into_owned()),
+                None if non_empty("CLACKATOO_DISPLAY").is_some_and(|off| off == "off") => None,
+                None => Some(dbus::system_address()),
             },
         }
     }
