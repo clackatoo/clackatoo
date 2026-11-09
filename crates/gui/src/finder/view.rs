@@ -293,12 +293,21 @@ pub(crate) struct Layout {
 const LIST_COLS_WITH_PREVIEW: f32 = 50.0;
 
 impl Layout {
+    /// Where the parts go, with nothing down the list's side.
+    #[cfg(test)]
+    pub(crate) fn new(geometry: &Geometry) -> Self {
+        Self::sided(geometry, false)
+    }
+
+    /// Where the parts go, with a side down the list's left if `side`,
+    /// as the settings menu has: the list is wider then, as it shares its
+    /// room with the side, and the preview narrower.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
-    pub(crate) fn new(geometry: &Geometry) -> Self {
+    pub(crate) fn sided(geometry: &Geometry, side: bool) -> Self {
         let metrics = geometry.metrics;
         let padding = metrics.padding;
         let [cell_width, cell_height] = metrics.cell;
@@ -333,7 +342,7 @@ impl Layout {
         let row_height = (cell_height + padding).round();
         let rows = (body.height / row_height).max(1.0) as usize;
         let cols_of = |width: f32| ((width - 4.0 * padding) / cell_width).max(1.0) as usize;
-        let half = (body.width / 2.0).round();
+        let half = (body.width * if side { 0.62 } else { 0.5 }).round();
         let (list, preview) = if half / cell_width >= LIST_COLS_WITH_PREVIEW {
             let list = Rect {
                 width: half - padding,
@@ -445,28 +454,10 @@ impl Layout {
         ));
 
         // The side, then the list beside it.
-        let mut list = self.list;
-        if let Some(side) = &view.side {
-            let width = (side.cells() as f32 * cell_width).min(list.width).round();
-            for (index, row) in side.rows.iter().enumerate() {
-                let y = list.y + index as f32 * self.row_height;
-                if side.selected == Some(index) {
-                    painted.over.push(Fill::rounded(
-                        [list.x, y, width - padding, self.row_height],
-                        Paint::Chosen,
-                        (1.5 * padding).round(),
-                    ));
-                }
-                let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
-                push_row(row, origin, cell_width, painted);
-            }
-            painted.over.push(Fill::solid(
-                [list.x + width, list.y, geometry.edge, list.height],
-                Paint::PaletteEdge,
-            ));
-            list.x += width + padding;
-            list.width = (list.width - width - padding).max(0.0);
-        }
+        let list = match &view.side {
+            Some(side) => self.paint_side(side, geometry, painted),
+            None => self.list,
+        };
         for (index, row) in view.rows.iter().enumerate() {
             let y = list.y + index as f32 * self.row_height;
             if view.selected == Some(index) {
@@ -516,6 +507,43 @@ impl Layout {
             let origin = [area.x + 2.0 * padding, (y + padding / 2.0).round()];
             push_row(row, origin, cell_width, painted);
         }
+    }
+}
+
+impl Layout {
+    /// Paints `side` down the list's left, and returns where the list goes
+    /// beside it.
+    #[allow(clippy::cast_precision_loss)]
+    fn paint_side<'a>(
+        &self,
+        side: &'a SideView,
+        geometry: &Geometry,
+        painted: &mut Painted<'a>,
+    ) -> Rect {
+        let padding = geometry.metrics.padding;
+        let mut list = self.list;
+        let width = (side.cells() as f32 * self.cell_width)
+            .min(list.width)
+            .round();
+        for (index, row) in side.rows.iter().enumerate() {
+            let y = list.y + index as f32 * self.row_height;
+            if side.selected == Some(index) {
+                painted.over.push(Fill::rounded(
+                    [list.x, y, width - padding, self.row_height],
+                    Paint::Chosen,
+                    (1.5 * padding).round(),
+                ));
+            }
+            let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
+            push_row(row, origin, self.cell_width, painted);
+        }
+        painted.over.push(Fill::solid(
+            [list.x + width, list.y, geometry.edge, list.height],
+            Paint::PaletteEdge,
+        ));
+        list.x += width + padding;
+        list.width = (list.width - width - padding).max(0.0);
+        list
     }
 }
 
@@ -612,8 +640,8 @@ mod tests {
         let layout = Layout::new(&geometry);
         let why = "Nothing matches ‘zz’";
         let mut view = FinderView {
-                        side: None,
-title: "Files",
+            side: None,
+            title: "Files",
             place: None,
             query: "zz▏".into(),
             count: "0 / 2".into(),

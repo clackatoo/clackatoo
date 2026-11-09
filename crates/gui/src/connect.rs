@@ -390,8 +390,8 @@ impl HostPicker {
         }
         let more = if self.gathering { "…" } else { "" };
         FinderView {
-                        side: None,
-title: "Connect to",
+            side: None,
+            title: "Connect to",
             place: None,
             query: picker::drawn(self.picker.query()),
             count: format!("{} / {}{more}", self.ranking.len(), self.candidates.len()),

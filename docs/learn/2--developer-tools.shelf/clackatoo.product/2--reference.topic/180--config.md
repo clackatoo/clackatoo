@@ -1,7 +1,7 @@
 ---
 title: Configuration
 type: reference
-description: The windows are configured in Lua, with an init.lua that runs once for every window, sets options, binds keys, listens for key presses and chats' turns ending, and splits, focuses and closes panes. Where the files go, how a key travels through handlers and bindings, how handlers are run, the options and :setlocal, the API so far, and what happens when the config goes wrong.
+description: The windows are configured in Lua, with an init.lua that runs once for every window, sets options, binds keys, listens for key presses and chats' turns ending, and splits, focuses and closes panes. Where the files go, how a key travels through handlers and bindings, how handlers are run, the options and :setlocal, the :Settings menu, the API so far, and what happens when the config goes wrong.
 related:
   - clackatoo/reference/window
   - clackatoo/reference/cli
@@ -41,7 +41,7 @@ end)
 
 ```text
 ~/.config/clackatoo/        or $XDG_CONFIG_HOME/clackatoo/
-  client/settings.lua       options :setpersist saved, run before init.lua
+  client/settings.lua       what :setpersist, :mappersist and :Settings saved, run before init.lua
   client/init.lua           the window's config
   client/lua/               modules for it to require
   client/startup.toml       the window's settings, needed before it starts
@@ -509,6 +509,94 @@ is loading until each file has run to its end, even one that waits partway, as
 `coroutine.create` or `coroutine.wrap`, is said to be set at a line of that
 coroutine's, as only its lines can be seen from there.
 
+## The settings menu
+
+`:Settings` opens a menu of every option and every key bound, over the panes,
+as the finder is. `:Settings wrap` opens it searching for `wrap`. Down its
+left are its sections: the options' groups, as they're listed here, then
+**Keys**, then **Daemon**, where the daemon's own settings will go. Each row
+is an option and its value, its name in bold if it isn't as it starts; beside
+the list, the row picked is said in full: its value, its default, what it
+takes, where its value comes from, as [`:verbose set`](~clackatoo/reference/config#where-an-option-was-set)
+says it, and the file it's saved in.
+
+| Key | Does |
+|---|---|
+| `j`, `k`; <kbd>Down</kbd>, <kbd>Up</kbd> | The next or previous row |
+| `gg`, `G`; <kbd>Home</kbd>, <kbd>End</kbd> | The first row or the last |
+| <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Tab</kbd>; `}`, `{` | The next section, or the one before |
+| `/` | Searches the names, short names and what each does, as the finder matches; <kbd>Enter</kbd> stops typing and keeps what's found |
+| <kbd>Enter</kbd>, <kbd>Space</kbd> | Changes the row: turns it on or off, picks the next choice, types a value, picks a font, or records keys |
+| `l`, `h`; <kbd>Right</kbd>, <kbd>Left</kbd> | The next or previous value: on or off, a choice, or a number up or down |
+| `r` | Puts the option back as it starts, and out of its file |
+| `u` | Undoes the row's last change, one at a time, even after the menu is closed and opened again |
+| `x` | Takes away this window's own value, as `:setlocal nu<` does |
+| `d` | Takes keys the menu saved out of `settings.lua` |
+| `o` | Opens the line of config that set the row |
+| <kbd>Esc</kbd>, `q` | Clears the search, or else closes the menu |
+
+A change applies at once, in every window, as `:set` does, and is saved where
+[`:setpersist`](~clackatoo/reference/config#saving-options-settings-lua) saves
+it: in `settings.lua`, or for the font, its size, `renderer` and `priority`,
+in [`startup.toml`](~clackatoo/reference/frame#settings), which takes effect
+for windows opened after; the font and its size change in this one too.
+`renderer` and `priority` are only saved, for windows opened after.
+
+The font picker lists the font families installed, as `fc-list : family`
+lists them, with the system's monospace font first. A value typed, as for
+`colorcolumn` or `showbreak`, is written as `:set` takes it after `=`.
+
+**Locked.** An option your `init.lua` sets as it loads is locked: it would
+outdo anything the menu saved, so the menu says where, as `init.lua:12` at the
+row's end, and changes nothing. <kbd>Enter</kbd> on it opens that line in an
+editor beside the focused pane.
+
+**Configured and current.** An option changed since your config loaded, with
+`:set` or a key, says both: "configured 4, currently 7", and `not saved` at
+the row's end. Changing it in the menu changes what it's configured to as
+well.
+
+**This window's own.** An option this window has a value of its own for, from
+[`:setlocal`](~clackatoo/reference/config#one-window-s-own-setlocal), says so
+at the row's end, and `x` takes it away.
+
+### Keys
+
+The **Keys** section lists every key bound, in every mode, those bound alike
+in several as one row, with what each does and what bound it: as the window
+starts, `settings.lua`, or a line of your config. <kbd>Enter</kbd> on one
+records more keys to do the same: press them, then <kbd>Enter</kbd>.
+<kbd>Backspace</kbd> takes the last one back, and <kbd>Esc</kbd> gives up.
+They're bound at once, and saved in `settings.lua` as keys bound to the
+binding's keys, in the same modes:
+
+```lua
+client.keys.map("niv", "<A-t>", "<C-b>c", { desc = "new tab" })
+```
+
+Keys your config binds as it loads are locked, as options are, and so are
+keys it binds to a function, which `settings.lua` can't hold: bind more keys
+to those in `init.lua`. `d` takes keys the menu saved out of `settings.lua`,
+and puts back what the window binds them to as it starts, if anything.
+
+`:mappersist`, or `:mapp`, does the same from the command line: modes, keys,
+and the keys to type, the rest of the line, as Vim's `:map` takes them:
+
+```text
+:mappersist niv <A-t> <C-b>c
+```
+
+It's refused for keys your `init.lua` binds as it loads, and the bottom bar
+names the line.
+
+Bindings in `settings.lua` go at the end of the file, after its options.
+Saving one changes only its own line, as for options: a binding of the same
+keys in the same modes is replaced where it is, and comments around it are
+kept.
+
+The menu is the window's own: options are the window process's, not the
+daemon's, so the [web app](~clackatoo/reference/phone) doesn't list them.
+
 ## Events and handles
 
 `client.on("keypress", function)` listens for keys anywhere. Windows, tabs and
@@ -608,6 +696,11 @@ stderr, for a window opened in a process of its own).
   `web.toml`.
 - `init.lua` and `settings.lua` aren't run again when they change: use
   `:reload`.
+- The settings menu has no colour options yet, as no option is a colour, and
+  lists none of the daemon's settings yet.
+- The settings menu can't record <kbd>Enter</kbd>, <kbd>Esc</kbd> or
+  <kbd>Backspace</kbd> as keys, nor <kbd>Ctrl</kbd>+<kbd>;</kbd>, which closes
+  it.
 - Bindings made in Lua don't show in <kbd>Ctrl</kbd>+<kbd>B</kbd>'s list in
   the bottom bar.
 - Keypresses and chats' turns ending are the only events.

@@ -67,7 +67,9 @@ impl Desk {
 
     /// Handles a key while the settings menu is open.
     pub(super) fn settings_key(&mut self, press: &KeyPress<'_>) {
-        if let Some(outcome) = self.with_settings(|menu, facts, history| menu.key(press, facts, history)) {
+        if let Some(outcome) =
+            self.with_settings(|menu, facts, history| menu.key(press, facts, history))
+        {
             self.settings_did(outcome);
         }
     }
@@ -104,10 +106,17 @@ impl Desk {
         self.with_settings(|menu, facts, _| menu.view(facts, list, preview))
     }
 
+    /// Whether the settings menu is open.
+    pub(crate) fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
     /// Whether the menu waits for the fonts installed, which
     /// [`Desk::font_families`] gives it.
     pub(crate) fn wants_font_families(&self) -> bool {
-        self.settings.as_ref().is_some_and(SettingsMenu::wants_fonts)
+        self.settings
+            .as_ref()
+            .is_some_and(SettingsMenu::wants_fonts)
     }
 
     /// Takes in the font families installed, for the menu's font picker.
@@ -141,10 +150,7 @@ impl Desk {
                     place: Place::Beside(clackatoo_protocol::Side::Right),
                 };
                 if self.shown.is_none() {
-                    return self.refuse(format!(
-                        "{} needs a workspace to open in",
-                        place.file
-                    ));
+                    return self.refuse(format!("{} needs a workspace to open in", place.file));
                 }
                 self.open_picked(opening);
             }

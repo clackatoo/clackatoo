@@ -331,9 +331,9 @@ impl SettingsMenu {
         let picked = self.picked_name();
         self.fill(facts);
         self.ranking.set_query(self.picker.query(), &self.items);
-        if let Some(rank) =
-            picked.and_then(|name| (0..self.ranking.len()).find(|&rank| self.name_at(rank) == Some(name.clone())))
-        {
+        if let Some(rank) = picked.and_then(|name| {
+            (0..self.ranking.len()).find(|&rank| self.name_at(rank) == Some(name.clone()))
+        }) {
             self.picker.set_selected(rank);
         }
         self.picker.clamp(self.ranking.len());
@@ -625,14 +625,21 @@ impl SettingsMenu {
             return Outcome::Nothing;
         };
         // The start of the section the row picked is in.
-        let start = (0..=at).rev().take_while(|&rank| sections[rank] == here).last().unwrap_or(at);
+        let start = (0..=at)
+            .rev()
+            .take_while(|&rank| sections[rank] == here)
+            .last()
+            .unwrap_or(at);
         let to = if forward {
             (at..len).find(|&rank| sections[rank] != here)
         } else if start == 0 {
             None
         } else {
             let before = sections[start - 1];
-            (0..start).rev().take_while(|&rank| sections[rank] == before).last()
+            (0..start)
+                .rev()
+                .take_while(|&rank| sections[rank] == before)
+                .last()
         };
         match to {
             Some(rank) => self.go_to(rank),
@@ -697,13 +704,11 @@ impl SettingsMenu {
 
     /// Opens where `by` set it, if it says, or says it doesn't.
     fn open_set_by(&mut self, by: SetBy, facts: &Facts) -> Outcome {
-        match by.at {
-            Some(place) => Outcome::Open(place),
-            None => {
-                let said = format!("{}, at no line clackatoo knows", facts.said(&by));
-                self.refuse(&said)
-            }
+        if let Some(place) = by.at {
+            return Outcome::Open(place);
         }
+        let said = format!("{}, at no line clackatoo knows", facts.said(&by));
+        self.refuse(&said)
     }
 
     /// `o`: opens the line that set the row's value, if a line did.
@@ -748,7 +753,11 @@ impl SettingsMenu {
         if unchanged {
             return Outcome::Nothing;
         }
-        history.0.entry(info.name.to_owned()).or_default().push(undo);
+        history
+            .0
+            .entry(info.name.to_owned())
+            .or_default()
+            .push(undo);
         Outcome::Change { info, live, saved }
     }
 
@@ -774,14 +783,20 @@ impl SettingsMenu {
                     (true, n) => n.saturating_add(1),
                     (false, n) => n.saturating_sub(1),
                 };
-                if !(min..=max).contains(&next) && !(or_zero && next == 0) {
+                if !((min..=max).contains(&next) || or_zero && next == 0) {
                     return self.refuse(&info.wants());
                 }
                 Value::Number(next)
             }
             (Kind::Decimal { min, max }, Value::Decimal(number)) => {
                 let whole = number.as_f64().floor();
-                let next = if by > 0 { whole + 1.0 } else if number.as_f64() > whole { whole } else { whole - 1.0 };
+                let next = if by > 0 {
+                    whole + 1.0
+                } else if number.as_f64() > whole {
+                    whole
+                } else {
+                    whole - 1.0
+                };
                 let next = crate::options::Decimal::exact(next.max(0.0));
                 match next.filter(|next| {
                     (crate::options::Decimal::whole(min)..=crate::options::Decimal::whole(max))
@@ -952,7 +967,11 @@ impl SettingsMenu {
             Some(Editing::Value { info, text }) => {
                 let info = *info;
                 match stroke {
-                    Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true } => {
+                    Stroke::Escape
+                    | Stroke::Char {
+                        ch: 'c',
+                        ctrl: true,
+                    } => {
                         self.editing = None;
                         Outcome::Changed
                     }
@@ -975,7 +994,11 @@ impl SettingsMenu {
                 items,
                 ranking,
             }) => match stroke {
-                Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true } => {
+                Stroke::Escape
+                | Stroke::Char {
+                    ch: 'c',
+                    ctrl: true,
+                } => {
                     self.editing = None;
                     Outcome::Changed
                 }
@@ -1058,70 +1081,25 @@ impl SettingsMenu {
             ranking,
         }) = &mut self.editing
         {
-            let font = &facts.store.font;
-            let len = ranking.len();
-            let shown: Vec<Row> = (picker.shown(rows, len))
-                .filter_map(|rank| {
-                    let index = ranking.get(rank)?;
-                    let text = items.get(index).to_owned();
-                    let accents = ranking.matched_chars(&text);
-                    let current = match index {
-                        0 => font.is_empty(),
-                        index => families.get(index - 1) == Some(font),
-                    };
-                    let inks: Vec<Ink> = (0..text.chars().count())
-                        .map(|at| {
-                            if accents.binary_search(&u32::try_from(at).unwrap_or(u32::MAX)).is_ok() {
-                                Ink::Matched
-                            } else if current {
-                                Ink::Accent
-                            } else {
-                                Ink::Plain
-                            }
-                        })
-                        .collect();
-                    Some(fit(&text, &inks, cols, false))
-                })
-                .collect();
-            let waiting = items.len() == 0;
-            return FinderView {
-                title: "Font",
-                side: Some(side),
-                place: None,
-                query: picker::drawn(picker.query()),
-                count: if waiting {
-                    "looking for fonts…".into()
-                } else {
-                    format!("{} / {}", ranking.len(), items.len())
-                },
-                selected: picker.shown_selected(len),
-                rows: shown,
-                preview: preview.map(|size| {
-                    lines(
-                        &[
-                            vec![("Pick a font family for terminals and editors.", Ink::Plain)],
-                            Vec::new(),
-                            vec![("Enter", Ink::Key), (" sets it · ", Ink::Muted), ("Esc", Ink::Key), (" goes back", Ink::Muted)],
-                        ],
-                        size,
-                    )
-                }),
-                empty: (!waiting).then(|| "No font matches".into()),
+            let font = FontPicker {
+                families,
+                picker,
+                items,
+                ranking,
             };
+            return font.view(&facts.store.font, side, (rows, cols), preview);
         }
         let len = self.ranking.len();
         let range = self.picker.shown(rows, len);
         let shown: Vec<Row> = range
             .filter_map(|rank| self.row(rank, facts, cols))
             .collect();
-        let preview = preview.map(|size| self.detail(picked.as_ref(), facts, size));
+        let preview = preview.map(|size| detail(picked.as_ref(), facts, size));
         let query = match &self.editing {
             Some(Editing::Value { info, text }) => picker::drawn(&format!("{}={text}", info.name)),
-            Some(Editing::Keys { bound, keys }) => picker::drawn(&format!(
-                "keys for {}: {}",
-                bound.does(),
-                display(keys)
-            )),
+            Some(Editing::Keys { bound, keys }) => {
+                picker::drawn(&format!("keys for {}: {}", bound.does(), display(keys)))
+            }
             _ if self.typing || !self.picker.query().is_empty() => {
                 picker::drawn(self.picker.query())
             }
@@ -1149,7 +1127,7 @@ impl SettingsMenu {
     }
 
     /// The sections, down the side, the picked row's picked out, in at
-    /// most a third of `cols`.
+    /// most nine twentieths of `cols`.
     fn side(&self, picked: Option<&Entry>, rows: usize, cols: usize) -> SideView {
         let mut sections: Vec<Section> = self.entries.iter().map(Entry::section).collect();
         sections.dedup();
@@ -1157,7 +1135,7 @@ impl SettingsMenu {
             .map(|section| section.title().chars().count())
             .max()
             .unwrap_or(0)
-            .min(cols / 3);
+            .min(cols * 9 / 20);
         let here = picked.map(Entry::section);
         let shown: Vec<Row> = (sections.iter())
             .take(rows)
@@ -1181,7 +1159,7 @@ impl SettingsMenu {
     /// The row ranked `rank`, `cols` cells wide.
     fn row(&mut self, rank: usize, facts: &Facts, cols: usize) -> Option<Row> {
         let index = self.ranking.get(rank)?;
-        let accents = self.ranking.matched_chars(&self.items.get(index).to_owned());
+        let accents = self.ranking.matched_chars(self.items.get(index));
         let mut pieces: Vec<(String, Ink)> = Vec::new();
         let mut tag: Option<(String, Ink)> = None;
         // The characters of what's matched that a piece of the row shows,
@@ -1205,16 +1183,16 @@ impl SettingsMenu {
                 pieces.push((name, if changed { Ink::Bold } else { Ink::Plain }));
                 pieces.push((shown_value(info, &facts.shown(info)), Ink::Plain));
                 tag = if let Some(by) = facts.locked(info) {
-                    Some((
-                        by.place(facts.dir)
-                            .map_or_else(|| "your config".into(), |place| format!("set in {place}")),
-                        Ink::Muted,
-                    ))
+                    Some((short_place(by), Ink::Muted))
                 } else if facts.store.local(facts.window, info).is_some() {
                     Some(("this window's own".into(), Ink::Muted))
-                } else if !info.restart && facts.store.get(info) != facts.store.configured_value(info) {
+                } else if !info.restart
+                    && facts.store.get(info) != facts.store.configured_value(info)
+                {
                     Some(("not saved".into(), Ink::Caution))
-                } else if info.restart && facts.store.get(info) != facts.store.configured_value(info) {
+                } else if info.restart
+                    && facts.store.get(info) != facts.store.configured_value(info)
+                {
                     Some(("for windows opened after".into(), Ink::Muted))
                 } else {
                     None
@@ -1229,12 +1207,7 @@ impl SettingsMenu {
                 pieces.push((bound.does(), Ink::Plain));
                 let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
                 tag = Some(match by.source {
-                    Source::Default => (KeyMode::letters(&bound.modes), Ink::Muted),
-                    Source::Config if by.loading => (
-                        by.place(facts.dir)
-                            .map_or_else(|| "your config".into(), |place| format!("set in {place}")),
-                        Ink::Muted,
-                    ),
+                    Source::Config if by.loading => (short_place(&by), Ink::Muted),
                     Source::Settings => ("settings.lua".into(), Ink::Muted),
                     _ => (KeyMode::letters(&bound.modes), Ink::Muted),
                 });
@@ -1264,167 +1237,287 @@ impl SettingsMenu {
         }
         Some(fit(&text, &inks, cols, false))
     }
+}
 
-    /// What the preview says of the row picked: what it is, and where it's
-    /// set.
-    fn detail(&self, picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> PreviewView {
-        let mut said: Vec<Vec<(String, Ink)>> = Vec::new();
-        let line = |label: &str, text: String, ink: Ink| {
-            vec![(format!("{label:<10}"), Ink::Muted), (text, ink)]
-        };
-        let keys = |pairs: &[(&str, &str)]| {
-            let mut line = Vec::new();
-            for (at, (key, does)) in pairs.iter().enumerate() {
-                if at > 0 {
-                    line.push((" · ".to_owned(), Ink::Muted));
-                }
-                line.push(((*key).to_owned(), Ink::Key));
-                line.push((format!(" {does}"), Ink::Muted));
-            }
-            line
-        };
-        match picked {
-            None => {}
-            Some(Entry::Coming) => {
-                said.push(vec![("The daemon's own settings".into(), Ink::Bold)]);
-                said.push(vec![(
-                    "Coming: agents, the web app and this machine, now in the daemon's TOML files."
-                        .into(),
-                    Ink::Plain,
-                )]);
-            }
-            Some(Entry::Option(info)) => {
-                let mut title = vec![(info.name.to_owned(), Ink::Bold)];
-                if !info.short.is_empty() {
-                    title.push((format!("  {}", info.short), Ink::Muted));
-                }
-                said.push(title);
-                said.push(vec![(info.description.to_owned(), Ink::Plain)]);
-                said.push(Vec::new());
-                let shared = facts.store.get(info);
-                said.push(line("Value", shown_value(info, &facts.shown(info)), Ink::Plain));
-                said.push(line("Default", shown_value(info, &info.default_value()), Ink::Plain));
-                said.push(line("Takes", takes(info), Ink::Plain));
-                let configured = facts.store.configured_value(info);
-                let from = match facts.store.configured(info) {
-                    // Saved since the config loaded, at no line yet.
-                    Some((_, by)) if by.source == Source::Settings && by.at.is_none() => {
-                        format!("saved in {}", crate::options::persist::file(info))
-                    }
-                    Some((_, by)) => facts.said(by),
-                    None if configured != info.default_value() => {
-                        "as the window opened: startup.toml".into()
-                    }
-                    None => "as it starts".into(),
+/// The font picker, while it's open: the families installed, what's typed
+/// to find one, and the one picked.
+struct FontPicker<'a> {
+    families: &'a [String],
+    picker: &'a mut Picker,
+    items: &'a Items,
+    ranking: &'a mut Ranking,
+}
+
+impl FontPicker<'_> {
+    /// What to draw, `font` being the one in use, with `side` beside it,
+    /// for a list `rows` rows tall and `cols` cells wide, and a preview so
+    /// big, if there's room for one.
+    fn view(
+        self,
+        font: &str,
+        side: SideView,
+        (rows, cols): (usize, usize),
+        preview: Option<(usize, usize)>,
+    ) -> FinderView {
+        let Self {
+            families,
+            picker,
+            items,
+            ranking,
+        } = self;
+        let len = ranking.len();
+        let shown: Vec<Row> = (picker.shown(rows, len))
+            .filter_map(|rank| {
+                let index = ranking.get(rank)?;
+                let text = items.get(index);
+                let accents = ranking.matched_chars(text);
+                // The first is the system's font, which is no family.
+                let current = match index {
+                    0 => font.is_empty(),
+                    index => families.get(index - 1).is_some_and(|family| family == font),
                 };
-                said.push(line("From", from, Ink::Plain));
-                if shared != configured {
-                    let now = format!(
-                        "configured {}, currently {}",
-                        shown_value(info, &configured),
-                        shown_value(info, &shared)
-                    );
-                    let ink = if info.restart { Ink::Muted } else { Ink::Caution };
-                    said.push(line("Now", now, ink));
-                    if !info.restart {
-                        said.push(line("", facts.said(&facts.store.set_by(info)), Ink::Muted));
-                    }
-                }
-                if let Some((value, by)) = facts.store.local(facts.window, info) {
-                    said.push(line(
-                        "Here",
-                        format!("this window's own: {}", shown_value(info, value)),
-                        Ink::Plain,
-                    ));
-                    said.push(line("", facts.said(by), Ink::Muted));
-                }
-                let kept = match info.scope {
-                    Scope::Startup(_) if info.restart => {
-                        "client/startup.toml: takes effect for windows opened after".to_owned()
-                    }
-                    Scope::Startup(_) => {
-                        "client/startup.toml: takes effect for windows opened after, and this one now"
-                            .to_owned()
-                    }
-                    Scope::Window | Scope::Daemon => "client/settings.lua".to_owned(),
-                };
-                said.push(line("Saved in", kept, Ink::Plain));
-                said.push(Vec::new());
-                if let Some(by) = facts.locked(info) {
-                    said.push(vec![(
-                        format!("Locked: {}, which outdoes what the menu saves", facts.said(by)),
-                        Ink::Caution,
-                    )]);
-                    said.push(keys(&[("Enter", "opens it")]));
-                } else {
-                    let change = match info.kind {
-                        Kind::Bool => "turns it on or off",
-                        Kind::Choice(_) => "picks the next",
-                        Kind::Text if info.name == "font" => "picks a font",
-                        _ => "types a value",
-                    };
-                    let mut pairs = vec![("Enter", change)];
-                    if matches!(info.kind, Kind::Bool | Kind::Choice(_) | Kind::Number { .. } | Kind::Decimal { .. }) {
-                        pairs.push(("h l", "step"));
-                    }
-                    pairs.extend([("r", "default"), ("u", "undo")]);
-                    if facts.store.local(facts.window, info).is_some() {
-                        pairs.push(("x", "clears this window's"));
-                    }
-                    said.push(keys(&pairs));
-                }
-            }
-            Some(Entry::Keys(bound)) => {
-                said.push(vec![
-                    (display(&bound.keys), Ink::Bold),
-                    (
-                        format!("  {}", bound.keys.iter().map(Chord::spoken).collect::<Vec<_>>().join(" ")),
-                        Ink::Muted,
-                    ),
-                ]);
-                said.push(vec![(bound.does(), Ink::Plain)]);
-                said.push(Vec::new());
-                said.push(line("Modes", modes_said(&bound.modes), Ink::Plain));
-                let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
-                let from = match by.source {
-                    Source::Settings => "saved in client/settings.lua".to_owned(),
-                    _ => facts.said(&by),
-                };
-                said.push(line("From", from, Ink::Plain));
-                said.push(Vec::new());
-                if by.config_loading() {
-                    said.push(vec![(
-                        format!("Locked: {}, which outdoes what the menu saves", facts.said(&by)),
-                        Ink::Caution,
-                    )]);
-                    said.push(keys(&[("Enter", "opens it")]));
-                } else if bound.typed().is_none() {
-                    said.push(vec![(
-                        "It runs a function of your config's: bind more keys to it in init.lua."
-                            .into(),
-                        Ink::Muted,
-                    )]);
-                } else {
-                    let mut pairs = vec![("Enter", "records more keys for it"), ("u", "undo")];
-                    if by.source == Source::Settings {
-                        pairs.push(("d", "takes it out"));
-                    }
-                    said.push(keys(&pairs));
-                }
-            }
-        }
-        let said: Vec<Vec<(&str, Ink)>> = (said.iter())
-            .map(|line| line.iter().map(|(text, ink)| (text.as_str(), *ink)).collect())
+                let inks: Vec<Ink> = (0..text.chars().count())
+                    .map(|at| {
+                        if accents
+                            .binary_search(&u32::try_from(at).unwrap_or(u32::MAX))
+                            .is_ok()
+                        {
+                            Ink::Matched
+                        } else if current {
+                            Ink::Accent
+                        } else {
+                            Ink::Plain
+                        }
+                    })
+                    .collect();
+                Some(fit(text, &inks, cols, false))
+            })
             .collect();
-        lines(&said, size)
+        let waiting = items.len() == 0;
+        FinderView {
+            title: "Font",
+            side: Some(side),
+            place: None,
+            query: picker::drawn(picker.query()),
+            count: if waiting {
+                "looking for fonts…".into()
+            } else {
+                format!("{} / {}", ranking.len(), items.len())
+            },
+            selected: picker.shown_selected(len),
+            rows: shown,
+            preview: preview.map(|size| {
+                lines(
+                    &[
+                        vec![("Pick a font family for terminals and editors.", Ink::Plain)],
+                        Vec::new(),
+                        vec![
+                            ("Enter", Ink::Key),
+                            (" sets it · ", Ink::Muted),
+                            ("Esc", Ink::Key),
+                            (" goes back", Ink::Muted),
+                        ],
+                    ],
+                    size,
+                )
+            }),
+            empty: (!waiting).then(|| "No font matches".into()),
+        }
     }
 }
 
+/// A line of the preview, in runs of ink.
+type Said = Vec<(String, Ink)>;
+
+/// A line saying `text` in `ink` after a label, as `Value     on`.
+fn labelled(label: &str, text: String, ink: Ink) -> Said {
+    vec![(format!("{label:<LABEL$}"), Ink::Muted), (text, ink)]
+}
+
+/// A line saying what keys do, as `Enter turns it on or off · r default`.
+fn key_hints(pairs: &[(&str, &str)]) -> Said {
+    let mut line = Vec::new();
+    for (at, (key, does)) in pairs.iter().enumerate() {
+        if at > 0 {
+            line.push((" · ".to_owned(), Ink::Muted));
+        }
+        line.push(((*key).to_owned(), Ink::Key));
+        line.push((format!(" {does}"), Ink::Muted));
+    }
+    line
+}
+
+/// What the preview says of the row picked: what it is, and where it's
+/// set, as a preview `size` lines and cells big.
+fn detail(picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> PreviewView {
+    let said = match picked {
+        None => Vec::new(),
+        Some(Entry::Coming) => vec![
+            vec![("The daemon's own settings".into(), Ink::Bold)],
+            vec![(
+                "Coming: agents, the web app and this machine, now in the daemon's TOML files."
+                    .into(),
+                Ink::Plain,
+            )],
+        ],
+        Some(Entry::Option(info)) => option_detail(info, facts),
+        Some(Entry::Keys(bound)) => keys_detail(bound, facts),
+    };
+    let said: Vec<Vec<(&str, Ink)>> = (said.iter())
+        .map(|line| {
+            line.iter()
+                .map(|(text, ink)| (text.as_str(), *ink))
+                .collect()
+        })
+        .collect();
+    lines(&said, size)
+}
+
+/// What the preview says of `info`'s option.
+fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
+    let mut title = vec![(info.name.to_owned(), Ink::Bold)];
+    if !info.short.is_empty() {
+        title.push((format!("  {}", info.short), Ink::Muted));
+    }
+    let mut said = vec![
+        title,
+        vec![(info.description.to_owned(), Ink::Plain)],
+        Vec::new(),
+        labelled("Value", shown_value(info, &facts.shown(info)), Ink::Plain),
+        labelled(
+            "Default",
+            shown_value(info, &info.default_value()),
+            Ink::Plain,
+        ),
+        labelled("Takes", takes(info), Ink::Plain),
+    ];
+    let shared = facts.store.get(info);
+    let configured = facts.store.configured_value(info);
+    let from = match facts.store.configured(info) {
+        // Saved since the config loaded, at no line yet.
+        Some((_, by)) if by.source == Source::Settings && by.at.is_none() => {
+            format!("saved in {}", crate::options::persist::file(info))
+        }
+        Some((_, by)) => facts.said(by),
+        None if configured != info.default_value() => "as the window opened: startup.toml".into(),
+        None => "as it starts".into(),
+    };
+    said.push(labelled("From", from, Ink::Plain));
+    if shared != configured {
+        let now = format!(
+            "configured {}, currently {}",
+            shown_value(info, &configured),
+            shown_value(info, &shared)
+        );
+        // One read as a window opens is as this one opened, and is for
+        // windows opened after.
+        if info.restart {
+            said.push(labelled("Now", now, Ink::Muted));
+        } else {
+            said.push(labelled("Now", now, Ink::Caution));
+            said.push(labelled(
+                "",
+                facts.said(&facts.store.set_by(info)),
+                Ink::Muted,
+            ));
+        }
+    }
+    if let Some((value, by)) = facts.store.local(facts.window, info) {
+        let own = format!("this window's own: {}", shown_value(info, value));
+        said.push(labelled("Here", own, Ink::Plain));
+        said.push(labelled("", facts.said(by), Ink::Muted));
+    }
+    let file = crate::options::persist::file(info).to_owned();
+    said.push(labelled("Saved in", file, Ink::Plain));
+    let later = match info.scope {
+        Scope::Startup(_) if info.restart => Some("takes effect for windows opened after"),
+        Scope::Startup(_) => Some("takes effect for windows opened after, and this one now"),
+        Scope::Window | Scope::Daemon => None,
+    };
+    if let Some(later) = later {
+        said.push(labelled("", later.into(), Ink::Muted));
+    }
+    said.push(Vec::new());
+    if let Some(by) = facts.locked(info) {
+        let locked = format!(
+            "Locked: {}, which outdoes what the menu saves",
+            facts.said(by)
+        );
+        said.push(vec![(locked, Ink::Caution)]);
+        said.push(key_hints(&[("Enter", "opens it")]));
+        return said;
+    }
+    let change = match info.kind {
+        Kind::Bool => "turns it on or off",
+        Kind::Choice(_) => "picks the next",
+        Kind::Text if info.name == "font" => "picks a font",
+        _ => "types a value",
+    };
+    let mut pairs = vec![("Enter", change)];
+    if matches!(
+        info.kind,
+        Kind::Bool | Kind::Choice(_) | Kind::Number { .. } | Kind::Decimal { .. }
+    ) {
+        pairs.push(("h l", "step"));
+    }
+    pairs.extend([("r", "default"), ("u", "undo")]);
+    if facts.store.local(facts.window, info).is_some() {
+        pairs.push(("x", "clears this window's"));
+    }
+    said.push(key_hints(&pairs));
+    said
+}
+
+/// What the preview says of `bound`'s keys.
+fn keys_detail(bound: &Bound, facts: &Facts) -> Vec<Said> {
+    let spoken: Vec<String> = bound.keys.iter().map(Chord::spoken).collect();
+    let by = facts.keys.bound_by(bound.modes[0], &bound.keys);
+    let from = match by.source {
+        Source::Settings => "saved in client/settings.lua".to_owned(),
+        _ => facts.said(&by),
+    };
+    let mut said = vec![
+        vec![
+            (display(&bound.keys), Ink::Bold),
+            (format!("  {}", spoken.join(" ")), Ink::Muted),
+        ],
+        vec![(bound.does(), Ink::Plain)],
+        Vec::new(),
+        labelled("Modes", modes_said(&bound.modes), Ink::Plain),
+        labelled("From", from, Ink::Plain),
+        Vec::new(),
+    ];
+    if by.config_loading() {
+        let locked = format!(
+            "Locked: {}, which outdoes what the menu saves",
+            facts.said(&by)
+        );
+        said.push(vec![(locked, Ink::Caution)]);
+        said.push(key_hints(&[("Enter", "opens it")]));
+    } else if bound.typed().is_none() {
+        said.push(vec![(
+            "It runs a function of your config's: bind more keys to it in init.lua.".into(),
+            Ink::Muted,
+        )]);
+    } else {
+        let mut pairs = vec![("Enter", "records more keys for it"), ("u", "undo")];
+        if by.source == Source::Settings {
+            pairs.push(("d", "takes it out"));
+        }
+        said.push(key_hints(&pairs));
+    }
+    said
+}
 /// The bindings in `keys`, those bound alike in several modes as one, in
 /// the order of their keys.
 fn bindings(keys: &Keys) -> Vec<Bound> {
     let mut found: Vec<Bound> = Vec::new();
-    for mode in [KeyMode::Normal, KeyMode::Insert, KeyMode::Visual, KeyMode::Prompt] {
+    for mode in [
+        KeyMode::Normal,
+        KeyMode::Insert,
+        KeyMode::Visual,
+        KeyMode::Prompt,
+    ] {
         for (bound_keys, binding, label) in keys.bound(mode) {
             let label = label.map(str::to_owned);
             let alike = found.iter_mut().find(|bound| {
@@ -1499,7 +1592,11 @@ fn typed_value(value: &Value) -> String {
 fn takes(info: &Info) -> String {
     match info.kind {
         Kind::Bool => "on or off".into(),
-        Kind::Number { min, max, or_zero: true } => {
+        Kind::Number {
+            min,
+            max,
+            or_zero: true,
+        } => {
             format!("0, the window's choice, or a whole number from {min} to {max}")
         }
         Kind::Number { min, max, .. } => format!("a whole number from {min} to {max}"),
@@ -1513,18 +1610,69 @@ fn takes(info: &Info) -> String {
     }
 }
 
-/// `said`, lines of runs of ink, as a preview `size` lines and cells big.
+/// Where `by` set it, short, as a row's end says it: the file's name and
+/// the line, `init.lua:12`.
+fn short_place(by: &SetBy) -> String {
+    match &by.at {
+        Some(at) => {
+            let file = Path::new(&*at.file).file_name().map_or_else(
+                || at.file.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            format!("{file}:{}", at.line)
+        }
+        None => "your config".into(),
+    }
+}
+
+/// How wide a label before a value is, as `Value     on`.
+const LABEL: usize = 10;
+
+/// `said`, lines of runs of ink, as a preview `size` lines and cells big:
+/// a line too long goes on over more, between words, under its value if
+/// it has a label.
 fn lines(said: &[Vec<(&str, Ink)>], (rows, cols): (usize, usize)) -> PreviewView {
-    let lines = (said.iter().take(rows))
-        .map(|runs| {
-            let mut text = String::new();
-            let mut inks = Vec::new();
-            for (piece, ink) in runs {
-                text.push_str(piece);
-                inks.extend(std::iter::repeat_n(*ink, piece.chars().count()));
+    let cols = cols.max(1);
+    let mut lines = Vec::new();
+    for runs in said {
+        let mut chars: Vec<(char, Ink)> = (runs.iter())
+            .flat_map(|(piece, ink)| piece.chars().map(move |ch| (ch, *ink)))
+            .collect();
+        let labelled = runs
+            .first()
+            .is_some_and(|(label, ink)| *ink == Ink::Muted && label.chars().count() == LABEL);
+        let indent = if labelled && cols > 2 * LABEL {
+            LABEL
+        } else {
+            0
+        };
+        loop {
+            let (row, rest) = if chars.len() <= cols {
+                (std::mem::take(&mut chars), Vec::new())
+            } else {
+                // The last blank that fits, past the label, or else all
+                // that fits.
+                let at = (indent + 1..=cols)
+                    .rev()
+                    .find(|&at| chars[at].0 == ' ')
+                    .unwrap_or(cols);
+                let rest: Vec<(char, Ink)> = (chars[at..].iter())
+                    .skip_while(|(ch, _)| *ch == ' ')
+                    .copied()
+                    .collect();
+                chars.truncate(at);
+                (std::mem::take(&mut chars), rest)
+            };
+            let (text, inks): (String, Vec<Ink>) = row.into_iter().unzip();
+            lines.push(fit(&text, &inks, cols, false));
+            if rest.is_empty() {
+                break;
             }
-            fit(&text, &inks, cols, false)
-        })
-        .collect();
+            chars = std::iter::repeat_n((' ', Ink::Plain), indent)
+                .chain(rest)
+                .collect();
+        }
+    }
+    lines.truncate(rows);
     PreviewView { lines, at: None }
 }

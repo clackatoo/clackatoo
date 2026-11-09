@@ -158,9 +158,8 @@ impl Model {
                 continue;
             }
             if trimmed.starts_with("client.keys.map(") {
-                let mut maps = maps(trimmed).ok_or_else(|| {
-                    format!("line {number} isn't one clackatoo wrote: {trimmed}")
-                })?;
+                let mut maps = maps(trimmed)
+                    .ok_or_else(|| format!("line {number} isn't one clackatoo wrote: {trimmed}"))?;
                 if let Line::Maps { read, .. } = &mut maps {
                     *read = Some(line.to_owned());
                 }
@@ -258,9 +257,7 @@ impl Model {
     /// `modes` no more. Only those keys' lines change, and a binding not
     /// saved before goes at the end.
     pub(crate) fn bind(&mut self, mapping: Mapping, to: bool) {
-        let its = |line: &Line| {
-            matches!(line, Line::Maps { mapping: Some(saved), .. } if saved.same_keys(&mapping))
-        };
+        let its = |line: &Line| matches!(line, Line::Maps { mapping: Some(saved), .. } if saved.same_keys(&mapping));
         let mut found: Vec<usize> = (self.lines.iter().enumerate())
             .filter(|(_, line)| its(line))
             .map(|(index, _)| index)

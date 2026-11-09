@@ -1415,6 +1415,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: "One config runs for every window, :setlocal sets an option for one, and a busy handler never holds up keys",
     },
+    News {
+        id: "settings",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: ":Settings lists every option and key, where each was set, and changes and saves them; :mappersist saves keys",
+    },
 ];
 
 impl News {

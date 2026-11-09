@@ -1,0 +1,21 @@
+# The settings menu, :Settings: its sections down the side, the options
+# with their values, and the one picked said in full; one set in init.lua
+# locked, one changed since it loaded; and the keys section.
+size 1400x860
+config <<END
+client.opt.numberwidth = 6
+client.keys.map("n", "<A-y>", function() end, { desc = "my own" })
+END
+keys <C-;>:set nowrap<CR>
+keys :Settings<CR>
+sleep 500
+shot settings
+keys /wrap<CR>
+sleep 200
+shot settings-wrap
+keys <Esc>/numberwidth<CR>
+sleep 200
+shot settings-locked
+keys <Esc>/new tab<CR>
+sleep 200
+shot settings-keys

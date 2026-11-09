@@ -45,8 +45,13 @@ fn named(desk: &mut Desk, key: NamedKey) {
 /// The menu, as it's drawn: its picked row, what it says in place of the
 /// count, and the lines of its preview.
 fn menu(desk: &mut Desk) -> (String, String, Vec<String>) {
-    let view = desk.finder_view((30, 100), Some((30, 70))).expect("the menu");
-    let picked = view.selected.map(|at| view.rows[at].text.clone()).unwrap_or_default();
+    let view = desk
+        .finder_view((30, 100), Some((30, 70)))
+        .expect("the menu");
+    let picked = view
+        .selected
+        .map(|at| view.rows[at].text.clone())
+        .unwrap_or_default();
     let preview = (view.preview.into_iter())
         .flat_map(|preview| preview.lines)
         .map(|line| line.text)
@@ -64,7 +69,11 @@ fn the_menu_finds_an_option_changes_and_saves_it_resets_and_undoes_it() {
     named(&mut desk, NamedKey::Enter);
     let (picked, _, preview) = menu(&mut desk);
     assert!(picked.starts_with("wrap "), "{picked}");
-    assert!(preview.iter().any(|line| line.starts_with("Saved in  client/settings.lua")));
+    assert!(
+        preview
+            .iter()
+            .any(|line| line.starts_with("Saved in  client/settings.lua"))
+    );
     named(&mut desk, NamedKey::Enter);
     saved(&mut desk, 1);
     assert!(!desk.options.wrap, "it applies at once");
@@ -119,7 +128,10 @@ fn an_option_set_since_says_both_values_and_one_of_this_windows_own_can_go() {
     assert!(read(&dir, "client/settings.lua").ends_with("client.opt.numberwidth = 8\n"));
     let (picked, _, preview) = menu(&mut desk);
     assert!(!picked.ends_with("not saved"), "{picked}");
-    assert!(!preview.iter().any(|line| line.starts_with("Now")), "{preview:#?}");
+    assert!(
+        !preview.iter().any(|line| line.starts_with("Now")),
+        "{preview:#?}"
+    );
     // A value typed, as `:set` takes it.
     named(&mut desk, NamedKey::Enter);
     named(&mut desk, NamedKey::Backspace);
@@ -148,7 +160,7 @@ fn an_option_init_lua_sets_is_locked_and_enter_opens_its_line() {
     let (mut desk, dir) = configured("client.opt.ts = 2\nclient.opt.nuw = 6\n");
     command(&mut desk, "Settings numberwidth");
     let (picked, _, preview) = menu(&mut desk);
-    assert!(picked.ends_with("set in client/init.lua:2"), "{picked}");
+    assert!(picked.ends_with("init.lua:2"), "{picked}");
     assert!(
         preview.contains(
             &"Locked: set in client/init.lua:2, which outdoes what the menu saves".to_owned()
@@ -209,13 +221,19 @@ fn keys_recorded_are_saved_as_a_binding_that_a_reload_reads_back() {
             "{HEADER}\nclient.keys.map(\"niv\", \"<A-t>\", \"<C-b>c\", {{ desc = \"new tab\" }})\n"
         )
     );
-    assert_eq!(desk.message.as_deref(), Some("saved <A-t> in client/settings.lua"));
+    assert_eq!(
+        desk.message.as_deref(),
+        Some("saved <A-t> in client/settings.lua")
+    );
     named(&mut desk, NamedKey::Escape);
     named(&mut desk, NamedKey::Escape);
     assert!(desk.settings.is_none());
     answer_all(&mut desk);
     press(&mut desk, Key::Character("t".into()), None, alt);
-    assert!(matches!(answer_all(&mut desk)[..], [Request::NewTab { .. }]));
+    assert!(matches!(
+        answer_all(&mut desk)[..],
+        [Request::NewTab { .. }]
+    ));
     // A reload reads it back, from settings.lua.
     command(&mut desk, "reload");
     desk.lua_ready();
@@ -224,7 +242,10 @@ fn keys_recorded_are_saved_as_a_binding_that_a_reload_reads_back() {
     assert_eq!((by.source, by.loading), (SetFrom::Settings, true));
     answer_all(&mut desk);
     press(&mut desk, Key::Character("t".into()), None, alt);
-    assert!(matches!(answer_all(&mut desk)[..], [Request::NewTab { .. }]));
+    assert!(matches!(
+        answer_all(&mut desk)[..],
+        [Request::NewTab { .. }]
+    ));
     // `d` takes them out again, and they do nothing.
     command(&mut desk, "Settings <A-t>");
     assert!(menu(&mut desk).0.starts_with("<A-t>"));

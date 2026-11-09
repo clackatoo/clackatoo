@@ -139,9 +139,7 @@ fn write(dir: &Path, change: &Change) -> anyhow::Result<()> {
         info.check(value).map_err(anyhow::Error::msg)?;
     }
     locked(&client, || match info.scope {
-        Scope::Window => settings_lua(&settings, value.is_some(), |model| {
-            model.set(info, value)
-        }),
+        Scope::Window => settings_lua(&settings, value.is_some(), |model| model.set(info, value)),
         Scope::Startup(_) => crate::startup::persist(&client.join("startup.toml"), info, value),
         Scope::Daemon => anyhow::bail!(
             "{} is the daemon's, which has no settings file yet",

@@ -800,7 +800,7 @@ impl App {
     fn chrome(&mut self) -> Option<Chrome> {
         let geometry = self.geometry()?;
         let rounded = self.rounded();
-        let finder = crate::finder::view::Layout::new(&geometry);
+        let finder = crate::finder::view::Layout::sided(&geometry, self.desk.settings_open());
         // The picker of a machine, over the panes or a notice, as the
         // finder is.
         let picker = (self.picker.as_mut()).map(|picker| picker.view((finder.rows, finder.cols)));

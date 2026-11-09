@@ -600,7 +600,10 @@ impl<T: Clone> Keymap<T> {
     }
 
     /// Every binding in `mode`, by its keys, each with its label.
-    pub(crate) fn bound(&self, mode: KeyMode) -> impl Iterator<Item = (&[Chord], &T, Option<&str>)> {
+    pub(crate) fn bound(
+        &self,
+        mode: KeyMode,
+    ) -> impl Iterator<Item = (&[Chord], &T, Option<&str>)> {
         (self.modes[mode.index()].iter())
             .map(|(keys, entry)| (keys.as_slice(), &entry.action, entry.label.as_deref()))
     }

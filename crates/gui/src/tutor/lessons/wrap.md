@@ -81,3 +81,19 @@ option wrap
 `:set` lasts until clackatoo's windows have all closed. `:setpersist`, or `:setp`, sets an option and saves it as well, in `client/settings.lua` beside your `init.lua`, so every window opened after starts with it: `:setp nolinebreak`. `:setp linebreak&` takes it out again. This lesson doesn't save anything, as that changes your own config.
 
 An option your `init.lua` sets as it loads isn't saved, as `init.lua` runs after `settings.lua` and would outdo it: `:setp` sets it for now, and the bar names your line that sets it. Font, font size, `renderer` and `priority` are saved in `startup.toml` instead, as the window needs them before any Lua runs.
+
+## The settings menu
+
+`:Settings` opens a menu of every option and every key bound: what each does, its value, and where it was set. A change there applies at once and is saved, as `:setp` saves it. `:Settings wrap` opens it searching for `wrap`: open it so.
+
+```check
+finder settings
+```
+
+## Closing it
+
+`j` and `k` move between rows, Tab between sections, and `/` searches again. On a row, Enter changes it, `r` puts it back as it starts, and `u` undoes, but this lesson saves nothing, so press Esc twice: once to clear the search, and again to close the menu.
+
+```check
+not finder
+```

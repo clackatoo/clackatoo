@@ -128,7 +128,10 @@ impl Store {
     /// loads, which outdoes what's saved.
     pub(crate) fn saved(&mut self, info: &'static Info, value: Option<Value>) {
         let configured = &mut self.configured[info.index()];
-        if configured.as_ref().is_some_and(|(_, by)| by.config_loading()) {
+        if configured
+            .as_ref()
+            .is_some_and(|(_, by)| by.config_loading())
+        {
             return;
         }
         *configured = value.map(|value| (value, SetBy::SAVED));

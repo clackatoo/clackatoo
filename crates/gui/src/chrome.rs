@@ -1907,7 +1907,7 @@ fn place_finder(
     view: FinderView,
     measure: &mut dyn FnMut(&str, bool) -> f32,
 ) -> (finder::view::Layout, FinderView) {
-    let mut layout = finder::view::Layout::new(geometry);
+    let mut layout = finder::view::Layout::sided(geometry, view.side.is_some());
     layout.title_width = measure(view.title, false);
     (layout, view)
 }

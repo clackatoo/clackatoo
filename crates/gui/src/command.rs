@@ -1217,10 +1217,14 @@ pub(crate) fn takes(word: &str) -> Takes {
 /// The binding `:mappersist`'s `argument` asks for: modes, keys, and the
 /// keys to type, the rest of the line, as Vim's `:map` takes it.
 fn map_persist(argument: Option<&str>) -> Result<crate::options::settings_lua::Mapping, String> {
-    const USAGE: &str = "mappersist takes modes, keys, and keys to type: :mappersist n <A-t> <C-b>c";
+    const USAGE: &str =
+        "mappersist takes modes, keys, and keys to type: :mappersist n <A-t> <C-b>c";
     let argument = argument.ok_or(USAGE)?;
     let (modes, rest) = argument.split_once(char::is_whitespace).ok_or(USAGE)?;
-    let (keys, to) = rest.trim_start().split_once(char::is_whitespace).ok_or(USAGE)?;
+    let (keys, to) = rest
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(USAGE)?;
     Ok(crate::options::settings_lua::Mapping {
         modes: crate::keymap::parse_modes(modes)?,
         keys: crate::keymap::parse_keys(keys)?,

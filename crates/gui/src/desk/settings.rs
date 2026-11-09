@@ -54,10 +54,12 @@ impl Default for Saving {
 
 #[cfg(test)]
 impl Saving {
-    /// Waits for the next setting to be saved, for tests.
+    /// Waits for the next setting to be saved, for tests. One thread
+    /// saves for every test, each save waiting on the disk twice, so a
+    /// busy machine's tests can queue for a while.
     pub(super) fn wait(&self) -> Saved {
         (self.answers)
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("saved")
     }
 }
