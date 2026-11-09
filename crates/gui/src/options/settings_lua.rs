@@ -119,6 +119,14 @@ impl Model {
                 lines.push(Line::Kept(line.to_owned()));
                 continue;
             }
+            let named = (trimmed.strip_prefix("client.opt."))
+                .and_then(|rest| rest.split_once('='))
+                .map(|(name, _)| name.trim());
+            if let Some(name) = named.filter(|name| KEPT_WORDS.contains(name)) {
+                return Err(format!(
+                    "line {number} sets `{name}`, a word Luau keeps for itself, which stops the file loading"
+                ));
+            }
             lines
                 .push(sets(trimmed).ok_or_else(|| {
                     format!("line {number} isn't one clackatoo wrote: {trimmed}")
@@ -284,14 +292,22 @@ fn long_bracket(after: &str) -> Option<(usize, String)> {
         .then(|| (level + 2, format!("]{}]", "=".repeat(level))))
 }
 
+/// The words Luau keeps for itself, which `client.opt.WORD` can't name:
+/// a line with one would stop the whole file from loading.
+const KEPT_WORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
+    "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
 /// Whether `name` could be an option's: a Lua name, as Luau reads
-/// `client.opt.NAME`.
+/// `client.opt.NAME`, and none of the words it keeps.
 fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && !KEPT_WORDS.contains(&name)
 }
 
 /// `value` written as Lua, as the option reads it back.
@@ -630,6 +646,23 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_word_luau_keeps_is_no_option_and_is_named() {
+        for word in KEPT_WORDS {
+            assert!(find(word).is_err(), "{word} is an option");
+            let err = Model::parse(&format!("client.opt.wrap = true\nclient.opt.{word} = 1\n"))
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "line 2 sets `{word}`, a word Luau keeps for itself, which stops the file loading"
+                )
+            );
+        }
+        // Luau's `continue` is a word only where a statement starts.
+        assert!(Model::parse("client.opt.continue = 1\n").is_ok());
+    }
+
     #[test]
     fn nothing_set_can_write_a_line_of_its_own() {
         let mut model = Model::default();
