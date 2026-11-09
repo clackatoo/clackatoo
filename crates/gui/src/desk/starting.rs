@@ -37,10 +37,12 @@ impl Desk {
         let agent = Some(self.options.agent.clone()).filter(|name| !name.is_empty());
         let case = Case::of(&self.options);
         self.start = Some(StartPage::new(place, self.last_chat.clone(), agent, case));
-        // `:Agent@desk`: the chat it starts is on desk.
+        // `:Agent@desk`: the chat it starts is on desk, so desk says what
+        // it could be.
         self.start_on = self.opening_on;
         let pane = self.shown.map(|shown| shown.pane);
-        self.request(Request::ChatChoices { pane }, Asked::ChatChoices);
+        let on = self.start_on;
+        self.request(Request::ChatChoices { pane, on }, Asked::ChatChoices);
     }
 
     /// Takes in the daemon's answer to what a new chat could be, for the

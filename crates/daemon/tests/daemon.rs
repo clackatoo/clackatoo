@@ -19036,7 +19036,10 @@ fn an_agent_lists_the_sessions_it_kept_newest_first_marking_those_a_chat_has_ope
     let mut client = daemon.client();
     // What a new chat could be, before any: the agent, not running.
     let Response::ChatChoices(choices) = client
-        .request(&Request::ChatChoices { pane: None })
+        .request(&Request::ChatChoices {
+            pane: None,
+            on: None,
+        })
         .unwrap()
     else {
         panic!("choices");

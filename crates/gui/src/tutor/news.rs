@@ -1331,6 +1331,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Stop holds a chat: other agents' messages and subagents' notices wait until you write there again",
     },
+    News {
+        id: "agent-at-host",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: ":Agent@desk's start page offers desk's agents, folder and sessions, even from one of this machine's panes",
+    },
 ];
 
 impl News {

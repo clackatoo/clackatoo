@@ -206,6 +206,50 @@ fn a_pane_goes_on_the_machine_named_after_its_kind() {
     assert_eq!(note_of(&desk), "no machine ‘dsk’: did you mean ‘desk’?");
 }
 
+/// `:Agent@desk`'s start page, from a pane of this machine's, asks desk
+/// what a chat there could be, and lists desk's agent's sessions; plain
+/// `:Agent` asks of the pane's own machine (CLACKA-118).
+#[test]
+fn the_start_page_for_another_machine_asks_that_machine() {
+    let mut desk = desk(here(three()));
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    let asked = |desk: &mut Desk, line: &str| {
+        command(desk, line);
+        let asked: Vec<Option<MachineId>> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::ChatChoices { on, .. }) => Some(on),
+                _ => None,
+            })
+            .collect();
+        desk.answered(Response::ChatChoices(clackatoo_protocol::ChatChoices {
+            agents: vec![clackatoo_protocol::Provider {
+                agent: "claude".to_owned(),
+                title: "Claude Code".to_owned(),
+                models: clackatoo_protocol::ProviderModels::Unknown,
+            }],
+            default: "claude".to_owned(),
+            cwd: "/home/them".to_owned(),
+            home: "/home/them".to_owned(),
+            unshown: Vec::new(),
+        }));
+        let listed: Vec<Option<MachineId>> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::ListSessions { on, .. } => Some(on),
+                _ => None,
+            })
+            .collect();
+        desk.close_finder();
+        (asked, listed)
+    };
+    assert_eq!(
+        asked(&mut desk, "Agent@desk"),
+        (vec![Some(DESK)], vec![Some(DESK)])
+    );
+    assert_eq!(asked(&mut desk, "Agent"), (vec![None], vec![None]));
+}
+
 #[test]
 fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from() {
     // This machine's workspace, holding a terminal on desk beside its own.

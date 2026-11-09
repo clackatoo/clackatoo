@@ -3425,7 +3425,8 @@ mod tests {
         assert_eq!(
             requests,
             [Request::ChatChoices {
-                pane: Some(PaneId(1))
+                pane: Some(PaneId(1)),
+                on: None,
             }]
         );
         assert_eq!(listings.len(), 1, "the agent's sessions asked for");

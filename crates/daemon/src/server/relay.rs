@@ -1212,14 +1212,7 @@ impl Daemon {
                 let action = action.clone();
                 (at, Ok((Request::Chat { terminal, action }, Then::Pass)))
             }),
-            &Request::ChatChoices { pane: Some(local) } => self
-                .pane_elsewhere(local)
-                .map(|found| {
-                    let (at, pane) = found?;
-                    let choices = Request::ChatChoices { pane: Some(pane) };
-                    Ok((at, (choices, Then::Choices)))
-                })
-                .map(flip),
+            &Request::ChatChoices { pane, on } => self.route_chat_choices(pane, on).map(flip),
             Request::NewTab {
                 workspace: local,
                 terminal: content,

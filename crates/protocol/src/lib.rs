@@ -148,7 +148,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 139;
+pub const PROTOCOL_VERSION: u32 = 140;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1204,6 +1204,14 @@ pub enum Request {
         /// The pane the chat would go beside, or `None` for the home
         /// directory.
         pane: Option<PaneId>,
+        /// The machine the chat would be on, if another than `pane`'s:
+        /// its daemon answers, for its home directory. New in protocol
+        /// 140: `None`, an older peer's, is `pane`'s machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::CHOICES_ON }, _>",
+            deserialize_with = "wire::since::<{ wire::CHOICES_ON }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Sizes a terminal to the client for a while, as a phone does to
     /// show it at its own width, or with no size, puts it back. Only a

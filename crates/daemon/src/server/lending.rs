@@ -382,7 +382,7 @@ impl Daemon {
             Request::OpenHere { pane: id, .. }
             | Request::BlankHere { pane: id, .. }
             | Request::Recover { pane: id, .. }
-            | Request::ChatChoices { pane: Some(id) }
+            | Request::ChatChoices { pane: Some(id), .. }
             | Request::Forwards { pane: id, .. } => pane(id, true),
             Request::CloseTab { tab: id }
             | Request::RenameTab { tab: id, .. }

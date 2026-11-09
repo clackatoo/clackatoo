@@ -18,11 +18,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use clackatoo_protocol::{AgentSession, ClientMessage, Error, Event, MachineId, TerminalId};
+use clackatoo_protocol::{
+    AgentSession, ClientMessage, Error, Event, MachineId, PaneId, Request, TerminalId,
+};
 use mio::Token;
 
-use super::Expect;
 use super::mirror::shown_name;
+use super::{Expect, Then};
 use crate::server::Daemon;
 
 /// The most sessions of another machine's agent taken in: as many as a
@@ -42,6 +44,9 @@ const MOST_UPDATED: usize = 64;
 /// characters.
 const LONGEST_REASON: usize = 1024;
 
+/// A request to ask of another daemon, and how its answer is renumbered.
+type Asked = (Request, Then);
+
 /// The listings asked of one other daemon, by the connection's numbers:
 /// the directory each asked about.
 #[derive(Debug, Default)]
@@ -51,6 +56,61 @@ pub(in crate::server) struct Listings {
 }
 
 impl Daemon {
+    /// Where [`Request::ChatChoices`] goes, for a chat beside `pane` on
+    /// machine `on`, if not here: the daemon there, asked about the pane
+    /// if it's that machine's, or else about its home directory, as a new
+    /// pane of its beside one of another machine's starts there. `None`
+    /// if this daemon answers.
+    ///
+    /// [`Request::ChatChoices`]: clackatoo_protocol::Request::ChatChoices
+    pub(super) fn route_chat_choices(
+        &self,
+        pane: Option<PaneId>,
+        on: Option<MachineId>,
+    ) -> Option<Result<(usize, Asked), Error>> {
+        let elsewhere = pane.and_then(|pane| self.pane_elsewhere(pane));
+        let machine = on.filter(|&machine| machine != self.machine.id);
+        let theirs =
+            |at: usize| (self.links.list[at].machine.as_ref()).map(|known| known.id) == machine;
+        match (elsewhere, machine) {
+            // Asked of the pane's machine, or of none: as it's asked.
+            (Some(found), None) if on.is_none() => Some(found.map(|(at, pane)| {
+                let choices = Request::ChatChoices {
+                    pane: Some(pane),
+                    on: None,
+                };
+                (at, (choices, Then::Choices))
+            })),
+            (Some(Ok((at, pane))), Some(_)) if theirs(at) => {
+                let choices = Request::ChatChoices {
+                    pane: Some(pane),
+                    on: None,
+                };
+                Some(Ok((at, (choices, Then::Choices))))
+            }
+            // This machine's, beside another's pane, or the other way
+            // round: the home directory of the machine it's on.
+            (_, None) => None,
+            (_, Some(machine)) => Some(self.choices_there(machine)),
+        }
+    }
+
+    /// The ask of what a new chat on machine `machine`, another, could be,
+    /// in its home directory: the connection to it, or why it can't be.
+    fn choices_there(&self, machine: MachineId) -> Result<(usize, Asked), Error> {
+        let Some(at) = self.link_to(machine) else {
+            return Err(Error::Other(format!(
+                "‘{}’ isn't connected: :connect it first",
+                self.machine_named(machine)
+            )));
+        };
+        let choices = Request::ChatChoices {
+            pane: None,
+            on: None,
+        };
+        Ok((at, (choices, Then::Choices)))
+    }
+
     /// Asks the daemon on machine `on` for the sessions its agent called
     /// `agent` kept in `cwd`, for the client at `token`, which numbered it
     /// `id`, if `on` is another machine than this one. Returns whether it

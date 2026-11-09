@@ -386,6 +386,11 @@ gates! {
     /// draw terminals in, for programs that ask, `ClientMessage::Colours`
     /// (`Palette`), which an older daemon is never sent.
     TERMINAL_STANDARDS = 139,
+    /// What a new chat on another machine than the pane it goes beside
+    /// could be, as `:Agent@desk` asks from a pane of this machine's
+    /// (CLACKA-118): `Request::ChatChoices`' `on`. An older daemon answers
+    /// for the pane's machine.
+    CHOICES_ON = 140,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1776,7 +1781,7 @@ mod tests {
             patches_at(NEW, vec![patch.clone()]),
             std::slice::from_ref(&patch)
         );
-        let read = patches_at(OLD, vec![patch]);
+        let read = patches_at(TERMINAL_STANDARDS - 1, vec![patch]);
         let [Patch::Grid { state: older, .. }] = read.as_slice() else {
             panic!("not one grid patch: {read:?}");
         };

@@ -3695,7 +3695,12 @@ impl Daemon {
             Request::DetachBrowser { chat } => Ok(self.detach_browser(token, chat)),
             Request::Review(action) => self.serve_review(action),
             Request::WatchChats => Ok(self.watch_chats(token)),
-            Request::ChatChoices { pane } => Ok(Response::ChatChoices(self.chat_choices(pane))),
+            // Beside a pane of another machine's, a chat on this one starts
+            // in its home directory.
+            Request::ChatChoices { pane, on } => {
+                let pane = pane.filter(|&pane| on.is_none() || self.pane_elsewhere(pane).is_none());
+                Ok(Response::ChatChoices(self.chat_choices(pane)))
+            }
             Request::Fit {
                 terminal,
                 size,

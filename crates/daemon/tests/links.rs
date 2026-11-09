@@ -1443,6 +1443,38 @@ fn a_subagents_card_in_a_chat_on_another_machine_opens_it() {
     );
 }
 
+/// What a new chat on a machine could be is that machine's, whichever
+/// machine's pane it goes beside, as `:Agent@laptop` from one of desk's
+/// panes, or `:Agent@local` from one of laptop's, asks (CLACKA-118).
+#[test]
+fn what_a_chat_could_be_is_asked_of_the_machine_it_would_be_on() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let desk = pair.desk.machine().id;
+    let own = pair.window.new_workspace(None, shell()).unwrap();
+    let theirs = pair.work.tabs[0].layout.panes()[0].id;
+    let cwd = |pair: &mut Pair, pane: PaneId, on: Option<MachineId>| {
+        let asked = Request::ChatChoices {
+            pane: Some(pane),
+            on,
+        };
+        match pair.window.request(&asked).unwrap() {
+            Response::ChatChoices(choices) => choices.cwd,
+            other => panic!("{other:?}"),
+        }
+    };
+    let home = |host: &str| pair.world.host(host).display().to_string();
+    let (desk_home, laptop_home) = (home("desk"), home("laptop"));
+    assert_eq!(cwd(&mut pair, own, Some(laptop)), laptop_home);
+    assert_eq!(cwd(&mut pair, theirs, Some(desk)), desk_home);
+    // Of the pane's own machine, it's as asked of the pane.
+    assert_eq!(cwd(&mut pair, own, Some(desk)), cwd(&mut pair, own, None));
+    assert_eq!(
+        cwd(&mut pair, theirs, Some(laptop)),
+        cwd(&mut pair, theirs, None)
+    );
+}
+
 #[test]
 fn a_form_an_agent_on_another_machine_asks_is_filled_in_through_this_daemon() {
     use clackatoo_protocol::{FieldValue, FormReply};

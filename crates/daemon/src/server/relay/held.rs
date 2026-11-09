@@ -414,8 +414,12 @@ impl Daemon {
                 pane: here(pane),
                 drop,
             },
-            Request::ChatChoices { pane: Some(pane) } => Request::ChatChoices {
+            Request::ChatChoices {
+                pane: Some(pane),
+                on,
+            } => Request::ChatChoices {
                 pane: Some(here(pane)),
+                on,
             },
             Request::Forwards { pane, forwarding } => Request::Forwards {
                 pane: here(pane),

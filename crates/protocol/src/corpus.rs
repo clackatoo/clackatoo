@@ -1037,6 +1037,14 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ),
         })),
     ));
+    // What a new chat on another machine than its pane's could be.
+    samples.push((
+        crate::wire::CHOICES_ON,
+        Client(ClientMessage::Request(Request::ChatChoices {
+            pane: Some(PaneId(1)),
+            on: Some(MachineId([9; 16])),
+        })),
+    ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,
@@ -3184,6 +3192,7 @@ fn more() -> Vec<Sample> {
         }),
         request(Request::ChatChoices {
             pane: Some(PaneId(1)),
+            on: None,
         }),
         response(Response::ChatChoices(ChatChoices {
             agents: vec![Provider {
