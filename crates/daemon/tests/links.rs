@@ -1379,6 +1379,70 @@ fn a_chat_on_another_machine_is_talked_to_through_this_daemon() {
     assert_eq!(summary.workspace, Some(pair.work.id));
 }
 
+/// A chat an agent on another machine started opens from its card, as the
+/// window's click asks, beside the chat that started it, and the window is
+/// shown it (CLACKA-118).
+#[test]
+fn a_subagents_card_in_a_chat_on_another_machine_opens_it() {
+    use clackatoo_protocol::AgentTools;
+    let mut pair = Pair::with(|world, host| {
+        world.start_configured(host, false, |config| {
+            config.mcp = Some(vec![example("fake_agent").into(), "mcp".into()]);
+        })
+    });
+    let tooled = match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent {
+            tools: AgentTools::Allow,
+            ..new
+        }),
+        other => other,
+    };
+    let pane = pair.window.new_tab(pair.work.id, tooled).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let chat = terminal_of(found(&shown, pane).1.content);
+    attach_to(&mut pair.window, chat);
+    wait_for_chat(&mut pair.window, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    pair.window
+        .chat(
+            chat,
+            ChatAction::Send("mcp start_chat {\"prompt\":\"hi\"}".into()),
+        )
+        .unwrap();
+    // Its card comes as it starts; a notice that it finished may come
+    // after, as a turn of its own.
+    let node = wait_for_chat(&mut pair.window, chat, |node| !node.subagents.is_empty());
+    let kid = node.subagents[0].chat;
+    pair.window
+        .chat(chat, ChatAction::Open { chat: kid })
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let shown = loop {
+        assert!(Instant::now() < deadline, "the window wasn't shown it");
+        match pair.window.next_event() {
+            Ok(Event::Show { pane, .. }) => break pane,
+            Ok(Event::View { terminal, .. }) => pair.window.frame_done(terminal).unwrap(),
+            Ok(_) => {}
+            Err(err) => panic!("{err}"),
+        }
+    };
+    let workspaces = pair.window.watch_workspaces().unwrap();
+    let (workspace, opened) = found(&workspaces, shown);
+    assert_eq!(workspace.id, pair.work.id);
+    let opened = terminal_of(opened.content);
+    assert_ne!(opened, chat);
+    let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+        panic!("no chats");
+    };
+    let summary = (chats.iter()).find(|summary| summary.chat == opened);
+    assert_eq!(
+        summary.and_then(|summary| summary.parent),
+        Some(chat),
+        "{chats:?}"
+    );
+}
+
 #[test]
 fn a_form_an_agent_on_another_machine_asks_is_filled_in_through_this_daemon() {
     use clackatoo_protocol::{FieldValue, FormReply};
