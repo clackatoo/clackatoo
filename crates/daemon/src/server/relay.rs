@@ -123,6 +123,22 @@ const SESSIONS: u32 = 15;
 /// The number of `Event::Listening` among the events.
 const LISTENING: u32 = 22;
 
+/// The number of `Event::Notified` among the events.
+const NOTIFIED: u32 = 30;
+
+/// Whether a message from another daemon headed `head` is one this
+/// daemon decodes to take in: the workspaces, the chats, and the events
+/// it passes on to its own clients as it has them.
+fn taken_in(head: &Head) -> bool {
+    head.is_workspaces()
+        || head.is_chats()
+        || head.is_small_event()
+        || matches!(
+            head.event_kind(),
+            Some(INSTALLED | LISTENING | SESSIONS | NOTIFIED)
+        )
+}
+
 /// What's relayed through one connection, kept while it's asked for,
 /// through the connection dropping.
 #[derive(Debug, Default)]
@@ -2661,11 +2677,7 @@ impl Daemon {
                 (Route::View { local, snapshot }, need)
             } else if let Some((route, need)) = self.event_route(token, &head, &payload) {
                 (route, need)
-            } else if head.is_workspaces()
-                || head.is_chats()
-                || head.is_small_event()
-                || matches!(head.event_kind(), Some(INSTALLED | LISTENING | SESSIONS))
-            {
+            } else if taken_in(&head) {
                 if payload.len() > MOST_SMALL && !head.is_workspaces() {
                     if let Some(Source::Reached(reached)) = self.sources.get(token.0) {
                         log::warn!(
@@ -3609,6 +3621,20 @@ mod tests {
 
     use super::*;
     use crate::server::{Client, Reading};
+
+    #[test]
+    fn the_events_taken_in_are_numbered_as_they_are_encoded() {
+        let head = |event: Event| {
+            let frame = frame::encode(PROTOCOL_VERSION, &ServerMessage::Event(event)).unwrap();
+            Head::of(&frame[4..]).event_kind()
+        };
+        assert_eq!(head(Event::Listening(Vec::new())), Some(LISTENING));
+        let notified = Event::Notified {
+            terminal: TerminalId(1),
+            notice: Notice::Close,
+        };
+        assert_eq!(head(notified), Some(NOTIFIED));
+    }
 
     pub(super) fn desk() -> Machine {
         Machine {
