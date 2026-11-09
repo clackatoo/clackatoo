@@ -3461,7 +3461,9 @@ mod tests {
         // Only as it was written: lowercase, and not a byte more or less.
         assert!(!daemon.mcp_secret_valid(chat, &first.to_uppercase()));
         assert!(!daemon.mcp_secret_valid(chat, &format!("{first}00")));
-        assert!(!daemon.mcp_secret_valid(chat, &format!("0{}", &first[1..])));
+        // Another first digit: never the one it had, or nothing changed.
+        let other = if first.starts_with('0') { '1' } else { '0' };
+        assert!(!daemon.mcp_secret_valid(chat, &format!("{other}{}", &first[1..])));
         daemon.chat(chat).unwrap().gave_mcp_token(first.clone());
         daemon.chat(chat).unwrap().connected(opened("s2"));
         assert!(!daemon.serves_tools(chat), "nothing connected");
