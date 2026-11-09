@@ -53,8 +53,10 @@ end)
 
 `require("theme")` loads `theme.lua` from `client/lua/`, or else `lua/`, or
 `theme/init.lua` from either. A dot in a name is a directory:
-`require("keys.tmux")` is `keys/tmux.lua`. Each module runs once, and later
-requires get what it returned.
+`require("keys.tmux")` is `keys/tmux.lua`. A name is letters, digits, `_` and
+`-`, never a path, so nothing outside those folders is required, and a module
+is read only as text, up to 1 MiB, never Luau's bytecode. Each module runs
+once, and later requires get what it returned.
 
 ## Windows
 
