@@ -534,6 +534,40 @@ mod queries {
     }
 
     #[test]
+    fn colours_are_told_as_the_window_said_them() {
+        let mut t = terminal(10, 5);
+        t.advance(b"\x1b]11;?\x07");
+        assert!(t.take_replies().is_empty(), "no window has said");
+        let mut named = [[0; 3]; 16];
+        named[1] = [0xcc, 0x66, 0x66];
+        t.set_palette(Some(crate::Palette {
+            foreground: [0xdd, 0xe1, 0xe6],
+            background: [0x1d, 0x1f, 0x21],
+            cursor: [0xff; 3],
+            named,
+        }));
+        t.advance(b"\x1b]11;?\x07");
+        assert_eq!(t.take_replies(), b"\x1b]11;rgb:1d1d/1f1f/2121\x07");
+        // Ended as asked, and several at once, as xterm reads them.
+        t.advance(b"\x1b]10;?;?\x1b\\");
+        assert_eq!(
+            t.take_replies(),
+            b"\x1b]10;rgb:dddd/e1e1/e6e6\x1b\\\x1b]11;rgb:1d1d/1f1f/2121\x1b\\"
+        );
+        t.advance(b"\x1b]4;1;?;196;?\x07");
+        assert_eq!(
+            t.take_replies(),
+            b"\x1b]4;1;rgb:cccc/6666/6666\x07\x1b]4;196;rgb:ffff/0000/0000\x07"
+        );
+        // Setting isn't supported, nor is what's no entry asked about.
+        t.advance(b"\x1b]11;#ffffff\x07\x1b]4;300;?\x07\x1b]12;?\x07");
+        assert_eq!(t.take_replies(), b"\x1b]12;rgb:ffff/ffff/ffff\x07");
+        // A reset keeps the window's colours.
+        t.advance(b"\x1bc\x1b]11;?\x07");
+        assert_eq!(t.take_replies(), b"\x1b]11;rgb:1d1d/1f1f/2121\x07");
+    }
+
+    #[test]
     fn unsupported_queries_get_no_reply() {
         // XTWINOPS 21t would read the title back, and a title can say
         // anything.

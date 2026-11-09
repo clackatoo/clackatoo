@@ -592,6 +592,25 @@ impl Theme {
         kept
     }
 
+    /// The colours terminals are drawn in, as programs that ask are told
+    /// them (OSC 10, 11, 12 and 4).
+    pub(crate) fn program_palette(&self) -> clackatoo_protocol::Palette {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a channel from 0 to 1, made 0 to 255"
+        )]
+        let bytes = |colour: Rgba| {
+            [0, 1, 2].map(|channel| (colour[channel].clamp(0.0, 1.0) * 255.0).round() as u8)
+        };
+        clackatoo_protocol::Palette {
+            foreground: bytes(self.foreground),
+            background: bytes(self.background),
+            cursor: bytes(self.cursor),
+            named: std::array::from_fn(|index| bytes(self.palette[index])),
+        }
+    }
+
     /// A program's colour, or `None` for the default.
     pub(crate) fn resolve(&self, color: Color) -> Option<Rgba> {
         match color {

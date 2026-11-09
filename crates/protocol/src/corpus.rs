@@ -819,6 +819,20 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             token: Some("5ec7e7".into()),
         })),
     ));
+    // A window's colours, for programs that ask.
+    let mut named = [[0; 3]; 16];
+    named[15] = [0xea, 0xea, 0xea];
+    samples.push((
+        crate::wire::TERMINAL_STANDARDS,
+        Client(ClientMessage::Colours {
+            palette: crate::Palette {
+                foreground: [0xdd, 0xe1, 0xe6],
+                background: [0x1d, 0x1f, 0x21],
+                cursor: [0xdd, 0xe1, 0xe6],
+                named,
+            },
+        }),
+    ));
     // An explorer attached asking for changes, and a folder sent as what
     // changed in it.
     let files = FilesId(4);

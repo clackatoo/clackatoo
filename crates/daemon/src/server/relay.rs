@@ -746,6 +746,18 @@ impl Daemon {
                 Some(Err(_)) => None,
                 None => Some(ClientMessage::Place { pane, place }),
             },
+            // The terminals of the daemons this one is connected to are
+            // drawn in the same colours. A relaying daemon's own links were
+            // told by it, and telling them again could go round for ever.
+            ClientMessage::Colours { palette } => {
+                if !self.relays(token) {
+                    for at in 0..self.links.list.len() {
+                        let colours = ClientMessage::Colours { palette };
+                        let _ = self.send_upstream(at, &colours, Expect::Nothing);
+                    }
+                }
+                Some(ClientMessage::Colours { palette })
+            }
             ClientMessage::Dismiss { pane } => match self.pane_elsewhere(pane) {
                 Some(Ok((at, remote))) => {
                     let dismiss = ClientMessage::Dismiss { pane: remote };
@@ -2143,6 +2155,11 @@ impl Daemon {
         self.held_reach_changed();
         let watch = ClientMessage::Request(Request::WatchChats);
         let _ = self.send_upstream(at, &watch, Expect::Chats);
+        // The colours its terminals are drawn in here, which a daemon too
+        // old to know refuses to be sent.
+        if let Some(palette) = self.colours {
+            let _ = self.send_upstream(at, &ClientMessage::Colours { palette }, Expect::Nothing);
+        }
         let followed: Vec<(TerminalId, TerminalId)> = (self.links.list[at].relayed.followed.iter())
             .filter(|(_, followed)| !followed.viewers.is_empty())
             .filter_map(|(&local, _)| {

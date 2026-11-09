@@ -85,10 +85,14 @@ A program you started from a shell is no different from one the daemon started: 
 | `CSI > q` (terminal version) | `DCS > \| clackatoo <version> ST` |
 | `CSI > c` (secondary device attributes) | `CSI > 1 ; <version> ; 0 c`: a VT220, its version clackatoo's year and month, as `202611`, as foot answers with its own. vim reads a number this high as a modern terminal's, not an old xterm's. |
 | `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 included. 2027 (grapheme clustering) is answered 0: not every character's width is as Unicode's segmentation would have it. |
+| `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's and cursor's colours) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colours, as vim, bat and delta do. |
+| `OSC 4 ; <index> ; ?` (a palette entry, several pairs at once) | `OSC 4 ; <index> ; rgb:… ST` for each |
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
 | `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels (`14t`, `16t`) aren't answered: the daemon knows the terminal's size in cells alone. Nor is the title read back (`21t`), which would let a program type what it set. |
 | `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say. It says `xterm-256color`'s name (`TN`) and colours (`Co`), 24-bit colour (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and coloured underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
 | `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own) and the scroll region (`r`); `DCS 0 $ r ST` for any other. |
+
+The colours are those the window draws terminals in, which it tells the daemon as it connects, so the daemon answers at once, as programs wait only a moment. Every terminal answers with those of the window that told it last, and the daemon tells those on [other machines](~clackatoo/reference/remote) it's connected to. Until a window has told it, as with a window older than protocol 137, these questions aren't answered, and programs keep their defaults.
 
 A program that asks faster than it reads the answers, as one at the far end of an ssh connection that has stopped reading can, gets no more once 64 KiB of answers and input wait for it. Answers are dropped whole, never cut, and what you type still goes in. The clipboard's answers go the same way, and so do answers to a program still reading a long paste: it gets none until it has read most of it.
 
@@ -122,7 +126,7 @@ A program can say how far a long task has got with `OSC 9 ; 4 ; <state> ; <perce
 These are ignored:
 
 - The kitty graphics protocol (`APC G`), sixels and other images.
-- Questions about colours: `OSC 10`, `11` and `12` (foreground, background, cursor) and `OSC 4` (a palette entry), and setting them (`OSC 4`, `104` and the others). Programs that ask, as Neovim and vim do to choose a light or dark background, get no answer and keep their default.
+- Setting colours: `OSC 4`, `10`, `11`, `12`, `104` and the others. Asking about them is [answered](#queries-answered).
 - Desktop notifications from programs: `OSC 99`, `OSC 777` and iTerm2's `OSC 9`.
 - Key repeats and releases (the kitty keyboard protocol's flag 2), and Super, Hyper and Meta as modifiers.
 - Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).

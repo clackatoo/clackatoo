@@ -29,7 +29,7 @@ const HEADER_LEN: usize = 4;
 
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.
-const CLIENT_MESSAGES: u32 = 22;
+const CLIENT_MESSAGES: u32 = 23;
 
 /// Serializes `message` into a complete frame, as a build of protocol
 /// `wire` would: downgraded first, for a peer older than this build (see
@@ -1469,9 +1469,13 @@ mod tests {
     fn a_head_knows_the_kinds_of_message_this_build_has() {
         let head = |bytes: Vec<u8>| Head::of(&bytes[HEADER_LEN..]);
         // The last kind of client message is known; the next isn't.
-        let last = ClientMessage::NativeReply {
-            id: 1,
-            result: Err("closed".into()),
+        let last = ClientMessage::Colours {
+            palette: crate::Palette {
+                foreground: [1, 2, 3],
+                background: [4, 5, 6],
+                cursor: [7, 8, 9],
+                named: [[0; 3]; 16],
+            },
         };
         let last = head(encode(PROTOCOL_VERSION, &last).unwrap());
         assert_eq!(last.get(0), Some(CLIENT_MESSAGES - 1));

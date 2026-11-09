@@ -381,8 +381,10 @@ gates! {
     FILES_NOTICE = 138,
     /// What a terminal's program asked for beyond its modes (CLACKA-234):
     /// the kitty keyboard protocol's flags to encode keys by,
-    /// `GridState`'s `keyboard`; and how far its task has got (OSC 9;4),
-    /// for tabs to show, `GridState`'s `progress`.
+    /// `GridState`'s `keyboard`; how far its task has got (OSC 9;4), for
+    /// tabs to show, `GridState`'s `progress`; and the colours windows
+    /// draw terminals in, for programs that ask, `ClientMessage::Colours`
+    /// (`Palette`), which an older daemon is never sent.
     TERMINAL_STANDARDS = 139,
 }
 
@@ -1157,6 +1159,9 @@ impl Downgrade for ClientMessage {
             return Downgraded::Refused;
         }
         if wire < PASTE_IMAGE && matches!(self, Self::Request(crate::Request::PasteImage { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < TERMINAL_STANDARDS && matches!(self, Self::Colours { .. }) {
             return Downgraded::Refused;
         }
         if wire < CHAT_ORIGINALS

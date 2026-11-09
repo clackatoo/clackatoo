@@ -198,6 +198,11 @@ impl Perform for Emulator {
                 }
             }
             [b"133", kind, options @ ..] => self.shell_mark(kind, options),
+            // Questions about colours (see crate::colours).
+            [b"10", asked @ ..] => self.report_colours(10, asked, bell_terminated),
+            [b"11", asked @ ..] => self.report_colours(11, asked, bell_terminated),
+            [b"12", asked @ ..] => self.report_colours(12, asked, bell_terminated),
+            [b"4", asked @ ..] => self.report_palette(asked, bell_terminated),
             // ConEmu's progress; any other OSC 9 is iTerm2's notification,
             // which isn't shown.
             [b"9", b"4", progress @ ..] => self.set_progress(progress),

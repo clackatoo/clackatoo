@@ -1317,6 +1317,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "clackatoo files [DIR] opens a folder in an explorer, in a new tab, from a shell",
     },
+    News {
+        id: "colour-queries",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs asking the terminal's colours (OSC 10, 11, 4), as Neovim does for its background, are told them",
+    },
 ];
 
 impl News {

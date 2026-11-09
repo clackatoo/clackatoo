@@ -1440,6 +1440,16 @@ impl Desk {
         if !self.unfocused {
             self.say_present(true);
         }
+        self.tell_colours();
+    }
+
+    /// Tells the daemon the colours terminals are drawn in, which it
+    /// answers programs that ask with, if it can take them.
+    fn tell_colours(&mut self) {
+        if self.daemon_has(wire::TERMINAL_STANDARDS) {
+            let palette = crate::colors::Theme::default().program_palette();
+            self.outbox.push(ClientMessage::Colours { palette });
+        }
     }
 
     /// The connection was lost: nothing is attached, and nothing asked
@@ -3125,6 +3135,7 @@ mod tests {
                 | ClientMessage::Login { .. }
                 | ClientMessage::NativeGrant { .. }
                 | ClientMessage::NativeReply { .. }
+                | ClientMessage::Colours { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();

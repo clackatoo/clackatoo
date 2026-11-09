@@ -1037,6 +1037,9 @@ pub struct Daemon {
     typed: Option<(TerminalId, Instant)>,
     /// When each terminal with uncompacted scrollback should compact it.
     compactions: BTreeMap<TerminalId, Instant>,
+    /// The colours windows draw terminals in, as the last to say said,
+    /// which every terminal answers programs that ask with.
+    colours: Option<clackatoo_term::Palette>,
     /// The terminals whose programs are drawing a frame (mode 2026), and
     /// until when their views are held back for it: `None` once that's
     /// passed, until the program starts another.
@@ -1231,6 +1234,7 @@ impl Daemon {
             typed: None,
             compactions: BTreeMap::new(),
             frames: BTreeMap::new(),
+            colours: None,
             views_pending: false,
             damage: Damage::new(),
             config,
@@ -2531,6 +2535,18 @@ impl Daemon {
         }
     }
 
+    /// A window said what colours it draws terminals in: every terminal
+    /// answers the programs that ask with them from now on (see
+    /// [`clackatoo_term::Palette`]).
+    fn take_colours(&mut self, palette: clackatoo_term::Palette) {
+        self.colours = Some(palette);
+        for slot in self.terminals.values_mut() {
+            if let Some(pty) = slot.terminal.pty() {
+                pty.set_palette(Some(palette));
+            }
+        }
+    }
+
     /// Starts holding back the terminal's views while its program draws a
     /// frame (mode 2026), for [`LONGEST_FRAME`] at most, or stops once the
     /// program says the frame is drawn, which its views then show whole.
@@ -2711,8 +2727,9 @@ impl Daemon {
     }
 
     /// Watches `terminal`'s PTY and program, and adds it.
-    fn add_terminal(&mut self, terminal: HostedTerminal) -> io::Result<()> {
+    fn add_terminal(&mut self, mut terminal: HostedTerminal) -> io::Result<()> {
         let id = terminal.info().id;
+        terminal.set_palette(self.colours);
         let output = self.register_fd(terminal.pty_fd(), Source::Output(id));
         let exit = self.register_fd(terminal.exit_fd(), Source::Exit(id));
         match (output, exit) {
@@ -3218,7 +3235,8 @@ impl Daemon {
                     | ClientMessage::Dismiss { .. }
                     | ClientMessage::Login { .. }
                     | ClientMessage::NativeGrant { .. }
-                    | ClientMessage::NativeReply { .. }),
+                    | ClientMessage::NativeReply { .. }
+                    | ClientMessage::Colours { .. }),
                 ) => {
                     if let Some(message) = self.route_message(token, message) {
                         self.serve_unanswered(token, message);
@@ -3310,6 +3328,7 @@ impl Daemon {
             ClientMessage::Colour { id, code } => self.colour_code(token, id, code),
             ClientMessage::Place { pane, place } => self.serve_place(pane, place),
             ClientMessage::Dismiss { pane } => self.serve_dismiss(pane),
+            ClientMessage::Colours { palette } => self.take_colours(palette),
             ClientMessage::Login { ask, answer } => {
                 self.serve_login(token, ask, answer.map(|answer| answer.0));
             }

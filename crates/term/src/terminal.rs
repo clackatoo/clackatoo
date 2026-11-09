@@ -10,6 +10,7 @@ use bitflags::bitflags;
 use crate::blocks::{self, Blocks, Mark};
 use crate::charset::Charsets;
 use crate::clipboard::{self, ClipboardRequest};
+use crate::colours::{self, Palette};
 use crate::damage::Damage;
 use crate::grid::Grid;
 use crate::keyboard;
@@ -259,6 +260,13 @@ impl Terminal {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.emulator.title
+    }
+
+    /// Says what colours the terminal is drawn in, for the programs that
+    /// ask (see [`Palette`]), or that nobody has said, with `None`: then
+    /// they're told nothing. A reset keeps them: they're the window's.
+    pub fn set_palette(&mut self, palette: Option<Palette>) {
+        self.emulator.palette = palette;
     }
 
     /// How far the program's task has got, as it last said (OSC 9;4),
@@ -832,6 +840,8 @@ pub(crate) struct Emulator {
     keyboard_alternate: keyboard::Stack,
     /// How far the program's task has got, as it last said.
     progress: Option<TaskProgress>,
+    /// The colours the terminal is drawn in, as a window said them.
+    palette: Option<Palette>,
     /// The device control string being collected, if it's a request this
     /// terminal answers (see [`crate::requests`]).
     pub(crate) request: Option<Request>,
@@ -891,6 +901,7 @@ impl Emulator {
             keyboard_primary: keyboard::Stack::default(),
             keyboard_alternate: keyboard::Stack::default(),
             progress: None,
+            palette: None,
             request: None,
             cwd: None,
             blocks: Blocks::default(),
@@ -1793,7 +1804,9 @@ impl Emulator {
         let secret = self.secret.take();
         // So do names that are the owner's.
         let kept = (self.names_kept).then(|| (std::mem::take(&mut self.title), self.cwd.take()));
+        let palette = self.palette;
         *self = Self::new(self.size, &self.config);
+        self.palette = palette;
         // The shell, which knows it, outlives the reset.
         self.secret = secret;
         if let Some((title, cwd)) = kept {
@@ -1993,6 +2006,53 @@ impl Emulator {
         self.links.len()
     }
 
+    /// OSC 10, 11 and 12: each `?` among `asked` asks for a colour, the
+    /// first the one `first` numbers and each after it the next, as xterm
+    /// reads `OSC 10 ; ? ; ?`: 10 the text's, 11 the background's, 12 the
+    /// cursor's. Each is answered as asked, `OSC 11 ; rgb:… ST`, ended as
+    /// the question was. Setting them isn't supported.
+    pub(crate) fn report_colours(&mut self, first: u16, asked: &[&[u8]], bell: bool) {
+        let Some(palette) = self.palette else {
+            return;
+        };
+        for (number, asked) in (first..=12).zip(asked) {
+            if *asked != b"?" {
+                continue;
+            }
+            let colour = match number {
+                10 => palette.foreground,
+                11 => palette.background,
+                _ => palette.cursor,
+            };
+            let end = string_end(bell);
+            let reply = format!("\x1b]{number};{}{end}", colours::x11(colour));
+            self.reply(reply.as_bytes());
+        }
+    }
+
+    /// OSC 4: each `index ; ?` pair among `asked` asks for an entry of
+    /// the palette, answered as `OSC 4 ; index ; rgb:… ST`. Setting them
+    /// isn't supported.
+    pub(crate) fn report_palette(&mut self, asked: &[&[u8]], bell: bool) {
+        let Some(palette) = self.palette else {
+            return;
+        };
+        for pair in asked.chunks(2) {
+            let [index, b"?"] = pair else {
+                continue;
+            };
+            let Some(index) =
+                (std::str::from_utf8(index).ok()).and_then(|index| index.parse().ok())
+            else {
+                continue;
+            };
+            let end = string_end(bell);
+            let colour = colours::x11(palette.indexed(index));
+            let reply = format!("\x1b]4;{index};{colour}{end}");
+            self.reply(reply.as_bytes());
+        }
+    }
+
     /// OSC 9;4: how far the program's task has got, as `params` say.
     pub(crate) fn set_progress(&mut self, params: &[&[u8]]) {
         if let Some(progress) = TaskProgress::parse(params) {
@@ -2023,6 +2083,12 @@ impl Emulator {
             self.replies.extend_from_slice(bytes);
         }
     }
+}
+
+/// What ends an answer to an OSC string ended with BEL if `bell`, or
+/// else with ST: as the question was, as xterm answers.
+fn string_end(bell: bool) -> &'static str {
+    if bell { "\x07" } else { "\x1b\\" }
 }
 
 /// `title`, or as much of it as a pushed title keeps: no more than

@@ -76,8 +76,8 @@ mod workspace;
 use std::fmt;
 
 pub use clackatoo_term::{
-    Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Position,
-    Selection, ShellState, Size, Style, TaskProgress, Underline, Which,
+    Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Palette,
+    Position, Selection, ShellState, Size, Style, TaskProgress, Underline, Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -407,6 +407,16 @@ pub enum ClientMessage {
         id: u64,
         /// Result, or refusal from the window's own permission checks.
         result: Result<NativeReply, String>,
+    },
+    /// The colours the window draws terminals in, for the programs that
+    /// ask (OSC 10, 11, 12 and 4), said as it connects: the daemon answers
+    /// them itself, at once, with the colours the window that said last
+    /// said, and tells the daemons it's connected to. Not answered. Only
+    /// sent to a daemon of protocol 137 or later
+    /// ([`wire::TERMINAL_STANDARDS`]).
+    Colours {
+        /// The colours.
+        palette: Palette,
     },
 }
 

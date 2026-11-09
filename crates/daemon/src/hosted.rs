@@ -437,6 +437,12 @@ impl HostedTerminal {
         &mut self.emulator
     }
 
+    /// Says what colours the terminal is drawn in, for programs that ask
+    /// (see [`Terminal::set_palette`]).
+    pub(crate) fn set_palette(&mut self, palette: Option<clackatoo_term::Palette>) {
+        self.emulator.set_palette(palette);
+    }
+
     /// Puts back what the program asked of the terminal it was handed
     /// over with, beyond its modes (see [`Terminal::restore_asked`]).
     pub(crate) fn restore_asked(&mut self, asked: &clackatoo_term::AskedSnapshot) {
