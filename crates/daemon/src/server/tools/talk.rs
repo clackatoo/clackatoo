@@ -1472,9 +1472,8 @@ impl Daemon {
         let turns = &kid.node().turns;
         let heard = kid.turns_heard_by(chat);
         let answers = answers_to(turns, chat, child);
-        let unheard = (answers.iter().copied())
-            .filter(|&(_, end)| end >= heard && turns[end].end.is_some())
-            .last();
+        let unheard =
+            (answers.iter().copied()).rfind(|&(_, end)| end >= heard && turns[end].end.is_some());
         let last = || (turns.iter()).rposition(|turn| turn.switch.is_none());
         let (asked, end) = (unheard.or_else(|| answers.last().copied()))
             .or_else(|| last().map(|index| (index, index)))

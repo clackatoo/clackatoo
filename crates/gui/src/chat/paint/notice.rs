@@ -170,6 +170,17 @@ impl ChatView {
         (self.node.subagents.iter()).any(|entry| entry.chat == chat)
     }
 
+    /// The chat of the card of a notice the cursor's on, or in whose
+    /// answer it is, if it's one this chat's agent started: `gx` and `gf`
+    /// open it.
+    pub(in crate::chat) fn notice_chat(&self) -> Option<TerminalId> {
+        let cursor = self.cursor?;
+        let (row, _) = notice_piece(cursor.text.piece)?;
+        let turn = self.node.turns.get(cursor.text.turn)?;
+        let chat = turn.notice.as_ref()?.finished.get(row)?.chat;
+        self.started(chat).then_some(chat)
+    }
+
     /// The card of the notice's chat the cursor's on, or whose answer
     /// it's in: its turn, its row and its id.
     fn answer_card(&self) -> Option<(usize, usize, String)> {
@@ -484,6 +495,17 @@ mod tests {
             }]
         );
         assert!(!answer_open(&chat, 0), "the card stays as it was");
+        // `gx` on its line does the same, and on one it didn't start,
+        // nothing.
+        on(&mut chat, card_piece(0));
+        read(&mut chat, "gx");
+        let open = ChatAction::Open {
+            chat: TerminalId(5),
+        };
+        assert_eq!(chat.settle(&mut fonts).actions, [open]);
+        on(&mut chat, card_piece(1));
+        read(&mut chat, "gx");
+        assert!(chat.settle(&mut fonts).actions.is_empty());
     }
 
     #[test]

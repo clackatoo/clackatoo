@@ -3025,24 +3025,16 @@ mod tests {
             exit: None,
         };
         let nested = |item| Item::nested("task".into(), item);
-        let mut turn = Turn {
-            prompt: "go".into(),
-            sent: 0,
-            items: vec![
+        let mut turn = turn(
+            "go",
+            vec![
                 Item::Tool(tool("task", "Find it", ToolStatus::Running)),
                 nested(Item::Tool(tool("r", "Read src/main.rs", ToolStatus::Done))),
                 nested(Item::Tool(tool("inner", "Inner", ToolStatus::Running))),
                 Item::nested("inner".into(), Item::Words("deeper".into())),
                 Item::Words("mine".into()),
             ],
-            end: None,
-            files: None,
-            from: None,
-            switch: None,
-            previews: Vec::new(),
-            woke: None,
-            notice: None,
-        };
+        );
         let work = turn.nested_work();
         let task = turn.items[0].tool().unwrap().clone();
         assert_eq!(work["task"].tools, 2);

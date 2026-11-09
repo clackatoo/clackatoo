@@ -1578,7 +1578,7 @@ impl HostedChat {
         let prompt = relations::prompt_for(&message);
         // A notice is shown as clackatoo's, as a card: the agent is told
         // its text all the same.
-        let notice = (message.is_notice()).then(|| TurnNotice {
+        let notice = (message.is_notice()).then_some(TurnNotice {
             finished: message.finished,
         });
         self.begin(

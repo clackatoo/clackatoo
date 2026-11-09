@@ -601,18 +601,17 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
 /// profile it was started as if this chat's agent started it; or what a
 /// notice of clackatoo's is.
 fn quoted(node: &ChatNode, turn: &Turn, from: &clackatoo_protocol::Sender) -> Element {
-    let head = match &turn.notice {
-        Some(notice) => el("div").class("from").text(notice.heading(&from.title)),
-        None => {
-            let profile = (node.subagents.iter())
-                .find(|entry| entry.chat == from.chat)
-                .and_then(|entry| entry.profile.as_deref());
-            let what = profile.unwrap_or(&from.agent);
-            el("div")
-                .class("from")
-                .class("subagent")
-                .text(format!("From chat {} · {what}", from.chat))
-        }
+    let head = if let Some(notice) = &turn.notice {
+        el("div").class("from").text(notice.heading(&from.title))
+    } else {
+        let profile = (node.subagents.iter())
+            .find(|entry| entry.chat == from.chat)
+            .and_then(|entry| entry.profile.as_deref());
+        let what = profile.unwrap_or(&from.agent);
+        el("div")
+            .class("from")
+            .class("subagent")
+            .text(format!("From chat {} · {what}", from.chat))
     };
     el("div")
         .class("quote")

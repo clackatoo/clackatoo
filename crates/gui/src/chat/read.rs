@@ -154,7 +154,7 @@ impl Dialect for ChatKeys {
                 half: true,
             } => "Scroll table left half a view",
             ChatKey::Resend => "Send the failed message again",
-            ChatKey::OpenLink => "Open file or link under cursor",
+            ChatKey::OpenLink => "Open file, link or subagent under cursor",
             ChatKey::Branch { back: true } => "Previous branch of the conversation",
             ChatKey::Branch { back: false } => "Next branch of the conversation",
             ChatKey::Rewind { edit: false } => "Rewind the conversation to before this turn",
@@ -747,6 +747,11 @@ impl ChatView {
                 }
             }
             ChatKey::OpenLink => {
+                // On a notice's chat, the chat.
+                if let Some(chat) = self.notice_chat() {
+                    self.queued.push(Input::Act(ChatAction::Open { chat }));
+                    return (true, false);
+                }
                 let found = (self.cursor).and_then(|cursor| self.link_at_spot(cursor));
                 let Some(found) = found else {
                     self.say("no file or link under the cursor".to_owned());
