@@ -197,23 +197,19 @@ box or return to the app. Safari can report its new visible size late in the
 keyboard animation, with no event saying so; for a second and a half after
 each of these transitions the app reads the size on every frame and follows
 it, without changing your place in older messages. An idle page reads nothing.
-Pinch zoom also stays within the browser's reported visible area. In the
-<kbd>Home</kbd> Screen app with the keyboard closed, an iPhone reports a visible
-area shorter than the screen it draws (812 of 874 pixels on one), so a chat or
-terminal there takes the full height instead (CSS `100lvh`) and keeps the whole
-home-indicator inset clear below the composer or the keys. In Safari, and with
-the keyboard open, the page fits the reported visible area; its bottom padding
-is capped at 12 pixels with the keyboard closed and is 6 pixels with it open.
-The app lets iOS choose its status-bar appearance instead of requesting the
-deprecated translucent mode.
+<kbd>Home</kbd> Screen mode and pinch zoom also stay within the browser's
+reported visible area; CSS viewport units can extend beyond the drawable
+window on iOS. The app lets iOS choose its status-bar appearance instead of
+requesting the deprecated translucent mode. The app's bottom padding is capped
+at 12 pixels with the keyboard closed and is 6 pixels with it open; space
+reserved outside the page by iOS is separate.
 
 If the composer still ends up behind the keyboard, or a gap shows under it,
 select **Screen measurements** at the foot of the list (touch screens only).
 It shows, over the page, the sizes the phone reports: its visual viewport, the
 layout viewport, the window's scroll, the CSS viewport units and safe-area
-insets, where the page and the composer end, which height the page took
-(`tall=lvh` for the full height, `=visual` for the visible area), and the
-latest keyboard, focus and scroll events with their timings. A screenshot of it tells what the phone
+insets, where the page and the composer end, and the latest keyboard, focus
+and scroll events with their timings. A screenshot of it tells what the phone
 said when the layout went wrong. It's kept on in that browser (or
 <kbd>Home</kbd> Screen app) until you select the button again, and never takes
 a touch itself.

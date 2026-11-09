@@ -1609,15 +1609,14 @@ impl App {
     /// Draws what changed in the terminal shown, then asks for older
     /// history if the user is near the top of what's held.
     fn draw_terminal(&mut self) {
-        // A new page is placed as it's made; after, as the screen moves.
-        let placement = self.term_page.is_none().then(|| self.placement()).flatten();
         let Some(term) = &self.state.term else {
             return;
         };
+        let fresh = self.term_page.is_none();
         let page =
             (self.term_page).get_or_insert_with(|| TermPage::new(&self.document, &self.root));
-        if let Some(placement) = placement {
-            page.place(placement);
+        if fresh && let Some(viewport) = self.window.visual_viewport() {
+            page.place(viewport.offset_top(), viewport.height());
         }
         page.draw(&self.document, &self.state, term);
         if page.near_top() {
@@ -1644,11 +1643,47 @@ impl App {
     /// The phone's screen changed size, or its keyboard came or went: the
     /// terminal's page is put above the keyboard, its font fitted again.
     fn viewport_changed(&mut self) {
-        let placement = self.placement();
         if let Some(page) = &self.page {
             let bottom = near_bottom(&page.scroller);
-            if let Some(placement) = placement {
-                placement.apply(&page.main);
+            if let Some(viewport) = self.window.visual_viewport() {
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("--viewport-top", &format!("{}px", viewport.offset_top()));
+                let layout_height = self
+                    .window
+                    .inner_height()
+                    .ok()
+                    .and_then(|h| h.as_f64())
+                    .unwrap_or(viewport.height());
+                let layout_height = self
+                    .document
+                    .document_element()
+                    .map_or(layout_height, |root| {
+                        layout_height.max(f64::from(root.client_height()))
+                    });
+                let obscured = viewport.height() < layout_height - 1.0;
+                page.main.set_class_name(if obscured {
+                    "chat-page keyboard-open"
+                } else {
+                    "chat-page"
+                });
+                // Always fit the visible rectangle. Safari can pan it to the
+                // layout's bottom, or report innerHeight already reduced, while
+                // 100dvh still extends behind the keyboard. Neither proves that
+                // the keyboard closed. Dismissal supplies a new visible height.
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("height", &format!("{}px", viewport.height()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("top", &format!("{}px", viewport.offset_top()));
             }
             if bottom {
                 page.scroller.set_scroll_top(page.scroller.scroll_height());
@@ -1657,8 +1692,8 @@ impl App {
         let Some(page) = &mut self.term_page else {
             return;
         };
-        if let Some(placement) = placement {
-            page.place(placement);
+        if let Some(viewport) = self.window.visual_viewport() {
+            page.place(viewport.offset_top(), viewport.height());
         }
         page.fit_font();
         // Fitted, it's fitted again to the space left, once the screen

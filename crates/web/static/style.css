@@ -6,7 +6,6 @@
   --subagent: #6fd3c9;
   --added: #20352a; --removed: #3a2326; --radius: 16px;
   --mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", monospace;
-  --inset-bottom: env(safe-area-inset-bottom, 0px);
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -147,7 +146,7 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .question.form .field > input { width: 100%; }
 .question.form p.failed:empty { display: none; }
 .question .plan { max-height: 50vh; overflow: auto; background: var(--raised); border-radius: 12px; padding: 4px 14px; margin-bottom: 14px; }
-.dock { flex: none; width: 100%; max-width: 840px; align-self: center; padding: 6px 14px clamp(6px, var(--inset-bottom), 12px); background: var(--bg); }
+.dock { flex: none; width: 100%; max-width: 840px; align-self: center; padding: 6px 14px clamp(6px, env(safe-area-inset-bottom), 12px); background: var(--bg); }
 .composer { background: var(--panel); border: 1px solid #35353b; border-radius: 18px; padding: 8px 8px 5px 12px; }
 .attach-photos { flex: none; width: 36px; min-height: 44px; padding: 0; background: transparent; color: var(--muted); font-size: 24px; }
 .draft-photos { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 5px 0 8px; }
@@ -173,7 +172,7 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .queue { max-height: 18dvh; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 6px; padding: 4px 6px; }.queue:empty { display: none; }.queue-heading { color: var(--muted); font-size: 11px; padding: 4px 6px; }.queued-message { display: flex; gap: 6px; align-items: center; padding: 0; }.queued-text { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-left: 6px; }.queued-message button { font-size: 11px; padding: 6px 10px; background: transparent; }
 .sheet-layer { position: fixed; inset: 0; z-index: 20; display: flex; justify-content: center; align-items: flex-end; padding-top: max(20px, env(safe-area-inset-top)); }
 .sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; background: #0009; }
-.sheet { position: relative; width: 100%; max-width: 620px; max-height: 85%; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 24px 24px 0 0; box-shadow: 0 -10px 60px #0006; padding-bottom: var(--inset-bottom); }
+.sheet { position: relative; width: 100%; max-width: 620px; max-height: 85%; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 24px 24px 0 0; box-shadow: 0 -10px 60px #0006; padding-bottom: env(safe-area-inset-bottom); }
 .sheet-header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 16px; border-bottom: 1px solid var(--line); }.sheet h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.02em; }.sheet .sheet-close { font-size: 14px; line-height: 1; padding: 8px; color: var(--accent); background: transparent !important; }.sheet-body { overflow: auto; padding: 20px; overscroll-behavior: contain; }.menus { display: grid; gap: 20px; }.menu { display: grid; gap: 7px; }.menu > span { color: var(--muted); font-size: 12px; }.menu select { width: 100%; min-height: 48px; background: var(--raised); }
 .usage { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0 0 24px; font-size: 14px; }.usage dt { color: var(--muted); }.usage dd { margin: 0; }.provider-usage h3 { font-size: 14px; margin: 20px 0 12px; }.provider-usage p { font-size: 12px; }.quota-card { background: transparent; border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 8px 0; }.quota-heading { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }.quota-heading strong { color: var(--text); white-space: nowrap; }.quota-track { height: 6px; border-radius: 4px; background: #ffffff12; overflow: hidden; margin-top: 14px; }.quota-track i { display: block; height: 100%; background: #d9d6cf; border-radius: inherit; }.quota-card p { margin: 8px 0 0; }
 .quota-card.low strong { color: var(--danger); }.quota-card.low .quota-track i { background: var(--danger); }
@@ -282,7 +281,7 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .grid .f14 { color: #70c0b1; } .grid .b14 { background: #70c0b1; }
 .grid .f15 { color: #eaeaea; } .grid .b15 { background: #eaeaea; }
 
-.keys-slot { flex: none; background: var(--panel); border-top: 1px solid var(--line); padding: 0 8px max(6px, var(--inset-bottom)); }
+.keys-slot { flex: none; background: var(--panel); border-top: 1px solid var(--line); padding: 0 8px max(6px, env(safe-area-inset-bottom)); }
 .term-page.typing .keys-slot { padding-bottom: 4px; }
 .terminal-input { position: absolute; bottom: 0; left: 12px; width: 1px; height: 1px; min-width: 0; padding: 0; border: 0; opacity: 0; pointer-events: none; font-size: 16px; }
 .terminal-bar { padding: 10px 12px 10px 4px; min-height: 64px; }
@@ -361,11 +360,6 @@ img.image-preview.dropped { width: auto; height: auto; border: none; background:
 /* Keep a small home-indicator gap, without lifting the whole composer by the
    full device inset. The keyboard already covers that area. */
 .chat-page.keyboard-open .dock { padding-bottom: 6px; }
-/* A Home Screen app with the keyboard closed takes the large viewport, which
-   an iPhone draws though it says the page is shorter (viewport.rs,
-   Placement). The composer then clears the home indicator's whole inset. */
-.chat-page.tall, .term-page.tall { top: 0; height: 100lvh; --viewport-top: 0px; --viewport-height: 100lvh; }
-.chat-page.tall .dock { padding-bottom: max(6px, var(--inset-bottom)); }
 .history-more { display: block; margin: 8px auto 0; padding: 6px 14px; min-height: 36px; background: transparent; color: var(--muted); font-size: 12px; }
 .history-more:hover:not(:disabled) { background: var(--raised); }
 .conversation { overflow-anchor: none; }
