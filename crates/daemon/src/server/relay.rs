@@ -654,6 +654,7 @@ impl Daemon {
     pub(super) fn relays_shown(&self, shown: &Workspaces) -> Workspaces {
         let mut relayed = self.without_parked(shown).unwrap_or_else(|| shown.clone());
         relayed.passed = self.passed_on();
+        relayed.homes = self.shared_homes();
         relayed
     }
 
@@ -1600,7 +1601,11 @@ impl Daemon {
                 let watching = client.watching_workspaces;
                 if watching {
                     let shown = self.shown_workspaces();
-                    if let Some(without) = self.without_parked(&shown) {
+                    let homes = self.shared_homes();
+                    let parked = self.without_parked(&shown);
+                    if parked.is_some() || homes != shown.homes {
+                        let mut without = parked.unwrap_or(shown);
+                        without.homes = homes;
                         self.send_event(token, Event::Workspaces(without));
                     }
                 }

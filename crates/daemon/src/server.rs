@@ -3821,10 +3821,11 @@ impl Daemon {
                 // A window opening while devices ask hears of them.
                 self.tell_of_asks(token);
                 let mut shown = self.shown_workspaces();
-                if self.relays(token)
-                    && let Some(without) = self.without_parked(&shown)
-                {
-                    shown = without;
+                if self.relays(token) {
+                    if let Some(without) = self.without_parked(&shown) {
+                        shown = without;
+                    }
+                    shown.homes = self.shared_homes();
                 }
                 Ok(Response::Workspaces(
                     self.with_lent(token, &shown).unwrap_or(shown),

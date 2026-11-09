@@ -739,29 +739,44 @@ impl Daemon {
     /// Says in `shown` the home directories of the other machines shown:
     /// each connected to's own, as it says, then those they pass on that
     /// this daemon has no connection to, as they say them, the nearest
-    /// first; none of a connection asked not to be passed on.
+    /// first.
     fn homes_shown(&self, shown: &mut Workspaces) {
+        self.homes_into(&mut shown.homes, false);
+    }
+
+    /// The home directories of the other machines shown, as daemons
+    /// relaying for clients of their own are told them: none of a
+    /// connection asked not to be passed on, nor of what it passes on.
+    pub(in crate::server) fn shared_homes(&self) -> Vec<clackatoo_protocol::MachineHome> {
+        let mut homes = Vec::new();
+        self.homes_into(&mut homes, true);
+        homes
+    }
+
+    /// Adds to `homes` those of the other machines shown, as
+    /// [`homes_shown`](Self::homes_shown) says, but, if `shared`, of the
+    /// connections that may be passed on alone.
+    fn homes_into(&self, homes: &mut Vec<clackatoo_protocol::MachineHome>, shared: bool) {
         let own = self.machine.id;
         let mut add = |id: MachineId, home: &str| {
-            if id != own && !shown.homes.iter().any(|known| known.id == id) {
+            if id != own && !homes.iter().any(|known| known.id == id) {
                 let home = home.to_owned();
-                shown
-                    .homes
-                    .push(clackatoo_protocol::MachineHome { id, home });
+                homes.push(clackatoo_protocol::MachineHome { id, home });
             }
         };
         // Of a machine this daemon has a connection to, only what that
-        // machine says; and nothing of one asked not to be passed on.
+        // machine says.
         let linked_to = |id: MachineId| {
             (self.links.list.iter())
                 .any(|linked| (linked.machine.as_ref()).is_some_and(|machine| machine.id == id))
         };
-        for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
+        let links = || (self.links.list.iter()).filter(|linked| !(shared && linked.unshared));
+        for linked in links() {
             if let (Some(machine), Some(home)) = (&linked.machine, &linked.relayed.mirror.home) {
                 add(machine.id, home);
             }
         }
-        for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
+        for linked in links() {
             for known in (linked.relayed.mirror.homes.iter()).filter(|known| !linked_to(known.id)) {
                 add(known.id, &known.home);
             }
@@ -1071,10 +1086,10 @@ mod tests {
     }
 
     /// Where a connection asked not to be passed on keeps its user's
-    /// files, or the machines it passes on do, is told to no one
-    /// (CLACKA-118).
+    /// files, or the machines it passes on do, is told to no daemon
+    /// relaying (CLACKA-118).
     #[test]
-    fn homes_of_a_connection_not_passed_on_are_told_to_no_one() {
+    fn homes_of_a_connection_not_passed_on_are_told_to_no_daemon_relaying() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, link, mut there) = linked(dir.path());
         let server = MachineId([5; 16]);
@@ -1087,7 +1102,35 @@ mod tests {
             [home(desk().id, "/home/desk"), home(server, "/home/server")]
         );
         daemon.links.list[0].unshared = true;
-        assert!(daemon.shown_workspaces().homes.is_empty());
+        assert!(
+            daemon
+                .relays_shown(&daemon.shown_workspaces())
+                .homes
+                .is_empty()
+        );
+        assert!(daemon.shared_homes().is_empty());
+    }
+
+    /// This daemon's own windows are told where a connection asked not to
+    /// be passed on keeps its files, to name its folders from, though no
+    /// daemon relaying is (CLACKA-118).
+    #[test]
+    fn a_window_here_is_told_the_home_of_a_connection_not_passed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        daemon.links.list[0].unshared = true;
+        let server = MachineId([5; 16]);
+        let homes = vec![home(server, "/home/server")];
+        say(&mut there, &said_homes(homes, vec![server]));
+        daemon.read_reached(link, Reading::Look);
+        let (window, _keep) = client(&mut daemon);
+        let clackatoo_protocol::Response::Workspaces(shown) =
+            daemon.respond(clackatoo_protocol::Request::WatchWorkspaces, window)
+        else {
+            panic!("no workspaces");
+        };
+        let homes = vec![home(desk().id, "/home/desk"), home(server, "/home/server")];
+        assert_eq!(shown.homes, homes);
     }
 
     /// A connection is taken at its word only about itself and the
