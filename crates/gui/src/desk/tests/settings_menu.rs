@@ -437,3 +437,44 @@ fn an_agents_keys_save_no_keys_and_leave_nothing_to_undo() {
     type_keys(&mut desk, "u");
     assert_eq!(menu(&mut desk).1, "the menu hasn't changed n <A-u>");
 }
+
+#[test]
+fn keys_init_lua_binds_since_are_never_undone() {
+    let (mut desk, dir) = configured("");
+    command(&mut desk, "Settings new tab");
+    named(&mut desk, NamedKey::Enter);
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("t".into()), None, alt);
+    named(&mut desk, NamedKey::Enter);
+    saved(&mut desk, 1);
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    std::fs::write(
+        dir.path().join("client/init.lua"),
+        "client.keys.map('n', '<A-t>', function() end)\n",
+    )
+    .unwrap();
+    command(&mut desk, "reload");
+    desk.lua_ready();
+    let file = read(&dir, "client/settings.lua");
+    command(&mut desk, "Settings new tab");
+    type_keys(&mut desk, "u");
+    assert_eq!(
+        menu(&mut desk).1,
+        "client/init.lua:1 binds <A-t> now, so it can't be undone"
+    );
+    assert_eq!(read(&dir, "client/settings.lua"), file);
+    // Kept, to undo once init.lua doesn't bind them.
+    std::fs::write(dir.path().join("client/init.lua"), "").unwrap();
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    command(&mut desk, "reload");
+    desk.lua_ready();
+    command(&mut desk, "Settings new tab");
+    type_keys(&mut desk, "u");
+    saved(&mut desk, 1);
+    assert_eq!(read(&dir, "client/settings.lua"), format!("{HEADER}\n"));
+}

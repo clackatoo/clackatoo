@@ -853,18 +853,24 @@ impl SettingsMenu {
         let Some(undo) = history.0.get_mut(&name).and_then(Vec::pop) else {
             return self.refuse(&format!("the menu hasn't changed {name}"));
         };
+        // What the user's own config sets or binds as it loads outdoes what
+        // undoing would save, so the change is kept, to undo once it's not.
+        let locked = match &undo {
+            Undo::Option { info, .. } => facts
+                .locked(info)
+                .map(|by| (by.clone(), info.name.to_owned(), "sets")),
+            Undo::Keys(changes) => (changes.iter()).find_map(|(mapping, _)| {
+                let by = facts.keys_locked(&mapping.modes, &mapping.keys)?;
+                Some((by, display(&mapping.keys), "binds"))
+            }),
+        };
+        if let Some((by, what, does)) = locked {
+            history.0.entry(name).or_default().push(undo);
+            let place = by.place(facts.dir).unwrap_or_else(|| "your config".into());
+            return self.refuse(&format!("{place} {does} {what} now, so it can't be undone"));
+        }
         match undo {
-            Undo::Option { info, live, saved } => {
-                if let Some(by) = facts.locked(info) {
-                    let said = format!(
-                        "{} sets {} now, so there's nothing to undo",
-                        by.place(facts.dir).unwrap_or_else(|| "your config".into()),
-                        info.name
-                    );
-                    return self.refuse(&said);
-                }
-                Outcome::Change { info, live, saved }
-            }
+            Undo::Option { info, live, saved } => Outcome::Change { info, live, saved },
             Undo::Keys(changes) if facts.automating => {
                 // Kept, for the user to undo.
                 history.0.entry(name).or_default().push(Undo::Keys(changes));
