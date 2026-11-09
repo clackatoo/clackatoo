@@ -229,7 +229,14 @@ impl Cache {
                 .spawn(move || {
                     while let Ok(job) = receive.recv() {
                         let side = job.key.1;
-                        let decoded = decode(job.info, &job.bytes, side);
+                        // A decoder given bytes it can't handle might
+                        // panic: the image fails, and the thread goes on.
+                        let decoded =
+                            std::panic::catch_unwind(|| decode(job.info, &job.bytes, side))
+                                .unwrap_or_else(|_| {
+                                    log::error!("decoding an image panicked");
+                                    Err("it isn't an image that can be read".into())
+                                });
                         if send.send((job.key, decoded)).is_err() {
                             break;
                         }
@@ -260,7 +267,23 @@ impl Cache {
         let Some(worker) = &self.worker else {
             return false;
         };
-        let done: Vec<_> = worker.done.try_iter().collect();
+        let mut done = Vec::new();
+        let stopped = loop {
+            match worker.done.try_recv() {
+                Ok(decoded) => done.push(decoded),
+                Err(mpsc::TryRecvError::Empty) => break false,
+                Err(mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        // Its thread gone, what it was decoding fails, rather than being
+        // waited for for ever; another is started for what's next.
+        if stopped {
+            self.worker = None;
+            for (id, _) in std::mem::take(&mut self.decoding) {
+                let why = "it isn't an image that can be read".to_owned();
+                done.push(((id, 0), Err(why)));
+            }
+        }
         let came = !done.is_empty();
         for (key, decoded) in done {
             self.decoding.remove(&key);
@@ -302,6 +325,10 @@ impl Cache {
 /// `bytes`, the image `info` describes, decoded, no wider or taller than
 /// `side`, or why not.
 fn decode(info: ImageInfo, bytes: &[u8], side: u32) -> Result<Image, String> {
+    #[cfg(test)]
+    if bytes == tests::PANICS {
+        panic!("as a decoder might");
+    }
     if !info.decodable() {
         return Err("it's too big to show".into());
     }
@@ -419,6 +446,10 @@ impl Images {
 mod tests {
     use super::*;
 
+    /// Bytes decoding panics on, as a decoder given bytes it can't handle
+    /// might.
+    pub(crate) const PANICS: &[u8] = b"panics";
+
     pub(crate) fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
         let mut bytes = Vec::new();
         image::RgbaImage::from_pixel(width, height, image::Rgba(rgba))
@@ -498,6 +529,21 @@ mod tests {
         settle(&images);
         assert!(matches!(images.show(from, info.id, 10.0), Shown::Failed(_)));
         assert!(images.take_wanted().is_empty());
+        // Decoding that panics fails too, and the thread goes on.
+        let panics = tests::info(4, 10, 10, tests::PANICS);
+        images.keep(panics.id, None, panics, tests::PANICS.to_vec());
+        assert!(images.decode(panics.id, 64));
+        settle(&images);
+        assert!(matches!(
+            images.show(from, panics.id, 10.0),
+            Shown::Failed(_)
+        ));
+        let good = png(10, 10, [1, 2, 3, 255]);
+        let fine = tests::info(5, 10, 10, &good);
+        images.keep(fine.id, None, fine, good);
+        assert!(images.decode(fine.id, 64));
+        settle(&images);
+        assert!(matches!(images.show(from, fine.id, 10.0), Shown::Ready(..)));
         let dropped = ImageId([3; 16]);
         images.gone(dropped, Gone::Dropped(64 << 20));
         assert!(

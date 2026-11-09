@@ -156,13 +156,17 @@ pub(crate) enum Source {
     /// gone away hangs, then isn't there.
     #[cfg(test)]
     Hang(Duration),
+    /// For tests: what panics as it's read, as a decoder given bytes it
+    /// can't handle might, read as a file is, if it says so.
+    #[cfg(test)]
+    Panics(bool),
 }
 
 impl Source {
     /// Whether it's a file, read by a reader of its own.
     fn is_file(&self) -> bool {
         #[cfg(test)]
-        if matches!(self, Self::Hang(_)) {
+        if matches!(self, Self::Hang(_) | Self::Panics(true)) {
             return true;
         }
         matches!(self, Self::File(_) | Self::Below { .. })
@@ -176,7 +180,7 @@ impl Source {
             Self::Pixels { rgba, .. } => rgba.len() as u64,
             Self::File(_) | Self::Below { .. } => 0,
             #[cfg(test)]
-            Self::Hang(_) => 0,
+            Self::Hang(_) | Self::Panics(_) => 0,
         }
     }
 }
@@ -480,7 +484,9 @@ impl<T: Clone + PartialEq> Images<T> {
             let spawned = std::thread::Builder::new()
                 .name("image-reader".into())
                 .spawn(move || {
-                    let kept = read_source(source, most).and_then(|bytes| examine(bytes, most));
+                    let kept = unpanicking(|| {
+                        read_source(source, most).and_then(|bytes| examine(bytes, most))
+                    });
                     let _ = done.send(Done::Read { read, kept });
                     if let Some(waker) = &waker {
                         let _ = waker.wake();
@@ -1144,7 +1150,8 @@ fn work(job: Job) -> Done {
             most,
         } => {
             let weight = source.weight();
-            let kept = read_source(source, most).and_then(|bytes| examine(bytes, most));
+            let kept =
+                unpanicking(|| read_source(source, most).and_then(|bytes| examine(bytes, most)));
             Done::Kept {
                 why,
                 owner,
@@ -1152,16 +1159,28 @@ fn work(job: Job) -> Done {
                 kept,
             }
         }
+        // A copy that can't be made is never made again: the image as it
+        // is is sent, if it isn't too big, or else asking fails.
         Job::Scale { info, bytes, side } => Done::Scaled {
             image: info.id,
             side,
-            copy: scaled(info, &bytes, side),
+            copy: unpanicking(|| Ok(scaled(info, &bytes, side))).unwrap_or(None),
         },
         Job::Encode { asker, bytes } => Done::Encoded {
             asker,
             text: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
         },
     }
+}
+
+/// What `f` makes, or, if it panics, as a decoder given bytes it can't
+/// handle might, that it can't be read: the image is shown as failed,
+/// and the thread goes on.
+fn unpanicking<R>(f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        log::error!("reading an image panicked");
+        Err("it isn't an image that can be read".into())
+    })
 }
 
 /// The bytes `source` holds, of no more than `most`.
@@ -1198,6 +1217,8 @@ fn read_source(source: Source, most: u64) -> Result<Vec<u8>, String> {
             std::thread::sleep(wait);
             return Err("there's no such file".into());
         }
+        #[cfg(test)]
+        Source::Panics(_) => panic!("as a decoder might"),
     };
     if bytes.len() as u64 > most {
         return Err(too_big());
@@ -1657,6 +1678,35 @@ mod tests {
     /// A file that hangs, as on a mount gone away, holds up neither the
     /// store's thread nor anything waiting for it: it's given up on in
     /// its time, or at once before a handover; and only so many wait.
+    /// What panics as it's read, on the store's thread or a reader, fails,
+    /// and the thread goes on.
+    #[test]
+    fn an_image_whose_reading_panics_fails_and_the_thread_goes_on() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        for (number, file) in [(1, false), (2, true)] {
+            store
+                .keep(CHAT, Why::Test(number), Source::Panics(file))
+                .unwrap();
+        }
+        store
+            .keep(CHAT, Why::Test(3), Source::Bytes(png(2, 2, 1)))
+            .unwrap();
+        let (mut kept, _) = store.take(Some(Duration::from_secs(10)));
+        kept.sort_by_key(|kept| format!("{:?}", kept.why));
+        let said: Vec<_> = (kept.iter())
+            .map(|kept| (kept.why.clone(), kept.kept.is_ok()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (Why::Test(1), false),
+                (Why::Test(2), false),
+                (Why::Test(3), true)
+            ]
+        );
+        assert!(store.next_due().is_none(), "nothing's still out");
+    }
+
     #[test]
     fn a_file_that_hangs_is_given_up_on_and_holds_nothing_up() {
         let mut store = Images::<u32>::new(Limits::default(), None);
