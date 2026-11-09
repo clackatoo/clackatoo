@@ -272,7 +272,7 @@ mod tests {
             let lines: Vec<HistoryLine> = (terminal.primary().scrollback_lines(start..end))
                 .map(|(_, row)| HistoryLine {
                     width: u16::try_from(row.width()).unwrap(),
-                    line: Line::from_row(&row),
+                    line: Line::from_row(&row, clackatoo_protocol::Widths::LEGACY),
                 })
                 .collect();
             let count = u16::try_from(lines.len()).unwrap();
@@ -345,7 +345,15 @@ mod tests {
                 node: NodeId::ROOT,
                 state: GridState::of(terminal),
                 lines: (0..4)
-                    .map(|line| (line, Line::from_row(grid.row(usize::from(line)))))
+                    .map(|line| {
+                        (
+                            line,
+                            Line::from_row(
+                                grid.row(usize::from(line)),
+                                clackatoo_protocol::Widths::LEGACY,
+                            ),
+                        )
+                    })
                     .collect(),
                 links: Vec::new(),
                 marks: Marks {

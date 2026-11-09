@@ -509,7 +509,7 @@ mod tests {
             let lines: Vec<HistoryLine> = (numbered.iter())
                 .map(|(_, row)| HistoryLine {
                     width: u16::try_from(row.width()).unwrap(),
-                    line: Line::from_row(row),
+                    line: Line::from_row(row, clackatoo_protocol::Widths::LEGACY),
                 })
                 .collect();
             let shown = LinkTarget::of(lines.iter().map(|line| &line.line), terminal);
@@ -634,7 +634,7 @@ mod tests {
             let lines: Vec<HistoryLine> = (numbered.iter())
                 .map(|(_, row)| HistoryLine {
                     width: u16::try_from(row.width()).unwrap(),
-                    line: Line::from_row(row),
+                    line: Line::from_row(row, clackatoo_protocol::Widths::LEGACY),
                 })
                 .collect();
             let shown = LinkTarget::of(lines.iter().map(|line| &line.line), &terminal);

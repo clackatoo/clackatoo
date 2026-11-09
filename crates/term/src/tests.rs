@@ -106,6 +106,112 @@ mod printing {
     }
 
     #[test]
+    fn mode_2027_prints_a_cluster_to_a_cell() {
+        // Off, a skin tone and a flag's halves are cells of their own.
+        let t = after(10, 2, "☝\u{1F3FD}|\u{1F1EC}\u{1F1E7}|कि");
+        assert_eq!(
+            texts(&t, 0),
+            [
+                "☝",
+                "\u{1F3FD}",
+                "*",
+                "|",
+                "\u{1F1EC}",
+                "\u{1F1E7}",
+                "|",
+                "क",
+                "ि",
+                " "
+            ]
+        );
+        // On, each is one cell, a flag and a toned emoji two columns wide.
+        let t = after(
+            10,
+            2,
+            "\x1b[?2027h☝\u{1F3FD}|\u{1F1EC}\u{1F1E7}|कि\u{0600}1",
+        );
+        assert_eq!(
+            texts(&t, 0),
+            [
+                "☝\u{1F3FD}",
+                "*",
+                "|",
+                "\u{1F1EC}\u{1F1E7}",
+                "*",
+                "|",
+                "कि",
+                "\u{0600}1",
+                " ",
+                " "
+            ]
+        );
+        assert_eq!(cursor(&t), (0, 8));
+        // A search finds a cluster whole, and what's after it in its column.
+        let row = t.grid().row(0);
+        let flag: Vec<char> = "\u{1F1EC}\u{1F1E7}".chars().collect();
+        assert_eq!(crate::matches_in(row, &flag, true), [(3, 2)]);
+        assert_eq!(crate::matches_in(row, &['|'], true), [(2, 1), (5, 1)]);
+        // The simple path agrees, in insert mode.
+        let t = after(
+            10,
+            2,
+            "\x1b[?2027h\x1b[4h☝\u{1F3FD}|\u{1F1EC}\u{1F1E7}|कि\u{0600}1",
+        );
+        assert_eq!(
+            texts(&t, 0),
+            [
+                "☝\u{1F3FD}",
+                "*",
+                "|",
+                "\u{1F1EC}\u{1F1E7}",
+                "*",
+                "|",
+                "कि",
+                "\u{0600}1",
+                " ",
+                " "
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_printed_either_way_come_back_as_they_were() {
+        // A cluster, then the same printed with the mode off beside it.
+        let mut t = after(
+            12,
+            1,
+            "\x1b[?2027h☝\u{1F3FD}\u{1F1EC}\u{1F1E7}\x1b[?2027l☝\u{1F3FD}\u{1F1EC}\u{1F1E7}\r\n",
+        );
+        let printed = cells(&t);
+        t.compact_scrollback();
+        assert_eq!(cells(&t), printed, "through history");
+        let restored = Terminal::restore(&t.snapshot(), &Config::default()).unwrap();
+        assert_eq!(cells(&restored), printed, "through a snapshot");
+        // A copy reads the text as printed.
+        let row = t.grid().scrollback().next().unwrap();
+        assert_eq!(
+            row.text(),
+            "☝\u{1F3FD}\u{1F1EC}\u{1F1E7}☝\u{1F3FD}\u{1F1EC}\u{1F1E7}"
+        );
+    }
+
+    #[test]
+    fn mode_2027_is_reported_and_only_where_rows_are_rebuilt_by_clusters() {
+        let mut t = after(4, 2, "\x1b[?2027$p\x1b[?2027h\x1b[?2027$p");
+        assert_eq!(t.take_replies(), b"\x1b[?2027;2$y\x1b[?2027;1$y");
+        // A reset turns it off.
+        t.advance(b"\x1b[!p\x1b[?2027$p");
+        assert_eq!(t.take_replies(), b"\x1b[?2027;2$y");
+        let config = Config {
+            widths: crate::Widths::LEGACY,
+            ..Config::default()
+        };
+        let mut t = Terminal::new(Size::new(4, 2).unwrap(), &config);
+        t.advance(b"\x1b[?2027h\x1b[?2027$p");
+        assert_eq!(t.take_replies(), b"\x1b[?2027;4$y", "it can't be set");
+    }
+
+    #[test]
     fn a_terminal_laid_out_as_before_never_widens() {
         let size = Size::new(6, 2).unwrap();
         let config = Config {
@@ -557,11 +663,10 @@ mod queries {
         );
         assert_eq!(replies("\x1b[?1049h\x1b[?1049$p"), "\x1b[?1049;1$y");
         assert_eq!(replies("\x1b[4h\x1b[4$p\x1b[20$p"), "\x1b[4;1$y\x1b[20;2$y");
-        // Grapheme clustering (2027) isn't claimed: not every width is
-        // as Unicode's segmentation would have it.
+        // Grapheme clustering (2027) is known, and off until asked for.
         assert_eq!(
             replies("\x1b[?2027$p\x1b[?12$p"),
-            "\x1b[?2027;0$y\x1b[?12;0$y"
+            "\x1b[?2027;2$y\x1b[?12;0$y"
         );
     }
 
@@ -712,6 +817,7 @@ mod queries {
             asked.extend_from_slice(
                 b"\x1b[?99999$p\x1b[65535$p\x1b[18t\x1b[>c\x1b[>q\x1b[?u\x1b[5n\x1b[6n\x1b[c",
             );
+            asked.extend_from_slice(b"\x1b[?2027h\x1b[?2027$p");
             t.advance(&asked);
             let replies = t.take_replies();
             assert!(!replies.is_empty());
@@ -1432,6 +1538,13 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         // Variation selector 16 after what it widens, and alone.
         Just("❤\u{FE0F}".to_owned()),
         Just("\u{FE0F}".to_owned()),
+        // What clusters join that code points alone don't: a spacing mark,
+        // a skin tone, a flag, a prefix before ASCII, a Hangul syllable.
+        Just("कि".to_owned()),
+        Just("☝\u{1F3FD}".to_owned()),
+        Just("\u{1F1EC}\u{1F1E7}\u{1F1EF}".to_owned()),
+        Just("\u{0600}1".to_owned()),
+        Just("\u{1100}\u{1161}".to_owned()),
     ]
     .prop_map(String::into_bytes);
     let control = prop::sample::select(vec![
@@ -1458,7 +1571,7 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
     let modes = (
         prop::sample::select(vec![
             4u16, 6, 7, 20, 25, 47, 1047, 1048, 1049, 1, 66, 9, 1000, 1002, 1003, 1004, 1005, 1006,
-            1015, 2004, 2026,
+            1015, 2004, 2026, 2027,
         ]),
         any::<bool>(),
     )

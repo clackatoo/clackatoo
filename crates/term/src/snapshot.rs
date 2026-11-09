@@ -38,7 +38,7 @@ use crate::row::{Row, RowBuilder};
 use crate::style::{
     Attributes, Color as LiveColor, Style as LiveStyle, Underline as LiveUnderline,
 };
-use crate::terminal::{CursorShape, CursorState, Modes as LiveModes, SavedCursor, ZWJ};
+use crate::terminal::{CursorShape, CursorState, Modes as LiveModes, SavedCursor};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -450,16 +450,16 @@ impl Captured {
         self.lines.push(line);
     }
 
-    /// Adds `row`.
-    pub(crate) fn push_row(&mut self, row: &Row) {
-        let (line, links) = Line::of_row(row);
+    /// Adds `row`, laid out by `widths`.
+    pub(crate) fn push_row(&mut self, row: &Row, widths: crate::Widths) {
+        let (line, links) = Line::of_row(row, widths);
         self.push(line, links.into_iter());
     }
 }
 
 impl Line {
     /// `row` as a line, and the link each of its runs is part of.
-    pub(crate) fn of_row(row: &Row) -> (Self, Vec<Option<LinkId>>) {
+    pub(crate) fn of_row(row: &Row, widths: crate::Widths) -> (Self, Vec<Option<LinkId>>) {
         let cells = row.cells();
         // As history stores rows: a row that continues keeps every column
         // but padding; one that doesn't loses its trailing blanks.
@@ -475,26 +475,24 @@ impl Line {
         let mut runs = Vec::new();
         let mut links = Vec::new();
         let mut current = LiveStyle::DEFAULT;
-        let mut ends_in_zwj = false;
         for (col, &cell) in cells[..end].iter().enumerate() {
             if cell.is_wide_spacer() {
                 continue;
             }
             let style = *row.style(cell);
-            if style != current || ends_in_zwj {
+            let apart = row.starts_apart(col, widths);
+            if style != current || apart {
                 runs.push(Run {
                     start: offset(text.len()),
                     style: Style::from(style),
-                    separate: ends_in_zwj,
+                    separate: apart,
                 });
                 links.push(style.link);
                 current = style;
             }
             text.push(cell.ch());
-            ends_in_zwj = false;
             if let Some(extra) = row.grapheme(col) {
                 text.extend(extra);
-                ends_in_zwj = extra.last() == Some(&ZWJ);
             }
         }
         let line = Self {
@@ -777,7 +775,7 @@ impl From<SavedCursorState> for SavedCursor {
 }
 
 /// Each mode flag, whether it is a DEC private mode, and its number.
-const NUMBERED: [(LiveModes, bool, u16); 10] = [
+const NUMBERED: [(LiveModes, bool, u16); 11] = [
     (LiveModes::INSERT, false, 4),
     (LiveModes::LINEFEED_NEWLINE, false, 20),
     (LiveModes::APP_CURSOR_KEYS, true, 1),
@@ -788,6 +786,7 @@ const NUMBERED: [(LiveModes, bool, u16); 10] = [
     (LiveModes::FOCUS_EVENTS, true, 1004),
     (LiveModes::BRACKETED_PASTE, true, 2004),
     (LiveModes::SYNCHRONIZED, true, 2026),
+    (LiveModes::GRAPHEMES, true, 2027),
 ];
 
 impl Modes {

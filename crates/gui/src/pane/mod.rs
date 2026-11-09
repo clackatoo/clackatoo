@@ -1463,7 +1463,7 @@ mod tests {
                             first.get_or_insert(number);
                             HistoryLine {
                                 width: u16::try_from(row.width()).unwrap(),
-                                line: Line::from_row(&row),
+                                line: Line::from_row(&row, clackatoo_protocol::Widths::LEGACY),
                             }
                         })
                         .collect();

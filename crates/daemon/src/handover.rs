@@ -375,12 +375,18 @@ pub(crate) struct Marks {
     pub(crate) phone: bool,
     /// Variation selector 16 widens an emoji in it.
     pub(crate) vs16: bool,
+    /// Its rows are rebuilt by grapheme clusters, and it can print by
+    /// them (mode 2027).
+    pub(crate) graphemes: bool,
 }
 
 impl Marks {
     /// The rules the terminal lays its cells out by.
     pub(crate) fn widths(&self) -> clackatoo_term::Widths {
-        clackatoo_term::Widths { vs16: self.vs16 }
+        clackatoo_term::Widths {
+            vs16: self.vs16,
+            graphemes: self.graphemes,
+        }
     }
 }
 
@@ -4822,6 +4828,7 @@ mod tests {
                 terminal: 1,
                 phone: true,
                 vs16: true,
+                graphemes: true,
             }],
             images: Some(images()),
             histories: vec![History {
@@ -6269,7 +6276,7 @@ mod tests {
         let read = State::read(&mut file).unwrap();
         assert_eq!(read.marks.len(), 1);
         assert_eq!((read.marks[0].terminal, read.marks[0].phone), (1, true));
-        assert!(read.marks[0].vs16);
+        assert!(read.marks[0].vs16 && read.marks[0].graphemes);
         assert!(read.layout.is_some());
         // Version 50 had none.
         let mut file = tempfile::tempfile().unwrap();

@@ -314,6 +314,30 @@ impl Row {
             && (self.grapheme(col)).is_some_and(|rest| widths.widens(cell.ch(), rest))
     }
 
+    /// Whether the cell at `col` starts apart from the one before it,
+    /// though rebuilding the row by `widths` from its text would join its
+    /// first character to that one (see [`RowBuilder`]): the one before
+    /// ends in a ZWJ, or with `widths`' clusters, Unicode says it goes on
+    /// with that one's cluster. Printing put them side by side so, as a
+    /// cursor moved there, or mode 2027 off, so a rebuild must start it
+    /// apart too.
+    #[must_use]
+    pub fn starts_apart(&self, col: usize, widths: crate::Widths) -> bool {
+        let cells = self.cells();
+        if col == 0 || cells[col].is_wide_spacer() {
+            return false;
+        }
+        let before = if cells[col - 1].is_wide_spacer() {
+            col - 2
+        } else {
+            col - 1
+        };
+        let rest = self.grapheme(before).unwrap_or_default();
+        rest.last() == Some(&crate::terminal::ZWJ)
+            || (widths.graphemes
+                && crate::width::continues_cluster(cells[before].ch(), rest, cells[col].ch()))
+    }
+
     /// Appends the text of the cell at `col` to `out` as a terminal laid
     /// out by [`Widths::LEGACY`](crate::Widths::LEGACY) would rebuild it
     /// in the same columns: its first character and what joins it by

@@ -583,7 +583,7 @@ impl GridNode {
         let grid = terminal.grid();
         let lines: Vec<Line> = grid
             .rows()
-            .map(|row| Line::from_row_for(row, wire))
+            .map(|row| Line::from_row_for(row, wire, terminal.widths()))
             .collect();
         Self {
             size: terminal.size(),
@@ -632,27 +632,32 @@ impl CursorState {
 }
 
 impl Line {
-    /// `row`'s text and styles.
+    /// `row`'s text and styles, from a terminal that lays its cells out
+    /// by `widths`, by which the line is rebuilt (see [`Line::to_row`]).
     #[must_use]
-    pub fn from_row(row: &Row) -> Self {
-        Self::from_row_by(row, Row::push_text)
+    pub fn from_row(row: &Row, widths: Widths) -> Self {
+        Self::from_row_by(row, Row::push_text, widths)
     }
 
-    /// `row`'s text and styles for a peer that speaks `wire`: as
+    /// `row`'s text and styles, from a terminal that lays its cells out
+    /// by `widths`, for a peer that speaks `wire`: as
     /// [`from_row`](Self::from_row), or for one from before protocol 143,
-    /// which lays rows out by [`Widths::LEGACY`](clackatoo_term::Widths),
-    /// as it would rebuild them in the same columns (see
-    /// [`Row::push_text_as_before`]).
+    /// which lays rows out by [`Widths::LEGACY`], as it would rebuild them
+    /// in the same columns (see [`Row::push_text_as_before`]).
     #[must_use]
-    pub fn from_row_for(row: &Row, wire: u32) -> Self {
+    pub fn from_row_for(row: &Row, wire: u32, widths: Widths) -> Self {
         if wire >= wire::TERMINAL_STANDARDS_2 {
-            Self::from_row(row)
+            Self::from_row(row, widths)
         } else {
-            Self::from_row_by(row, Row::push_text_as_before)
+            Self::from_row_by(row, Row::push_text_as_before, Widths::LEGACY)
         }
     }
 
-    fn from_row_by(row: &Row, push_text: impl Fn(&Row, usize, &mut String)) -> Self {
+    fn from_row_by(
+        row: &Row,
+        push_text: impl Fn(&Row, usize, &mut String),
+        widths: Widths,
+    ) -> Self {
         let cells = row.cells();
         let is_blank = |col: usize| {
             let cell = cells[col];
@@ -663,16 +668,24 @@ impl Line {
             .map_or(0, |last| last + 1);
 
         let mut runs: Vec<Run> = Vec::new();
+        // Whether the last cell was plain ASCII, which a plain ASCII cell
+        // never goes on from: nearly every cell, which then needs no look.
+        let mut after_ascii = false;
         for (col, &cell) in cells.iter().enumerate().take(end) {
             let style = *row.style(cell);
+            let ascii = cell.ch().is_ascii() && !cell.has_grapheme();
+            // A cell that the rebuild would join to the one before, as
+            // one after a ZWJ, starts its own run, marked separate.
+            let apart = !(after_ascii && ascii) && row.starts_apart(col, widths);
+            if !cell.is_wide_spacer() {
+                after_ascii = ascii;
+            }
             match runs.last_mut() {
-                // A cell after one ending in a ZWJ starts its own run, marked
-                // separate, or rebuilding the row would join the two.
-                Some(run) if run.style == style && !run.text.ends_with(ZWJ) => {
+                Some(run) if run.style == style && !apart => {
                     push_text(row, col, &mut run.text);
                 }
-                last => {
-                    let separate = last.is_some_and(|run| run.text.ends_with(ZWJ));
+                _ => {
+                    let separate = apart;
                     let mut text = String::new();
                     push_text(row, col, &mut text);
                     // A wide character's spacer pushes no text. Its style
@@ -712,8 +725,6 @@ impl Line {
         self.runs.iter().map(|run| run.text.as_str()).collect()
     }
 }
-
-const ZWJ: char = '\u{200D}';
 
 /// Converts a screen coordinate, which [`Size::MAX`] bounds.
 fn to_u16(value: usize) -> u16 {
@@ -804,7 +815,7 @@ mod tests {
         // "b" is printed first, then "a" and a ZWJ before it, so the two sit
         // side by side without the printer having joined them.
         let t = terminal(4, 1, "\x1b[2Gb\x1b[1Ga\u{200D}");
-        let line = Line::from_row(t.grid().row(0));
+        let line = Line::from_row(t.grid().row(0), t.widths());
         assert!(line.runs[1].separate);
         assert_eq!(line.to_row(4, Widths::LEGACY).cells()[1].ch(), 'b');
     }
@@ -830,7 +841,8 @@ mod tests {
                     "ab", "字", "e\u{301}", "👩\u{200D}💻", "\u{200D}", "\u{301}",
                     "\x1b[31m", "\x1b[1;44m", "\x1b[0m", "\x1b[K", "\x1b[3G", "\x1b[1G",
                     "\x1b[D", "\r\n", " ", "\x1b]8;;https://a/\x07", "\x1b]8;id=b;https://b/\x07",
-                    "\x1b]8;;\x07", "\u{2764}\u{FE0F}", "\u{FE0F}",
+                    "\x1b]8;;\x07", "\u{2764}\u{FE0F}", "\u{FE0F}", "\x1b[?2027h", "\x1b[?2027l",
+                    "\u{261D}\u{1F3FD}", "\u{1F1EC}\u{1F1E7}", "\u{915}\u{93F}", "\u{600}1",
                 ]),
                 0..30,
             ),
@@ -838,11 +850,11 @@ mod tests {
         ) {
             let t = terminal(cols, 3, &fragments.concat());
             for row in t.grid().rows() {
-                let rebuilt = Line::from_row(row).to_row(row.width(), t.widths());
+                let rebuilt = Line::from_row(row, t.widths()).to_row(row.width(), t.widths());
                 proptest::prop_assert_eq!(cells(&rebuilt), cells(row));
                 // A peer from before the rules gets each character in the
                 // same column.
-                let before = Line::from_row_for(row, wire::TERMINAL_STANDARDS_2 - 1)
+                let before = Line::from_row_for(row, wire::TERMINAL_STANDARDS_2 - 1, t.widths())
                     .to_row(row.width(), Widths::LEGACY);
                 for col in (0..row.width()).filter(|&col| !row.cells()[col].is_wide_spacer()) {
                     proptest::prop_assert_eq!(before.cells()[col].ch(), row.cells()[col].ch());
@@ -861,7 +873,10 @@ mod tests {
             Patch::Grid {
                 node: NodeId::ROOT,
                 state: GridState::of(&t),
-                lines: vec![(1, Line::from_row(t.grid().row(1))), (9, Line::default())],
+                lines: vec![
+                    (1, Line::from_row(t.grid().row(1), t.widths())),
+                    (9, Line::default()),
+                ],
                 links: Vec::new(),
                 marks: BlockMarks::default(),
             },
@@ -890,7 +905,7 @@ mod tests {
         assert_eq!(view.grid().unwrap().links.len(), 1);
         // Line 0's link is written over with another.
         t.advance(b"\x1b[H\x1b]8;;https://b/\x07b\x1b]8;;\x07\x1b]7;file:///d\x07");
-        let lines = vec![(0, Line::from_row(t.grid().row(0)))];
+        let lines = vec![(0, Line::from_row(t.grid().row(0), t.widths()))];
         view.apply(ViewUpdate::Patch(vec![
             Patch::Cwd(Some("/d".into())),
             Patch::Grid {
@@ -920,7 +935,12 @@ mod tests {
         // `true` prints two lines, scrolling `false` off the screen.
         t.advance(format!("true\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07{PROMPT}").as_bytes());
         let lines: Vec<(u16, Line)> = (0..3)
-            .map(|line| (line, Line::from_row(t.grid().row(usize::from(line)))))
+            .map(|line| {
+                (
+                    line,
+                    Line::from_row(t.grid().row(usize::from(line)), t.widths()),
+                )
+            })
             .collect();
         let rows = lines
             .iter()

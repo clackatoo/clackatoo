@@ -45,13 +45,28 @@ impl RowBuilder {
 
     /// Appends `text` in `style`. If `separate`, its first character starts
     /// a new cell even if the previous cell ends in a ZWJ, which happens
-    /// when cursor movement put two unrelated characters side by side.
+    /// when cursor movement put two unrelated characters side by side, or
+    /// if by the builder's [`Widths`] it would go on with the previous
+    /// cell's grapheme cluster, as text printed with mode 2027 off doesn't
+    /// (see [`Row::starts_apart`]).
     pub fn push(&mut self, text: &str, style: &Style, separate: bool) {
         self.joins &= !separate;
+        let mut apart = separate;
         for ch in text.chars() {
-            match width::of(ch) {
+            let width = width::of(ch);
+            // By clusters, what goes on with the cell before joins it.
+            let clusters = self.widths.graphemes
+                && !std::mem::take(&mut apart)
+                && width.is_some_and(|cells| cells > 0)
+                && !self.joins
+                && self.previous_cell().is_some_and(|previous| {
+                    let first = self.row.cells()[previous].ch();
+                    let rest = self.row.grapheme(previous).unwrap_or_default();
+                    width::continues_cluster(first, rest, ch)
+                });
+            match width {
                 None => {}
-                Some(cells) if cells == 0 || self.joins => {
+                Some(cells) if cells == 0 || self.joins || clusters => {
                     let Some(previous) = self.previous_cell() else {
                         continue;
                     };

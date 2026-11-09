@@ -197,7 +197,7 @@ desktop; nothing about it passes between machines.
 | `CSI` other | `g` (clear tab stops), `r` (scroll region), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn), `t` (window operations: `22` and `23` push and pop the title, with a second parameter of 0 or 2, ten titles deep, each kept to 4096 bytes; see [queries](#queries-answered) for `18`), `>u` `<u` `=u` (the [kitty keyboard protocol](#keyboard)) |
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
-| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)) |
+| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
 | `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)) |
 
@@ -211,7 +211,7 @@ desktop; nothing about it passes between machines.
 | `CSI 6 n` and `CSI ? 6 n` (cursor position) | `CSI <line> ; <col> R`, with `?` for the second form. Relative to the scroll region in origin mode. |
 | `CSI > q` (terminal version) | `DCS > \| clackatoo <version> ST` |
 | `CSI > c` (secondary device attributes) | `CSI > 1 ; <version> ; 0 c`: a VT220, its version clackatoo's year and month, as `202611`, as foot answers with its own. vim reads a number this high as a modern terminal's, not an old xterm's. |
-| `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 included. 2027 (grapheme clustering) is answered 0: not every character's width is as Unicode's segmentation would have it. |
+| `CSI ? Ps $ p` and `CSI Ps $ p` (DECRQM, is a mode set?) | `CSI ? Ps ; Pm $ y`, without the `?` for an ANSI mode: `Pm` is 1 for set, 2 for reset, and 0 for a mode clackatoo doesn't know. Every mode in [supported sequences](#supported-sequences) is known, 2026 and 2027 included; 2027 is answered 4, can't be set, in a terminal carried over from a build before it, whose rows are laid out the old way. |
 | `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's, and cursor's colors) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colors, as vim, bat and delta do. |
 | `OSC 4 ; <index> ; ?` (a palette entry, several pairs at once) | `OSC 4 ; <index> ; rgb:… ST` for each |
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
@@ -272,6 +272,27 @@ pushed, and a program's progress go on through an upgrade in place. The window
 encodes keys this way; the web app on your phone sends xterm's encoding still.
 A window older than protocol 139 does too, which programs that ask still
 understand.
+
+## Grapheme clusters
+
+By default, as in xterm, each character takes its own columns, and only a
+zero-width one, or one after a zero-width joiner, joins the cell before it, as
+programs counting widths with `wcwidth` expect. A program that counts by
+grapheme clusters, what Unicode's segmentation (UAX #29) says reads as one
+character, asks for mode 2027 (`CSI ? 2027 h`), as in Contour, WezTerm and
+Ghostty. Then a cluster takes one cell: a letter and its spacing mark (कि), an
+emoji and its skin tone (☝🏽), a flag's two halves (🇬🇧), a Hangul syllable
+written in jamo. A cluster is as wide as its first character, but a flag, an
+emoji with a skin tone, or one with [variation selector 16](#screen-behavior)
+takes two columns. `CSI ? 2027 $ p` says whether it's on. A reset, soft or
+full, turns it off.
+
+What's printed either way stays as it was printed: rows are laid out again, in
+history, after a resize, through an upgrade and in every window, by the same
+rules, with what was printed side by side with the mode off kept apart.
+Selecting, searching and copying go by cells, so a cluster is one character to
+them. Text printed with the mode on in the last column that a cluster would
+widen stays one column, as variation selector 16 does there.
 
 ## Synchronized output
 
@@ -353,6 +374,5 @@ These are ignored:
   about them is [answered](#queries-answered).
 - Key repeats and releases (the kitty keyboard protocol's flag 2), and
   <kbd>Super</kbd>, Hyper and Meta as modifiers.
-- Grapheme clustering (mode 2027), in-band resize reports (mode 2048) and
-  mouse reports in pixels (mode 1016).
+- In-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).

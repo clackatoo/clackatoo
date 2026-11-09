@@ -175,6 +175,11 @@ impl Scrollback {
         }
     }
 
+    /// The rules its rows are rebuilt from their records by.
+    pub(crate) fn widths(&self) -> Widths {
+        self.widths
+    }
+
     /// Rows are rebuilt from their records by `widths`, as the terminal
     /// lays them out.
     pub(crate) fn set_widths(&mut self, widths: Widths) {
@@ -537,7 +542,7 @@ impl Scrollback {
             }
         }
         for row in &self.raw {
-            captured.push_row(row);
+            captured.push_row(row, self.widths);
         }
         captured
     }
@@ -617,7 +622,7 @@ impl Scrollback {
             self.style_indices.clear();
         }
         let page = self.pages.back_mut().expect("a page was just made");
-        page.encode(row, &mut self.style_indices);
+        page.encode(row, &mut self.style_indices, self.widths);
         self.records += 1;
     }
 
@@ -673,7 +678,7 @@ impl Scrollback {
 }
 
 impl Page {
-    fn encode(&mut self, row: &Row, style_indices: &mut StyleIndices) {
+    fn encode(&mut self, row: &Row, style_indices: &mut StyleIndices, widths: Widths) {
         let cells = row.cells();
         let end = if row.is_wrapped() {
             cells.len() - usize::from(row.is_padded())
@@ -689,7 +694,11 @@ impl Page {
         // does.
         let mut row_style = StyleIndex::DEFAULT;
         let mut page_style = 0;
-        let mut ends_in_zwj = false;
+        // Whether the next cell may start apart from the one before (see
+        // `Row::starts_apart`) though it's plain ASCII, which only one
+        // after a ZWJ, or by clusters one after a character past ASCII, can.
+        // Any other cell is looked at, by clusters.
+        let mut may_be_apart = false;
         let mut col = 0;
         while col < end {
             // Nearly every cell is plain ASCII in the same style as the last:
@@ -697,7 +706,7 @@ impl Page {
             // this style, and a character below 0x80.
             let plain_bits = u64::from(row_style.0) << 32;
             let is_plain = |cell: &Cell| cell.bits() & !0x7F == plain_bits;
-            if !ends_in_zwj {
+            if !may_be_apart {
                 // Find the run eight cells at a time, with a fold the compiler
                 // can vectorise, then copy it in one loop over two slices.
                 let start = col;
@@ -727,26 +736,26 @@ impl Page {
             if cell.is_wide_spacer() {
                 continue;
             }
-            if cell.style() != row_style || ends_in_zwj {
+            let apart = (may_be_apart || widths.graphemes) && row.starts_apart(col - 1, widths);
+            if cell.style() != row_style || apart {
                 row_style = cell.style();
                 let style = self.style_index(row.style(cell), style_indices);
-                if style != page_style || ends_in_zwj {
+                if style != page_style || apart {
                     self.runs.push(Run {
                         start: offset(self.text.len()),
                         style,
-                        separate: ends_in_zwj,
+                        separate: apart,
                     });
                     page_style = style;
                 }
             }
             push_char(&mut self.text, cell.ch());
-            ends_in_zwj = false;
-            if let Some(extra) = row.grapheme(col - 1) {
-                for &ch in extra {
-                    push_char(&mut self.text, ch);
-                }
-                ends_in_zwj = extra.last() == Some(&ZWJ);
+            let extra = row.grapheme(col - 1).unwrap_or_default();
+            for &ch in extra {
+                push_char(&mut self.text, ch);
             }
+            let last = extra.last().copied().unwrap_or(cell.ch());
+            may_be_apart = last == ZWJ || (widths.graphemes && !last.is_ascii());
         }
 
         self.records.push(Record {

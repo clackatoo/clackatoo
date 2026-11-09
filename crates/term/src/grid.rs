@@ -59,7 +59,7 @@ impl Grid {
     pub(crate) fn lines(&self) -> (Captured, Captured) {
         let mut screen = Captured::default();
         for row in &self.rows {
-            screen.push_row(row);
+            screen.push_row(row, self.widths);
         }
         (screen, self.scrollback.lines())
     }

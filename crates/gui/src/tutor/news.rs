@@ -1266,6 +1266,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "An emoji with variation selector 16 (❤️) takes two columns, as in kitty and Ghostty; vs16 = false to keep one",
     },
     News {
+        id: "graphemes",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs that ask (mode 2027) get a grapheme cluster to a cell: flags, toned emoji and Indic syllables line up",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

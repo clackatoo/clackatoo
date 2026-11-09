@@ -369,6 +369,7 @@ dependencies = [
  "serde",
  "simdutf8",
  "thiserror",
+ "unicode-segmentation",
  "unicode-width",
  "vte",
 ]

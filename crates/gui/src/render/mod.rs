@@ -2059,7 +2059,10 @@ mod tests {
             eprintln!("no emoji font; skipping");
             return;
         }
-        let widths = clackatoo_term::Widths { vs16: true };
+        let widths = clackatoo_term::Widths {
+            vs16: true,
+            graphemes: false,
+        };
         let mut builder = clackatoo_term::RowBuilder::with_widths(20, widths);
         builder.push("\u{2764}\u{FE0F}x", &clackatoo_term::Style::DEFAULT, false);
         let row = builder.finish(false);
@@ -2098,6 +2101,67 @@ mod tests {
         assert!(
             ((x.0 / cell).floor() - 2.0).abs() < f32::EPSILON,
             "after both its cells: {x:?}"
+        );
+    }
+
+    #[test]
+    fn a_cluster_in_one_cell_is_drawn_as_one_glyph_over_both_columns() {
+        let Some((device, _)) = crate::tests::gpu() else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        let mut fonts = crate::tests::fonts(1.0);
+        if fonts.glyph('👍', Variant::Regular).is_none() {
+            eprintln!("no emoji font; skipping");
+            return;
+        }
+        // As mode 2027 prints them: a flag and a toned hand, a cell each.
+        let widths = clackatoo_term::Widths {
+            vs16: true,
+            graphemes: true,
+        };
+        let mut builder = clackatoo_term::RowBuilder::with_widths(20, widths);
+        builder.push(
+            "\u{1F1EC}\u{1F1E7}\u{261D}\u{1F3FD}x",
+            &clackatoo_term::Style::DEFAULT,
+            false,
+        );
+        let row = builder.finish(false);
+        assert!(row.cells()[0].is_wide() && row.cells()[2].is_wide());
+        let rows = [&row];
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        #[allow(clippy::cast_precision_loss)]
+        let cell = fonts.cell.width as f32;
+        let picture = Picture {
+            scenes: &[Scene {
+                scroll: None,
+                origin: [0.0; 2],
+                #[allow(clippy::cast_precision_loss)]
+                size: [20.0 * cell, fonts.cell.height as f32],
+                rows: &rows,
+                cursor: None,
+                normal_mode: false,
+                highlights: &[],
+            }],
+            fills: &[],
+            over: &[],
+            texts: &[],
+            glyphs: &[],
+            over_glyphs: &[],
+            images: &[],
+            transparent: false,
+        };
+        renderer.build(&picture, &mut fonts);
+        let drawn: Vec<(f32, u32)> = (renderer.glyph_instances.iter())
+            .map(|glyph| (glyph.origin[0], glyph.colored))
+            .collect();
+        // The flag, the hand, and x after their four columns.
+        assert_eq!(drawn.len(), 3, "{drawn:?}");
+        assert!(drawn[..2].iter().all(|&(_, colored)| colored == 1));
+        let starts: Vec<f32> = drawn.iter().map(|&(x, _)| (x / cell).floor()).collect();
+        assert!(
+            (starts[1] - 2.0).abs() < f32::EPSILON && (starts[2] - 4.0).abs() < f32::EPSILON,
+            "{starts:?}"
         );
     }
 

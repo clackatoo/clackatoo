@@ -9,3 +9,4 @@ cc 042229eef91bc4100dfdf05d093aa12e451cfd7ad1aace731adc4bace84265c7 # shrinks to
 cc 38f9656634eaf1e658b78298fac5296e43e638bb4daa8ee84fa21cd401ce9022 # shrinks to text = "aa", cols = 3, new_cols = 2, rows = 1
 cc 14e5856a0e11fdb2c8ccefa358caa7eabb69875890a5831299e51bff5d27adf3 # shrinks to text = " aa字 字a字 a字字字aaaa 字aa字  aa字aa aa字字aaa字字字a  aa ", cols = 3, new_cols = 5, rows = 1
 cc 76048ed5402efcce583baff1699e9e952f406c6951ae57408bacc7abda499853 # shrinks to text = "字字字 aaa 字a字字 ", cols = 3, new_cols = 4, rows = 1
+cc 784f025223e1abca1c5cd082a9dc255ad8a6535863bf227997f912942b5126ab # shrinks to bytes = [226, 152, 157, 240, 159, 143, 189, 226, 152, 157, 240, 159, 143, 189, 226, 157, 164, 239, 184, 143, 8, 101, 204, 129, 226, 152, 157, 240, 159, 143, 189, 101, 204, 129, 226, 157, 164, 239, 184, 143, 224, 164, 149, 224, 164, 191, 13, 216, 128, 49, 216, 128, 49, 27, 56, 32, 13], cols = 7, rows = 2

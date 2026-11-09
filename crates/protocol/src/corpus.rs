@@ -4230,7 +4230,10 @@ fn grid_state() -> GridState {
         progress: Some(TaskProgress::Paused(Some(40))),
         restarted: None,
         phone: true,
-        widths: crate::Widths { vs16: true },
+        widths: crate::Widths {
+            vs16: true,
+            graphemes: true,
+        },
     }
 }
 

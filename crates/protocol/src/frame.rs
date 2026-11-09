@@ -890,7 +890,7 @@ mod tests {
                         1 + 3
                     } else {
                         0
-                    } + 2 * usize::from(wire >= wire::TERMINAL_STANDARDS_2);
+                    } + 3 * usize::from(wire >= wire::TERMINAL_STANDARDS_2);
                     let tail = 3 + countdown + fed + later;
                     assert_eq!(
                         view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),

@@ -127,6 +127,7 @@ impl KeptCopy {
                     .map_or(Hints::empty(), |(_, hints)| hints);
                 (number, (hints, row))
             });
+        let widths = self.history.widths();
         let mut lines = Vec::new();
         let mut placeholder = false;
         let mut push = |number: u64, hints: Hints, row: &Row| {
@@ -145,7 +146,7 @@ impl KeptCopy {
             }
             placeholder = false;
             lines.push(KeptLine {
-                line: Line::of_row(row).0,
+                line: Line::of_row(row, widths).0,
                 hints: hints.bits(),
             });
         };
@@ -243,7 +244,7 @@ fn not_kept(width: usize) -> Line {
     let width = width.max(NOT_KEPT.len());
     let mut builder = RowBuilder::new(width);
     builder.push(NOT_KEPT, &Style::DEFAULT, true);
-    Line::of_row(&builder.finish(false)).0
+    Line::of_row(&builder.finish(false), crate::Widths::LEGACY).0
 }
 
 #[cfg(test)]

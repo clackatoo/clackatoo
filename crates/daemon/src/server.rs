@@ -926,7 +926,7 @@ impl Subscription {
         self.damage.clear();
         let row = |line: u16| grid.row(usize::from(line));
         let lines: Vec<(u16, Line)> = (damaged.iter())
-            .map(|&line| (line, Line::from_row_for(row(line), wire)))
+            .map(|&line| (line, Line::from_row_for(row(line), wire, terminal.widths())))
             .collect();
         // Only a window that reads them is told where prompts are, or how
         // blocks ended: a look at each line sent, and at the blocks after
@@ -1765,6 +1765,7 @@ impl Daemon {
                         terminal: terminal.id,
                         phone,
                         vs16: widths.vs16,
+                        graphemes: widths.graphemes,
                     });
                     if programs_asked != clackatoo_term::AskedSnapshot::default() {
                         asked.push(handover::Asked {
@@ -5030,7 +5031,7 @@ fn history(terminal: &Terminal, end: u64, count: u16, wire: u32) -> HistoryLines
             first.get_or_insert(number);
             HistoryLine {
                 width: u16::try_from(row.width()).expect("rows are at most Size::MAX wide"),
-                line: Line::from_row_for(&row, wire),
+                line: Line::from_row_for(&row, wire, terminal.widths()),
             }
         })
         .collect::<Vec<_>>();

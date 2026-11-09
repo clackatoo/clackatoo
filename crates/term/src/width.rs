@@ -7,7 +7,10 @@
 
 use std::sync::OnceLock;
 
+use unicode_segmentation::GraphemeCursor;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::row::MAX_EXTRA;
 
 /// Code points in one Unicode plane.
 const PLANE_LEN: usize = 0x1_0000;
@@ -144,21 +147,79 @@ pub struct Widths {
     /// (U+FE0F) follows takes two columns, as kitty and Ghostty draw it:
     /// ❤ is one column, ❤️ two.
     pub vs16: bool,
+    /// Rows are rebuilt by grapheme clusters, as mode 2027 prints them: a
+    /// character Unicode's segmentation (UAX #29) says goes on with the
+    /// cell before it joins it, unless its run starts apart (see
+    /// [`RowBuilder::push`](crate::RowBuilder::push)), as what's printed
+    /// with the mode off does; and a cell of a pair of regional
+    /// indicators (a flag), or an emoji with a skin tone, takes two
+    /// columns. The terminal can then honour mode 2027.
+    pub graphemes: bool,
 }
 
 impl Widths {
     /// The rules before there were any: what a terminal restored from a
     /// build before them was laid out by.
-    pub const LEGACY: Self = Self { vs16: false };
+    pub const LEGACY: Self = Self {
+        vs16: false,
+        graphemes: false,
+    };
 
     /// Whether a cell holding `first`, a character one column wide, then
     /// `rest`, takes two columns by these rules.
     pub(crate) fn widens(self, first: char, rest: &[char]) -> bool {
         match rest.first() {
             Some('\u{FE0F}') if self.vs16 => emoji_form(first),
+            Some(&next) if self.graphemes => {
+                (regional_indicator(first) && regional_indicator(next)) || skin_tone(next)
+            }
             _ => false,
         }
     }
+}
+
+/// Whether `ch` is a regional indicator, half a flag.
+fn regional_indicator(ch: char) -> bool {
+    matches!(ch, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
+/// Whether `ch` is one of the five skin tones that colour the emoji
+/// before them.
+fn skin_tone(ch: char) -> bool {
+    matches!(ch, '\u{1F3FB}'..='\u{1F3FF}')
+}
+
+/// Whether `next` goes on with the grapheme cluster a cell holding
+/// `first`, then `rest`, has begun, as Unicode's segmentation (UAX #29)
+/// says, so it belongs in that cell, where clusters are kept whole: a
+/// spacing mark, a skin tone, a flag's second half, a Hangul syllable's
+/// next jamo. A cell starts a cluster, so the cell is all the context the
+/// rules need.
+pub(crate) fn continues_cluster(first: char, rest: &[char], next: char) -> bool {
+    let last = rest.last().copied().unwrap_or(first);
+    // What nearly all text is, said quickly: ASCII after ASCII, and an
+    // ideograph or kana after another, never join.
+    if (last.is_ascii() && next.is_ascii()) || (ideograph(last) && ideograph(next)) {
+        return false;
+    }
+    let mut text = [0; 4 * (MAX_EXTRA + 2)];
+    let mut len = 0;
+    for ch in std::iter::once(first).chain(rest.iter().copied().take(MAX_EXTRA)) {
+        len += ch.encode_utf8(&mut text[len..]).len();
+    }
+    let at = len;
+    len += next.encode_utf8(&mut text[len..]).len();
+    let Ok(text) = std::str::from_utf8(&text[..len]) else {
+        return false;
+    };
+    let mut cursor = GraphemeCursor::new(at, len, true);
+    cursor.is_boundary(text, 0) == Ok(false)
+}
+
+/// Whether `ch` is a CJK ideograph or kana: never a cluster's extension,
+/// and never extended.
+fn ideograph(ch: char) -> bool {
+    matches!(ch, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}')
 }
 
 /// Whether `ch` has an emoji form that variation selector 16 asks for,
@@ -226,8 +287,47 @@ mod tests {
     }
 
     #[test]
+    fn clusters_go_on_as_unicode_says() {
+        // A spacing mark, a skin tone, a flag's second half, a jamo.
+        assert!(continues_cluster('क', &[], '\u{093F}'));
+        assert!(continues_cluster('☝', &[], '\u{1F3FD}'));
+        assert!(continues_cluster('\u{1F1EC}', &[], '\u{1F1E7}'));
+        assert!(!continues_cluster('\u{1F1EC}', &['\u{1F1E7}'], '\u{1F1EF}'));
+        assert!(continues_cluster('\u{1100}', &[], '\u{1161}'));
+        // A prefix, as the Arabic number sign, joins what follows, ASCII too.
+        assert!(continues_cluster('\u{0600}', &[], '1'));
+        for (before, next) in [
+            ('a', 'b'),
+            ('字', '字'),
+            ('a', '字'),
+            ('é', 'x'),
+            ('👍', '👍'),
+        ] {
+            assert!(!continues_cluster(before, &[], next), "{before:?} {next:?}");
+        }
+        // A cell full of marks is still read whole.
+        let marks = ['\u{301}'; MAX_EXTRA];
+        assert!(continues_cluster('e', &marks, '\u{301}'));
+    }
+
+    #[test]
+    fn flags_and_skin_tones_widen_by_clusters() {
+        let clusters = Widths {
+            vs16: false,
+            graphemes: true,
+        };
+        assert!(clusters.widens('\u{1F1EC}', &['\u{1F1E7}']));
+        assert!(clusters.widens('☝', &['\u{1F3FD}']));
+        assert!(!clusters.widens('a', &['\u{301}']));
+        assert!(!Widths::LEGACY.widens('\u{1F1EC}', &['\u{1F1E7}']));
+    }
+
+    #[test]
     fn vs16_widens_only_what_has_an_emoji_form() {
-        let vs16 = Widths { vs16: true };
+        let vs16 = Widths {
+            vs16: true,
+            graphemes: false,
+        };
         for ch in ['❤', '☺', '✔', '☝'] {
             assert!(vs16.widens(ch, &['\u{FE0F}']), "{ch:?}");
             assert!(!Widths::LEGACY.widens(ch, &['\u{FE0F}']), "{ch:?}");

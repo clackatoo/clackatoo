@@ -42,7 +42,11 @@ fn snapshot(terminal: &Terminal) -> ServerMessage {
 
 /// A thousand patches of two lines each, and the cursor.
 fn patches(terminal: &Terminal) -> Vec<ServerMessage> {
-    let lines: Vec<Line> = terminal.grid().rows().map(Line::from_row).collect();
+    let lines: Vec<Line> = terminal
+        .grid()
+        .rows()
+        .map(|row| Line::from_row(row, terminal.widths()))
+        .collect();
     let state = GridState::of(terminal);
     (0..1000_u16)
         .map(|n| {

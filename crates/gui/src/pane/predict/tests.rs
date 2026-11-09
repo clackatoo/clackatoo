@@ -92,7 +92,12 @@ impl Fixture {
         self.terminal.advance(output.as_bytes());
         let grid = self.terminal.grid();
         let lines = (0..grid.height())
-            .map(|line| (u16::try_from(line).unwrap(), Line::from_row(grid.row(line))))
+            .map(|line| {
+                (
+                    u16::try_from(line).unwrap(),
+                    Line::from_row(grid.row(line), clackatoo_protocol::Widths::LEGACY),
+                )
+            })
             .collect();
         self.pane.view_changed(&ViewUpdate::Patch(vec![Patch::Grid {
             node: NodeId::ROOT,

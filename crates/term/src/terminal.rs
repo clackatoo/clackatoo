@@ -54,7 +54,10 @@ impl Default for Config {
             scrollback_lines: 10_000,
             scrollback_compaction: Compaction::default(),
             local_host: None,
-            widths: Widths { vs16: true },
+            widths: Widths {
+                vs16: true,
+                graphemes: true,
+            },
         }
     }
 }
@@ -703,6 +706,9 @@ bitflags! {
         /// Mode 2026: the program is drawing a frame, to be shown whole
         /// once it resets this.
         const SYNCHRONIZED = 1 << 9;
+        /// Mode 2027: characters are printed by grapheme clusters, as
+        /// Unicode's segmentation has them, a cluster to a cell.
+        const GRAPHEMES = 1 << 10;
     }
 }
 
@@ -790,6 +796,27 @@ impl Printable for &str {
         let ch = self[at..].chars().next().expect("at is within the text");
         (ch, ch.len_utf8())
     }
+}
+
+/// Whether a character may join the cell at `col`, to be looked at a
+/// character at a time: as one after a ZWJ does, or by `clusters`, as one
+/// after a character past ASCII may (see [`joins_cell`]).
+fn may_join(row: &Row, col: usize, clusters: bool) -> bool {
+    ends_in_zwj(row, col) || (clusters && !row.last_char(col).is_ascii())
+}
+
+/// Whether `ch`, a character that takes columns, joins the cell at `col`
+/// rather than starting one: after a ZWJ, it does; by `clusters`, as mode
+/// 2027 prints, it does if Unicode says it goes on with the cell's
+/// cluster.
+fn joins_cell(row: &Row, col: usize, ch: char, clusters: bool) -> bool {
+    ends_in_zwj(row, col)
+        || (clusters
+            && width::continues_cluster(
+                row.cells()[col].ch(),
+                row.grapheme(col).unwrap_or_default(),
+                ch,
+            ))
 }
 
 /// Whether the cell at `col` ends in a ZWJ, so the next character joins it.
@@ -1056,15 +1083,20 @@ impl Emulator {
             cursor,
             last_printed,
             config,
+            modes,
             ..
         } = self;
         let widths = config.widths;
+        let clusters = modes.contains(Modes::GRAPHEMES);
         let grid = match screen {
             Screen::Primary => primary,
             Screen::Alternate => alternate.as_mut().expect(ALTERNATE_EXISTS),
         };
         let row = grid.row_mut(cursor.line);
-        let mut joins = previous_cell(row, cursor).is_some_and(|col| ends_in_zwj(row, col));
+        // Whether the next character may join the cell before it, as one
+        // after a ZWJ does, or by clusters one after a character past
+        // ASCII may: then even ASCII is looked at a character at a time.
+        let mut joins = previous_cell(row, cursor).is_some_and(|col| may_join(row, col, clusters));
         // Nothing below interns again, so the index stays valid.
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
@@ -1100,7 +1132,12 @@ impl Emulator {
             match width::of(ch) {
                 // Control characters never get here, but drop them if so.
                 None => {}
-                Some(cells) if cells == 0 || joins => {
+                Some(cells)
+                    if cells == 0
+                        || (joins
+                            && previous_cell(row, cursor)
+                                .is_some_and(|col| joins_cell(row, col, ch, clusters))) =>
+                {
                     joins = match previous_cell(row, cursor) {
                         Some(col) => {
                             row.append_to_grapheme(col, ch);
@@ -1112,7 +1149,7 @@ impl Emulator {
                             }
                             // Not just `ch == ZWJ`: a full grapheme drops
                             // what's appended.
-                            ends_in_zwj(row, col)
+                            may_join(row, col, clusters)
                         }
                         None => false,
                     };
@@ -1130,6 +1167,7 @@ impl Emulator {
                         row.write_cell(cursor.col, ch, wide, style);
                         advance(cursor, cells, width, autowrap);
                         *last_printed = Some(ch);
+                        joins = clusters && !ch.is_ascii();
                     }
                 }
             }
@@ -1148,7 +1186,7 @@ impl Emulator {
             None => {}
             Some(0) => self.print_zero_width(ch),
             Some(width) => {
-                if self.joins_previous_grapheme() {
+                if self.joins_previous_grapheme(ch) {
                     self.print_zero_width(ch);
                 } else {
                     self.print_cell(ch, width == 2);
@@ -1214,12 +1252,14 @@ impl Emulator {
         }
     }
 
-    /// Whether the next character continues the previous grapheme instead of
-    /// starting a cell. That happens after a zero-width joiner (ZWJ), which
-    /// glues emoji like 👩‍💻 into one.
-    fn joins_previous_grapheme(&self) -> bool {
+    /// Whether `ch`, the next character, continues the previous grapheme
+    /// instead of starting a cell. That happens after a zero-width joiner
+    /// (ZWJ), which glues emoji like 👩‍💻 into one, and with mode 2027,
+    /// wherever Unicode says the cluster goes on.
+    fn joins_previous_grapheme(&self, ch: char) -> bool {
         let row = self.grid().row(self.cursor.line);
-        previous_cell(row, &self.cursor).is_some_and(|col| ends_in_zwj(row, col))
+        let clusters = self.modes.contains(Modes::GRAPHEMES);
+        previous_cell(row, &self.cursor).is_some_and(|col| joins_cell(row, col, ch, clusters))
     }
 
     fn previous_cell(&self) -> Option<usize> {
@@ -1587,6 +1627,8 @@ impl Emulator {
             66 => self.modes.set(Modes::APP_KEYPAD, on),
             2004 => self.modes.set(Modes::BRACKETED_PASTE, on),
             2026 => self.modes.set(Modes::SYNCHRONIZED, on),
+            // Only where the rows are rebuilt by clusters too.
+            2027 if self.config.widths.graphemes => self.modes.set(Modes::GRAPHEMES, on),
             6 => {
                 self.modes.set(Modes::ORIGIN, on);
                 self.move_to_origin(0, 0);
@@ -1625,8 +1667,8 @@ impl Emulator {
     }
 
     /// DECRQM: whether mode `mode`, a DEC private mode if `dec`, is set,
-    /// as DECRPM answers it: 1 for set, 2 for reset, and 0 for a mode this
-    /// terminal doesn't know. Programs ask before they rely on a mode, as
+    /// as DECRPM answers it: 1 for set, 2 for reset, 4 for one that can't
+    /// be set, and 0 for a mode this terminal doesn't know. Programs ask before they rely on a mode, as
     /// for synchronized output.
     pub(crate) fn report_mode(&mut self, mode: u16, dec: bool) {
         let state = if dec {
@@ -1637,6 +1679,10 @@ impl Emulator {
         let answer = match state {
             Some(true) => 1,
             Some(false) => 2,
+            // A terminal laid out by the rules from before grapheme
+            // clusters, as one an older build handed over, can't print by
+            // them: it says so, rather than that it doesn't know the mode.
+            None if dec && mode == 2027 => 4,
             None => 0,
         };
         let marker = if dec { "?" } else { "" };
@@ -1671,6 +1717,7 @@ impl Emulator {
             1004 => Modes::FOCUS_EVENTS,
             2004 => Modes::BRACKETED_PASTE,
             2026 => Modes::SYNCHRONIZED,
+            2027 if self.config.widths.graphemes => Modes::GRAPHEMES,
             47 | 1047 | 1049 => return Some(self.screen == Screen::Alternate),
             _ => return None,
         };
