@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.31 (2026-11-09)
+
+### Fixes
+
+- **relay:** --no-share keeps a machine and its subtree from relaying daemons both ways (CLACKA-118) (dd57d4a0)
+
 ## 2026.11.30 (2026-11-09)
 
 ### Fixes
