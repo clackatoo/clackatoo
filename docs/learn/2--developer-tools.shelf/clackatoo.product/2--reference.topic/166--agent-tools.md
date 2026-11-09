@@ -18,7 +18,7 @@ say, can run them where you watch.
 
 | Tool | Does |
 |---|---|
-| `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. In a folder you haven't [trusted](~clackatoo/reference/editor#trusted-folders), the file has no language server, and the agent is told so; only you can trust the folder. |
+| `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. In a folder you haven't [trusted](~clackatoo/reference/languages#trusted-folders), the file has no language server, and the agent is told so; only you can trust the folder. |
 | `run_in_terminal` | Opens a terminal beside the chat, running your own shell, and types a command at its first prompt. You can watch it, and type into it yourself. |
 | `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/window#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
 | `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output: the last 50 lines, unless it asks for up to 500. |
@@ -233,18 +233,18 @@ stopping, undoing, or rewinding in another chat; keeping, rejecting, or
 commenting on agents' changes in a review, or sending its comments; posting on
 a board; closing panes, tabs, workspaces, terminals, or background tabs;
 pairing or revoking devices, unlocking pairing, `:keep`,
-[trusting a folder](~clackatoo/reference/editor#trusted-folders), connecting
-to or forgetting other machines, forwarding ports, installing, upgrading,
-`:update`, and `:reload`. While a chat has control, the config's Lua runs no
-commands, makes or closes no panes, and connects to nothing, whether it acts
-by itself or for your keys. So `:reload`, run by you while a chat has control,
-doesn't run the config's startup splits or commands either; reload again once
-the access has ended. Keys the agent's input left to go on later, as the rest
-of a macro waiting for the daemon to answer, are dropped as each input ends.
-`:set` changes only this window, as it always does, so control can change the
-window's options. None of this is an operating-system sandbox, and an agent
-that runs commands without asking can reach the daemon itself, outside the
-window.
+[trusting a folder](~clackatoo/reference/languages#trusted-folders),
+connecting to or forgetting other machines, forwarding ports, installing,
+upgrading, `:update`, and `:reload`. While a chat has control, the config's
+Lua runs no commands, makes or closes no panes, and connects to nothing,
+whether it acts by itself or for your keys. So `:reload`, run by you while a
+chat has control, doesn't run the config's startup splits or commands either;
+reload again once the access has ended. Keys the agent's input left to go on
+later, as the rest of a macro waiting for the daemon to answer, are dropped as
+each input ends. `:set` changes only this window, as it always does, so
+control can change the window's options. None of this is an operating-system
+sandbox, and an agent that runs commands without asking can reach the daemon
+itself, outside the window.
 
 A window is granted to one chat at a time, for inspect and control alike, and
 a chat holds a grant on one window: granting it another moves the grant, and

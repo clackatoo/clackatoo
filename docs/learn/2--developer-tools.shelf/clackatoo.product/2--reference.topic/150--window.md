@@ -630,20 +630,20 @@ other pane, `5:` opens the command line as `:` does. From a selection it's
 | `:Tutor`, `:Tutor NAME`, `:Tutor new` | Opens [the tutor](#learning-clackatoo): its lessons in the finder, the lesson called NAME, or what's new. |
 | `:Editor PATH`, `:\|Editor PATH`…, `:e PATH`, `:e` | [Edits the file](~clackatoo/reference/editor), in a new tab or beside the focused pane; `:e` in place of the file an editor shows, and alone, an explorer beside an empty file. |
 | `:Files`, `:Grep PATTERN`, `:Buffers`, `:Diagnostics`, `:Symbols`, `:ProjectSymbols NAME` | Opens [the finder](#the-finder), with what follows typed. |
-| `:Registers`, `:reg` | Lists what an editor's [registers](~clackatoo/reference/editor#registers) hold, by its cursor. |
+| `:Registers`, `:reg` | Lists what an editor's [registers](~clackatoo/reference/registers-macros-marks#registers) hold, by its cursor. |
 | `:nohlsearch`, `:noh` | Stops lighting up what the last search matched in the focused pane, an editor's, a terminal's, a chat's or a list's, until the next search, `n` or `N`. <kbd>Esc</kbd> in normal mode does too. |
 | `:Messages`, `:mes` | Shows what the bottom bar has said lately, above it, until the next key. |
-| `:Marks` | Opens [the finder](#the-finder) on the [marks](~clackatoo/reference/editor#marks) the focused file can go to. |
+| `:Marks` | Opens [the finder](#the-finder) on the [marks](~clackatoo/reference/registers-macros-marks#marks) the focused file can go to. |
 | `:1`, `:2`… | In an editor, goes to that line, as Vim does, as do `:$`, `:+3` and `:'a`. Elsewhere, moves to that tab of the workspace shown. |
-| `:s/old/new/`, `:%s/old/new/g`… | Replaces text in the focused editor, with [Vim's ranges and flags](~clackatoo/reference/editor#substituting). |
-| `:g/pattern/d`, `:v/…`, `:d`, `:y`, `:m`, `:t`, `:normal` | Vim's [commands for lines](~clackatoo/reference/editor#lines), in the focused editor. |
+| `:s/old/new/`, `:%s/old/new/g`… | Replaces text in the focused editor, with [Vim's ranges and flags](~clackatoo/reference/substituting#substituting). |
+| `:g/pattern/d`, `:v/…`, `:d`, `:y`, `:m`, `:t`, `:normal` | Vim's [commands for lines](~clackatoo/reference/substituting#lines), in the focused editor. |
 | `:workspace NAME`, `:ws NAME` | Switches to the workspace called NAME, making it if there's none. Without a name, makes a new workspace, named with the lowest number no workspace has. `:ws new@desk NAME` makes one on desk, as does `:ws NAME@desk` if desk has none of that name. |
 | `:rename NAME` | Renames the workspace shown. |
 | `:bg`, `:bgpane`, `:Background` | Sends the tab shown, or the focused pane, to the [background](#background-tabs), or lists the background tabs. |
 | `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/chats-together#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
 | `:bd`, `:bdelete` | Closes the focused chat for good, pane and all: a subagent's too, which `:q` and `:close` only send back to the background. |
-| `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor#writing). |
+| `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor-files#writing). |
 | `:reload` | Runs the [config](~clackatoo/reference/config) again, from the start. |
 | `:set nonu`, `:set rnu!`… | Changes [options](~clackatoo/reference/config#options), or shows them, as Vim's `:set` does. |
 
@@ -749,8 +749,8 @@ In normal mode, `q` and a register start recording, `q` stops, and `@a`, `3@a`
 and `@@` replay, in editors, terminals, chats, explorers, boards and reviews.
 The keys can move between panes and continue there. Explorer, board, and
 review panes close with `Q` so `q` is available for recording. See
-[macros](~clackatoo/reference/editor#macros) for registers, waiting, and
-stopping on a failed command.
+[macros](~clackatoo/reference/registers-macros-marks#macros) for registers,
+waiting, and stopping on a failed command.
 
 `ma` sets a mark in the current file or pane; `mA` sets a window-wide mark.
 Backtick and the letter return to its position, and apostrophe and the letter
@@ -859,10 +859,10 @@ ends in. A name with no ending such as `Makefile`, a language that isn't
 installed, or a daemon older than protocol 84 leaves it plain, and a preview
 from the middle of a file can be colored wrongly inside a long comment. An
 empty file says so. Opening one is a
-[jump](~clackatoo/reference/editor#jumps), so <kbd>Ctrl</kbd>+<kbd>O</kbd>
-comes back. <kbd>Space</kbd> starts these keys in normal mode, so
-<kbd>Space</kbd> alone doesn't move the cursor, unless a command is half
-typed, as in `d<Space>`.
+[jump](~clackatoo/reference/editor-keys#jumps), so
+<kbd>Ctrl</kbd>+<kbd>O</kbd> comes back. <kbd>Space</kbd> starts these keys in
+normal mode, so <kbd>Space</kbd> alone doesn't move the cursor, unless a
+command is half typed, as in `d<Space>`.
 
 ## Typing
 
@@ -1103,9 +1103,9 @@ program printed: a line that wrapped only because it reached the window's edge
 comes out as one line, and blanks at the ends of lines are left out.
 
 What `y` copies goes into the
-[registers](~clackatoo/reference/editor#registers) exactly as an editor's yank
-does: into the unnamed register, which `p` in an editor puts, and `"0`, or
-into the register named before it; and, as the
+[registers](~clackatoo/reference/registers-macros-marks#registers) exactly as
+an editor's yank does: into the unnamed register, which `p` in an editor puts,
+and `"0`, or into the register named before it; and, as the
 [option](~clackatoo/reference/config#options) `clipboard` says, onto the
 clipboard, as it is unless you change it, or the primary selection. With
 `clipboard=none` it stays in the window's registers, and `"+y` or
@@ -1219,7 +1219,7 @@ off lights only the match found. If there's none, the bottom bar says
 While you type the search, the cursor goes to the match it would find from
 where you started, the view follows, and its matches are lit, as Neovim's
 `incsearch` shows them, in an editor too (see
-[Shown as you type](~clackatoo/reference/editor#shown-as-you-type)).
+[Shown as you type](~clackatoo/reference/editor-keys#shown-as-you-type)).
 <kbd>Esc</kbd> puts the cursor and the view back; <kbd>Enter</kbd> keeps them,
 and is the search. The daemon is asked after each key, but only once it has
 answered the last, so typing fast never queues searches, and the match shown

@@ -223,12 +223,12 @@ short name, as in Vim, which works everywhere the long one does.
 |---|---|---|---|
 | `font` | `gfn` | The font family terminals and editors are drawn in, as `fc-list : family` names it, such as `JetBrains Mono`. Empty is your system's monospace font. A family that isn't installed is refused, and the font stays as it was. `--font` or `CLACKATOO_FONT` outdoes what `init.lua` sets as it runs, but not `:set` or what your keys set afterward. | your system's |
 | `fontsize` | `fsz` | The size text is drawn at, in points, from 4 to 200, such as `12` or `10.5`. The window keeps its size, and the panes fit as many cells as now fit, as when it's resized. `--font-size` or `CLACKATOO_FONT_SIZE` outdoes what `init.lua` sets as it runs. | 12 |
-| `number` | `nu` | Line numbers down an [editor](~clackatoo/reference/editor#line-numbers)'s left, the cursor's line showing its own. | on |
+| `number` | `nu` | Line numbers down an [editor](~clackatoo/reference/editor-view#line-numbers)'s left, the cursor's line showing its own. | on |
 | `relativenumber` | `rnu` | The other lines show how far they are from the cursor's, for counts such as `5j`. Without `number`, the cursor's line shows 0. | on |
 | `numberwidth` | `nuw` | The fewest columns the line numbers take, with the space after them, from 1 to 20. | 4 |
 | `cursorline` | `cul` | The cursor's line is lit faintly across an editor, so the eye finds it. | on |
 | `colorcolumn` | `cc` | Columns marked down an editor, such as `80`, to keep lines short by. A list, counting from 1, as the bottom bar's column does, up to 9999. | none |
-| `virtualtext` | `vt` | What a [language server](~clackatoo/reference/editor#language-servers) says is wrong with a line, written dimly after its end: the worst, if there are several. | on |
+| `virtualtext` | `vt` | What a [language server](~clackatoo/reference/languages#language-servers) says is wrong with a line, written dimly after its end: the worst, if there are several. | on |
 | `wrap` | `wrap` | A line too long for an editor's pane goes on over as many rows as it needs. Off, the view scrolls sideways to follow the cursor. | on |
 | `linebreak` | `lbr` | Wrapped lines break between words, not in them. | on |
 | `breakindent` | `bri` | Wrapped rows start as far in as their line is indented. | on |
@@ -236,9 +236,9 @@ short name, as in Vim, which works everywhere the long one does.
 | `scrolloff` | `so` | The fewest lines kept in view above and below an editor's cursor. Half the pane or more keeps the cursor's line in the middle. | 5 |
 | `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
 | `tabstop` | `ts` | How wide a tab is drawn: to the next column that's a multiple of it, from 1 to 32. | 4 |
-| `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor#tabs-and-indenting) by, as does <kbd>Tab</kbd> where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
+| `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor-view#tabs-and-indenting) by, as does <kbd>Tab</kbd> where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
 | `expandtab` | `et` | Indents with spaces, not tabs, where no line nearby is indented yet. A file keeps the kind of indent it has. | on |
-| `smartindent` | `si` | A new line, and one where `}`, `]` or `)` is typed first or `:` ends `else` and the like, is [indented](~clackatoo/reference/editor#tabs-and-indenting) as its language's tree-sitter rules say, not Vim's rules for C, a moment after it's given the line before's indent. Off, it keeps the line before's. `=` indents by the rules either way. | on |
+| `smartindent` | `si` | A new line, and one where `}`, `]` or `)` is typed first or `:` ends `else` and the like, is [indented](~clackatoo/reference/editor-view#tabs-and-indenting) as its language's tree-sitter rules say, not Vim's rules for C, a moment after it's given the line before's indent. Off, it keeps the line before's. `=` indents by the rules either way. | on |
 | `autoread` | `ar` | A file changed on disk by something other than an agent is read again if it has no changes not written, as an edit `u` undoes. Off, or with changes, the bottom bar says so. | on |
 | `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. <kbd>Esc</kbd> puts them back; <kbd>Enter</kbd> keeps them, and is the search. Off, nothing moves until <kbd>Enter</kbd>. | on |
 | `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
@@ -270,14 +270,14 @@ short name, as in Vim, which works everywhere the long one does.
 | `completeaccept` | `cmpa` | What <kbd>Enter</kbd> does with the menu open: accept the item you moved to (`picked`), always accept (`enter`), or never (`ctrl-y`), leaving it to <kbd>Ctrl</kbd>+<kbd>Y</kbd>. | `picked` |
 | `completetab` | `cmpt` | <kbd>Tab</kbd> accepts the picked item too. | off |
 | `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
-| `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/editor#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
-| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
-| `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/editor#language-servers) says; where it's given a value a little brighter. | on |
-| `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/editor#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
-| `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
-| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
+| `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/languages#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
+| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor-view#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
+| `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/languages#language-servers) says; where it's given a value a little brighter. | on |
+| `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/languages#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
+| `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor-view#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |
+| `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor-view#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
 | `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/window#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
-| `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/editor#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
+| `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/languages#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as

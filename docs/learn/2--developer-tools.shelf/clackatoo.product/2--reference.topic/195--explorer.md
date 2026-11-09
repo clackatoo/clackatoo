@@ -24,7 +24,7 @@ is sent the same way: only the marks that changed, not every mark again.
 | `<Space>e` | Opens an explorer down the left of the tab, goes to it if there's one, or closes it if it has the focus. |
 | `:Explore`, `:Ex` | Opens one, or goes to it. |
 | `:Explore DIR` | The same, with `DIR` as its root. A relative `DIR` is from the root, and `~/` is your home directory. |
-| `:e` | With nothing after it: opens one at the folder you're in, or roots the tab's there, beside an empty file with no name yet (see [the editor](~clackatoo/reference/editor#opening-a-file)). |
+| `:e` | With nothing after it: opens one at the folder you're in, or roots the tab's there, beside an empty file with no name yet (see [the editor](~clackatoo/reference/editor-files#opening-a-file)). |
 | `clackatoo files [DIR]` | From a shell: opens one at `DIR`, or the current directory, in a new tab (see [the clackatoo command](~clackatoo/reference/cli#files)). |
 
 Its root is the project the focused pane is in: the git repository of an

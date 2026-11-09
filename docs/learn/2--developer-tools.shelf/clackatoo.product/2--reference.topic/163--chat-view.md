@@ -144,7 +144,7 @@ found is lit, until <kbd>Esc</kbd> or `:noh`.
 While you type the search, the cursor goes to the match it would find from
 where you started, opening the work or card it's in, and its matches are lit,
 as Neovim's `incsearch` shows them, in an editor too (see
-[Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). It's
+[Shown as you type](~clackatoo/reference/editor-keys#shown-as-you-type)). It's
 worked out once after each key, as one step of a search, within the same
 bounds. <kbd>Esc</kbd> puts the cursor, the view, and anything it opened back;
 <kbd>Enter</kbd> keeps them, and is the search. With the
