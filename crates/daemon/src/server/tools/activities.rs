@@ -525,12 +525,17 @@ mod tests {
 
     #[test]
     fn a_long_result_keeps_its_end_with_how_the_command_ended() {
+        use std::fmt::Write as _;
+
         assert_eq!(
             kept_result("$ make\nok\n[finished]"),
             "$ make\nok\n[finished]"
         );
-        let output: String = (0..2000).map(|line| format!("é {line}\n")).collect();
-        let result = format!("$ make\n{output}[exited with status 2]");
+        let mut result = "$ make\n".to_owned();
+        for line in 0..2000 {
+            let _ = writeln!(result, "é {line}");
+        }
+        result.push_str("[exited with status 2]");
         let kept = kept_result(&result);
         assert!(kept.len() <= MOST_RESULT, "{}", kept.len());
         assert!(kept.starts_with('…'), "{kept}");
