@@ -475,10 +475,11 @@ fn receive() -> Result<Handover, HandoverError> {
 
     let mut fds = fds?.into_iter();
     let mut memfd = File::from(fds.next().ok_or(HandoverError::NotAHandover)?);
-    let state = State::read(&mut memfd)?;
+    let (state, version) = State::read_versioned(&mut memfd)?;
     Ok(Handover {
         state,
         fds: Fds::from_received(fds.collect()),
+        version,
     })
 }
 

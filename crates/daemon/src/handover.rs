@@ -93,6 +93,10 @@
 //! 39. Which items of chats' turns an agent's own subagents did, and the
 //!     tool call that started each (CLACKA-195). Before, a subagent's work
 //!     came back as the agent's own.
+//! 45. Version 44's state, said by a build that asks before a folder's
+//!     language servers run (CLACKA-224): one handing over an older
+//!     version ran them unasked, so the next build trusts the folders it
+//!     ran them for.
 
 pub(crate) mod relay;
 
@@ -107,12 +111,17 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 44;
+pub(crate) const VERSION: u32 = 45;
+
+/// The first version written by a build that asks before a folder's
+/// language servers run (CLACKA-224): a build handing over an older one
+/// ran them unasked.
+pub(crate) const ASKS_TRUST: u32 = 45;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -120,6 +129,9 @@ pub(crate) const READABLE: &[u32] = &[
 pub(crate) struct Handover {
     pub(crate) state: State,
     pub(crate) fds: Fds,
+    /// The version the state was written in, which says what the build
+    /// handing it over did.
+    pub(crate) version: u32,
 }
 
 /// The file descriptors a handover's state refers to, by index.
@@ -1676,7 +1688,13 @@ impl State {
     }
 
     /// Reads a state [`write`](Self::write) wrote, from `file`'s start.
+    #[cfg(test)]
     pub(crate) fn read(file: &mut File) -> Result<Self, HandoverError> {
+        Self::read_versioned(file).map(|(state, _)| state)
+    }
+
+    /// As [`read`](Self::read), with the version it was written in.
+    pub(crate) fn read_versioned(file: &mut File) -> Result<(Self, u32), HandoverError> {
         file.rewind()?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -1686,7 +1704,8 @@ impl State {
         let (version, body) = rest
             .split_first_chunk::<4>()
             .ok_or(HandoverError::NotAHandover)?;
-        match u32::from_le_bytes(*version) {
+        let version = u32::from_le_bytes(*version);
+        let state = match version {
             1 => Ok(v7::State::from(postcard::from_bytes::<v1::State>(body)?).into()),
             2 => Ok(v7::State::from(postcard::from_bytes::<v2::State>(body)?).into()),
             3 => Ok(v7::State::try_from(postcard::from_bytes::<v3::State>(body)?)?.into()),
@@ -1733,9 +1752,12 @@ impl State {
             41 => Ok(postcard::from_bytes::<v41::State>(body)?.into()),
             42 => Ok(postcard::from_bytes::<v42::State>(body)?.into()),
             43 => Ok(postcard::from_bytes::<v43::State>(body)?.into()),
-            VERSION => Ok(postcard::from_bytes(body)?),
+            // Version 45 is 44's shape: it says only that the build
+            // handing over asked before a folder's servers ran.
+            44 | VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
-        }
+        };
+        state.map(|state| (state, version))
     }
 }
 
@@ -5814,14 +5836,29 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v44.bin"]
+    #[ignore = "writes tests/fixtures/handover-v45.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v44.bin"
+            "/tests/fixtures/handover-v45.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
+    }
+
+    #[test]
+    fn version_45_is_read_as_44_and_says_it_asked_before_servers_ran() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v45.bin"))
+            .unwrap();
+        let (state, version) = State::read_versioned(&mut file).unwrap();
+        assert!(version >= ASKS_TRUST);
+        assert_eq!(state.mcp.unwrap().key, [5; 32]);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v44.bin"))
+            .unwrap();
+        let (_, version) = State::read_versioned(&mut file).unwrap();
+        assert!(version < ASKS_TRUST, "a build that ran servers unasked");
     }
 
     #[test]

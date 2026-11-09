@@ -26,6 +26,9 @@ pub(super) struct Asking {
     /// Each client asked, and the folder: not asked again while it's
     /// connected, as an install isn't offered again.
     asked: HashSet<(Token, PathBuf)>,
+    /// How many folders were trusted as the build before ran their
+    /// servers, for the first window the user is at to say.
+    pub(super) carried: usize,
 }
 
 impl Asking {
@@ -33,6 +36,7 @@ impl Asking {
         Self {
             folders: Trust::load(trusting),
             asked: HashSet::new(),
+            carried: 0,
         }
     }
 
@@ -190,7 +194,9 @@ impl Daemon {
             |slot| slot.buffer.dir().to_owned(),
         );
         let path = if folder == "~" {
-            self.config.home.clone()
+            // Made real, as every other folder is: home may be a link.
+            let home = &self.config.home;
+            home.canonicalize().unwrap_or_else(|_| home.clone())
         } else {
             super::buffers::resolve(folder, &from, &self.config.home)
         };
@@ -224,41 +230,59 @@ impl Daemon {
     }
 
     /// Trusts the folders the build before this one ran language servers
-    /// for, if it kept no folders trusted: those of the files open as it
-    /// handed over, whose servers are installed, so an upgrade to a build
-    /// that asks takes no server away. Then the file is written, even with
-    /// nothing in it, so the next build knows this one kept it.
-    pub(super) fn trust_what_was_running(&mut self) {
-        if self.trust.folders.fresh() {
-            let ids: Vec<BufferId> = self.buffers.keys().copied().collect();
-            for id in ids {
-                let Some(slot) = self.buffers.get(&id) else {
-                    continue;
-                };
-                if slot.buffer.is_blank() {
-                    continue;
-                }
-                let path = slot.buffer.path().to_owned();
-                let Some(spec) = (self.languages.as_mut())
-                    .and_then(|languages| languages.find(&path))
-                    .and_then(|pack| pack.server.clone())
-                else {
-                    continue;
-                };
-                let Some(root) = spec.root(&path, &self.config.home) else {
-                    continue;
-                };
-                let program = spec.command.first().map_or("", String::as_str);
-                if self.trust.folders.trusts(&root).is_none() && self.program_found(program) {
-                    log::info!(
-                        "{} is trusted: the build before ran its language server",
-                        root.display()
-                    );
-                    self.trust.folders.mark(root, true);
-                }
+    /// for, if it ran them unasked, as its handover's version, `from`,
+    /// says: those of the files open as it handed over, whose servers are
+    /// installed, so an upgrade to a build that asks takes no server away.
+    /// Only ever from such a build: a file of folders deleted, kept for a
+    /// run only, or that couldn't be written, never trusts anything again.
+    /// The first window the user is at is told, once.
+    pub(super) fn trust_what_was_running(&mut self, from: u32) {
+        if from >= crate::handover::ASKS_TRUST {
+            return;
+        }
+        let ids: Vec<BufferId> = self.buffers.keys().copied().collect();
+        for id in ids {
+            let Some(slot) = self.buffers.get(&id) else {
+                continue;
+            };
+            if slot.buffer.is_blank() {
+                continue;
+            }
+            let path = slot.buffer.path().to_owned();
+            let Some(spec) = (self.languages.as_mut())
+                .and_then(|languages| languages.find(&path))
+                .and_then(|pack| pack.server.clone())
+            else {
+                continue;
+            };
+            let Some(root) = spec.root(&path, &self.config.home) else {
+                continue;
+            };
+            let program = spec.command.first().map_or("", String::as_str);
+            if self.trust.folders.trusts(&root).is_none() && self.program_found(program) {
+                log::info!(
+                    "{} is trusted: the build before ran its language server",
+                    root.display()
+                );
+                self.trust.folders.mark(root, true);
+                self.trust.carried += 1;
             }
         }
-        self.trust.folders.started();
+    }
+
+    /// Tells the window at `token`, which the user is at, how many folders
+    /// were trusted as the build before ran their servers, if any were and
+    /// no window has been told yet.
+    pub(super) fn tell_trusted_through_upgrade(&mut self, token: Token) {
+        let carried = std::mem::take(&mut self.trust.carried);
+        if carried == 0 {
+            return;
+        }
+        let folders = if carried == 1 { "folder" } else { "folders" };
+        let said = format!(
+            "trusted {carried} {folders} whose language servers were running: :trusted lists them"
+        );
+        self.send_event(token, clackatoo_protocol::Event::Said(said));
     }
 }
 
@@ -271,7 +295,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_upgrade_from_a_build_that_kept_none_trusts_what_had_servers() {
+    fn only_an_upgrade_from_a_build_that_never_asked_trusts_what_had_servers() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let pack = root.join("languages/fake");
@@ -290,7 +314,8 @@ mod tests {
         let (daemon, _) = crate::server::agent_files::tests::daemon_with_chat(&root);
         let mut config = daemon.config.clone();
         drop(daemon);
-        // A build asking about every folder, keeping none.
+        // Asking about every folder, keeping none, as a file deleted or
+        // never written leaves it.
         config.languages = Some(root.join("languages"));
         config.trusted = Trusting::ThisRun;
         let mut daemon = Daemon::listening(
@@ -312,21 +337,20 @@ mod tests {
         let id = open(&mut daemon, "open");
         assert!(daemon.servers.slots.is_empty(), "not trusted: not started");
         assert_eq!(daemon.untrusted_root(id), Some(root.join("open").as_path()));
-        let file = root.join("state/trusted");
-        config.trusted = Trusting::File(file.clone());
+        // From a build that asks, nothing is trusted, though nothing was
+        // kept.
         let handover = daemon.hand_over(Instant::now()).unwrap();
         drop(daemon);
         let mut resumed = Daemon::resume(handover, config.clone()).unwrap();
+        assert!(!resumed.trusts(&root.join("open")));
+        assert_eq!(resumed.trust.carried, 0);
+        // From one that ran its servers unasked, what's open is trusted.
+        let mut handover = resumed.hand_over(Instant::now()).unwrap();
+        drop(resumed);
+        handover.version = crate::handover::ASKS_TRUST - 1;
+        let resumed = Daemon::resume(handover, config).unwrap();
         assert!(resumed.trusts(&root.join("open")));
         assert!(!resumed.trusts(&root.join("other")));
-        resumed.trust.folders.kept();
-        assert!(file.exists());
-        // From a build that kept them, nothing more is trusted.
-        open(&mut resumed, "other");
-        let handover = resumed.hand_over(Instant::now()).unwrap();
-        drop(resumed);
-        let again = Daemon::resume(handover, config).unwrap();
-        assert!(again.trusts(&root.join("open")));
-        assert!(!again.trusts(&root.join("other")));
+        assert_eq!(resumed.trust.carried, 1, "a window is told");
     }
 }

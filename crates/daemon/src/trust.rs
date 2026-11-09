@@ -16,12 +16,9 @@
 //! synced, and renamed over it, on a thread of its own, the newest last.
 //! One that can't be read is set aside as `trusted.unreadable`, and no
 //! folder is trusted: each is asked about again. A folder whose name isn't
-//! UTF-8 is trusted for this run only.
-//!
-//! The file is written as soon as a build that keeps it starts, so its
-//! absence says the build before kept none: from such a build, the folders
-//! of the files open as it handed over, whose servers it ran, are trusted
-//! (see [`Trust::fresh`]).
+//! UTF-8 is trusted for this run only. An upgrade from a build that never
+//! asked trusts the folders whose servers it ran: see
+//! `server::trust::trust_what_was_running`.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -58,11 +55,6 @@ pub(crate) struct Trust {
     /// Every folder trusted, none asked about.
     all: bool,
     folders: BTreeMap<PathBuf, bool>,
-    /// The file wasn't there as the daemon started.
-    fresh: bool,
-    /// It's to be written as the daemon starts: it wasn't there, or was
-    /// set aside.
-    unwritten: bool,
     /// Counts the changes, so a write of what's older than what's been
     /// written already is passed over.
     changes: u64,
@@ -95,16 +87,11 @@ impl Trust {
             Trusting::ThisRun => (None, false),
             Trusting::All => (None, true),
         };
-        let (folders, fresh, unwritten) = match &file {
-            Some(file) => read(file),
-            None => (BTreeMap::new(), !all, false),
-        };
+        let folders = file.as_deref().map(read).unwrap_or_default();
         Self {
             file,
             all,
             folders,
-            fresh,
-            unwritten,
             changes: 0,
             written: Arc::default(),
             writers: Vec::new(),
@@ -139,22 +126,6 @@ impl Trust {
     /// Whether every folder is trusted, so none is asked about.
     pub(crate) fn trusts_all(&self) -> bool {
         self.all
-    }
-
-    /// Whether the file wasn't there as the daemon started, so the build
-    /// before kept no folders: [`started`](Self::started) ends that.
-    pub(crate) fn fresh(&self) -> bool {
-        self.fresh
-    }
-
-    /// The daemon has started, and trusted what it carried on from: the
-    /// file's written, if it wasn't there, so the next build knows this
-    /// one kept it, even with nothing marked.
-    pub(crate) fn started(&mut self) {
-        self.fresh = false;
-        if std::mem::take(&mut self.unwritten) {
-            self.keep();
-        }
     }
 
     /// Writes the folders to the file, on a thread of its own.
@@ -197,24 +168,21 @@ impl Trust {
     }
 }
 
-/// The folders `file` keeps, whether it wasn't there, and whether it's to
-/// be written as the daemon starts: none, with the file set aside, if it
-/// can't be read as one.
-fn read(file: &Path) -> (BTreeMap<PathBuf, bool>, bool, bool) {
+/// The folders `file` keeps: none if it isn't there, and none, with the
+/// file set aside, if it can't be read as one.
+fn read(file: &Path) -> BTreeMap<PathBuf, bool> {
     let mut bytes = Vec::new();
     match File::open(file) {
         Ok(opened) => {
             if let Err(err) = opened.take(MAX_FILE).read_to_end(&mut bytes) {
                 log::error!("{} couldn't be read: {err}", file.display());
-                return (BTreeMap::new(), false, false);
+                return BTreeMap::new();
             }
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return (BTreeMap::new(), true, true);
-        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return BTreeMap::new(),
         Err(err) => {
             log::error!("{} couldn't be read: {err}", file.display());
-            return (BTreeMap::new(), false, false);
+            return BTreeMap::new();
         }
     }
     let kept = match serde_json::from_slice::<Kept>(&bytes) {
@@ -227,15 +195,14 @@ fn read(file: &Path) -> (BTreeMap<PathBuf, bool>, bool, bool) {
             let mut aside = file.as_os_str().to_owned();
             aside.push(".unreadable");
             let _ = fs::rename(file, aside);
-            return (BTreeMap::new(), false, true);
+            return BTreeMap::new();
         }
     };
-    let folders = (kept.folders.into_iter())
+    (kept.folders.into_iter())
         .map(|kept| (PathBuf::from(kept.folder), kept.trusted))
         // Only a folder named from the root means one folder.
         .filter(|(folder, _)| folder.is_absolute())
-        .collect();
-    (folders, false, false)
+        .collect()
 }
 
 /// Writes `folders` as the file at `path`: in full beside it, in a file
@@ -291,7 +258,6 @@ mod tests {
     #[test]
     fn the_nearest_folder_marked_decides() {
         let mut trust = Trust::load(&Trusting::ThisRun);
-        assert!(trust.fresh(), "a run keeping nothing kept nothing before");
         let projects = Path::new("/home/u/projects");
         assert_eq!(trust.trusts(&projects.join("a")), None);
         assert!(trust.mark(projects.to_owned(), true));
@@ -313,13 +279,7 @@ mod tests {
         let file = dir.path().join("state/trusted");
         let trusting = Trusting::File(file.clone());
         let mut trust = Trust::load(&trusting);
-        assert!(trust.fresh());
-        trust.started();
-        trust.kept();
-        assert!(!trust.fresh());
-        let read = Trust::load(&trusting);
-        assert!(!read.fresh(), "written as it started, with nothing marked");
-        assert_eq!(read.marked().count(), 0);
+        assert_eq!(trust.marked().count(), 0, "none there yet");
         assert!(trust.mark("/src/good".into(), true));
         assert!(trust.mark("/src/good/bad".into(), false));
         trust.kept();
@@ -338,12 +298,6 @@ mod tests {
         fs::write(&file, "not json").unwrap();
         let read = Trust::load(&trusting);
         assert_eq!(read.trusts(Path::new("/src/good")), None);
-        assert!(!read.fresh(), "it was there");
         assert!(dir.path().join("state/trusted.unreadable").exists());
-        // And written afresh as the daemon starts.
-        let mut read = read;
-        read.started();
-        read.kept();
-        assert!(!Trust::load(&trusting).fresh());
     }
 }

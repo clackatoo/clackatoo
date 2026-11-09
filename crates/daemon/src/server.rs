@@ -1084,7 +1084,6 @@ impl Daemon {
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
         let mut daemon = Self::listening(listener, config, None)?;
-        daemon.trust.folders.started();
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
         Ok(daemon)
@@ -1260,6 +1259,7 @@ impl Daemon {
             .map(|chat| (chat.chat, chat))
             .collect();
         let agent_terminals = handover.state.agent_terminals.take();
+        let handed_over_in = handover.version;
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -1430,7 +1430,7 @@ impl Daemon {
         daemon.resume_files(state.next_files, explorers);
         // With the files that were open, whose servers the build before
         // may have run without asking.
-        daemon.trust_what_was_running();
+        daemon.trust_what_was_running(handed_over_in);
         // Messages waiting in chats' inboxes go as their turns end.
         daemon.resume_talk(&state.undelivered, standing.as_ref());
         daemon.resume_activities(&state.activities);
@@ -1757,6 +1757,7 @@ impl Daemon {
                 exes,
             },
             fds,
+            version: handover::VERSION,
         })
     }
 
@@ -3059,6 +3060,9 @@ impl Daemon {
                 }
                 Some(ClientMessage::Present { here }) => {
                     self.present(token, here);
+                    if here {
+                        self.tell_trusted_through_upgrade(token);
+                    }
                     continue;
                 }
                 Some(ClientMessage::Request(request)) => match self.route_request(token, request) {
