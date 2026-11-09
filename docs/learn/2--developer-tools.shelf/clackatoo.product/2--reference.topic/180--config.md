@@ -271,6 +271,7 @@ short name, as in Vim, which works everywhere the long one does.
 | `hlsearch` | `hls` | Every match of the last search in view is lit up, in editors, in a terminal's normal mode, in chats and in lists, the one the search went to brighter than the rest, as Neovim's are: after `/`, `?`, `n` and `N`, and in editors `*`, `#`, `:s` and `:g` too, until <kbd>Esc</kbd> or `:nohlsearch`. Off, only the match the search went to is lit. | on |
 | `incsearch` | `is` | While `/` or `?` is typed, in editors, a terminal's normal mode, chats and lists (explorers, boards, and reviews), the cursor and the view go to the match the search would go to from where it started, and its matches are lit, as Neovim's are. <kbd>Esc</kbd> puts them back; <kbd>Enter</kbd> keeps them, and is the search. Off, nothing moves until <kbd>Enter</kbd>. | on |
 | `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
+| `hintpattern` | `hpat` | A regular expression whose matches [hints](~clackatoo/reference/workspaces#hints) label too, as `CLACKA-\d+`. One that can't be read is said in the bar as hints start. | none |
 
 ### Completion and language servers
 
@@ -332,7 +333,6 @@ short name, as in Vim, which works everywhere the long one does.
 |---|---|---|---|
 | `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/connecting#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
-| `hintpattern` | `hpat` | A regular expression whose matches [hints](~clackatoo/reference/workspaces#hints) label too, as `CLACKA-\d+`. One that can't be read is said in the bar as hints start. | none |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as
 `client.opt.number = 1`, is a mistake. `renderer` and `priority` are read only
