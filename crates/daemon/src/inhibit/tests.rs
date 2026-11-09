@@ -175,9 +175,14 @@ impl FakeBus {
     /// returns its read end, which ends once every copy of the lock is
     /// closed.
     fn lock(&mut self, inhibit: &Message) -> OwnedFd {
+        self.lock_from(LOGIND, inhibit)
+    }
+
+    /// Passes a lock as [`FakeBus::lock`] does, from `sender`.
+    fn lock_from(&mut self, sender: &str, inhibit: &Message) -> OwnedFd {
         let (read, write) = rustix::pipe::pipe().unwrap();
         let reply = Sent::Reply(inhibit.serial);
-        self.send(LOGIND, reply, ("h", &0u32.to_le_bytes()), Some(&write));
+        self.send(sender, reply, ("h", &0u32.to_le_bytes()), Some(&write));
         read
     }
 
@@ -441,6 +446,34 @@ fn logind_not_running_yet_is_asked_once_it_is() {
     let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
         panic!("not the shutdown, with the lock");
     };
+    drop(lock);
+    assert!(ended(&held));
+}
+
+/// A lock only counts from logind itself: one that seems to answer the
+/// daemon's call, from another connection, is passed over.
+#[test]
+fn a_lock_from_anyone_but_logind_is_passed_over() {
+    let Connected {
+        dir: _dir,
+        mut bus,
+        inhibitor,
+        ..
+    } = connected();
+    let inhibit = bus.up_to_the_lock();
+    let forged = bus.lock_from(OTHER, &inhibit);
+    // Closed unseen as it was passed over.
+    let until = Instant::now() + Duration::from_secs(10);
+    while !ended(&forged) {
+        assert!(Instant::now() < until, "the forged lock is kept");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let held = bus.lock(&inhibit);
+    bus.signal(LOGIND, "PrepareForShutdown", true);
+    let News::ShuttingDown(Some(lock)) = next(&inhibitor) else {
+        panic!("not the shutdown, with logind's lock");
+    };
+    assert!(!ended(&held));
     drop(lock);
     assert!(ended(&held));
 }

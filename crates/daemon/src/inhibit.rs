@@ -234,6 +234,13 @@ fn listen(
             continue;
         }
         if asking.is_some() && message.reply_serial == asking {
+            // A lock only from logind itself, and a refusal from it or the
+            // bus, which answers for a logind that has gone.
+            let from = message.sender.as_deref();
+            let refused = !message.is(Kind::Reply) && from == Some(BUS);
+            if !refused && (owner.is_empty() || from != Some(owner.as_str())) {
+                continue;
+            }
             asking = None;
             // In place of any from logind before it started again.
             lock = Some(locked(&message, &mut fds)?);
