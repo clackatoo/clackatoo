@@ -7,12 +7,19 @@ related:
   - clackatoo/reference/recordings
 ---
 
-clackatoo's goal is to be very fast and very light, so speed is measured, not assumed. There are two suites:
+clackatoo's goal is to be very fast and very light, so speed is measured, not
+assumed. There are two suites:
 
-- **Emulator throughput** feeds terminal output straight into `clackatoo-term`, the crate that turns output into a grid of cells, and into `alacritty_terminal`, the emulator inside Alacritty, so the two can be compared on the same machine.
-- **End to end** starts the real release binary and drives it the way a user would: it starts daemons, opens terminals and windows, types into them and floods them with output.
+- **Emulator throughput** feeds terminal output straight into
+  `clackatoo-term`, the crate that turns output into a grid of cells, and into
+  `alacritty_terminal`, the emulator inside Alacritty, so the two can be
+  compared on the same machine.
+- **End to end** starts the real release binary and drives it the way a user
+  would: it starts daemons, opens terminals and windows, types into them and
+  floods them with output.
 
-Both compare each run with the previous one, so a regression shows up as a number.
+Both compare each run with the previous one, so a regression shows up as a
+number.
 
 ## Run everything
 
@@ -20,18 +27,24 @@ Both compare each run with the previous one, so a regression shows up as a numbe
 cargo bench
 ```
 
-That builds in release mode and runs both suites, which takes a few minutes. To run one suite on its own:
+That builds in release mode and runs both suites, which takes a few minutes.
+To run one suite on its own:
 
 ```sh
 cargo bench -p clackatoo-bench          # emulator throughput
 cargo bench -p clackatoo --bench e2e    # end to end
 ```
 
-Close anything busy first, such as builds, browsers playing video, or other benchmarks. A desktop's timings wander by a few percent anyway, with CPU frequency scaling and background load, and both suites treat changes under 5% as noise.
+Close anything busy first, such as builds, browsers playing video, or other
+benchmarks. A desktop's timings wander by a few percent anyway, with CPU
+frequency scaling and background load, and both suites treat changes under 5%
+as noise.
 
 ## Workloads
 
-Both suites use the same workloads. They are generated in code from a fixed seed, so every run sees identical bytes and nothing large is committed. Each one leans on a different part of the emulator:
+Both suites use the same workloads. They are generated in code from a fixed
+seed, so every run sees identical bytes and nothing large is committed. Each
+one leans on a different part of the emulator:
 
 | Workload | Stands for |
 |---|---|
@@ -43,13 +56,22 @@ Both suites use the same workloads. They are generated in code from a fixed seed
 | `cursor` | Short writes at random places, sometimes recolored, like a full-screen program redrawing. |
 | `vim` | A recorded vim session (open, edit, quit), repeated. Emulator suite only. |
 
-Generated workloads play in a 120x40 terminal, a typical window. The vim recording plays at the size it was recorded at.
+Generated workloads play in a 120x40 terminal, a typical window. The vim
+recording plays at the size it was recorded at.
 
 ## Emulator throughput
 
-Each benchmark feeds a workload to one emulator in 64 KiB pieces, the size the daemon reads from a PTY at a time. The emulator is reused from one iteration to the next, so its 10,000-line scrollback is full and every new line pushes an old one out. That's the steady state of a terminal that has been open a while. Neither emulator does any I/O or drawing.
+Each benchmark feeds a workload to one emulator in 64 KiB pieces, the size the
+daemon reads from a PTY at a time. The emulator is reused from one iteration
+to the next, so its 10,000-line scrollback is full and every new line pushes
+an old one out. That's the steady state of a terminal that has been open a
+while. Neither emulator does any I/O or drawing.
 
-For each workload there are three results: `clackatoo`, `clackatoo-eager`, and `alacritty`. A flood never pauses, so by default clackatoo never compacts its scrollback during the benchmark, much as alacritty never does. `clackatoo-eager` compacts every line as it scrolls off, so the cost of compacting stays measured.
+For each workload there are three results: `clackatoo`, `clackatoo-eager`, and
+`alacritty`. A flood never pauses, so by default clackatoo never compacts its
+scrollback during the benchmark, much as alacritty never does.
+`clackatoo-eager` compacts every line as it scrolls off, so the cost of
+compacting stays measured.
 
 ```text
 ascii/clackatoo         time:   [23.467 ms 23.522 ms 23.601 ms]
@@ -58,15 +80,28 @@ ascii/alacritty         time:   [15.675 ms 15.724 ms 15.780 ms]
                         thrpt:  [126.74 MiB/s 127.20 MiB/s 127.60 MiB/s]
 ```
 
-`thrpt` is throughput: how much output the emulator gets through per second. The middle number is the best estimate, and the outer two bound it. The benchmarks use [criterion](https://github.com/criterion-rs/criterion.rs), which also prints how each result changed since the last run.
+`thrpt` is throughput: how much output the emulator gets through per second.
+The middle number is the best estimate, and the outer two bound it. The
+benchmarks use [criterion](https://github.com/criterion-rs/criterion.rs),
+which also prints how each result changed since the last run.
 
-Before benchmarking a workload, the suite plays it through both emulators and checks they end up showing the same screen. Otherwise the two wouldn't be doing the same work. One difference is expected: alacritty draws a ZWJ emoji sequence such as 👩&#x200D;💻 as two separate emoji, while clackatoo joins it into one, as kitty, WezTerm and Ghostty do. So on `unicode`, alacritty's lines wrap sooner, and the suite prints a note saying so. Any other difference prints a warning with both screens.
+Before benchmarking a workload, the suite plays it through both emulators and
+checks they end up showing the same screen. Otherwise the two wouldn't be
+doing the same work. One difference is expected: alacritty draws a ZWJ emoji
+sequence such as 👩&#x200D;💻 as two separate emoji, while clackatoo joins it
+into one, as kitty, WezTerm and Ghostty do. So on `unicode`, alacritty's lines
+wrap sooner, and the suite prints a note saying so. Any other difference
+prints a warning with both screens.
 
-alacritty also records which lines changed as it goes, for its renderer. clackatoo doesn't do that, so the gap would narrow a little if it did.
+alacritty also records which lines changed as it goes, for its renderer.
+clackatoo doesn't do that, so the gap would narrow a little if it did.
 
 ## End to end
 
-The harness runs as a bench target of the `clackatoo` package. That way, cargo always builds a fresh release binary before measuring it. Every daemon it starts gets a temporary runtime directory of its own, so it never touches a daemon you are using. It prints one table:
+The harness runs as a bench target of the `clackatoo` package. That way, cargo
+always builds a fresh release binary before measuring it. Every daemon it
+starts gets a temporary runtime directory of its own, so it never touches a
+daemon you are using. It prints one table:
 
 ```text
 clackatoo end-to-end benchmarks
@@ -77,7 +112,9 @@ startup
   daemon start to accepting clients            677.2 µs  ±10.1%  -2.0% (noise)
 ```
 
-Each line shows the median of several runs, then the spread: half the distance between the 10th and 90th percentiles, as a percentage of the median. The last column compares the result with the baseline.
+Each line shows the median of several runs, then the spread: half the distance
+between the 10th and 90th percentiles, as a percentage of the median. The last
+column compares the result with the baseline.
 
 What each group measures:
 
@@ -111,9 +148,18 @@ What each group measures:
 | | Wakeups of the window's own threads | How often the window wakes up per second with nothing to draw. This should be zero. |
 | | Wakeups, the GPU driver's threads too | The same, counting threads the GPU driver started inside the window. Some drivers wake up on their own: NVIDIA's Vulkan driver about 110 times a second, even with no window at all. |
 
-Most groups learn that a terminal has caught up by polling it. Throughput runs watch the terminal's title, which the script sets when it finishes, every 200 µs. The first keypress test captures the screen back to back, so its result includes up to one capture round trip on top of the true latency; the view-update tests don't poll.
+Most groups learn that a terminal has caught up by polling it. Throughput runs
+watch the terminal's title, which the script sets when it finishes, every 200
+µs. The first keypress test captures the screen back to back, so its result
+includes up to one capture round trip on top of the true latency; the
+view-update tests don't poll.
 
-The `window` group opens real windows, so it needs a display. Without one (no `WAYLAND_DISPLAY` or `DISPLAY`), it says so and is skipped. The windows open on the harness's own daemons, never on yours. The window logs its first frame, and how long each frame took when started with `RUST_LOG=clackatoo_gui::frame=trace`; the harness reads those from its output.
+The `window` group opens real windows, so it needs a display. Without one (no
+`WAYLAND_DISPLAY` or `DISPLAY`), it says so and is skipped. The windows open
+on the harness's own daemons, never on yours. The window logs its first frame,
+and how long each frame took when started with
+`RUST_LOG=clackatoo_gui::frame=trace`; the harness reads those from its
+output.
 
 To run some groups only, name them:
 
@@ -121,7 +167,8 @@ To run some groups only, name them:
 cargo bench -p clackatoo --bench e2e -- startup memory
 ```
 
-To measure a different build, such as another branch's, point the harness at its binary:
+To measure a different build, such as another branch's, point the harness at
+its binary:
 
 ```sh
 cargo bench -p clackatoo --bench e2e -- --binary ../other/target/release/clackatoo
@@ -132,10 +179,12 @@ cargo bench -p clackatoo --bench e2e -- --binary ../other/target/release/clackat
 Both suites work like criterion's baselines:
 
 - By default, each run is compared with the previous run and replaces it.
-- `--save-baseline NAME` compares with the baseline called `NAME` and replaces it.
+- `--save-baseline NAME` compares with the baseline called `NAME` and replaces
+  it.
 - `--baseline NAME` compares with `NAME` without saving anything.
 
-To measure a change, save a baseline before making it, then compare against it afterward:
+To measure a change, save a baseline before making it, then compare against it
+afterward:
 
 ```sh
 cargo bench -- --save-baseline before
@@ -143,19 +192,26 @@ cargo bench -- --save-baseline before
 cargo bench -- --baseline before
 ```
 
-A change counts when it is bigger than 5% and outside both runs' spreads. Otherwise it's marked `(noise)`. Measurements that don't vary, like the binary's size, report any change.
+A change counts when it is bigger than 5% and outside both runs' spreads.
+Otherwise it's marked `(noise)`. Measurements that don't vary, like the
+binary's size, report any change.
 
-Criterion keeps its baselines in `target/criterion/`. The end-to-end harness keeps its own in `target/clackatoo-bench/` as tab-separated files, along with the commit they were measured on.
+Criterion keeps its baselines in `target/criterion/`. The end-to-end harness
+keeps its own in `target/clackatoo-bench/` as tab-separated files, along with
+the commit they were measured on.
 
 ## Profile a workload
 
-To see where the time goes, replay one workload through the emulator in a loop and point a profiler at it:
+To see where the time goes, replay one workload through the emulator in a loop
+and point a profiler at it:
 
 ```sh
 cargo run --release -p clackatoo-bench --example replay -- dense 20
 ```
 
-That plays `dense` for 20 seconds and prints its throughput. Release builds use link-time optimization, so build with `CARGO_PROFILE_RELEASE_DEBUG=true` to get the function names back in a profiler.
+That plays `dense` for 20 seconds and prints its throughput. Release builds
+use link-time optimization, so build with `CARGO_PROFILE_RELEASE_DEBUG=true`
+to get the function names back in a profiler.
 
 ## Pane status and focus
 
@@ -168,8 +224,8 @@ CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clack
 ```
 
 It reports the median of seven batches for each operation. Compare the same
-harness and build profile on both revisions, with other builds finished.
-The default test profile is unoptimized: these numbers help find changes in
+harness and build profile on both revisions, with other builds finished. The
+default test profile is unoptimized: these numbers help find changes in
 dispatch cost, but do not measure release frame latency. There is no timing
 assertion because a shared machine's load varies.
 
@@ -182,14 +238,15 @@ CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clack
 
 Each sample is a batch of 10,000 routing sequences; the report takes the
 median of seven batches. The same build-profile and idle-machine rules apply.
-This measures routing, not rendering or a populated pane's scrolling throughput.
+This measures routing, not rendering or a populated pane's scrolling
+throughput.
 
 ## List input
 
-Explorer, Board and Review use `vim::list::ListPane` for key parsing,
-movement and paging, search routing and leaving a pane. Their own actions
-and prompts enter through hooks; Explorer also keeps its tree flattened
-before and after each stroke. The trait is statically dispatched.
+Explorer, Board and Review use `vim::list::ListPane` for key parsing, movement
+and paging, search routing and leaving a pane. Their own actions and prompts
+enter through hooks; Explorer also keeps its tree flattened before and after
+each stroke. The trait is statically dispatched.
 
 The three ignored `list_input_timing` tests exercise navigation and search
 through each real pane, without drawing or daemon I/O:
@@ -200,7 +257,8 @@ CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0 cargo test -p clack
 
 Each reports nanoseconds per stroke, taking the median of seven batches:
 10,000 navigation sequences or 100 search sequences, whose pattern compilation
-is much more expensive in an unoptimized build. The search query matches entries in the board and
-explorer; the review fixture exercises a missing query. Compare identical
-harnesses and build profiles, with compilation finished. These default
-unoptimized test timings compare dispatch cost, not release input latency.
+is much more expensive in an unoptimized build. The search query matches
+entries in the board and explorer; the review fixture exercises a missing
+query. Compare identical harnesses and build profiles, with compilation
+finished. These default unoptimized test timings compare dispatch cost, not
+release input latency.

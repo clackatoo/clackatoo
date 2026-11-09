@@ -8,7 +8,9 @@ related:
   - clackatoo/reference/config
 ---
 
-An editor pane edits one file, with Vim's keys. Its text lives in the daemon, in a buffer, as a terminal's screen does, and each window showing it keeps a copy that it changes as you type, so a key never waits for the daemon.
+An editor pane edits one file, with Vim's keys. Its text lives in the daemon,
+in a buffer, as a terminal's screen does, and each window showing it keeps a
+copy that it changes as you type, so a key never waits for the daemon.
 
 ```text
 :e src/main.rs          edit a file in a new tab
@@ -27,17 +29,46 @@ An editor pane edits one file, with Vim's keys. Its text lives in the daemon, in
 | `:\|Editor PATH`, `:\|<Editor PATH`, `:-Editor PATH`, `:-^Editor PATH` | Opens it beside the focused pane: right, left, below or above, as the [split marks](~clackatoo/reference/window#the-command-line) do for terminals. |
 | `clackatoo edit [PATH]` | From a shell: opens it, a folder too, in a new tab of the workspace last used; with no path, the current directory. See [the CLI](~clackatoo/reference/cli#edit). |
 
-A relative path is from the focused pane's directory: for a terminal, the directory of the program in front, as for a new terminal; for an editor, the directory its file was opened from. `~/` is your home directory.
+A relative path is from the focused pane's directory: for a terminal, the
+directory of the program in front, as for a new terminal; for an editor, the
+directory its file was opened from. `~/` is your home directory.
 
-A file a pane stops showing, as after `:e`, closes too, unless another pane shows it, or it has changes that aren't written: then it's kept, unseen, the bottom bar says so, and `:e` it again to go back.
+A file a pane stops showing, as after `:e`, closes too, unless another pane
+shows it, or it has changes that aren't written: then it's kept, unseen, the
+bottom bar says so, and `:e` it again to go back.
 
-A file that's already open is shown again, not read again: two panes on one file are two views of one buffer, each with its own cursor. A file that doesn't exist yet opens empty, and is made when it's first written. A file that isn't UTF-8 text can't be opened, and the bottom bar says so. Nor can anything but a regular file of up to 256 MiB, such as a pipe or a device, even one put in a file's place while it's open: it's never waited on or read. A save writes the new text to a new file beside the old one, made with a name no one can guess, and puts it in the old one's place, so nothing put beside the file can make a save write anywhere else.
+A file that's already open is shown again, not read again: two panes on one
+file are two views of one buffer, each with its own cursor. A file that
+doesn't exist yet opens empty, and is made when it's first written. A file
+that isn't UTF-8 text can't be opened, and the bottom bar says so. Nor can
+anything but a regular file of up to 256 MiB, such as a pipe or a device, even
+one put in a file's place while it's open: it's never waited on or read. A
+save writes the new text to a new file beside the old one, made with a name no
+one can guess, and puts it in the old one's place, so nothing put beside the
+file can make a save write anywhere else.
 
-A file with no name yet, as `:e` alone makes, is called `[No Name]`. Nothing is written until `:w NAME` names it, from the folder it was opened in; `:w` alone asks for the name on the command line. Nothing could open it again once no pane shows it, so while it has changes the daemon refuses to close, or to show anything else in, the last pane showing it, whoever asks: `:w NAME` writes them, `:q!` closes it, `:e!` empties it.
+A file with no name yet, as `:e` alone makes, is called `[No Name]`. Nothing
+is written until `:w NAME` names it, from the folder it was opened in; `:w`
+alone asks for the name on the command line. Nothing could open it again once
+no pane shows it, so while it has changes the daemon refuses to close, or to
+show anything else in, the last pane showing it, whoever asks: `:w NAME`
+writes them, `:q!` closes it, `:e!` empties it.
 
 ## Folders
 
-An editor shows a folder as its listing, as oil.nvim does: an entry on each line, folders ending `/`. The first line is `..`, except at `/`: <kbd>Enter</kbd> or a double click on it goes up, and deleting or moving it changes nothing. It's the [explorer's listing](~clackatoo/reference/explorer#editing-a-folder-as-text), edited the same way: change a line to rename, delete one to delete (to the trash), add one to make a file, or a folder if it ends `/`. `:w` lists every change, and asks under them; `y` makes them, `n` goes back. Once they're made, the folder is listed again. In a listing, `r` leaves each line's hidden mark and the `..` line as they are; `J`, and deleting, changing or putting over characters across lines, are refused, since they would join entries: act on whole lines instead. `>` and `<` are refused too, since a name can start with a space.
+An editor shows a folder as its listing, as oil.nvim does: an entry on each
+line, folders ending `/`. The first line is `..`, except at `/`:
+<kbd>Enter</kbd> or a double click on it goes up, and deleting or moving it
+changes nothing. It's the
+[explorer's listing](~clackatoo/reference/explorer#editing-a-folder-as-text),
+edited the same way: change a line to rename, delete one to delete (to the
+trash), add one to make a file, or a folder if it ends `/`. `:w` lists every
+change, and asks under them; `y` makes them, `n` goes back. Once they're made,
+the folder is listed again. In a listing, `r` leaves each line's hidden mark
+and the `..` line as they are; `J`, and deleting, changing or putting over
+characters across lines, are refused, since they would join entries: act on
+whole lines instead. `>` and `<` are refused too, since a name can start with
+a space.
 
 | Key | Does |
 |---|---|
@@ -45,40 +76,89 @@ An editor shows a folder as its listing, as oil.nvim does: an entry on each line
 | `-` | Goes up a folder; in a file, shows the folder it's in, with the cursor on the file |
 | `g.` | Shows hidden files, or hides them, as `explorerhidden` starts them |
 
-A listing with changes isn't left until they're made or thrown away: `:e!` throws away every listing's changes, and `:q!` closes the pane. One with no changes is listed afresh whenever its folder changes on disk, and a folder you've left as it was stops being watched. The finder (`<Space>pf`) is rooted at the folder shown, and a relative `:e` path starts there. Going into a folder, up from one, and from a listing to a file are jumps: <kbd>Ctrl</kbd>+<kbd>O</kbd> and <kbd>Ctrl</kbd>+<kbd>I</kbd> go back through them, landing on the entry the cursor was on. If a folder with changes disappears from disk, `y` makes none of them.
+A listing with changes isn't left until they're made or thrown away: `:e!`
+throws away every listing's changes, and `:q!` closes the pane. One with no
+changes is listed afresh whenever its folder changes on disk, and a folder
+you've left as it was stops being watched. The finder (`<Space>pf`) is rooted
+at the folder shown, and a relative `:e` path starts there. Going into a
+folder, up from one, and from a listing to a file are jumps:
+<kbd>Ctrl</kbd>+<kbd>O</kbd> and <kbd>Ctrl</kbd>+<kbd>I</kbd> go back through
+them, landing on the entry the cursor was on. If a folder with changes
+disappears from disk, `y` makes none of them.
 
 ## Buffers
 
 The daemon keeps each buffer, as it keeps terminals:
 
-- **Every window edits the same text.** Edits made in one window, or by anyone else, show in the others, and move their cursors with the text around them.
-- **Edits made at once meet.** If an agent edits a file while you type in it, both edits are kept, and every copy ends up with the same text. The daemon puts edits in order, and brings each one up to date past those made since, by operational transformation, as Google Docs does.
-- **Undo undoes your edits, not anyone else's.** `u` takes back your last change, from whichever window you made it in, and leaves an agent's edits made since in place. See [the files an agent changes](~clackatoo/reference/agents#the-files-it-changes).
-- **Nothing is lost when the window closes, or the daemon [upgrades](~clackatoo/reference/cli#upgrade).** Buffers come through an upgrade with their undo history. Changes not written outlive a crash or a stop too: see [Recovery](#recovery).
+- **Every window edits the same text.** Edits made in one window, or by anyone
+  else, show in the others, and move their cursors with the text around them.
+- **Edits made at once meet.** If an agent edits a file while you type in it,
+  both edits are kept, and every copy ends up with the same text. The daemon
+  puts edits in order, and brings each one up to date past those made since,
+  by operational transformation, as Google Docs does.
+- **Undo undoes your edits, not anyone else's.** `u` takes back your last
+  change, from whichever window you made it in, and leaves an agent's edits
+  made since in place. See
+  [the files an agent changes](~clackatoo/reference/agents#the-files-it-changes).
+- **Nothing is lost when the window closes, or the daemon
+  [upgrades](~clackatoo/reference/cli#upgrade).** Buffers come through an
+  upgrade with their undo history. Changes not written outlive a crash or a
+  stop too: see [Recovery](#recovery).
 
-Each command in normal mode is one undo step, as is each go of insert mode, with the command that started it, such as `cw`.
+Each command in normal mode is one undo step, as is each go of insert mode,
+with the command that started it, such as `cw`.
 
-Undo is the daemon's, one history per file that every window shares: each step keeps where the cursor was and the file's last selection as it began, which follow other windows' and agents' edits made since, so an undo puts them back whoever edited meanwhile. Undo keeps your last 1000 steps in each file, or as many as fit in 64 MB. Past that the oldest are let go, and `u` past the oldest one kept says so in the bar. The daemon also keeps the last 32 MB of edits made to each file, to bring up to date an edit a window made before it heard of others'. A window that has fallen further behind than that, or so far that bringing its edit up to date would hold up the daemon for more than a few milliseconds, catches up itself and sends its edit again. You don't see this happen, except with a window from before protocol 92, whose edit that far behind isn't made: it keeps its own text, as when a change couldn't be made, until `:w!` or `:e!`. An edit of more than 16,384 pieces, as `:%s` over a big file can make, is sent with neighboring changes joined into one, so marks between them move as if the text between had been typed again.
+Undo is the daemon's, one history per file that every window shares: each step
+keeps where the cursor was and the file's last selection as it began, which
+follow other windows' and agents' edits made since, so an undo puts them back
+whoever edited meanwhile. Undo keeps your last 1000 steps in each file, or as
+many as fit in 64 MB. Past that the oldest are let go, and `u` past the oldest
+one kept says so in the bar. The daemon also keeps the last 32 MB of edits
+made to each file, to bring up to date an edit a window made before it heard
+of others'. A window that has fallen further behind than that, or so far that
+bringing its edit up to date would hold up the daemon for more than a few
+milliseconds, catches up itself and sends its edit again. You don't see this
+happen, except with a window from before protocol 92, whose edit that far
+behind isn't made: it keeps its own text, as when a change couldn't be made,
+until `:w!` or `:e!`. An edit of more than 16,384 pieces, as `:%s` over a big
+file can make, is sent with neighboring changes joined into one, so marks
+between them move as if the text between had been typed again.
 
-A file whose lines end with CRLF, as Windows ends them, is edited with plain line ends, and written with CRLF again, as its first line says; a file that mixes the two is written all one way. Its git signs compare it line by line, but it's staged a change at a time in a terminal, not here.
+A file whose lines end with CRLF, as Windows ends them, is edited with plain
+line ends, and written with CRLF again, as its first line says; a file that
+mixes the two is written all one way. Its git signs compare it line by line,
+but it's staged a change at a time in a terminal, not here.
 
-A buffer closes with its last pane, unless it has changes that aren't written. `:q` won't close that pane, and `:q!` throws the changes away. A pane closed another way, such as with <kbd>Ctrl</kbd>+<kbd>B</kbd> `x` or by closing its tab, keeps the buffer's changes, unseen: opening the file again shows them.
+A buffer closes with its last pane, unless it has changes that aren't written.
+`:q` won't close that pane, and `:q!` throws the changes away. A pane closed
+another way, such as with <kbd>Ctrl</kbd>+<kbd>B</kbd> `x` or by closing its
+tab, keeps the buffer's changes, unseen: opening the file again shows them.
 
 ## Languages
 
-A file in a language that's installed is colored as the language's grammar reads it: keywords, strings, comments, functions, types, and so on.
+A file in a language that's installed is colored as the language's grammar
+reads it: keywords, strings, comments, functions, types, and so on.
 
-Opening a file in a language that isn't installed, but that clackatoo knows where to get, asks in the bottom bar:
+Opening a file in a language that isn't installed, but that clackatoo knows
+where to get, asks in the bottom bar:
 
 ```text
 Install toml's grammar and taplo? [Y/n]
 ```
 
-`y` or <kbd>Enter</kbd> installs the language, and its [language server](#language-servers) if that isn't installed either. The bar says when it's done, and the file is colored and checked straight away. `n` means it's never offered again. Any other key leaves the question unanswered, and does what it would have done. Each window asks once about each language, so a window opened later asks again. The question waits while a terminal has the focus, or the command line is open.
+`y` or <kbd>Enter</kbd> installs the language, and its
+[language server](#language-servers) if that isn't installed either. The bar
+says when it's done, and the file is colored and checked straight away. `n`
+means it's never offered again. Any other key leaves the question unanswered,
+and does what it would have done. Each window asks once about each language,
+so a window opened later asks again. The question waits while a terminal has
+the focus, or the command line is open.
 
-The [option](~clackatoo/reference/config#options) `languageinstall` decides what happens instead: `ask`, `always` (install without asking) or `never`.
+The [option](~clackatoo/reference/config#options) `languageinstall` decides
+what happens instead: `ask`, `always` (install without asking) or `never`.
 
-[`clackatoo language`](~clackatoo/reference/cli#language) installs languages from the command line too:
+[`clackatoo language`](~clackatoo/reference/cli#language) installs languages
+from the command line too:
 
 ```text
 clackatoo language list            what can be installed, and what is
@@ -86,17 +166,32 @@ clackatoo language install rust    install one, or several, with their servers
 clackatoo language install --all   install every one
 ```
 
-clackatoo knows where to get Bash, C, CSS, Go, HTML, JavaScript, JSON, Lua, Python, Rust, TOML, TypeScript (and TSX) and YAML. A file's language is found from its name: its extension, such as `.rs`, or the whole name, such as `.bashrc`.
+clackatoo knows where to get Bash, C, CSS, Go, HTML, JavaScript, JSON, Lua,
+Python, Rust, TOML, TypeScript (and TSX) and YAML. A file's language is found
+from its name: its extension, such as `.rs`, or the whole name, such as
+`.bashrc`.
 
 How it works:
 
-- **Grammars are [tree-sitter](https://tree-sitter.github.io)'s**, compiled to WebAssembly by their authors, and run in the daemon by [wasmtime](https://wasmtime.dev). A grammar can't reach anything outside itself, so one that goes wrong can't take the daemon, and every terminal it keeps, with it. Nor does a new language need a new clackatoo.
-- **The daemon parses each file once, whichever windows show it**, on a thread of its own, so typing never waits for a parse. After an edit, only what it changed is read again: about a tenth of a millisecond in a big source file. The colors of text you've typed follow within a frame or so; until then, the colors already there move with the text.
-- **Opening a file reads it all**, which takes about 50 ms for an 80 KB file in a language not used since the daemon started, most of it getting the grammar ready, and less after.
+- **Grammars are [tree-sitter](https://tree-sitter.github.io)'s**, compiled to
+  WebAssembly by their authors, and run in the daemon by
+  [wasmtime](https://wasmtime.dev). A grammar can't reach anything outside
+  itself, so one that goes wrong can't take the daemon, and every terminal it
+  keeps, with it. Nor does a new language need a new clackatoo.
+- **The daemon parses each file once, whichever windows show it**, on a thread
+  of its own, so typing never waits for a parse. After an edit, only what it
+  changed is read again: about a tenth of a millisecond in a big source file.
+  The colors of text you've typed follow within a frame or so; until then, the
+  colors already there move with the text.
+- **Opening a file reads it all**, which takes about 50 ms for an 80 KB file
+  in a language not used since the daemon started, most of it getting the
+  grammar ready, and less after.
 
 ### Language packs
 
-Each language is a directory in `~/.local/share/clackatoo/languages` (or `$XDG_DATA_HOME/clackatoo/languages`), which `clackatoo language install` writes, and you can write yourself for a language clackatoo doesn't know:
+Each language is a directory in `~/.local/share/clackatoo/languages` (or
+`$XDG_DATA_HOME/clackatoo/languages`), which `clackatoo language install`
+writes, and you can write yourself for a language clackatoo doesn't know:
 
 | File | |
 |---|---|
@@ -112,31 +207,93 @@ extensions = ["rs"]
 filenames = []
 ```
 
-A query's names are colored by the first part: `@function.method.call` as a function, `@string.escape` as an escape. A pack the daemon can't load is passed over, and its log says why.
+A query's names are colored by the first part: `@function.method.call` as a
+function, `@string.escape` as an escape. A pack the daemon can't load is
+passed over, and its log says why.
 
 ## Language servers
 
-A language server is a program that knows a language well enough to say what's wrong with a file as you write it, such as [rust-analyzer](https://rust-analyzer.github.io) for Rust. It speaks [LSP](https://microsoft.github.io/language-server-protocol/), the Language Server Protocol, which most editors share. When you open a file in an installed language whose server is installed, its mistakes are underlined with a wavy line: red for errors, yellow for warnings, blue for information, and cyan for hints. With the cursor on a line with one, the bottom bar says what it is, after the cursor's place:
+A language server is a program that knows a language well enough to say what's
+wrong with a file as you write it, such as
+[rust-analyzer](https://rust-analyzer.github.io) for Rust. It speaks
+[LSP](https://microsoft.github.io/language-server-protocol/), the Language
+Server Protocol, which most editors share. When you open a file in an
+installed language whose server is installed, its mistakes are underlined with
+a wavy line: red for errors, yellow for warnings, blue for information, and
+cyan for hints. With the cursor on a line with one, the bottom bar says what
+it is, after the cursor's place:
 
 ```text
 main.rs  12:9  error: mismatched types [E0308 rustc]
 ```
 
-That's the one under the cursor, or else the one on the line that matters most.
+That's the one under the cursor, or else the one on the line that matters
+most.
 
-The worst on each line is also written dimly after the line's end, in its color, as far as the pane has room, unless the [option](~clackatoo/reference/config#options) `virtualtext` is off; and the line's number takes its color. `]d` goes to the next mistake and `[d` to the one before, round the file's ends.
+The worst on each line is also written dimly after the line's end, in its
+color, as far as the pane has room, unless the
+[option](~clackatoo/reference/config#options) `virtualtext` is off; and the
+line's number takes its color. `]d` goes to the next mistake and `[d` to the
+one before, round the file's ends.
 
-`K` asks the server what's under the cursor and shows it in a panel under the cursor, or over it where there's more room, as wide as its text up to 80 columns, scrolling past 20 lines. Headings and strong text are bold, and code is on a faint band. Code in a fenced block is colored in the language its tag names, such as `rust` or `py`, or in the file's own language if it has no tag, once the daemon has read it; code in a language that isn't installed stays plain. The name the server says it's about is underlined while the panel is shown, until the panel closes or the text there changes. What's wrong there comes first, in full. <kbd>Ctrl</kbd>+<kbd>W</kbd> `d` shows only what's wrong there, in full.
+`K` asks the server what's under the cursor and shows it in a panel under the
+cursor, or over it where there's more room, as wide as its text up to 80
+columns, scrolling past 20 lines. Headings and strong text are bold, and code
+is on a faint band. Code in a fenced block is colored in the language its tag
+names, such as `rust` or `py`, or in the file's own language if it has no tag,
+once the daemon has read it; code in a language that isn't installed stays
+plain. The name the server says it's about is underlined while the panel is
+shown, until the panel closes or the text there changes. What's wrong there
+comes first, in full. <kbd>Ctrl</kbd>+<kbd>W</kbd> `d` shows only what's wrong
+there, in full.
 
-`grn` renames what's under the cursor everywhere the server knows of it, asking in the bottom bar for the new name. The new name starts selected, so what you type replaces it; an arrow key, <kbd>Home</kbd> or <kbd>End</kbd> keeps it to edit, and <kbd>Backspace</kbd>, Delete or <kbd>Ctrl</kbd>+<kbd>W</kbd> clears it. A server that can tell is asked first whether there's anything there to rename: if there isn't, the bar says so at once, in the server's words if it gives any; if there is, the new name starts as the server suggests, or as the name it would rename. With any other server it starts as the word under the cursor. Files that are open are changed as if you'd typed it, one undo step each, so every window sees it. Files that aren't open are written: all of them, or none, if one can't be, or has changed meanwhile. A rename that would make, rename or delete files, or write outside the project, is refused, as is one touching over 200 files that aren't open.
+`grn` renames what's under the cursor everywhere the server knows of it,
+asking in the bottom bar for the new name. The new name starts selected, so
+what you type replaces it; an arrow key, <kbd>Home</kbd> or <kbd>End</kbd>
+keeps it to edit, and <kbd>Backspace</kbd>, Delete or
+<kbd>Ctrl</kbd>+<kbd>W</kbd> clears it. A server that can tell is asked first
+whether there's anything there to rename: if there isn't, the bar says so at
+once, in the server's words if it gives any; if there is, the new name starts
+as the server suggests, or as the name it would rename. With any other server
+it starts as the word under the cursor. Files that are open are changed as if
+you'd typed it, one undo step each, so every window sees it. Files that aren't
+open are written: all of them, or none, if one can't be, or has changed
+meanwhile. A rename that would make, rename or delete files, or write outside
+the project, is refused, as is one touching over 200 files that aren't open.
 
-`gra` asks the server what it could do to the text under the cursor, or to what's selected in visual mode, such as fix what's wrong there or rewrite it, and shows it in a menu by the cursor: quick fixes first, and those the server would pick before the rest. `j` and `k`, the arrows, <kbd>Tab</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> move through it; <kbd>Enter</kbd> does the one picked, and 1 to 9 the one so numbered; <kbd>Esc</kbd> or `q` closes it. Its changes are made as `grn`'s are, as if you'd typed them, one undo step in each file, and refused the same way. An action that runs one of the server's commands runs it, one at a time, and the changes the server makes while it runs are made the same way; changes a server makes unasked are refused. The bar says how it went.
+`gra` asks the server what it could do to the text under the cursor, or to
+what's selected in visual mode, such as fix what's wrong there or rewrite it,
+and shows it in a menu by the cursor: quick fixes first, and those the server
+would pick before the rest. `j` and `k`, the arrows, <kbd>Tab</kbd>,
+<kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> move through
+it; <kbd>Enter</kbd> does the one picked, and 1 to 9 the one so numbered;
+<kbd>Esc</kbd> or `q` closes it. Its changes are made as `grn`'s are, as if
+you'd typed them, one undo step in each file, and refused the same way. An
+action that runs one of the server's commands runs it, one at a time, and the
+changes the server makes while it runs are made the same way; changes a server
+makes unasked are refused. The bar says how it went.
 
-`<Space>bs` lists the file's symbols in [the finder](~clackatoo/reference/window#the-finder), as the server knows them, in the order of the file's outline. `<Space>ps` finds symbols in the whole project. <kbd>Enter</kbd> goes to the one picked.
+`<Space>bs` lists the file's symbols in
+[the finder](~clackatoo/reference/window#the-finder), as the server knows
+them, in the order of the file's outline. `<Space>ps` finds symbols in the
+whole project. <kbd>Enter</kbd> goes to the one picked.
 
-Once the cursor rests on a name in normal mode, the other places it's used in the file are lit, as the server says: where it's given a value a little brighter than where it's read. They go once the cursor leaves the name, the text changes, or the mode does. The [option](~clackatoo/reference/config#options) `highlightuses` turns this off.
+Once the cursor rests on a name in normal mode, the other places it's used in
+the file are lit, as the server says: where it's given a value a little
+brighter than where it's read. They go once the cursor leaves the name, the
+text changes, or the mode does. The
+[option](~clackatoo/reference/config#options) `highlightuses` turns this off.
 
-A server that can also writes notes between the code, dim and italic: the type of a name bound without one written, as `: u32` after `let total`, and the name of the parameter an argument is for, as `count:` before it. They're never part of the text: the cursor steps over them, motions, searches and yanks don't see them, a click on one lands on the character after it, a long line wraps with them, each staying with its character, and `colorcolumn` runs straight past them. While you type, the cursor's line shows none; they come back once typing pauses. They're asked for the part of the file in view and a screenful either side. `<Space>th`, or the [option](~clackatoo/reference/config#options) `inlayhints`, turns them off.
+A server that can also writes notes between the code, dim and italic: the type
+of a name bound without one written, as `: u32` after `let total`, and the
+name of the parameter an argument is for, as `count:` before it. They're never
+part of the text: the cursor steps over them, motions, searches and yanks
+don't see them, a click on one lands on the character after it, a long line
+wraps with them, each staying with its character, and `colorcolumn` runs
+straight past them. While you type, the cursor's line shows none; they come
+back once typing pauses. They're asked for the part of the file in view and a
+screenful either side. `<Space>th`, or the
+[option](~clackatoo/reference/config#options) `inlayhints`, turns them off.
 
 ```text
  12 let total = count + "1";  ■ cannot add `&str` to `u32`
@@ -144,20 +301,58 @@ A server that can also writes notes between the code, dim and italic: the type o
 
 ### Trusted folders
 
-A language server can run the code of the project it reads. rust-analyzer builds and runs a crate's build scripts and procedural macros; typescript-language-server loads the plugins `tsconfig.json` names from `node_modules`; gopls runs the `go` command, which can fetch and run another toolchain. So a server starts only for a folder you've trusted. The first time a file's server would start for a folder you haven't said anything about, the bottom bar asks:
+A language server can run the code of the project it reads. rust-analyzer
+builds and runs a crate's build scripts and procedural macros;
+typescript-language-server loads the plugins `tsconfig.json` names from
+`node_modules`; gopls runs the `go` command, which can fetch and run another
+toolchain. So a server starts only for a folder you've trusted. The first time
+a file's server would start for a folder you haven't said anything about, the
+bottom bar asks:
 
 ```text
 Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 ```
 
-- **The folder is the project the server would start for** (see below), named as the daemon's machine names it, with any character that could hide or turn round what's around it shown by its number, as `<U+202E>`.
-- **It's asked while an editor showing a file of that folder has the focus**, in normal mode, with nothing half typed, and neither the command line nor the finder open; until then it waits. So a file an agent opens beside its chat asks only once you go to it. A file moved or saved under a new name into a folder not trusted asks too. A file on another machine names it, as in `Trust ~/src/thing on desk?`, and is trusted there.
-- **A window older than the daemon's trusted folders isn't asked**, as it can't answer: its files get no servers until you run [`clackatoo trust`](~clackatoo/reference/cli#trust) for the folder, or `:trust` in a newer window.
-- **`y` trusts the folder**, and its files open get their servers at once. **`n` marks it not trusted**, and it isn't asked about again. Any other key leaves it unanswered, and does what it would have done; the bar says `:trust` runs its servers. Each window is asked once about each folder while it's connected.
-- **Only a key you press then answers it.** Not one a [macro](#macros) or a key binding types, nor one held while the window waited for something, nor one pressed in the first half second the question shows, which says to press it again: so a `y` meant for a yank, typed right as the question came, doesn't trust anything. Agents never answer it: no tool of theirs trusts a folder, and a window under an agent's [native control](~clackatoo/reference/agents) refuses to send a trust. A device on the [web app](~clackatoo/reference/remote) can't trust a folder either, and isn't asked.
-- **A folder is trusted with everything inside it**, but for a folder inside it marked not trusted: the nearest folder marked, the project's own or one it's in, decides. So `clackatoo trust ~/src` trusts every project under it, and `clackatoo untrust ~/src/cloned-thing` still keeps that one out.
-- **What's marked is the folder a server starts for**, the project's root (see below), so only a mark on that folder or one it's in counts. A Rust project's root is the outermost folder with a `Cargo.toml`: in a workspace of many crates, marking one crate's folder does nothing, as rust-analyzer starts for the workspace's folder. `:trusted` lists what's marked, and the question names the folder that counts.
-- **A folder not trusted keeps its colors**, which clackatoo's own parser gives, and every editor key that doesn't need a server; it gets no mistakes, `K`, `gd`, completion, renames, or formatting.
+- **The folder is the project the server would start for** (see below), named
+  as the daemon's machine names it, with any character that could hide or turn
+  round what's around it shown by its number, as `<U+202E>`.
+- **It's asked while an editor showing a file of that folder has the focus**,
+  in normal mode, with nothing half typed, and neither the command line nor
+  the finder open; until then it waits. So a file an agent opens beside its
+  chat asks only once you go to it. A file moved or saved under a new name
+  into a folder not trusted asks too. A file on another machine names it, as
+  in `Trust ~/src/thing on desk?`, and is trusted there.
+- **A window older than the daemon's trusted folders isn't asked**, as it
+  can't answer: its files get no servers until you run
+  [`clackatoo trust`](~clackatoo/reference/cli#trust) for the folder, or
+  `:trust` in a newer window.
+- **`y` trusts the folder**, and its files open get their servers at once.
+  **`n` marks it not trusted**, and it isn't asked about again. Any other key
+  leaves it unanswered, and does what it would have done; the bar says
+  `:trust` runs its servers. Each window is asked once about each folder while
+  it's connected.
+- **Only a key you press then answers it.** Not one a [macro](#macros) or a
+  key binding types, nor one held while the window waited for something, nor
+  one pressed in the first half second the question shows, which says to press
+  it again: so a `y` meant for a yank, typed right as the question came,
+  doesn't trust anything. Agents never answer it: no tool of theirs trusts a
+  folder, and a window under an agent's
+  [native control](~clackatoo/reference/agents) refuses to send a trust. A
+  device on the [web app](~clackatoo/reference/remote) can't trust a folder
+  either, and isn't asked.
+- **A folder is trusted with everything inside it**, but for a folder inside
+  it marked not trusted: the nearest folder marked, the project's own or one
+  it's in, decides. So `clackatoo trust ~/src` trusts every project under it,
+  and `clackatoo untrust ~/src/cloned-thing` still keeps that one out.
+- **What's marked is the folder a server starts for**, the project's root (see
+  below), so only a mark on that folder or one it's in counts. A Rust
+  project's root is the outermost folder with a `Cargo.toml`: in a workspace
+  of many crates, marking one crate's folder does nothing, as rust-analyzer
+  starts for the workspace's folder. `:trusted` lists what's marked, and the
+  question names the folder that counts.
+- **A folder not trusted keeps its colors**, which clackatoo's own parser
+  gives, and every editor key that doesn't need a server; it gets no mistakes,
+  `K`, `gd`, completion, renames, or formatting.
 
 | Command | What it does |
 |---|---|
@@ -166,25 +361,97 @@ Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
 | `:untrust`, `:untrust DIR` | Marks the folder not trusted: its servers stop, and it isn't asked about again. |
 | `:trusted` | Lists the folders marked, trusted or not, in the bar (`:Messages` shows it again). |
 
-Only a `:trust` you type trusts a folder: one a macro, a key binding, or your config runs is refused. [`clackatoo trust`](~clackatoo/reference/cli#trust) does the same from a shell. The folders marked are kept in `~/.local/state/clackatoo/trusted` (or under `$XDG_STATE_HOME`), readable by you alone, so they're remembered across restarts and upgrades. A folder whose name isn't UTF-8 is never asked about; `clackatoo trust` trusts it for the daemon's run.
+Only a `:trust` you type trusts a folder: one a macro, a key binding, or your
+config runs is refused. [`clackatoo trust`](~clackatoo/reference/cli#trust)
+does the same from a shell. The folders marked are kept in
+`~/.local/state/clackatoo/trusted` (or under `$XDG_STATE_HOME`), readable by
+you alone, so they're remembered across restarts and upgrades. A folder whose
+name isn't UTF-8 is never asked about; `clackatoo trust` trusts it for the
+daemon's run.
 
-When a daemon from before trusted folders upgrades to one that has them, the projects of the files open then, whose servers are installed, are trusted, as their servers were running anyway. The daemon's log names each, and the first window you use says how many: `trusted 3 folders whose language servers were running: :trusted lists them`. That's only ever said by an upgrade from such a daemon: deleting the file of folders, or starting the daemon afresh, trusts nothing, and every other folder is asked about.
+When a daemon from before trusted folders upgrades to one that has them, the
+projects of the files open then, whose servers are installed, are trusted, as
+their servers were running anyway. The daemon's log names each, and the first
+window you use says how many:
+`trusted 3 folders whose language servers were running: :trusted lists them`.
+That's only ever said by an upgrade from such a daemon: deleting the file of
+folders, or starting the daemon afresh, trusts nothing, and every other folder
+is asked about.
 
 How it works:
 
-- **The daemon runs the server, not the window**, one for each project, and keeps each file open in it as it's edited, by anyone. Every window, and every agent, sees the same.
-- **A project is found from the file's place:** the nearest directory above it with one of the server's root files, such as `go.mod`, or else the nearest with a `.git`, or else the file's own directory. A file right in your home directory has no project, and no server, rather than make the whole of home one. A Rust project is the outermost directory with a `Cargo.toml`, so a workspace of many crates has one rust-analyzer, not one each.
-- **Only what changes is sent** after each edit, for servers that can take that, which most can.
-- **A question asked again cancels the last.** A newer `K`, completion or call help from the same window about the same file tells the server to stop working on the one before, and an answer that comes anyway is ignored. So do a newer search of the project's symbols, the file's symbols asked again, and a rename's check. Inlay hints asked again cancel only those asked for a part of the file the new question covers, so two panes on one file never cancel each other's. Another window's questions are never canceled.
-- **A server starts when a file of its is first opened, if its folder is [trusted](#trusted-folders), and stops five minutes after the last closes,** so going to a library's file and back, or closing a project's files and opening another soon after, doesn't make it read the whole project again. A file gone to from an answer, such as a library's definition, is opened in the server that answered, not one of its own. One that stops by itself is started again at once, for the files of its on screen; if it stops by itself again, it's left stopped until its project's files are all closed, and the daemon's log says why. Servers don't come through an [upgrade](~clackatoo/reference/cli#upgrade): they start again as their files are next shown. A server stopped is asked to shut down, then told to exit, as LSP asks, and killed if it hasn't gone a second later. The daemon stops its servers the same way when it stops or upgrades, waiting at most a second and a half. What a server writes to stderr reaches the daemon's log, its last lines too. A server that stops listening is still read for a moment, so its last answers arrive, but it isn't asked anything more: questions, and commands from code actions, fail at once with "its language server has hung up". A server runs in a process group of its own, so stopping it also ends whatever it started (before Linux 6.9, only the server's own process).
-- **A server's big answers don't hold up typing.** A message of 256 KiB or more is read, and later freed, on a thread of the daemon's own, so a 60 MB list of a project's symbols doesn't stop a key's echo in another pane. What the server sends after it waits behind it, so its messages are still taken in the order it sent them, and an answer sent right before a server stops still arrives. A message longer than 64 MiB stops the server, and the daemon's log says how long it was.
-- **Servers hear of files changed on disk**, by git, an agent or another editor, if they ask, as rust-analyzer does: a file made, written or deleted is told them a tenth of a second later, a few at a time. Only folders inside the server's project are watched, never `.git`, what `.gitignore` leaves out, or `target`, `node_modules`, `.venv` and `__pycache__`, and the servers share up to 3072 of them. A file open in a buffer isn't told of, as the server has it from the buffer. A server that asks for nothing still hears of changes to files it has said are wrong.
+- **The daemon runs the server, not the window**, one for each project, and
+  keeps each file open in it as it's edited, by anyone. Every window, and
+  every agent, sees the same.
+- **A project is found from the file's place:** the nearest directory above it
+  with one of the server's root files, such as `go.mod`, or else the nearest
+  with a `.git`, or else the file's own directory. A file right in your home
+  directory has no project, and no server, rather than make the whole of home
+  one. A Rust project is the outermost directory with a `Cargo.toml`, so a
+  workspace of many crates has one rust-analyzer, not one each.
+- **Only what changes is sent** after each edit, for servers that can take
+  that, which most can.
+- **A question asked again cancels the last.** A newer `K`, completion or call
+  help from the same window about the same file tells the server to stop
+  working on the one before, and an answer that comes anyway is ignored. So do
+  a newer search of the project's symbols, the file's symbols asked again, and
+  a rename's check. Inlay hints asked again cancel only those asked for a part
+  of the file the new question covers, so two panes on one file never cancel
+  each other's. Another window's questions are never canceled.
+- **A server starts when a file of its is first opened, if its folder is
+  [trusted](#trusted-folders), and stops five minutes after the last closes,**
+  so going to a library's file and back, or closing a project's files and
+  opening another soon after, doesn't make it read the whole project again. A
+  file gone to from an answer, such as a library's definition, is opened in
+  the server that answered, not one of its own. One that stops by itself is
+  started again at once, for the files of its on screen; if it stops by itself
+  again, it's left stopped until its project's files are all closed, and the
+  daemon's log says why. Servers don't come through an
+  [upgrade](~clackatoo/reference/cli#upgrade): they start again as their files
+  are next shown. A server stopped is asked to shut down, then told to exit,
+  as LSP asks, and killed if it hasn't gone a second later. The daemon stops
+  its servers the same way when it stops or upgrades, waiting at most a second
+  and a half. What a server writes to stderr reaches the daemon's log, its
+  last lines too. A server that stops listening is still read for a moment, so
+  its last answers arrive, but it isn't asked anything more: questions, and
+  commands from code actions, fail at once with "its language server has hung
+  up". A server runs in a process group of its own, so stopping it also ends
+  whatever it started (before Linux 6.9, only the server's own process).
+- **A server's big answers don't hold up typing.** A message of 256 KiB or
+  more is read, and later freed, on a thread of the daemon's own, so a 60 MB
+  list of a project's symbols doesn't stop a key's echo in another pane. What
+  the server sends after it waits behind it, so its messages are still taken
+  in the order it sent them, and an answer sent right before a server stops
+  still arrives. A message longer than 64 MiB stops the server, and the
+  daemon's log says how long it was.
+- **Servers hear of files changed on disk**, by git, an agent or another
+  editor, if they ask, as rust-analyzer does: a file made, written or deleted
+  is told them a tenth of a second later, a few at a time. Only folders inside
+  the server's project are watched, never `.git`, what `.gitignore` leaves
+  out, or `target`, `node_modules`, `.venv` and `__pycache__`, and the servers
+  share up to 3072 of them. A file open in a buffer isn't told of, as the
+  server has it from the buffer. A server that asks for nothing still hears of
+  changes to files it has said are wrong.
 
-clackatoo knows each installed language's usual server, so nothing needs setting up. A server that isn't installed is [offered](#languages) along with its language, or on its own when the language is installed but the server isn't. The daemon looks for a server's program on `PATH` first, only in its absolute directories (an empty or relative one, such as `.`, would find a program in the project, which anyone could have filled), and runs it by the path found, giving it that `PATH`; then in `~/.local/share/clackatoo/servers`, where clackatoo installs servers, each in its own directory:
+clackatoo knows each installed language's usual server, so nothing needs
+setting up. A server that isn't installed is [offered](#languages) along with
+its language, or on its own when the language is installed but the server
+isn't. The daemon looks for a server's program on `PATH` first, only in its
+absolute directories (an empty or relative one, such as `.`, would find a
+program in the project, which anyone could have filled), and runs it by the
+path found, giving it that `PATH`; then in `~/.local/share/clackatoo/servers`,
+where clackatoo installs servers, each in its own directory:
 
-- **A server with a release built for Linux is downloaded**, from its own GitHub releases, at the version clackatoo was tried with, and checked to be exactly that file: rust-analyzer, taplo, lua-language-server, and clangd. clangd has no build for ARM.
-- **A server published to npm is installed with npm**, at a pinned version: pyright, typescript-language-server (with TypeScript 6, as 7 has no `tsserver`), the CSS, HTML and JSON servers, yaml-language-server and bash-language-server. Without npm, these aren't offered.
-- **gopls is installed yourself**, with `go install golang.org/x/tools/gopls@latest`.
+- **A server with a release built for Linux is downloaded**, from its own
+  GitHub releases, at the version clackatoo was tried with, and checked to be
+  exactly that file: rust-analyzer, taplo, lua-language-server, and clangd.
+  clangd has no build for ARM.
+- **A server published to npm is installed with npm**, at a pinned version:
+  pyright, typescript-language-server (with TypeScript 6, as 7 has no
+  `tsserver`), the CSS, HTML and JSON servers, yaml-language-server and
+  bash-language-server. Without npm, these aren't offered.
+- **gopls is installed yourself**, with
+  `go install golang.org/x/tools/gopls@latest`.
 
 | Language | Server |
 |---|---|
@@ -214,9 +481,21 @@ Lines past the end of the file show a faint `~`.
 
 ## Completion
 
-As you type a word in insert mode, the [language server](#language-servers) is asked what could finish it, once typing pauses; a character it names, such as `.`, asks at once. <kbd>Ctrl</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> ask too. The menu under the cursor narrows as you type, best first. Each item's label starts under the word you're typing, with its letters that match in blue, then its detail, dimmed, and its kind, dimmed, at the right. When the menu is too narrow, the detail is cut short first, then the label, and in a very narrow pane the kind goes. The picked item's documentation shows in a box of its own beside the menu: what it is, dimmed, then under a line, what it does.
+As you type a word in insert mode, the [language server](#language-servers) is
+asked what could finish it, once typing pauses; a character it names, such as
+`.`, asks at once. <kbd>Ctrl</kbd>+<kbd>Space</kbd>,
+<kbd>Ctrl</kbd>+<kbd>N</kbd>, and <kbd>Ctrl</kbd>+<kbd>P</kbd> ask too. The
+menu under the cursor narrows as you type, best first. Each item's label
+starts under the word you're typing, with its letters that match in blue, then
+its detail, dimmed, and its kind, dimmed, at the right. When the menu is too
+narrow, the detail is cut short first, then the label, and in a very narrow
+pane the kind goes. The picked item's documentation shows in a box of its own
+beside the menu: what it is, dimmed, then under a line, what it does.
 
-The word completed is the one before the cursor as the file's language reads it. Where the server doesn't say where the word starts, an item whose text starts with what's right before it, such as `libcap-tools` after `libcap-t`, takes that in too, rather than being put in twice.
+The word completed is the one before the cursor as the file's language reads
+it. Where the server doesn't say where the word starts, an item whose text
+starts with what's right before it, such as `libcap-tools` after `libcap-t`,
+takes that in too, rather than being put in twice.
 
 | Key | Does |
 |---|---|
@@ -226,13 +505,28 @@ The word completed is the one before the cursor as the file's language reads it.
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Closes the menu |
 | <kbd>Esc</kbd> | Closes it and leaves insert mode |
 
-Accepting puts in the item, and any import it needs elsewhere in the file, as one undo step with what you typed, which `.` repeats. A snippet, such as a function with its arguments, goes in with places to type. Its lines after the first take your line's indent, and its tabs are what <kbd>Tab</kbd> would put in. Its first place's text is selected: typing replaces it, and <kbd>Backspace</kbd> deletes it. What you type in a place is copied to the places that mirror it as you type, and a place with choices shows them in the menu. <kbd>Tab</kbd> goes to the next place, and from the last to the snippet's end; <kbd>Shift</kbd>+<kbd>Tab</kbd> goes to the place before. <kbd>Tab</kbd> is <kbd>Tab</kbd> again once you reach the snippet's end, press <kbd>Esc</kbd>, or move out of it. Filling it in is one undo step with the rest of what you typed, and `.` types what you left, indented as the line it types on.
+Accepting puts in the item, and any import it needs elsewhere in the file, as
+one undo step with what you typed, which `.` repeats. A snippet, such as a
+function with its arguments, goes in with places to type. Its lines after the
+first take your line's indent, and its tabs are what <kbd>Tab</kbd> would put
+in. Its first place's text is selected: typing replaces it, and
+<kbd>Backspace</kbd> deletes it. What you type in a place is copied to the
+places that mirror it as you type, and a place with choices shows them in the
+menu. <kbd>Tab</kbd> goes to the next place, and from the last to the
+snippet's end; <kbd>Shift</kbd>+<kbd>Tab</kbd> goes to the place before.
+<kbd>Tab</kbd> is <kbd>Tab</kbd> again once you reach the snippet's end, press
+<kbd>Esc</kbd>, or move out of it. Filling it in is one undo step with the
+rest of what you typed, and `.` types what you left, indented as the line it
+types on.
 
-While you type a call's arguments, its signature shows over the cursor, with the argument you're on in bold.
+While you type a call's arguments, its signature shows over the cursor, with
+the argument you're on in bold.
 
 ## Registers
 
-What's yanked and deleted is kept in registers, as in Vim. `"` and a register's name before a command keeps text in it, or puts it from it: `"ayy`, `"ap`, `"_dd`. A count can go either side: `2"a3yy` copies six lines.
+What's yanked and deleted is kept in registers, as in Vim. `"` and a
+register's name before a command keeps text in it, or puts it from it: `"ayy`,
+`"ap`, `"_dd`. A count can go either side: `2"a3yy` copies six lines.
 
 | Register | Holds |
 |---|---|
@@ -244,25 +538,81 @@ What's yanked and deleted is kept in registers, as in Vim. `"` and a register's 
 | `"_` | Nothing: what goes to it is thrown away, and the others keep theirs. |
 | `"+` `"*` | The clipboard, and the primary selection that a middle click pastes. |
 
-A terminal's normal mode yanks into the same registers, `"a` before `y` too, so `p` puts a line copied from a terminal as a line, and so does a chat's (see [Yanking](~clackatoo/reference/agents#yanking)). Text selected with the mouse there goes only to `"*`, as in Vim.
+A terminal's normal mode yanks into the same registers, `"a` before `y` too,
+so `p` puts a line copied from a terminal as a line, and so does a chat's (see
+[Yanking](~clackatoo/reference/agents#yanking)). Text selected with the mouse
+there goes only to `"*`, as in Vim.
 
-A block is kept as one, its rows a line each, and `p` and `P` put it back as one: a row on each line from the cursor's, padded with spaces where text follows, and on new lines past the end. `:Registers` marks it `b`.
+A block is kept as one, its rows a line each, and `p` and `P` put it back as
+one: a row on each line from the cursor's, padded with spaces where text
+follows, and on new lines past the end. `:Registers` marks it `b`.
 
-As the option `clipboard` says, the unnamed register goes along with the clipboard by default, as Neovim's `unnamedplus` does: what's yanked or deleted can be pasted anywhere, and `p` puts what was last copied anywhere. Deleting nothing, as `D` on an empty line, leaves them alone. The window reads the clipboard and the primary selection when it gets the focus, off to one side, so a program slow to answer for them never holds it up. In visual mode, `p` and `P` put in place of what's selected; `p` keeps what was selected, as a delete, and `P` doesn't. `:Registers` lists them by the cursor.
+As the option `clipboard` says, the unnamed register goes along with the
+clipboard by default, as Neovim's `unnamedplus` does: what's yanked or deleted
+can be pasted anywhere, and `p` puts what was last copied anywhere. Deleting
+nothing, as `D` on an empty line, leaves them alone. The window reads the
+clipboard and the primary selection when it gets the focus, off to one side,
+so a program slow to answer for them never holds it up. In visual mode, `p`
+and `P` put in place of what's selected; `p` keeps what was selected, as a
+delete, and `P` doesn't. `:Registers` lists them by the cursor.
 
 ## Macros
 
-`q` and a register records the keys you press, until `q`; the bar says `recording @a` meanwhile, in every pane you move to and below a search or command line you type. Every key is kept, whatever has it: the editor, a terminal, the command line, the finder, or a binding. So a macro can run `:w`, move to another pane with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or open a file with `<Space>pf`. `@` and the register types the keys again, as if you pressed them now, through your bindings as they are now; `@@` types the last one again, and a count that many times: `100@a`. Each file a macro changes takes one `u` to undo. The keys are kept as text, written as bindings are (`A;<Esc>:w<CR><C-l>j`), so `"ap` puts them in the file to change, and `"ay$` keeps them again. An item picked from the completion menu is kept as the text it put in, and a snippet as the text you left in it, not the keys that filled it in.
+`q` and a register records the keys you press, until `q`; the bar says
+`recording @a` meanwhile, in every pane you move to and below a search or
+command line you type. Every key is kept, whatever has it: the editor, a
+terminal, the command line, the finder, or a binding. So a macro can run `:w`,
+move to another pane with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or open a file with
+`<Space>pf`. `@` and the register types the keys again, as if you pressed them
+now, through your bindings as they are now; `@@` types the last one again, and
+a count that many times: `100@a`. Each file a macro changes takes one `u` to
+undo. The keys are kept as text, written as bindings are
+(`A;<Esc>:w<CR><C-l>j`), so `"ap` puts them in the file to change, and `"ay$`
+keeps them again. An item picked from the completion menu is kept as the text
+it put in, and a snippet as the text you left in it, not the keys that filled
+it in.
 
-A key that fails stops the macro, as in Vim: a motion that can't move, a search that finds nothing, an empty register, a command that isn't one or is refused, <kbd>Enter</kbd> in the finder with nothing picked, or a write the daemon refuses. So a macro ending `j@a` goes down the file and stops at its end. When a key starts something that takes a moment, such as `gd`, `:w`, opening a file or a search in the finder, the macro waits for it before its next key, and keys you press meanwhile wait behind it. After 5 seconds it gives up and says what it waited for; <kbd>Esc</kbd> stops it at once, and so does moving to another pane yourself while it waits. Recording and replay work in every text and list pane in normal mode; see [macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes). A macro typing through a terminal's normal mode or a chat stops there the same way, at a motion that goes nowhere, a search that finds nothing or a command they refuse; keys after a terminal's search or `[[` wait for the daemon's answer, as they wait for a chat's search.
+A key that fails stops the macro, as in Vim: a motion that can't move, a
+search that finds nothing, an empty register, a command that isn't one or is
+refused, <kbd>Enter</kbd> in the finder with nothing picked, or a write the
+daemon refuses. So a macro ending `j@a` goes down the file and stops at its
+end. When a key starts something that takes a moment, such as `gd`, `:w`,
+opening a file or a search in the finder, the macro waits for it before its
+next key, and keys you press meanwhile wait behind it. After 5 seconds it
+gives up and says what it waited for; <kbd>Esc</kbd> stops it at once, and so
+does moving to another pane yourself while it waits. Recording and replay work
+in every text and list pane in normal mode; see
+[macros and marks across panes](~clackatoo/reference/window#macros-and-marks-across-panes).
+A macro typing through a terminal's normal mode or a chat stops there the same
+way, at a motion that goes nowhere, a search that finds nothing or a command
+they refuse; keys after a terminal's search or `[[` wait for the daemon's
+answer, as they wait for a chat's search.
 
 ## Marks
 
-`m` and a letter marks the cursor's place: `a` to `z` for each file on its own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are jumps, and an operator takes them: `d'a` deletes the lines from here to the mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes to your last change. Marks move with the text, whoever edits it, and lines `:m` moves take theirs with them; once no pane shows a file, its marks keep their lines. `:Marks` lists them in the finder. `'<` and `'>` are the last selection's start and end, which `gv` selects again, kept as Vim keeps them (see `gv` below); by lines, `'<` is the first line's start and `'>` the last's end. They follow lines `:m` moves too, so the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time, and keeps them selected.
+`m` and a letter marks the cursor's place: `a` to `z` for each file on its
+own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are
+jumps, and an operator takes them: `d'a` deletes the lines from here to the
+mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes
+to your last change. Marks move with the text, whoever edits it, and lines
+`:m` moves take theirs with them; once no pane shows a file, its marks keep
+their lines. `:Marks` lists them in the finder. `'<` and `'>` are the last
+selection's start and end, which `gv` selects again, kept as Vim keeps them
+(see `gv` below); by lines, `'<` is the first line's start and `'>` the last's
+end. They follow lines `:m` moves too, so the binding
+`client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known
+Neovim mapping, moves the lines selected down a line at a time, and keeps them
+selected.
 
 ## Substituting
 
-`:s/pattern/replacement/flags` replaces what matches on the cursor's line, or in a range typed before it: `:%s/old/new/g` replaces every match in the file. Patterns are Vim's, as `/` reads them too: `\(` `\)`, `\|`, `\+`, `\{n,m}`, `\<` `\>`, `\s` `\d` `\w` and their kin, `\v` for fewer backslashes, `\zs` and `\ze`, `\c` and `\C`. Case is matched as `ignorecase` and `smartcase` say. An empty pattern is the last search's, and `:s` makes its pattern the last search, for `n`.
+`:s/pattern/replacement/flags` replaces what matches on the cursor's line, or
+in a range typed before it: `:%s/old/new/g` replaces every match in the file.
+Patterns are Vim's, as `/` reads them too: `\(` `\)`, `\|`, `\+`, `\{n,m}`,
+`\<` `\>`, `\s` `\d` `\w` and their kin, `\v` for fewer backslashes, `\zs` and
+`\ze`, `\c` and `\C`. Case is matched as `ignorecase` and `smartcase` say. An
+empty pattern is the last search's, and `:s` makes its pattern the last
+search, for `n`.
 
 | Range | Lines |
 |---|---|
@@ -283,11 +633,20 @@ A key that fails stops the macro, as in Vim: a motion that can't move, a search 
 | `&` | The last `:s`'s flags, with these. |
 | `r` | With no pattern, the last search's rather than the last `:s`'s. |
 
-In the replacement, `&` and `\0` are the match, `\1` to `\9` its groups, `\r` and `\n` a line break, `\t` a tab, `~` the last replacement, and `\u` `\l` make the next character a capital or small, `\U` `\L` the rest, until `\E`.
+In the replacement, `&` and `\0` are the match, `\1` to `\9` its groups, `\r`
+and `\n` a line break, `\t` a tab, `~` the last replacement, and `\u` `\l`
+make the next character a capital or small, `\U` `\L` the rest, until `\E`.
 
-`&` does the last `:s` again on the cursor's line, without its flags; `g&` on every line, with them and the last search's pattern. `:&&` keeps the flags, and `:~` uses the last search's pattern. A count after it does that many lines from the range's last: `:s/x/y/ 3`.
+`&` does the last `:s` again on the cursor's line, without its flags; `g&` on
+every line, with them and the last search's pattern. `:&&` keeps the flags,
+and `:~` uses the last search's pattern. A count after it does that many lines
+from the range's last: `:s/x/y/ 3`.
 
-Each `:s` is one undo step, however many lines it changes. While you type it, what it would do shows in place, as Neovim's `inccommand` shows it, with the replacements lit; the file isn't touched until <kbd>Enter</kbd>, and <kbd>Esc</kbd> puts the view back. A `:g` being typed lights its pattern's matches. When nothing matches, the bar says so and a macro stops, as in Vim.
+Each `:s` is one undo step, however many lines it changes. While you type it,
+what it would do shows in place, as Neovim's `inccommand` shows it, with the
+replacements lit; the file isn't touched until <kbd>Enter</kbd>, and
+<kbd>Esc</kbd> puts the view back. A `:g` being typed lights its pattern's
+matches. When nothing matches, the bar says so and a macro stops, as in Vim.
 
 ## Lines
 
@@ -300,7 +659,12 @@ Each `:s` is one undo step, however many lines it changes. While you type it, wh
 
 ## Git signs
 
-When a file is in a git repository, a column left of the line numbers shows how it differs from the file in git's index, as gitsigns.nvim does: a green bar beside lines added, a blue bar beside lines changed, and a red line under a line where lines after it were deleted. The signs follow your typing, and update a moment after you pause, or at once when something stages changes, in a terminal or anywhere else.
+When a file is in a git repository, a column left of the line numbers shows
+how it differs from the file in git's index, as gitsigns.nvim does: a green
+bar beside lines added, a blue bar beside lines changed, and a red line under
+a line where lines after it were deleted. The signs follow your typing, and
+update a moment after you pause, or at once when something stages changes, in
+a terminal or anywhere else.
 
 | Key | Does |
 |---|---|
@@ -309,11 +673,19 @@ When a file is in a git repository, a column left of the line numbers shows how 
 | `<Space>hr` | Puts the change at the cursor back as git's index has it. `u` undoes it. |
 | `<Space>hs` | Stages the change at the cursor, and only it, as `git add -p` would. |
 
-`:gitsigns preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` and `prev_hunk` do the same, so `client.cmd` can bind them to other keys. A file with conflicts is compared with your side. A file git converts, such as one whose line endings it changes, or that Git LFS keeps, shows its signs but is staged in a terminal, not a change at a time. Files that git doesn't track, or that are bigger than 8 MiB, have no signs.
+`:gitsigns preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` and
+`prev_hunk` do the same, so `client.cmd` can bind them to other keys. A file
+with conflicts is compared with your side. A file git converts, such as one
+whose line endings it changes, or that Git LFS keeps, shows its signs but is
+staged in a terminal, not a change at a time. Files that git doesn't track, or
+that are bigger than 8 MiB, have no signs.
 
 ## Agents' changes
 
-Lines an agent changed and you haven't reviewed have a bar in a column right of git's signs, in the chat's color, shown while a file has such lines (`agentsigns`). They follow your typing; typing a line back as it was clears it.
+Lines an agent changed and you haven't reviewed have a bar in a column right
+of git's signs, in the chat's color, shown while a file has such lines
+(`agentsigns`). They follow your typing; typing a line back as it was clears
+it.
 
 | Key | Does |
 |---|---|
@@ -322,7 +694,8 @@ Lines an agent changed and you haven't reviewed have a bar in a column right of 
 | `<Space>c` | Comments on the line, for the agent |
 | `<Space>gr` | Opens a review of the chat's changes (see [Agents](~clackatoo/reference/agents#reviewing-its-changes)) |
 
-`:blame` writes after each line an agent changed which chat and turn changed it, and `:blame` again stops.
+`:blame` writes after each line an agent changed which chat and turn changed
+it, and `:blame` again stops.
 
 ## Writing
 
@@ -338,15 +711,37 @@ Lines an agent changed and you haven't reviewed have a bar in a column right of 
 | `:q!` | Closes the pane, throwing away the file's changes not written. |
 | `:e!` | Throws away the changes not written, reading the file again. That's an edit like any other: `u` brings the changes back. |
 
-Writing writes a new file beside the old one, with its permissions, then renames it over the old one, so the file is never half written. If something else has changed the file since it was read or last written, `:w` refuses, so as not to write over the change; `:w!` writes over it. The bottom bar shows `[+]` after the file's name while it has changes that aren't written.
+Writing writes a new file beside the old one, with its permissions, then
+renames it over the old one, so the file is never half written. If something
+else has changed the file since it was read or last written, `:w` refuses, so
+as not to write over the change; `:w!` writes over it. The bottom bar shows
+`[+]` after the file's name while it has changes that aren't written.
 
-When something other than an agent changes the file on disk, such as a git checkout or another editor, a file with nothing unwritten is read again, as Vim's `autoread` does. That's an edit like any other, so `u` takes it back. With changes not written, yours stay, `:w` refuses, and the bar says the file changed: `:e!` takes it, `:w!` keeps yours. A file over 4 MB is never read again by itself: the bar says it changed. Turn `autoread` off to be told in every case.
+When something other than an agent changes the file on disk, such as a git
+checkout or another editor, a file with nothing unwritten is read again, as
+Vim's `autoread` does. That's an edit like any other, so `u` takes it back.
+With changes not written, yours stay, `:w` refuses, and the bar says the file
+changed: `:e!` takes it, `:w!` keeps yours. A file over 4 MB is never read
+again by itself: the bar says it changed. Turn `autoread` off to be told in
+every case.
 
 ## Recovery
 
-Changes not written, a `[No Name]`'s too, are kept on disk as you make them, so they outlive the daemon crashing, being killed or stopping, or the machine going down, as Vim's swap files do. Each buffer with changes has a file in `~/.local/state/clackatoo/recovery`, for you alone: the folder is 0700, each file 0600. It's written a second after you stop typing, and every few seconds while you don't (less often for a big file), by a thread of the daemon's own, so a key never waits for the disk. It goes once the file is written, its changes are thrown away with `:e!`, or they're undone. A buffer over 64 MB isn't kept, and the bar says so. `CLACKATOO_RECOVERY` sets another folder for the daemon, or `off` for none. Only one daemon at a time keeps the files in a folder: a second one keeps none, and says so. An upgrade hands the folder to the next build.
+Changes not written, a `[No Name]`'s too, are kept on disk as you make them,
+so they outlive the daemon crashing, being killed or stopping, or the machine
+going down, as Vim's swap files do. Each buffer with changes has a file in
+`~/.local/state/clackatoo/recovery`, for you alone: the folder is 0700, each
+file 0600. It's written a second after you stop typing, and every few seconds
+while you don't (less often for a big file), by a thread of the daemon's own,
+so a key never waits for the disk. It goes once the file is written, its
+changes are thrown away with `:e!`, or they're undone. A buffer over 64 MB
+isn't kept, and the bar says so. `CLACKATOO_RECOVERY` sets another folder for
+the daemon, or `off` for none. Only one daemon at a time keeps the files in a
+folder: a second one keeps none, and says so. An upgrade hands the folder to
+the next build.
 
-When the daemon next starts, each comes back unseen, as a file with changes not written does after `:q`: opening the file shows it.
+When the daemon next starts, each comes back unseen, as a file with changes
+not written does after `:q`: opening the file shows it.
 
 | What came back | What happens |
 |---|---|
@@ -360,13 +755,19 @@ When the daemon next starts, each comes back unseen, as a file with changes not 
 | `:recover`, `:rec` | In a file whose changes were set aside, takes them. Otherwise shows the next file or `[No Name]` that came back that no pane shows: in place of an editor's file, or in a new tab. |
 | `:recover!` | Drops a file's changes that were set aside. |
 
-As the daemon starts, it takes back at most 64 files or 256 MB at once; `:recover` takes back the rest, one at a time.
+As the daemon starts, it takes back at most 64 files or 256 MB at once;
+`:recover` takes back the rest, one at a time.
 
 ## Line numbers
 
-Line numbers run down the pane's left. To begin with, the cursor's line shows its own number, in clackatoo's yellow, and every other line shows how far it is from the cursor, so the count for a motion such as `5j` or `3dd` can be read off the screen. The numbers widen as the file grows, and a pane too narrow for them to leave the text 12 columns shows none.
+Line numbers run down the pane's left. To begin with, the cursor's line shows
+its own number, in clackatoo's yellow, and every other line shows how far it
+is from the cursor, so the count for a motion such as `5j` or `3dd` can be
+read off the screen. The numbers widen as the file grows, and a pane too
+narrow for them to leave the text 12 columns shows none.
 
-Three [options](~clackatoo/reference/config#options) choose them, as in Vim. Set them in the config, or as you go with `:set`:
+Three [options](~clackatoo/reference/config#options) choose them, as in Vim.
+Set them in the config, or as you go with `:set`:
 
 | Options | Show |
 |---|---|
@@ -375,17 +776,42 @@ Three [options](~clackatoo/reference/config#options) choose them, as in Vim. Set
 | `relativenumber` alone (`:set nonu`) | Distances, with 0 on the cursor's line. |
 | Neither (`:set nonu nornu`) | No numbers. |
 
-`numberwidth` is the fewest columns they take, with the space after them: 4 to begin with.
+`numberwidth` is the fewest columns they take, with the space after them: 4 to
+begin with.
 
 ## Tabs and indenting
 
-A tab is drawn to the next column that's a multiple of `tabstop`: 4 to begin with. `>>`, `<<` and <kbd>Tab</kbd> in insert mode indent by `shiftwidth` columns, which is `tabstop`'s while it's 0, as it starts.
+A tab is drawn to the next column that's a multiple of `tabstop`: 4 to begin
+with. `>>`, `<<` and <kbd>Tab</kbd> in insert mode indent by `shiftwidth`
+columns, which is `tabstop`'s while it's 0, as it starts.
 
-A file keeps the kind of indent it has, whatever the options say. `>`, `<` and <kbd>Tab</kbd> indent with tabs or spaces as the first indented line among those they change does, or else the nearest indented line around them. `expandtab`, on to begin with, decides only where no line nearby is indented yet: spaces while it's on, tabs while it's off.
+A file keeps the kind of indent it has, whatever the options say. `>`, `<` and
+<kbd>Tab</kbd> indent with tabs or spaces as the first indented line among
+those they change does, or else the nearest indented line around them.
+`expandtab`, on to begin with, decides only where no line nearby is indented
+yet: spaces while it's on, tabs while it's off.
 
-`>` and `<` write each line's indent afresh, as many tabs as fit and spaces for the rest, or all spaces. Empty lines stay empty. Changing `tabstop` with a file open redraws its tabs, and the cursor and selection stay on their characters.
+`>` and `<` write each line's indent afresh, as many tabs as fit and spaces
+for the rest, or all spaces. Empty lines stay empty. Changing `tabstop` with a
+file open redraws its tabs, and the cursor and selection stay on their
+characters.
 
-A new line is indented as its language says, where its pack has the rules for it. It takes the indent of the line before at once, so typing never waits, and is put right a moment later, when the daemon has worked it out: usually within a millisecond or two. What you type meanwhile stays after the indent, but if you've typed in the indent itself, as a <kbd>Tab</kbd> or <kbd>Backspace</kbd> does, or made another change, it's left as you made it. A line where `}`, `]`, or `)` is typed first is worked out again. So is a line that starts with `else`, `elif`, `elsif`, `elseif`, `except`, `finally`, `catch`, `rescue`, `ensure`, `case` or `default`, or with `end`, `fi`, `done` or `esac`, which end blocks, once you've typed the word: the key after it, such as a space, <kbd>Tab</kbd>, `{`, `:` or <kbd>Enter</kbd>, or <kbd>Esc</kbd>, finishes it. Only a word you type counts, not one that was there or was pasted, nor a longer word such as `elsewhere`. The rules decide the indent, so a word that isn't one of the language's gets what `=` would give the line. `:set nosi` turns this off, for new lines and these words, and a new line keeps the line before's indent. `=` indents by the rules either way.
+A new line is indented as its language says, where its pack has the rules for
+it. It takes the indent of the line before at once, so typing never waits, and
+is put right a moment later, when the daemon has worked it out: usually within
+a millisecond or two. What you type meanwhile stays after the indent, but if
+you've typed in the indent itself, as a <kbd>Tab</kbd> or <kbd>Backspace</kbd>
+does, or made another change, it's left as you made it. A line where `}`, `]`,
+or `)` is typed first is worked out again. So is a line that starts with
+`else`, `elif`, `elsif`, `elseif`, `except`, `finally`, `catch`, `rescue`,
+`ensure`, `case` or `default`, or with `end`, `fi`, `done` or `esac`, which
+end blocks, once you've typed the word: the key after it, such as a space,
+<kbd>Tab</kbd>, `{`, `:` or <kbd>Enter</kbd>, or <kbd>Esc</kbd>, finishes it.
+Only a word you type counts, not one that was there or was pasted, nor a
+longer word such as `elsewhere`. The rules decide the indent, so a word that
+isn't one of the language's gets what `=` would give the line. `:set nosi`
+turns this off, for new lines and these words, and a new line keeps the line
+before's indent. `=` indents by the rules either way.
 
 ```text
 :set ts=8 sw=4      tabs 8 wide, indenting by 4
@@ -404,11 +830,19 @@ A new line is indented as its language says, where its pack has the rules for it
 | `showbreak` | Drawn at the start of those rows, after the indent, such as `:set sbr=↪\ `. | none |
 | `colorcolumn` | Marks columns down the file's lines, such as `:set cc=80,120`, to keep lines short by. They count from 1, as the bottom bar's column does. | none |
 
-The marks are drawn behind the text, and the selection over it. See [the options](~clackatoo/reference/config#options) for setting them.
+The marks are drawn behind the text, and the selection over it. See
+[the options](~clackatoo/reference/config#options) for setting them.
 
 ## Rendered Markdown
 
-`<Space>tm`, or `:markdown`, shows a Markdown file (`.md`, `.markdown`) rendered, in place of its text: headings, lists, task lists, quotes, tables, rules, links, and code colored as the editor colors its language, in a column of prose down the pane. Again, it shows the text. Either way it keeps your place: the rendered view opens with the block holding the line at the top of the text's view at its top, and the text comes back with the top block's first line at the top. It's a view of the file: what anyone changes, in another pane or window or an agent's chat, shows as it's made.
+`<Space>tm`, or `:markdown`, shows a Markdown file (`.md`, `.markdown`)
+rendered, in place of its text: headings, lists, task lists, quotes, tables,
+rules, links, and code colored as the editor colors its language, in a column
+of prose down the pane. Again, it shows the text. Either way it keeps your
+place: the rendered view opens with the block holding the line at the top of
+the text's view at its top, and the text comes back with the top block's first
+line at the top. It's a view of the file: what anyone changes, in another pane
+or window or an agent's chat, shows as it's made.
 
 | Key | Does |
 |---|---|
@@ -417,15 +851,32 @@ The marks are drawn behind the text, and the selection over it. See [the options
 | <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Page Down</kbd>, <kbd>Page Up</kbd> | A view less two lines, which stay in view; a count goes that many |
 | `gg` `G` | The top, the end; `10G` or `10gg`, the block holding line 10 |
 
-The keys are read as the text's are, so a count or `g` shows in the bar while it's typed, and <kbd>Esc</kbd> forgets it. The wheel scrolls it too. Any other key is the text's: the text comes back where the view was, and the key does there what it does, so `i` types at the start of the top block, and `/` searches the text. `:w`, `:q`, and the rest of the command line are the same either way.
+The keys are read as the text's are, so a count or `g` shows in the bar while
+it's typed, and <kbd>Esc</kbd> forgets it. The wheel scrolls it too. Any other
+key is the text's: the text comes back where the view was, and the key does
+there what it does, so `i` types at the start of the top block, and `/`
+searches the text. `:w`, `:q`, and the rest of the command line are the same
+either way.
 
-Selecting a link opens it: a web address with the desktop's opener, as a terminal's links open, asking first, with where it goes shown whole, if it isn't a plain `http://` or `https://` address or a mail address; a file in the editor, in place of this one, as `:e` would, written from the Markdown file's folder; and `#` and a heading scrolls to that heading, named as GitHub names them. An image shows its text, after `▣`.
+Selecting a link opens it: a web address with the desktop's opener, as a
+terminal's links open, asking first, with where it goes shown whole, if it
+isn't a plain `http://` or `https://` address or a mail address; a file in the
+editor, in place of this one, as `:e` would, written from the Markdown file's
+folder; and `#` and a heading scrolls to that heading, named as GitHub names
+them. An image shows its text, after `▣`.
 
-The [option](~clackatoo/reference/config#options) `markdownview` says how a Markdown file opens: as its text, `raw`, to begin with, or `rendered`.
+The [option](~clackatoo/reference/config#options) `markdownview` says how a
+Markdown file opens: as its text, `raw`, to begin with, or `rendered`.
 
 ## Keys
 
-An editor in a window of its own starts in normal mode, as in Vim. One you go to takes [the window's mode](~clackatoo/reference/window#modes): in insert mode it types at its cursor once its text has come, holding what you type until then. A file opened from the explorer or a review opens in normal mode. The bottom bar shows the mode, the file's name, and the cursor's line and column, and before them a command half typed, as `2d` or `"a`, as Vim's `showcmd` shows it.
+An editor in a window of its own starts in normal mode, as in Vim. One you go
+to takes [the window's mode](~clackatoo/reference/window#modes): in insert
+mode it types at its cursor once its text has come, holding what you type
+until then. A file opened from the explorer or a review opens in normal mode.
+The bottom bar shows the mode, the file's name, and the cursor's line and
+column, and before them a command half typed, as `2d` or `"a`, as Vim's
+`showcmd` shows it.
 
 ### Moving
 
@@ -463,28 +914,96 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `K` | What's under the cursor, as the [language server](#language-servers) says, in a panel by the cursor, with what's wrong there in full above it, its code colored and the name it's about underlined. `K` again pages through a long one, <kbd>Ctrl</kbd>+<kbd>E</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd> scroll it, and <kbd>Esc</kbd>, moving the cursor or an edit closes it. |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> `d`, <kbd>Ctrl</kbd>+<kbd>W</kbd> <kbd>Ctrl</kbd>+<kbd>D</kbd> | What's wrong under the cursor, or else on its line, in full, in the same panel. |
 
-A word is letters, digits and `_`, and in a language whose pack says so, more: in CSS, `margin-top` and `--main-color` are each one word to `w`, `b`, `e`, `iw`, `aw`, `cw`, `*`, `#` and <kbd>Ctrl</kbd>+<kbd>W</kbd> in insert mode, and to `\<`, `\>` and `\k` in a search, which take words as the motions do, past ASCII too: `*` on the `中文` of `x中文` searches for `中文`, a word of its own, as Vim's does. A search with `\<` or `\>` in such a file that would take too long to finish says it's too complex, and changes nothing. `W`, `B` and `E` are the same in every language, and terminals keep plain words. Past ASCII, characters make words as Vim sorts them: in Latin-1, accented letters and `µ` are letters, but `ª`, `²` and `½` are punctuation and the no-break space is blank; past it, CJK ideographs, kana, hangul and emoji are each a kind of word of their own, apart from letters, so `w` goes from `中文` to the `x` after it. A skin tone after an emoji, or after any other character, goes with it as part of its word to the motions (`dw` on `👍🏽` takes it whole), though not after a tab or at a line's start, and only up to four in a row; to `*`, `#`, `\<` and `\>` a skin tone is punctuation, so `*` on `👍🏽` searches for `👍` with any tone or none.
+A word is letters, digits and `_`, and in a language whose pack says so, more:
+in CSS, `margin-top` and `--main-color` are each one word to `w`, `b`, `e`,
+`iw`, `aw`, `cw`, `*`, `#` and <kbd>Ctrl</kbd>+<kbd>W</kbd> in insert mode,
+and to `\<`, `\>` and `\k` in a search, which take words as the motions do,
+past ASCII too: `*` on the `中文` of `x中文` searches for `中文`, a word of its own,
+as Vim's does. A search with `\<` or `\>` in such a file that would take too
+long to finish says it's too complex, and changes nothing. `W`, `B` and `E`
+are the same in every language, and terminals keep plain words. Past ASCII,
+characters make words as Vim sorts them: in Latin-1, accented letters and `µ`
+are letters, but `ª`, `²` and `½` are punctuation and the no-break space is
+blank; past it, CJK ideographs, kana, hangul and emoji are each a kind of word
+of their own, apart from letters, so `w` goes from `中文` to the `x` after it. A
+skin tone after an emoji, or after any other character, goes with it as part
+of its word to the motions (`dw` on `👍🏽` takes it whole), though not after a
+tab or at a line's start, and only up to four in a row; to `*`, `#`, `\<` and
+`\>` a skin tone is punctuation, so `*` on `👍🏽` searches for `👍` with any tone
+or none.
 
 ### Shown as you type
 
-While you type a search after `/` or `?`, the cursor goes to the match it would find from where you started, the view follows, and its matches are lit up, the one it would go to brighter, as Neovim's `incsearch` shows them. Each key shows it afresh from where you started, <kbd>Backspace</kbd> too. <kbd>Esc</kbd> puts the cursor, the view and what was lit before back; <kbd>Enter</kbd> keeps them, and is the search, so `n`, the search history and macros have it as they would without it. A pattern you haven't finished, such as `\(` without its `\)`, shows nothing yet, nor does a count before `/` until <kbd>Enter</kbd>.
+While you type a search after `/` or `?`, the cursor goes to the match it
+would find from where you started, the view follows, and its matches are lit
+up, the one it would go to brighter, as Neovim's `incsearch` shows them. Each
+key shows it afresh from where you started, <kbd>Backspace</kbd> too.
+<kbd>Esc</kbd> puts the cursor, the view and what was lit before back;
+<kbd>Enter</kbd> keeps them, and is the search, so `n`, the search history and
+macros have it as they would without it. A pattern you haven't finished, such
+as `\(` without its `\)`, shows nothing yet, nor does a count before `/` until
+<kbd>Enter</kbd>.
 
-It's worked out once before each frame is drawn, not at each key, so typing fast costs one search between frames, and a macro typing `/foo` and <kbd>Enter</kbd> costs none. It looks no further than a megabyte from where you started each way round the file's ends, and through no more than so many matches going back. Where it can't be sure it would find what <kbd>Enter</kbd> will, such as a match further away than that, matches along a very long line found from part way along it, or a pattern that crosses line breaks in a big file, it shows nothing until <kbd>Enter</kbd>, rather than a match <kbd>Enter</kbd> wouldn't go to. Edits from elsewhere while you type move where it started, and show at your next key. A pattern with `\<`, `\>` or `\k` in it also reads the whole file once a key to check how its words are made, as any search with them does. With the [option](~clackatoo/reference/config#options) `incsearch` off, nothing moves until <kbd>Enter</kbd>.
+It's worked out once before each frame is drawn, not at each key, so typing
+fast costs one search between frames, and a macro typing `/foo` and
+<kbd>Enter</kbd> costs none. It looks no further than a megabyte from where
+you started each way round the file's ends, and through no more than so many
+matches going back. Where it can't be sure it would find what <kbd>Enter</kbd>
+will, such as a match further away than that, matches along a very long line
+found from part way along it, or a pattern that crosses line breaks in a big
+file, it shows nothing until <kbd>Enter</kbd>, rather than a match
+<kbd>Enter</kbd> wouldn't go to. Edits from elsewhere while you type move
+where it started, and show at your next key. A pattern with `\<`, `\>` or `\k`
+in it also reads the whole file once a key to check how its words are made, as
+any search with them does. With the
+[option](~clackatoo/reference/config#options) `incsearch` off, nothing moves
+until <kbd>Enter</kbd>.
 
 ### Lit matches
 
-After `/`, `?`, `*`, `#`, `n` or `N`, every match of the search in view is lit up, as Neovim's `hlsearch` lights them, and the one the search went to brighter than the rest. `:s`, `:g` and a `:/pattern/` address make their pattern the last search, and light its matches, as in Vim. They stay lit as you move, edit and scroll, until <kbd>Esc</kbd> in normal mode (leaving visual mode keeps them) or `:nohlsearch` (`:noh`), and come back at the next search, `n` or `N`. A terminal's and a chat's do the same. With the [option](~clackatoo/reference/config#options) `hlsearch` off, only the match found is lit.
+After `/`, `?`, `*`, `#`, `n` or `N`, every match of the search in view is lit
+up, as Neovim's `hlsearch` lights them, and the one the search went to
+brighter than the rest. `:s`, `:g` and a `:/pattern/` address make their
+pattern the last search, and light its matches, as in Vim. They stay lit as
+you move, edit and scroll, until <kbd>Esc</kbd> in normal mode (leaving visual
+mode keeps them) or `:nohlsearch` (`:noh`), and come back at the next search,
+`n` or `N`. A terminal's and a chat's do the same. With the
+[option](~clackatoo/reference/config#options) `hlsearch` off, only the match
+found is lit.
 
-Matches are found along each line from its start, or a few kilobytes before what's shown of a very long line, one after another, as `n` finds them, so they never overlap, and none is drawn over the one found. Only the lines in view are looked through, with a few kilobytes around what's shown of each, for a match that runs into view from before it, from an earlier line too, or on past it, and at most 512 matches on a line; and only again when the text, the view or the search changes, not at each `n`. So a huge file or a very long line costs no more than a short one. A match starting at a line's break, as `/\nfoo` finds, lights the cell after the line's end.
+Matches are found along each line from its start, or a few kilobytes before
+what's shown of a very long line, one after another, as `n` finds them, so
+they never overlap, and none is drawn over the one found. Only the lines in
+view are looked through, with a few kilobytes around what's shown of each, for
+a match that runs into view from before it, from an earlier line too, or on
+past it, and at most 512 matches on a line; and only again when the text, the
+view or the search changes, not at each `n`. So a huge file or a very long
+line costs no more than a short one. A match starting at a line's break, as
+`/\nfoo` finds, lights the cell after the line's end.
 
 ### Jumps
 
-`gg`, `G`, `12G`, <kbd>Ctrl</kbd>+<kbd>Home</kbd>, <kbd>Ctrl</kbd>+<kbd>End</kbd>, `H`, `M`, `L`, `%`, `{`, `}`, `(`, `)`, `]c`, `[c`, `]f`, `[f`, `]C`, `[C`, `` `a ``, `'a`, `''`, a search found with Enter, `*`, `#`, `n`, `N`, `]d`, `[d`, `gd` and its kin, `zt`, `zz` and `zb` with a count, `:12`, `:$`, `:+3`, and `:e` are jumps: the window remembers where the cursor was, and Ctrl+O goes back there, opening the file again in place of the one shown if it has to, as `:e` does. Ctrl+I goes forward again. A count goes that many places, as `3` Ctrl+O, or nowhere if there aren't that many. Moving to another pane is a jump too (see [the window](~clackatoo/reference/window#moving-around)).
+`gg`, `G`, `12G`, <kbd>Ctrl</kbd>+<kbd>Home</kbd>,
+<kbd>Ctrl</kbd>+<kbd>End</kbd>, `H`, `M`, `L`, `%`, `{`, `}`, `(`, `)`, `]c`,
+`[c`, `]f`, `[f`, `]C`, `[C`, `` `a ``, `'a`, `''`, a search found with Enter,
+`*`, `#`, `n`, `N`, `]d`, `[d`, `gd` and its kin, `zt`, `zz` and `zb` with a
+count, `:12`, `:$`, `:+3`, and `:e` are jumps: the window remembers where the
+cursor was, and Ctrl+O goes back there, opening the file again in place of the
+one shown if it has to, as `:e` does. Ctrl+I goes forward again. A count goes
+that many places, as `3` Ctrl+O, or nowhere if there aren't that many. Moving
+to another pane is a jump too (see
+[the window](~clackatoo/reference/window#moving-around)).
 
-A jump from the line the last one left replaces it, so going back never stops twice on one line. A place moves with the text while a pane of the window shows its file, whoever edits it. Once none does, it keeps its line and column, as far as the file still goes.
+A jump from the line the last one left replaces it, so going back never stops
+twice on one line. A place moves with the text while a pane of the window
+shows its file, whoever edits it. Once none does, it keeps its line and
+column, as far as the file still goes.
 
 
-`` ` `` and a mark go to it, and `'` to its line's first character that isn't blank (see [Marks](#marks)). `''` and ` `` ` go back to where the last jump left in this file, and again to come back. `m'` makes where the cursor is a place to come back to.
+`` ` `` and a mark go to it, and `'` to its line's first character that isn't
+blank (see [Marks](#marks)). `''` and ` `` ` go back to where the last jump
+left in this file, and again to come back. `m'` makes where the cursor is a
+place to come back to.
 ### Changing
 
 | Keys | Does |
@@ -517,11 +1036,14 @@ A jump from the line the last one left replaces it, so going back never stops tw
 
 `cw` changes to the end of the word, not up to the next word, as in Vim.
 
-What `y` copies goes on the clipboard too. What `d` and `c` delete only goes where `p` puts from, so deleting doesn't lose what you copied from somewhere else.
+What `y` copies goes on the clipboard too. What `d` and `c` delete only goes
+where `p` puts from, so deleting doesn't lose what you copied from somewhere
+else.
 
 ### Insert mode
 
-Keys type into the file. <kbd>Esc</kbd>, or <kbd>Ctrl</kbd>+<kbd>;</kbd> as in a terminal, goes back to normal mode.
+Keys type into the file. <kbd>Esc</kbd>, or <kbd>Ctrl</kbd>+<kbd>;</kbd> as in
+a terminal, goes back to normal mode.
 
 | Keys | Does |
 |---|---|
@@ -533,37 +1055,92 @@ Keys type into the file. <kbd>Esc</kbd>, or <kbd>Ctrl</kbd>+<kbd>;</kbd> as in a
 | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Deletes back to the end of the line's indent, or from there, to the line's start. |
 | The arrows, <kbd>Home</kbd>, <kbd>End</kbd> | Move, and start a new undo step. |
 
-A count before `i`, `a`, or `o` types what's typed that many times: `3ix` <kbd>Esc</kbd> types `xxx`.
+A count before `i`, `a`, or `o` types what's typed that many times: `3ix`
+<kbd>Esc</kbd> types `xxx`.
 
 ### The mouse
 
-A click puts the cursor where it's clicked, or at the line's start if it's on the line's number, and the wheel scrolls. A click beside a row a line goes on over goes to that row's start. Moving up and down after a click aims for the column clicked, as Neovim's cursor does, even past the end of a short line or in the middle of a tab.
+A click puts the cursor where it's clicked, or at the line's start if it's on
+the line's number, and the wheel scrolls. A click beside a row a line goes on
+over goes to that row's start. Moving up and down after a click aims for the
+column clicked, as Neovim's cursor does, even past the end of a short line or
+in the middle of a tab.
 
-With <kbd>Alt</kbd> held, or <kbd>Ctrl</kbd> and <kbd>Alt</kbd>, dragging selects a block of columns. Dragging selects, as in Neovim: from where the button went down to where the mouse is, in visual mode, ready for `d`, `y`, `c`, `>` and the rest once you let go. A double click selects a word, by the file's own word characters, and dragging after it selects whole words; a triple click selects the line, and dragging after it whole lines. A long line wrapped over several rows is selected row by row, and an inlay hint is never selected: the mouse on one takes the character it's drawn before. A click ends the selection, and `gv` selects it again. An editor showing a folder selects the same way, but a double click there opens what's clicked, as <kbd>Enter</kbd> does.
+With <kbd>Alt</kbd> held, or <kbd>Ctrl</kbd> and <kbd>Alt</kbd>, dragging
+selects a block of columns. Dragging selects, as in Neovim: from where the
+button went down to where the mouse is, in visual mode, ready for `d`, `y`,
+`c`, `>` and the rest once you let go. A double click selects a word, by the
+file's own word characters, and dragging after it selects whole words; a
+triple click selects the line, and dragging after it whole lines. A long line
+wrapped over several rows is selected row by row, and an inlay hint is never
+selected: the mouse on one takes the character it's drawn before. A click ends
+the selection, and `gv` selects it again. An editor showing a folder selects
+the same way, but a double click there opens what's clicked, as
+<kbd>Enter</kbd> does.
 
-Mouse-wheel scrolling is smooth across native panes, including editors, terminal history, chats, rendered Markdown, explorers, boards and reviews. Trackpads retain pixel precision, and keyboard navigation remains immediate. Use `:set nosmoothscroll` to disable wheel animation, or save `client.opt.smoothscroll = false` in `client/init.lua`. Programs that handle their own mouse input receive wheel events directly.
+Mouse-wheel scrolling is smooth across native panes, including editors,
+terminal history, chats, rendered Markdown, explorers, boards and reviews.
+Trackpads retain pixel precision, and keyboard navigation remains immediate.
+Use `:set nosmoothscroll` to disable wheel animation, or save
+`client.opt.smoothscroll = false` in `client/init.lua`. Programs that handle
+their own mouse input receive wheel events directly.
 
-Past the pane's top or bottom, the view scrolls while the button is held, faster the further past the mouse goes. While you drag, the view keeps still under the mouse; once you let go, `scrolloff` keeps rows around the cursor again. If the text changes under a drag, say by an agent's edit, where it started moves with the text.
+Past the pane's top or bottom, the view scrolls while the button is held,
+faster the further past the mouse goes. While you drag, the view keeps still
+under the mouse; once you let go, `scrolloff` keeps rows around the cursor
+again. If the text changes under a drag, say by an agent's edit, where it
+started moves with the text.
 
-Letting go puts what's selected on the primary selection, which a middle click pastes, as selecting in a terminal does; not with `clipboard=unnamed`, where `p` over the selection would put the selection itself.
+Letting go puts what's selected on the primary selection, which a middle click
+pastes, as selecting in a terminal does; not with `clipboard=unnamed`, where
+`p` over the selection would put the selection itself.
 
-A drag from insert mode selects in visual mode for a while, as Neovim's "(insert) VISUAL" does, and the bar says `(insert) VISUAL`: once the selection ends, by an operator, <kbd>Esc</kbd> or a click, the editor goes back to insert mode at the cursor; `c` types over it. A binding or macro run on it goes back to insert only once all its keys have run. `:` on it, `gra`, and leaving the pane leave it in normal mode.
+A drag from insert mode selects in visual mode for a while, as Neovim's
+"(insert) VISUAL" does, and the bar says `(insert) VISUAL`: once the selection
+ends, by an operator, <kbd>Esc</kbd> or a click, the editor goes back to
+insert mode at the cursor; `c` types over it. A binding or macro run on it
+goes back to insert only once all its keys have run. `:` on it, `gra`, and
+leaving the pane leave it in normal mode.
 
 ## Known limits
 
-- A window isn't told of changes that came back until it opens their file, or `:recover`; a `[No Name]` that came back isn't in `:Buffers`.
-- No `breakat` or `breakindentopt`. Typing near the start of a line of megabytes that isn't plain ASCII takes a moment, as the rest of it is laid out again.
-- Lightbulbs or gutter hints for lines with code actions, and typing to narrow the menu of them.
+- A window isn't told of changes that came back until it opens their file, or
+  `:recover`; a `[No Name]` that came back isn't in `:Buffers`.
+- No `breakat` or `breakindentopt`. Typing near the start of a line of
+  megabytes that isn't plain ASCII takes a moment, as the rest of it is laid
+  out again.
+- Lightbulbs or gutter hints for lines with code actions, and typing to narrow
+  the menu of them.
 - `:jumps`, to list them.
-- A server installed some other way than through clackatoo, after a file of its was first opened, isn't looked for again until the daemon restarts.
-- `indentkeys` and `indentexpr` as options. <kbd>Esc</kbd> on a line with nothing but its indent leaves the indent. `.` doesn't wait for a repeated new line's indent to be put right.
-- In Python, `else:` typed under the body it ends stays where it's typed, where Neovim takes it back a step: the grammar clackatoo installs reads that line differently.
-- Languages inside others, such as code in a Markdown file, or CSS in HTML: they're colored as the outer language only. Code in a Markdown file is colored only when it's [rendered](#rendered-markdown).
-- Selecting, copying or searching rendered Markdown, images in it, scrolling a wide table in it sideways, and a link's heading in another file.
-- Choosing the colors. They're the palette's named colors where there's one to suit, so they follow the terminal's.
+- A server installed some other way than through clackatoo, after a file of
+  its was first opened, isn't looked for again until the daemon restarts.
+- `indentkeys` and `indentexpr` as options. <kbd>Esc</kbd> on a line with
+  nothing but its indent leaves the indent. `.` doesn't wait for a repeated
+  new line's indent to be put right.
+- In Python, `else:` typed under the body it ends stays where it's typed,
+  where Neovim takes it back a step: the grammar clackatoo installs reads that
+  line differently.
+- Languages inside others, such as code in a Markdown file, or CSS in HTML:
+  they're colored as the outer language only. Code in a Markdown file is
+  colored only when it's [rendered](#rendered-markdown).
+- Selecting, copying or searching rendered Markdown, images in it, scrolling a
+  wide table in it sideways, and a link's heading in another file.
+- Choosing the colors. They're the palette's named colors where there's one to
+  suit, so they follow the terminal's.
 - Options for one pane only: `:set` sets them for every pane.
-- `clackatoo edit` opens the tab, but the window doesn't switch to it ([`clackatoo open`](~clackatoo/reference/cli#open) does).
-- `\1` inside a pattern, `\@` lookaround, `\&`, and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that moves more than one line, as `:g/^/m0` does, leaves marks on them where they were, as its moves are made as one edit. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
-- Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S` and `R` don't act on whole lines as Vim's do, `X`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
+- `clackatoo edit` opens the tab, but the window doesn't switch to it
+  ([`clackatoo open`](~clackatoo/reference/cli#open) does).
+- `\1` inside a pattern, `\@` lookaround, `\&`, and `\%V`; `\zs` and `\ze`
+  inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that
+  moves more than one line, as `:g/^/m0` does, leaves marks on them where they
+  were, as its moves are made as one edit. There are no `'[` and `']` marks.
+  Macros don't record pastes. A mark on deleted text stays where the text was,
+  rather than going.
+- Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`,
+  `C`, `S` and `R` don't act on whole lines as Vim's do, `X`, `R` and `S`
+  don't act on a block as Vim's do, and `.` doesn't make `gq` again.
 - A change typed right as the connection to the daemon drops can be lost.
-- Where `u` puts the cursor differs from Vim in a few cases: after `A` on a selection made from its end back to its start, after `d` with a search, and after `:d` or `:m` on lines selected in visual mode, which Vim starts from the selection's first line's start.
+- Where `u` puts the cursor differs from Vim in a few cases: after `A` on a
+  selection made from its end back to its start, after `d` with a search, and
+  after `:d` or `:m` on lines selected in visual mode, which Vim starts from
+  the selection's first line's start.

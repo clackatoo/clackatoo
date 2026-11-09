@@ -7,7 +7,13 @@ related:
   - clackatoo/reference/cli
 ---
 
-The window's behavior is configured in code: an `init.lua`, as Neovim's is, written in [Luau](https://luau.org), a fast dialect of Lua with optional types and a sandbox. Without one, the window works as it always does. Settings needed before the window starts, such as the graphics API, stay in [`startup.toml`](~clackatoo/reference/window#settings), beside it. The font is both: startup.toml's is what the window starts in, and `init.lua`'s outdoes it.
+The window's behavior is configured in code: an `init.lua`, as Neovim's is,
+written in [Luau](https://luau.org), a fast dialect of Lua with optional types
+and a sandbox. Without one, the window works as it always does. Settings
+needed before the window starts, such as the graphics API, stay in
+[`startup.toml`](~clackatoo/reference/window#settings), beside it. The font is
+both: startup.toml's is what the window starts in, and `init.lua`'s outdoes
+it.
 
 ```lua
 -- ~/.config/clackatoo/client/init.lua
@@ -44,11 +50,20 @@ end)
   lua/                      modules shared with the daemon's config, once it has one
 ```
 
-`require("theme")` loads `theme.lua` from `client/lua/`, or else `lua/`, or `theme/init.lua` from either. A dot in a name is a directory: `require("keys.tmux")` is `keys/tmux.lua`. Each module runs once, and later requires get what it returned.
+`require("theme")` loads `theme.lua` from `client/lua/`, or else `lua/`, or
+`theme/init.lua` from either. A dot in a name is a directory:
+`require("keys.tmux")` is `keys/tmux.lua`. Each module runs once, and later
+requires get what it returned.
 
-The config runs once for the client, the process that opens windows, so its bindings apply in every window. It runs on a thread of its own, alongside the window starting up, and a typical config takes under a millisecond. The window never waits for it to show itself: keys pressed before it has run do what they do without it.
+The config runs once for the client, the process that opens windows, so its
+bindings apply in every window. It runs on a thread of its own, alongside the
+window starting up, and a typical config takes under a millisecond. The window
+never waits for it to show itself: keys pressed before it has run do what they
+do without it.
 
-`:reload` runs the config again, from the start. Everything the old config bound or listened for goes, the window's own keys come back first, and options go back to how they start, including those changed with `:set`.
+`:reload` runs the config again, from the start. Everything the old config
+bound or listened for goes, the window's own keys come back first, and options
+go back to how they start, including those changed with `:set`.
 
 
 ### The daemon's name
@@ -59,35 +74,72 @@ The config runs once for the client, the process that opens windows, so its bind
 name = "jack-desktop"
 ```
 
-Without it, the daemon takes the machine's hostname. It's read when the daemon starts or upgrades.
+Without it, the daemon takes the machine's hostname. It's read when the daemon
+starts or upgrades.
 
-`priority = false` beside it has the daemon run as other programs do, rather than [ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
+`priority = false` beside it has the daemon run as other programs do, rather
+than
+[ahead of them](~clackatoo/reference/cli#staying-quick-on-a-busy-machine).
 
-Each daemon also has an ID of its own, chosen the first time it starts and kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`), or in `$CLACKATOO_MACHINE`. Deleting that file makes the daemon a new machine to every other; copying it to another machine makes the two refuse each other until one of them deletes it. `CLACKATOO_MACHINE=off` chooses a new ID at every start, as tests do.
+Each daemon also has an ID of its own, chosen the first time it starts and
+kept in `machine` in clackatoo's state directory (`~/.local/state/clackatoo`),
+or in `$CLACKATOO_MACHINE`. Deleting that file makes the daemon a new machine
+to every other; copying it to another machine makes the two refuse each other
+until one of them deletes it. `CLACKATOO_MACHINE=off` chooses a new ID at
+every start, as tests do.
 
 ## How a key travels
 
 Each key you press goes through, in order:
 
-1. **Keypress handlers**, added with `on("keypress", …)`, in the order they were added. A handler on a pane only hears keys pressed in that pane.
+1. **Keypress handlers**, added with `on("keypress", …)`, in the order they
+   were added. A handler on a pane only hears keys pressed in that pane.
 2. **Bindings**, the window's own and those made with `client.keys.map`.
-3. **The pane**: the program in a terminal, the box in a chat, or the pane's normal mode.
+3. **The pane**: the program in a terminal, the box in a chat, or the pane's
+   normal mode.
 
-A handler lets the key go on unless it calls `ev:stop()`, which ends its journey there. A binding stops its keys unless it calls `ev:propagate()`, which lets them go on to the pane, as if they weren't bound. If the binding took several keys, such as `<C-b>x`, they all go on, in order.
+A handler lets the key go on unless it calls `ev:stop()`, which ends its
+journey there. A binding stops its keys unless it calls `ev:propagate()`,
+which lets them go on to the pane, as if they weren't bound. If the binding
+took several keys, such as `<C-b>x`, they all go on, in order.
 
-Whether a key goes on is decided when the handler finishes, or first waits for something, as `pane:split` waits for the new pane. Calling `stop` or `propagate` after that is a mistake. A key waits at most 300 milliseconds for the config to decide. After that, it's as if the config had done nothing more: a binding's keys stop there, and a key a handler heard goes on.
+Whether a key goes on is decided when the handler finishes, or first waits for
+something, as `pane:split` waits for the new pane. Calling `stop` or
+`propagate` after that is a mistake. A key waits at most 300 milliseconds for
+the config to decide. After that, it's as if the config had done nothing more:
+a binding's keys stop there, and a key a handler heard goes on.
 
 ## Keys
 
-`client.keys.map(modes, keys, function)` binds keys in one or more modes, replacing what they were bound to. `client.keys.unmap(modes, keys)` takes a binding away, the window's own included.
+`client.keys.map(modes, keys, function)` binds keys in one or more modes,
+replacing what they were bound to. `client.keys.unmap(modes, keys)` takes a
+binding away, the window's own included.
 
-A binding can say what it does, as Neovim's `vim.keymap.set` takes it: `client.keys.map("n", "<Space>ft", function() client.cmd("Files") end, {desc = "find todos"})`. The panel of keys shows it in place of "from your config". Neovim's `silent`, `noremap`, `nowait`, `unique`, and `remap = false` are taken and change nothing; any other option is left out, with a warning in the bar, and the binding is still made. `client.keys.group(modes, keys, name)` names the keys that start several, as which-key.nvim's groups do: `client.keys.group("n", "<Space>f", "my files")` makes <kbd>Space</kbd>'s panel say `f +my files`. A group with no name stops naming them. Keys that finish a binding of their own say what that does instead.
+A binding can say what it does, as Neovim's `vim.keymap.set` takes it:
+`client.keys.map("n", "<Space>ft", function() client.cmd("Files") end, {desc = "find todos"})`.
+The panel of keys shows it in place of "from your config". Neovim's `silent`,
+`noremap`, `nowait`, `unique`, and `remap = false` are taken and change
+nothing; any other option is left out, with a warning in the bar, and the
+binding is still made. `client.keys.group(modes, keys, name)` names the keys
+that start several, as which-key.nvim's groups do:
+`client.keys.group("n", "<Space>f", "my files")` makes <kbd>Space</kbd>'s
+panel say `f +my files`. A group with no name stops naming them. Keys that
+finish a binding of their own say what that does instead.
 
-Keys can be bound to other keys too, given as a string, as Vim's `noremap` maps them: `client.keys.map("n", "gi", "gri")` makes `gi` go to implementations, and `client.keys.map("n", "<Space>w", ":w<CR>")` writes the file. The keys are typed as if pressed, so the window's own keys do what they do, but the config's bindings and keypress handlers don't see them, so a binding can't set off itself or another of the config's. They're typed after any keys typed before them: a mapping to `@qx` types q's keys and then `x`, and a key among them that fails stops the rest, as in Vim.
+Keys can be bound to other keys too, given as a string, as Vim's `noremap`
+maps them: `client.keys.map("n", "gi", "gri")` makes `gi` go to
+implementations, and `client.keys.map("n", "<Space>w", ":w<CR>")` writes the
+file. The keys are typed as if pressed, so the window's own keys do what they
+do, but the config's bindings and keypress handlers don't see them, so a
+binding can't set off itself or another of the config's. They're typed after
+any keys typed before them: a mapping to `@qx` types q's keys and then `x`,
+and a key among them that fails stops the rest, as in Vim.
 
-**Modes** are written as letters, together: `"niv"` is all three of normal, insert and visual. `c` is typing into a pane's prompt, such as a search.
+**Modes** are written as letters, together: `"niv"` is all three of normal,
+insert and visual. `c` is typing into a pane's prompt, such as a search.
 
-**Keys** are written as in Vim. A character is itself, and `<…>` holds a key with modifiers or a named key:
+**Keys** are written as in Vim. A character is itself, and `<…>` holds a key
+with modifiers or a named key:
 
 | Written | Is |
 |---|---|
@@ -98,9 +150,18 @@ Keys can be bound to other keys too, given as a string, as Vim's `noremap` maps 
 | `<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<F1>`–`<F12>` | More named keys |
 | `<lt>` | `<` |
 
-Several keys in a row, such as `<C-b>"`, make a sequence. A key that starts one waits for the rest as long as it takes, as tmux's prefix does. If the next key goes on to no binding, the keys typed so far go to the pane as if nothing were bound to them, as Vim's do, so binding `gi` leaves `gg` as it was, and the next key is looked up on its own. Keys that began with <kbd>Ctrl</kbd> or <kbd>Alt</kbd> held, as `<C-b>` does, are the window's, and are dropped instead. A binding whose keys start a longer binding's, such as `<C-b>` beside `<C-b>x`, can't be reached.
+Several keys in a row, such as `<C-b>"`, make a sequence. A key that starts
+one waits for the rest as long as it takes, as tmux's prefix does. If the next
+key goes on to no binding, the keys typed so far go to the pane as if nothing
+were bound to them, as Vim's do, so binding `gi` leaves `gg` as it was, and
+the next key is looked up on its own. Keys that began with <kbd>Ctrl</kbd> or
+<kbd>Alt</kbd> held, as `<C-b>` does, are the window's, and are dropped
+instead. A binding whose keys start a longer binding's, such as `<C-b>` beside
+`<C-b>x`, can't be reached.
 
-`client.cmd(line)` runs a command, as if typed after `:`, so a key can do anything a command can. To find files with `<Space>ff` rather than `<Space>pf`:
+`client.cmd(line)` runs a command, as if typed after `:`, so a key can do
+anything a command can. To find files with `<Space>ff` rather than
+`<Space>pf`:
 
 ```lua
 client.keys.unmap("nv", "<Space>pf")
@@ -109,13 +170,24 @@ client.keys.map("n", "<Space>ff", function() client.cmd("Files") end)
 
 `client.cmd("reload")` is refused: the config can't run itself again.
 
-`client.forward(spec)` forwards a port as [`:portforward`](~clackatoo/reference/remote#forwarding-ports) does, `client.forward(8080)` or `client.forward("3000:8080")`, each time a window opens on another machine. A window on this machine passes it over silently; a spec it can't read is an error.
+`client.forward(spec)` forwards a port as
+[`:portforward`](~clackatoo/reference/remote#forwarding-ports) does,
+`client.forward(8080)` or `client.forward("3000:8080")`, each time a window
+opens on another machine. A window on this machine passes it over silently; a
+spec it can't read is an error.
 
-`client.connect(host)` has the daemon bring another machine's workspaces in, as [`:connect HOST`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) does, asking again whenever the window connects to the daemon and saying nothing unless it fails. `client.disconnect(host)` ends that connection. `client.connect("server", {share = false})` keeps that machine from the daemons connected to this one, as `:connect HOST --no-share` does.
+`client.connect(host)` has the daemon bring another machine's workspaces in,
+as
+[`:connect HOST`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+does, asking again whenever the window connects to the daemon and saying
+nothing unless it fails. `client.disconnect(host)` ends that connection.
+`client.connect("server", {share = false})` keeps that machine from the
+daemons connected to this one, as `:connect HOST --no-share` does.
 
 ## Options
 
-Options are settings, as Vim's are, read and set by name through `client.opt`, as through Neovim's `vim.opt`:
+Options are settings, as Vim's are, read and set by name through `client.opt`,
+as through Neovim's `vim.opt`:
 
 ```lua
 client.opt.relativenumber = false   -- absolute line numbers only
@@ -125,7 +197,12 @@ print(client.opt.number)            -- true
 print(client.opt.cc[1])             -- 80
 ```
 
-A list, such as `colorcolumn`, reads as a table of numbers, and is set with one, with a string as `:set` writes it, such as `"80,120"`, or with a number for a list of one. `""` or `{}` sets none. Text, such as `showbreak`, is a string. A number can have a fraction where the option takes one, `client.opt.fontsize = 10.5`, and a number can be set as a string, as `:set` writes it.
+A list, such as `colorcolumn`, reads as a table of numbers, and is set with
+one, with a string as `:set` writes it, such as `"80,120"`, or with a number
+for a list of one. `""` or `{}` sets none. Text, such as `showbreak`, is a
+string. A number can have a fraction where the option takes one,
+`client.opt.fontsize = 10.5`, and a number can be set as a string, as `:set`
+writes it.
 
 `:set` changes them as you go, as in Vim, and a config reads what it sets:
 
@@ -139,7 +216,8 @@ A list, such as `colorcolumn`, reads as a table of numbers, and is set with one,
 | `:set showbreak=↪\ ` | Sets text; `\ ` is a space and `\\` a backslash. |
 | `:set` | Shows the options changed from how they start. |
 
-Several can go after one `:set`, such as `:set nu rnu`. Each option has a short name, as in Vim, which works everywhere the long one does.
+Several can go after one `:set`, such as `:set nu rnu`. Each option has a
+short name, as in Vim, which works everywhere the long one does.
 
 | Option | Short | Is | Starts |
 |---|---|---|---|
@@ -202,11 +280,14 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/editor#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 
-Setting an option that doesn't exist, or to a value it can't hold, such as `client.opt.number = 1`, is a mistake.
+Setting an option that doesn't exist, or to a value it can't hold, such as
+`client.opt.number = 1`, is a mistake.
 
 ## Events and handles
 
-`client.on("keypress", function)` listens for keys anywhere. Windows, tabs and panes have `:on` too, to listen only there. Each returns a subscription, whose `:off()` stops it. A pane's or tab's handlers go when it closes.
+`client.on("keypress", function)` listens for keys anywhere. Windows, tabs and
+panes have `:on` too, to listen only there. Each returns a subscription, whose
+`:off()` stops it. A pane's or tab's handlers go when it closes.
 
 A handler gets the event, `ev`:
 
@@ -220,9 +301,12 @@ A handler gets the event, `ev`:
 | `ev.count1` | The same, but 1 if none, as `v:count1` |
 | `ev.pane`, `ev.window` | Where it was pressed |
 
-A binding that lets its keys go on passes the count on with them, so `5x` bound to a function that calls `ev:propagate()` still deletes five.
+A binding that lets its keys go on passes the count on with them, so `5x`
+bound to a function that calls `ev:propagate()` still deletes five.
 
-Windows, workspaces, tabs, and panes are handles: values that stand for one of them, whose fields are read as they are at the time. Reading a pane that has closed is a mistake. Two handles to the same pane are equal.
+Windows, workspaces, tabs, and panes are handles: values that stand for one of
+them, whose fields are read as they are at the time. Reading a pane that has
+closed is a mistake. Two handles to the same pane are equal.
 
 | | Fields | Methods |
 |---|---|---|
@@ -232,7 +316,12 @@ Windows, workspaces, tabs, and panes are handles: values that stand for one of t
 | A tab | `name`, `panes`, `focused`, `workspace` | `on` |
 | A pane | `kind` (`"terminal"`, `"chat"`, `"editor"`, `"explorer"`, `"folder"`, `"board"`, `"review"`, `"browser"`, or `"other"` for a kind this window doesn't know), `title`, `tab` | `on`, `split`, `close`, `focus` |
 
-`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`, `"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }` or `{ kind = "terminal" }`. Those are the only kinds the config can make, so splitting any other pane, such as an [editor](~clackatoo/reference/editor), needs one. It waits for the daemon to make it, then focuses it, as <kbd>Ctrl</kbd>+<kbd>B</kbd> `|` does, and returns it:
+`pane:split(side)` puts a new pane on that side, `"right"`, `"left"`,
+`"below"` or `"above"`, of the same kind, or another with `{ kind = "chat" }`
+or `{ kind = "terminal" }`. Those are the only kinds the config can make, so
+splitting any other pane, such as an [editor](~clackatoo/reference/editor),
+needs one. It waits for the daemon to make it, then focuses it, as
+<kbd>Ctrl</kbd>+<kbd>B</kbd> `|` does, and returns it:
 
 ```lua
 client.keys.map("n", "<C-b>t", function(ev)
@@ -241,22 +330,37 @@ client.keys.map("n", "<C-b>t", function(ev)
 end)
 ```
 
-While it waits, the window carries on, and so does the key. Each handler and binding runs in a coroutine, a function that can pause partway and carry on later, so waiting holds up nothing else.
+While it waits, the window carries on, and so does the key. Each handler and
+binding runs in a coroutine, a function that can pause partway and carry on
+later, so waiting holds up nothing else.
 
-Nothing is shown while `init.lua` first runs, so `client.focused` is nil then: handles are for handlers.
+Nothing is shown while `init.lua` first runs, so `client.focused` is nil then:
+handles are for handlers.
 
 ## When it goes wrong
 
-A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane that has closed, is shown in the bottom bar, with the file and line, until the next key, and written in full to the window's log, `window.log` in clackatoo's state directory (and to stderr, for a window opened in a process of its own). A mistake in `init.lua` itself stops it there, as an error in any Lua program does: what it bound before that line stays bound.
+A mistake, such as a key that doesn't exist, a mode that isn't one, or a pane
+that has closed, is shown in the bottom bar, with the file and line, until the
+next key, and written in full to the window's log, `window.log` in clackatoo's
+state directory (and to stderr, for a window opened in a process of its own).
+A mistake in `init.lua` itself stops it there, as an error in any Lua program
+does: what it bound before that line stays bound.
 
-`init.lua` can run for 2 seconds before it's stopped where it is. A handler or binding that runs for more than a quarter of a second at a time, as a loop that never ends would, is stopped there, and its key is decided as if it had done nothing more.
+`init.lua` can run for 2 seconds before it's stopped where it is. A handler or
+binding that runs for more than a quarter of a second at a time, as a loop
+that never ends would, is stopped there, and its key is decided as if it had
+done nothing more.
 
-`print` writes to the window's log, `window.log` in clackatoo's state directory, which keeps what it prints unless `RUST_LOG` says otherwise (and to stderr, for a window opened in a process of its own).
+`print` writes to the window's log, `window.log` in clackatoo's state
+directory, which keeps what it prints unless `RUST_LOG` says otherwise (and to
+stderr, for a window opened in a process of its own).
 
 ## Known limits
 
-- The daemon's only config files are `agents.toml`, `machine.toml` and `web.toml`.
+- The daemon's only config files are `agents.toml`, `machine.toml` and
+  `web.toml`.
 - `init.lua` isn't run again when it changes: use `:reload`.
-- Bindings made in Lua don't show in <kbd>Ctrl</kbd>+<kbd>B</kbd>'s list in the bottom bar.
+- Bindings made in Lua don't show in <kbd>Ctrl</kbd>+<kbd>B</kbd>'s list in
+  the bottom bar.
 - Keypresses are the only event.
 - There are no type definitions for editors to complete the API with.

@@ -9,7 +9,11 @@ related:
   - clackatoo/reference/terminal-emulation
 ---
 
-The window is a client of the daemon, like the `clackatoo` command. It shows a workspace's terminals, keeps up with them as their programs print, and sends your keys to the one with the focus. Closing the window closes nothing: the terminals keep running in the daemon, and the next window shows them again, laid out as they were.
+The window is a client of the daemon, like the `clackatoo` command. It shows a
+workspace's terminals, keeps up with them as their programs print, and sends
+your keys to the one with the focus. Closing the window closes nothing: the
+terminals keep running in the daemon, and the next window shows them again,
+laid out as they were.
 
 ## Opening it
 
@@ -17,27 +21,92 @@ The window is a client of the daemon, like the `clackatoo` command. It shows a w
 clackatoo
 ```
 
-With no command, `clackatoo` opens a window on your [workspaces](#workspaces-tabs-and-panes): the one last used, at the tab and pane last used. If there are none, it makes one, showing your newest running terminal, such as one started with `clackatoo new`, or else a new terminal running your `$SHELL`. If no daemon is running, it starts one in the background first. Until the daemon answers, the window says it's connecting, and <kbd>Esc</kbd> quits. That daemon logs to `daemon.log` in the [runtime directory](~clackatoo/reference/cli), and keeps running after the window closes.
+With no command, `clackatoo` opens a window on your
+[workspaces](#workspaces-tabs-and-panes): the one last used, at the tab and
+pane last used. If there are none, it makes one, showing your newest running
+terminal, such as one started with `clackatoo new`, or else a new terminal
+running your `$SHELL`. If no daemon is running, it starts one in the
+background first. Until the daemon answers, the window says it's connecting,
+and <kbd>Esc</kbd> quits. That daemon logs to `daemon.log` in the
+[runtime directory](~clackatoo/reference/cli), and keeps running after the
+window closes.
 
 ### Windows share one process
 
-Every window opens in one process, the **process of windows**, which sets up the GPU once, for its first window: that's most of the time a window takes to open, so every window after it opens at once, in tens of milliseconds rather than a few hundred. What's left is mostly your desktop making the window.
+Every window opens in one process, the **process of windows**, which sets up
+the GPU once, for its first window: that's most of the time a window takes to
+open, so every window after it opens at once, in tens of milliseconds rather
+than a few hundred. What's left is mostly your desktop making the window.
 
-`clackatoo` hands its window to the process of windows over a socket only you can reach, `window.sock` in the [runtime directory](~clackatoo/reference/cli#daemon), and returns as soon as the window is open, rather than staying until it closes. When none is running, it forks one first, apart from itself: in a session of its own, with no terminal, so closing the terminal you ran `clackatoo` in, <kbd>Ctrl</kbd>+<kbd>C</kbd> or <kbd>Ctrl</kbd>+<kbd>Z</kbd> there, touch no window. `ps` shows it as `clackatoo-win`, with the command line of the `clackatoo` it was forked from. The launcher's token goes with the window, so it takes focus. A window opened from another, as the [machine picker](~clackatoo/reference/remote#picking-a-machine) opens one, opens in the same process too.
+`clackatoo` hands its window to the process of windows over a socket only you
+can reach, `window.sock` in the
+[runtime directory](~clackatoo/reference/cli#daemon), and returns as soon as
+the window is open, rather than staying until it closes. When none is running,
+it forks one first, apart from itself: in a session of its own, with no
+terminal, so closing the terminal you ran `clackatoo` in,
+<kbd>Ctrl</kbd>+<kbd>C</kbd> or <kbd>Ctrl</kbd>+<kbd>Z</kbd> there, touch no
+window. `ps` shows it as `clackatoo-win`, with the command line of the
+`clackatoo` it was forked from. The launcher's token goes with the window, so
+it takes focus. A window opened from another, as the
+[machine picker](~clackatoo/reference/remote#picking-a-machine) opens one,
+opens in the same process too.
 
-Each window is its own: its own view, mode and focus, its own connection to its daemon, on this machine or another, and its own run of `init.lua`. What a window starts, the daemon, ssh for a machine, a link's opener, `clackatoo update`, is started with the environment and directory of the `clackatoo` that opened the window, so a window opened from a shell with its own `PATH`, virtualenv or `SSH_AUTH_SOCK` uses them. If one window fails, it closes and the others stay open. If the GPU is lost, as when its driver resets, each window opens again in a process of windows started afresh; if it's lost a third time within a minute, the windows close instead. The process ends with its last window.
+Each window is its own: its own view, mode and focus, its own connection to
+its daemon, on this machine or another, and its own run of `init.lua`. What a
+window starts, the daemon, ssh for a machine, a link's opener,
+`clackatoo update`, is started with the environment and directory of the
+`clackatoo` that opened the window, so a window opened from a shell with its
+own `PATH`, virtualenv or `SSH_AUTH_SOCK` uses them. If one window fails, it
+closes and the others stay open. If the GPU is lost, as when its driver
+resets, each window opens again in a process of windows started afresh; if
+it's lost a third time within a minute, the windows close instead. The process
+ends with its last window.
 
-A window gets a process of its own, which takes no others but those it opens, when it couldn't be the window it would be in the process of windows, whose own environment it shares: it's shown on another display (`WAYLAND_DISPLAY`, `DISPLAY`); has another `HOME`, config, state, or cache directory (`XDG_CACHE_HOME`), or desktop bus (`DBUS_SESSION_BUS_ADDRESS`); would draw with another [renderer](#drawing), GPU, or driver (`WGPU_*`, `DRI_PRIME`, `__NV_PRIME_RENDER_OFFLOAD`, `__GLX_VENDOR_LIBRARY_NAME`, `VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, `MESA_*`) or libraries (`LD_LIBRARY_PATH`, `LD_PRELOAD`); has another locale (`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `LC_COLLATE`, `LC_NUMERIC`, `LC_TIME`, `LC_MONETARY`, `LC_IDENTIFICATION`), cursor theme (`XCURSOR_*`) or fontconfig (`FONTCONFIG_*`); or is from an older build of clackatoo than the process. Windows like it share a process of windows of their own, which listens on a socket named after what they share. The build is the program's file, so a build of your own counts as new even at the same version: the first window of a newer build, as after `clackatoo update` or a new build put in place of the old, starts a process of windows for itself and the windows after it, and the old process ends with its last window. `:update` reopens only the window it's typed in, in the new build.
+A window gets a process of its own, which takes no others but those it opens,
+when it couldn't be the window it would be in the process of windows, whose
+own environment it shares: it's shown on another display (`WAYLAND_DISPLAY`,
+`DISPLAY`); has another `HOME`, config, state, or cache directory
+(`XDG_CACHE_HOME`), or desktop bus (`DBUS_SESSION_BUS_ADDRESS`); would draw
+with another [renderer](#drawing), GPU, or driver (`WGPU_*`, `DRI_PRIME`,
+`__NV_PRIME_RENDER_OFFLOAD`, `__GLX_VENDOR_LIBRARY_NAME`, `VK_ICD_FILENAMES`,
+`VK_DRIVER_FILES`, `MESA_*`) or libraries (`LD_LIBRARY_PATH`, `LD_PRELOAD`);
+has another locale (`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`,
+`LC_COLLATE`, `LC_NUMERIC`, `LC_TIME`, `LC_MONETARY`, `LC_IDENTIFICATION`),
+cursor theme (`XCURSOR_*`) or fontconfig (`FONTCONFIG_*`); or is from an older
+build of clackatoo than the process. Windows like it share a process of
+windows of their own, which listens on a socket named after what they share.
+The build is the program's file, so a build of your own counts as new even at
+the same version: the first window of a newer build, as after
+`clackatoo update` or a new build put in place of the old, starts a process of
+windows for itself and the windows after it, and the old process ends with its
+last window. `:update` reopens only the window it's typed in, in the new
+build.
 
-The window opens in the `clackatoo` you ran itself only if no process of windows takes it within a few seconds, if its environment is too big to hand over (more than a megabyte), or with `CLACKATOO_WINDOW_HOST=off`, which also keeps the windows it opens out of it.
+The window opens in the `clackatoo` you ran itself only if no process of
+windows takes it within a few seconds, if its environment is too big to hand
+over (more than a megabyte), or with `CLACKATOO_WINDOW_HOST=off`, which also
+keeps the windows it opens out of it.
 
-Every window logs to `window.log` in clackatoo's state directory (see [logs](~clackatoo/reference/remote#logs)), each line with its process's ID, which windows in one process share. A font installed while the process of windows runs is used once it has ended and started again, after its last window closes.
+Every window logs to `window.log` in clackatoo's state directory (see
+[logs](~clackatoo/reference/remote#logs)), each line with its process's ID,
+which windows in one process share. A font installed while the process of
+windows runs is used once it has ended and started again, after its last
+window closes.
 
-The window sizes itself so that its one pane holds 100×30 cells. Resizing the window resizes each pane's terminal to fit, and its program is told the new size. When several windows show one terminal, the terminal takes the size of whichever was last opened on it, resized or focused.
+The window sizes itself so that its one pane holds 100×30 cells. Resizing the
+window resizes each pane's terminal to fit, and its program is told the new
+size. When several windows show one terminal, the terminal takes the size of
+whichever was last opened on it, resized or focused.
 
-With `--remote <HOST>`, the window shows the workspaces on another machine, through ssh. See [another machine](~clackatoo/reference/remote).
+With `--remote <HOST>`, the window shows the workspaces on another machine,
+through ssh. See [another machine](~clackatoo/reference/remote).
 
-From a file manager, "Open in clackatoo" in its menu, or "Open With" clackatoo, opens each folder in a new terminal tab and each file in a new editor tab, in the window you used last, which switches to them and comes to the front; with none open, a window opens on them. [`clackatoo desktop install`](~clackatoo/reference/cli#file-managers) sets this up, and [`clackatoo open`](~clackatoo/reference/cli#open) is what runs.
+From a file manager, "Open in clackatoo" in its menu, or "Open With"
+clackatoo, opens each folder in a new terminal tab and each file in a new
+editor tab, in the window you used last, which switches to them and comes to
+the front; with none open, a window opens on them.
+[`clackatoo desktop install`](~clackatoo/reference/cli#file-managers) sets
+this up, and [`clackatoo open`](~clackatoo/reference/cli#open) is what runs.
 
 | Option | Environment variable | [Setting](#settings) | |
 |---|---|---|---|
@@ -47,36 +116,107 @@ From a file manager, "Open in clackatoo" in its menu, or "Open With" clackatoo, 
 | `--remote <HOST>` | | | Use the daemon on another machine. |
 | `--remote-command <COMMAND>` | `CLACKATOO_REMOTE_COMMAND` | | The command that runs clackatoo there. Default: `clackatoo`. |
 
-An option on the command line wins over its environment variable, which wins over the `font` and `fontsize` that `init.lua` sets as it runs, which win over the setting. startup.toml's font is what the window opens in before config has run; config nearly always runs first, so the window opens in config's font.
+An option on the command line wins over its environment variable, which wins
+over the `font` and `fontsize` that `init.lua` sets as it runs, which win over
+the setting. startup.toml's font is what the window opens in before config has
+run; config nearly always runs first, so the window opens in config's font.
 
 ## The frame
 
 The window draws its own frame, in place of the desktop's:
 
-- **The top bar** holds your [workspaces](#workspaces-tabs-and-panes), each with a colored dot and how many tabs it has (unless its name is only a number, as unnamed workspaces' are), the one shown picked out, and a `+` after them that makes a new one, asking which machine once the daemon is connected to another. A workspace from another machine (see [`:connect`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)) has a ring in place of its dot: in its color while connected, in the warning color while its connection is down, and filled amber while it needs a password. Hold the mouse over it to see which machine it's on, and how its connection is. The window's buttons sit at whichever end your desktop puts them, in the same order. Drag the bar to move the window, double-click it to maximize or restore it, and right-click it for the desktop's window menu. A workspace's chats mark it after its name, as tabs do (see below). When there are more workspaces than fit, the bar shows those around the one shown, with a quiet count at either end of how many are hidden that way, such as `‹3` or `5›`; select a count to scroll that way. While a chat has [access to the window](~clackatoo/reference/agents#native-window-access), a teal badge before the buttons names the chat and the access, as `Agent Control · chat 3`: select it to go to the chat, or its gold `×` to revoke the access. Only the top bar shows it, never the window's title, which a program could set to look the same.
-- **The bottom bar** starts with the window's [mode](#modes), then the tabs of the workspace shown, with a `+` after them that opens a new one. When there are more tabs than fit, the tab shown stays in view, and a quiet count at either end, such as `‹3` or `5›`, says how many are hidden that way; select it to scroll. On the bar's right are how far the view is [scrolled](#scrolling) or a message, how many panes the tab has, and a reminder of the key to press next. These take the room the tabs leave; when there are more tabs than fit, a quarter of the bar is kept for them. A message too long for its room is cut short with `…`: hold the mouse over it to read it all. A tab's chats mark it after its name.
-- **The panes** fill the space between the bars, side by side with a thin line between them. When a tab has more than one, a gold line runs round the focused pane. Gold is kept for focus and for what to act on: the cursor in normal mode, the focused pane, the button to press and a chat waiting for you. Links and matched letters are blue, and headings bold.
-- **The palette** opens in the middle of the window for anything typed to clackatoo itself: [commands](#the-command-line), [searches](#searching), and new names.
+- **The top bar** holds your [workspaces](#workspaces-tabs-and-panes), each
+  with a colored dot and how many tabs it has (unless its name is only a
+  number, as unnamed workspaces' are), the one shown picked out, and a `+`
+  after them that makes a new one, asking which machine once the daemon is
+  connected to another. A workspace from another machine (see
+  [`:connect`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar))
+  has a ring in place of its dot: in its color while connected, in the warning
+  color while its connection is down, and filled amber while it needs a
+  password. Hold the mouse over it to see which machine it's on, and how its
+  connection is. The window's buttons sit at whichever end your desktop puts
+  them, in the same order. Drag the bar to move the window, double-click it to
+  maximize or restore it, and right-click it for the desktop's window menu. A
+  workspace's chats mark it after its name, as tabs do (see below). When there
+  are more workspaces than fit, the bar shows those around the one shown, with
+  a quiet count at either end of how many are hidden that way, such as `‹3` or
+  `5›`; select a count to scroll that way. While a chat has
+  [access to the window](~clackatoo/reference/agents#native-window-access), a
+  teal badge before the buttons names the chat and the access, as
+  `Agent Control · chat 3`: select it to go to the chat, or its gold `×` to
+  revoke the access. Only the top bar shows it, never the window's title,
+  which a program could set to look the same.
+- **The bottom bar** starts with the window's [mode](#modes), then the tabs of
+  the workspace shown, with a `+` after them that opens a new one. When there
+  are more tabs than fit, the tab shown stays in view, and a quiet count at
+  either end, such as `‹3` or `5›`, says how many are hidden that way; select
+  it to scroll. On the bar's right are how far the view is
+  [scrolled](#scrolling) or a message, how many panes the tab has, and a
+  reminder of the key to press next. These take the room the tabs leave; when
+  there are more tabs than fit, a quarter of the bar is kept for them. A
+  message too long for its room is cut short with `…`: hold the mouse over it
+  to read it all. A tab's chats mark it after its name.
+- **The panes** fill the space between the bars, side by side with a thin line
+  between them. When a tab has more than one, a gold line runs round the
+  focused pane. Gold is kept for focus and for what to act on: the cursor in
+  normal mode, the focused pane, the button to press and a chat waiting for
+  you. Links and matched letters are blue, and headings bold.
+- **The palette** opens in the middle of the window for anything typed to
+  clackatoo itself: [commands](#the-command-line), [searches](#searching), and
+  new names.
 
-Drag the window's edges or corners to resize it. Interface text, such as the names in the bars, is in your desktop's interface font. On GNOME, both the font and where the buttons go come from its settings. If the desktop names a font that isn't installed, it's your system's sans-serif font, as fontconfig picks it, or else the first installed of Noto Sans, Cantarell, Inter, DejaVu Sans, Liberation Sans and Roboto. The bottom bar is drawn in the terminal's font, as Vim's status line is.
+Drag the window's edges or corners to resize it. Interface text, such as the
+names in the bars, is in your desktop's interface font. On GNOME, both the
+font and where the buttons go come from its settings. If the desktop names a
+font that isn't installed, it's your system's sans-serif font, as fontconfig
+picks it, or else the first installed of Noto Sans, Cantarell, Inter, DejaVu
+Sans, Liberation Sans and Roboto. The bottom bar is drawn in the terminal's
+font, as Vim's status line is.
 
 With the mouse:
 
 - Select a workspace or tab to show it, and a pane to focus it.
 - Select a `+` to make a workspace, or open a tab.
-- Right-click a workspace or tab for **Rename** or **Close**. Rename opens the palette with the old name selected: typing replaces it, and an arrow key, <kbd>Home</kbd> or <kbd>End</kbd> keeps it to edit. Clearing a tab's name names it after its focused pane's program again. Close closes every pane in it, hanging up their programs.
+- Right-click a workspace or tab for **Rename** or **Close**. Rename opens the
+  palette with the old name selected: typing replaces it, and an arrow key,
+  <kbd>Home</kbd> or <kbd>End</kbd> keeps it to edit. Clearing a tab's name
+  names it after its focused pane's program again. Close closes every pane in
+  it, hanging up their programs.
 
 ## Keyboard help
 
-Press **Ctrl+?** in the native window to see shortcuts for the current pane, mode, prompt or popup. On a keyboard where `?` is <kbd>Shift</kbd>+<kbd>/</kbd>, press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>/</kbd>. Plain <kbd>Ctrl</kbd>+<kbd>/</kbd> still goes to the terminal program.
+Press **Ctrl+?** in the native window to see shortcuts for the current pane,
+mode, prompt or popup. On a keyboard where `?` is
+<kbd>Shift</kbd>+<kbd>/</kbd>, press
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>/</kbd>. Plain
+<kbd>Ctrl</kbd>+<kbd>/</kbd> still goes to the terminal program.
 
-Type to filter by key or description. <kbd>Up</kbd>/<kbd>Down</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd>/<kbd>Ctrl</kbd>+<kbd>N</kbd> scroll through matches, <kbd>PageUp</kbd>/<kbd>PageDown</kbd> move a page, and the mouse wheel scrolls too. <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>;</kbd>, <kbd>Ctrl</kbd>+<kbd>?</kbd> again, or selecting outside it closes help. The draft, selection, open popup, and unfinished command underneath are kept: after <kbd>Ctrl</kbd>+<kbd>B</kbd>, for example, help lists bindings starting with that prefix, and closing help lets you finish it.
+Type to filter by key or description. <kbd>Up</kbd>/<kbd>Down</kbd> or
+<kbd>Ctrl</kbd>+<kbd>P</kbd>/<kbd>Ctrl</kbd>+<kbd>N</kbd> scroll through
+matches, <kbd>PageUp</kbd>/<kbd>PageDown</kbd> move a page, and the mouse
+wheel scrolls too. <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>;</kbd>,
+<kbd>Ctrl</kbd>+<kbd>?</kbd> again, or selecting outside it closes help. The
+draft, selection, open popup, and unfinished command underneath are kept:
+after <kbd>Ctrl</kbd>+<kbd>B</kbd>, for example, help lists bindings starting
+with that prefix, and closing help lets you finish it.
 
-The list uses the current Lua-configured mappings and their `desc` labels, so replacements, unbindings and mode restrictions appear immediately. Built-in entries are generated from the same key definitions that dispatch commands, and Vim continuations come from its parser. They follow the current pane and temporary state, including completion, pending operators and file-operation confirmations; there is no separate built-in shortcut catalog to keep in sync. Keys handled inside terminal programs, and arbitrary Lua `keypress` callback logic, cannot be enumerated; terminal help identifies which keys pass through to the program. <kbd>Ctrl</kbd>+<kbd>?</kbd> is reserved for this window-level help.
+The list uses the current Lua-configured mappings and their `desc` labels, so
+replacements, unbindings and mode restrictions appear immediately. Built-in
+entries are generated from the same key definitions that dispatch commands,
+and Vim continuations come from its parser. They follow the current pane and
+temporary state, including completion, pending operators and file-operation
+confirmations; there is no separate built-in shortcut catalog to keep in sync.
+Keys handled inside terminal programs, and arbitrary Lua `keypress` callback
+logic, cannot be enumerated; terminal help identifies which keys pass through
+to the program. <kbd>Ctrl</kbd>+<kbd>?</kbd> is reserved for this window-level
+help.
 
 ## Settings
 
-Settings you rarely change, or change to tune how the window starts, live in `startup.toml`: `$XDG_CONFIG_HOME/clackatoo/client/startup.toml`, or `~/.config/clackatoo/client/startup.toml`. The window reads it before anything else starts, which takes a few microseconds.
+Settings you rarely change, or change to tune how the window starts, live in
+`startup.toml`: `$XDG_CONFIG_HOME/clackatoo/client/startup.toml`, or
+`~/.config/clackatoo/client/startup.toml`. The window reads it before anything
+else starts, which takes a few microseconds.
 
 ```toml
 font = "JetBrains Mono"
@@ -85,9 +225,14 @@ renderer = "opengl"
 priority = "normal"
 ```
 
-`priority = "high"`, as it starts, has the window's thread, which draws it and takes your keys, ask to run ahead of your other programs, as [the daemon's does](~clackatoo/reference/cli#staying-quick-on-a-busy-machine); `"normal"` leaves it as other programs are. `CLACKATOO_PRIORITY=off` in the environment does the same.
+`priority = "high"`, as it starts, has the window's thread, which draws it and
+takes your keys, ask to run ahead of your other programs, as
+[the daemon's does](~clackatoo/reference/cli#staying-quick-on-a-busy-machine);
+`"normal"` leaves it as other programs are. `CLACKATOO_PRIORITY=off` in the
+environment does the same.
 
-`clackatoo config` shows and changes them, keeping the rest of the file, comments included, as it was:
+`clackatoo config` shows and changes them, keeping the rest of the file,
+comments included, as it was:
 
 ```sh
 clackatoo config renderer opengl   # set one
@@ -96,41 +241,70 @@ clackatoo config --unset renderer  # back to its default
 clackatoo config                   # all of them, and where the file is
 ```
 
-A mistake in the file never stops the window opening. Each setting with a mistake, such as an unknown name or a value of the wrong kind, is reported on stderr and left at its default, and the rest still apply.
+A mistake in the file never stops the window opening. Each setting with a
+mistake, such as an unknown name or a value of the wrong kind, is reported on
+stderr and left at its default, and the rest still apply.
 
-Keys, and what the window does, are configured in Lua instead, in `init.lua` beside `startup.toml`. See [configuration](~clackatoo/reference/config).
+Keys, and what the window does, are configured in Lua instead, in `init.lua`
+beside `startup.toml`. See [configuration](~clackatoo/reference/config).
 
-The settings are on this machine. With [`--remote`](~clackatoo/reference/remote), the window's settings come from the machine the window opens on.
+The settings are on this machine. With
+[`--remote`](~clackatoo/reference/remote), the window's settings come from the
+machine the window opens on.
 
-A font family is named as fontconfig knows it, as `fc-list : family` prints. Characters the font doesn't have, such as CJK text or emoji, come from fallback fonts, found the same way.
+A font family is named as fontconfig knows it, as `fc-list : family` prints.
+Characters the font doesn't have, such as CJK text or emoji, come from
+fallback fonts, found the same way.
 
 ### A daemon from another build
 
-Each build of clackatoo speaks one version of the protocol between windows and the daemon, and refuses a daemon speaking another. When the window finds a daemon from another build, it says so, and what <kbd>Enter</kbd> does depends on which is older:
+Each build of clackatoo speaks one version of the protocol between windows and
+the daemon, and refuses a daemon speaking another. When the window finds a
+daemon from another build, it says so, and what <kbd>Enter</kbd> does depends
+on which is older:
 
-- **An older daemon, from protocol 11 on:** <kbd>Enter</kbd> upgrades it. The daemon becomes this build without stopping, so its terminals and the programs in them carry on, and the window opens on them.
-- **An older daemon, from before protocol 11:** it's too old to upgrade, so <kbd>Enter</kbd> stops it and starts a new one. This closes every terminal in the old daemon, and hangs up their programs.
-- **A daemon newer than the window:** the window says to open a window from the newer build instead. It never offers to replace a newer daemon.
+- **An older daemon, from protocol 11 on:** <kbd>Enter</kbd> upgrades it. The
+  daemon becomes this build without stopping, so its terminals and the
+  programs in them carry on, and the window opens on them.
+- **An older daemon, from before protocol 11:** it's too old to upgrade, so
+  <kbd>Enter</kbd> stops it and starts a new one. This closes every terminal
+  in the old daemon, and hangs up their programs.
+- **A daemon newer than the window:** the window says to open a window from
+  the newer build instead. It never offers to replace a newer daemon.
 
-<kbd>Esc</kbd> quits, leaving the daemon running. [`clackatoo upgrade`](~clackatoo/reference/cli#upgrade) and `clackatoo stop` do the same from the command line.
+<kbd>Esc</kbd> quits, leaving the daemon running.
+[`clackatoo upgrade`](~clackatoo/reference/cli#upgrade) and `clackatoo stop`
+do the same from the command line.
 
 ### Losing the daemon
 
-If the connection to the daemon is lost, because the daemon stopped or, [on another machine](~clackatoo/reference/remote), the network went, the window says so and why, in place of the terminal:
+If the connection to the daemon is lost, because the daemon stopped or,
+[on another machine](~clackatoo/reference/remote), the network went, the
+window says so and why, in place of the terminal:
 
-- <kbd>Enter</kbd> reconnects, starting a daemon if none is running. If the workspace shown is still there, the window returns to it, with each pane as it was, in the same mode and scrolled to the same place.
+- <kbd>Enter</kbd> reconnects, starting a daemon if none is running. If the
+  workspace shown is still there, the window returns to it, with each pane as
+  it was, in the same mode and scrolled to the same place.
 - <kbd>Esc</kbd> quits.
 
-When the daemon [upgrades](~clackatoo/reference/cli#upgrade), every connection to it drops for a moment. A window whose daemon on this machine is still there afterward reconnects by itself, without asking.
+When the daemon [upgrades](~clackatoo/reference/cli#upgrade), every connection
+to it drops for a moment. A window whose daemon on this machine is still there
+afterward reconnects by itself, without asking.
 
 ## Modes
 
 The window is in one of two modes, like Vim:
 
 - **Insert mode**, where it starts. Keys go to the program.
-- **Normal mode**. Keys drive clackatoo. The bottom bar starts `NORMAL`, on gold, in place of `INSERT`, on lilac. A visual selection shows `VISUAL`, `V-LINE` or `V-BLOCK`, on blue.
+- **Normal mode**. Keys drive clackatoo. The bottom bar starts `NORMAL`, on
+  gold, in place of `INSERT`, on lilac. A visual selection shows `VISUAL`,
+  `V-LINE` or `V-BLOCK`, on blue.
 
-The mode is the window's, not each pane's: every pane, tab, and workspace shares it. Panes with no insert mode, such as the explorer, a board, a review or a lesson, show `NORMAL` and leave the window's mode as it was. But whatever you open or close from one, with a key, the mouse, or a command, leaves the window in normal mode.
+The mode is the window's, not each pane's: every pane, tab, and workspace
+shares it. Panes with no insert mode, such as the explorer, a board, a review
+or a lesson, show `NORMAL` and leave the window's mode as it was. But whatever
+you open or close from one, with a key, the mouse, or a command, leaves the
+window in normal mode.
 
 | Key | In | Does |
 |---|---|---|
@@ -140,35 +314,125 @@ The mode is the window's, not each pane's: every pane, tab, and workspace shares
 | <kbd>Ctrl</kbd>+<kbd>&#92;</kbd>, twice | insert mode | Sends a real <kbd>Ctrl</kbd>+<kbd>&#92;</kbd> to the program. |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | either | Interrupts the program. |
 
-Plain <kbd>Esc</kbd> always goes to the program, since programs such as Vim and less use it. <kbd>Ctrl</kbd>+<kbd>;</kbd> costs programs nothing: a terminal has no code to send them for it, so none can be listening for it. It's found by where the key is, so on layouts where `;` takes <kbd>Shift</kbd>, such as German, it's <kbd>Ctrl</kbd> and the key to the right of L.
+Plain <kbd>Esc</kbd> always goes to the program, since programs such as Vim
+and less use it. <kbd>Ctrl</kbd>+<kbd>;</kbd> costs programs nothing: a
+terminal has no code to send them for it, so none can be listening for it.
+It's found by where the key is, so on layouts where `;` takes
+<kbd>Shift</kbd>, such as German, it's <kbd>Ctrl</kbd> and the key to the
+right of L.
 
 ## Workspaces, tabs, and panes
 
 The window shows your work at three levels:
 
-- **Workspaces**, one for each piece of distinct work, such as a project. Their names run along the [top bar](#the-frame). Often there's only one.
-- **Tabs**, inside a workspace. They run along the bottom bar, numbered, and named after the title of their focused pane's program, or, for a terminal whose program set none, the folder its shell is in (`~` for your home, or for a terminal on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar), yours there), unless you've named them. A program's title, or a folder's name, shows without control characters or anything that shows nothing itself, as a mark that turns text round, so it can't hide or move what's beside it, in a tab's name, the window's title or a notification. Only the zero-width joiners and non-joiners that emoji and scripts such as Persian need stay, between two characters past ASCII that show, three in a row at most, so 👩&#x200D;👩&#x200D;👧 shows as one; agents' words to each other keep them by the same rule.
-- **Panes**, which a tab is split into, side by side or stacked. Each shows a terminal, a [chat with an agent](~clackatoo/reference/agents), a [file being edited](~clackatoo/reference/editor), or one of the other kinds: an [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boards), a [review](~clackatoo/reference/agents#reviewing-its-changes), or a chat's browser page. A split shares its space equally until you [resize it](#resizing-panes).
+- **Workspaces**, one for each piece of distinct work, such as a project.
+  Their names run along the [top bar](#the-frame). Often there's only one.
+- **Tabs**, inside a workspace. They run along the bottom bar, numbered, and
+  named after the title of their focused pane's program, or, for a terminal
+  whose program set none, the folder its shell is in (`~` for your home, or
+  for a terminal on
+  [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar),
+  yours there), unless you've named them. A program's title, or a folder's
+  name, shows without control characters or anything that shows nothing
+  itself, as a mark that turns text round, so it can't hide or move what's
+  beside it, in a tab's name, the window's title or a notification. Only the
+  zero-width joiners and non-joiners that emoji and scripts such as Persian
+  need stay, between two characters past ASCII that show, three in a row at
+  most, so 👩&#x200D;👩&#x200D;👧 shows as one; agents' words to each other keep
+  them by the same rule.
+- **Panes**, which a tab is split into, side by side or stacked. Each shows a
+  terminal, a [chat with an agent](~clackatoo/reference/agents), a
+  [file being edited](~clackatoo/reference/editor), or one of the other kinds:
+  an [explorer](~clackatoo/reference/explorer), a
+  [board](~clackatoo/reference/boards), a
+  [review](~clackatoo/reference/agents#reviewing-its-changes), or a chat's
+  browser page. A split shares its space equally until you
+  [resize it](#resizing-panes).
 
-Workspace names are unique on each machine, so one from another machine can share a name with one of yours. It then shows its machine after its name, as `notes@desk`; [`showhost`](~clackatoo/reference/config#options) changes when. `:workspace notes@desk` switches to it by its machine, and `:workspace notes` alone to your own.
+Workspace names are unique on each machine, so one from another machine can
+share a name with one of yours. It then shows its machine after its name, as
+`notes@desk`; [`showhost`](~clackatoo/reference/config#options) changes when.
+`:workspace notes@desk` switches to it by its machine, and `:workspace notes`
+alone to your own.
 
-A tab says what its chats are doing after its name: `⋯` while one's agent is at work, `?` while one asks you something, and `•` when one finished while this window wasn't showing it. A workspace in the top bar says the same of all its chats, so a chat in another workspace that wants you shows there. Where several would say different things, the one that needs you most shows: `?`, then `⋯`, then `•`. A tab whose program says how far a long task has got ends with that last: ` 42%`, ` …` busy, ` ‖` paused, or ` ✗` failed (see [progress](~clackatoo/reference/terminal-emulation#progress)).
+A tab says what its chats are doing after its name: `⋯` while one's agent is
+at work, `?` while one asks you something, and `•` when one finished while
+this window wasn't showing it. A workspace in the top bar says the same of all
+its chats, so a chat in another workspace that wants you shows there. Where
+several would say different things, the one that needs you most shows: `?`,
+then `⋯`, then `•`. A tab whose program says how far a long task has got ends
+with that last: ` 42%`, ` …` busy, ` ‖` paused, or ` ✗` failed (see
+[progress](~clackatoo/reference/terminal-emulation#progress)).
 
-What's unseen is each window's own: a chat counts as seen once its tab is shown in a focused window, and a chat finished while no window or phone was looking is unseen to a window that comes to it later. A chat that starts again loses its `•`. While the daemon is out of reach, no chat is said to work or ask. A window also shows a [desktop notification](~clackatoo/reference/agents#desktop-notifications) for a chat it marks, as it finishes or asks.
+What's unseen is each window's own: a chat counts as seen once its tab is
+shown in a focused window, and a chat finished while no window or phone was
+looking is unseen to a window that comes to it later. A chat that starts again
+loses its `•`. While the daemon is out of reach, no chat is said to work or
+ask. A window also shows a
+[desktop notification](~clackatoo/reference/agents#desktop-notifications) for
+a chat it marks, as it finishes or asks.
 
-The daemon keeps all of them, as it keeps terminals. Closing the window closes nothing, and the next window opens on the workspace, tab and pane last used. Each window shows one workspace, so two windows can show two workspaces, or two tabs of one.
+The daemon keeps all of them, as it keeps terminals. Closing the window closes
+nothing, and the next window opens on the workspace, tab and pane last used.
+Each window shows one workspace, so two windows can show two workspaces, or
+two tabs of one.
 
 ### After a restart
 
-The daemon keeps your workspaces, tabs and panes, so they come back after a restart, a crash or a power cut: with their names, order, splits and sizes, and the tab and pane you were on. Each terminal comes back as a new shell in the folder it was in, or your home if that's gone. Each editor comes back on its file with its cursor and view where they were, still in the directory its file was opened from (or its file's own folder if that's gone), and with its changes not saved if it had any, as `[No Name]` files do; explorers and folders keep their root; boards and reviews come back too, and chats on their sessions, a [subagent](~clackatoo/reference/agents#what-lasts) still its chat's. Scrollback and running programs don't. An editor whose file has been deleted is left out.
+The daemon keeps your workspaces, tabs and panes, so they come back after a
+restart, a crash or a power cut: with their names, order, splits and sizes,
+and the tab and pane you were on. Each terminal comes back as a new shell in
+the folder it was in, or your home if that's gone. Each editor comes back on
+its file with its cursor and view where they were, still in the directory its
+file was opened from (or its file's own folder if that's gone), and with its
+changes not saved if it had any, as `[No Name]` files do; explorers and
+folders keep their root; boards and reviews come back too, and chats on their
+sessions, a [subagent](~clackatoo/reference/agents#what-lasts) still its
+chat's. Scrollback and running programs don't. An editor whose file has been
+deleted is left out.
 
-A terminal whose shell was running a command shows "was running: cargo watch" at its bottom right. In normal mode, `R` puts the command at the new shell's prompt, where you read it and press <kbd>Enter</kbd> to run it; <kbd>Esc</kbd> dismisses it, and selecting either does the same. Nothing runs by itself. Typing into the terminal dismisses it too, in every window. This works in bash, zsh, and fish 4 when clackatoo starts them as your shell: their integration marks each command with a secret only it and clackatoo know, and only a command marked so is offered, never one a program printed. A command the shell keeps out of its history is never offered: one typed with a space before it, one bash leaves out (`HISTCONTROL`, `HISTIGNORE`), one your `zshaddhistory` or `fish_should_add_to_history` turns away, and everything in `fish --private`. bash is cautious here: with `ignoredups` (part of `ignoreboth`) or `erasedups`, running the same command twice in a row gives no offer for the second. A terminal started with a command of its own, or a shell started any other way, comes back without an offer. An offer not yet taken or dismissed stays through an upgrade, which makes no new ones, and shows in a workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) too. An upgrade from a release before this one, which can't hand its offers over, takes those still open from the workspaces it kept, once, unless what's kept differs from the panes it hands over, as when its last write failed.
+A terminal whose shell was running a command shows "was running: cargo watch"
+at its bottom right. In normal mode, `R` puts the command at the new shell's
+prompt, where you read it and press <kbd>Enter</kbd> to run it; <kbd>Esc</kbd>
+dismisses it, and selecting either does the same. Nothing runs by itself.
+Typing into the terminal dismisses it too, in every window. This works in
+bash, zsh, and fish 4 when clackatoo starts them as your shell: their
+integration marks each command with a secret only it and clackatoo know, and
+only a command marked so is offered, never one a program printed. A command
+the shell keeps out of its history is never offered: one typed with a space
+before it, one bash leaves out (`HISTCONTROL`, `HISTIGNORE`), one your
+`zshaddhistory` or `fish_should_add_to_history` turns away, and everything in
+`fish --private`. bash is cautious here: with `ignoredups` (part of
+`ignoreboth`) or `erasedups`, running the same command twice in a row gives no
+offer for the second. A terminal started with a command of its own, or a shell
+started any other way, comes back without an offer. An offer not yet taken or
+dismissed stays through an upgrade, which makes no new ones, and shows in a
+workspace on
+[another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+too. An upgrade from a release before this one, which can't hand its offers
+over, takes those still open from the workspaces it kept, once, unless what's
+kept differs from the panes it hands over, as when its last write failed.
 
-To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`](~clackatoo/reference/cli#daemon).
+To start once with none, run `clackatoo stop`, then
+[`clackatoo daemon --fresh`](~clackatoo/reference/cli#daemon).
 
 ### Keeping a terminal running
 
-`:keep` marks the focused terminal to run its command again by itself as the daemon starts afresh, in its folder: the one exception to nothing running by itself, and only because you asked. Its command is the one its shell runs, or else ran last, as the shell's integration said it with its secret, taken as you mark it and kept: never what a program printed, nor whatever runs later. A shell that hasn't said, as one clackatoo didn't start as your shell, can't be marked. A terminal marked so offers nothing after a restart: it runs. The secret is one of the shell's variables, so any code running in the shell, a command typed at it, yours or an agent's, a function or a script it sources, can read it. What the shell said a command is stays, whatever that command prints with the secret while it runs; but once it has printed the marks that say it ended (`D;0`), it can say another started, with the secret, and that's the command an offer or `:keep` would then take. The secret tells a program from the shell, not code you let into the shell from the shell itself, which could as well edit your `~/.bashrc`. Read what `:keep` says it keeps.
+`:keep` marks the focused terminal to run its command again by itself as the
+daemon starts afresh, in its folder: the one exception to nothing running by
+itself, and only because you asked. Its command is the one its shell runs, or
+else ran last, as the shell's integration said it with its secret, taken as
+you mark it and kept: never what a program printed, nor whatever runs later. A
+shell that hasn't said, as one clackatoo didn't start as your shell, can't be
+marked. A terminal marked so offers nothing after a restart: it runs. The
+secret is one of the shell's variables, so any code running in the shell, a
+command typed at it, yours or an agent's, a function or a script it sources,
+can read it. What the shell said a command is stays, whatever that command
+prints with the secret while it runs; but once it has printed the marks that
+say it ended (`D;0`), it can say another started, with the secret, and that's
+the command an offer or `:keep` would then take. The secret tells a program
+from the shell, not code you let into the shell from the shell itself, which
+could as well edit your `~/.bashrc`. Read what `:keep` says it keeps.
 
 | Command | Does |
 |---|---|
@@ -176,19 +440,71 @@ To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`]
 | `:keep always` | That, and runs it again as it ends: a second after its shell's prompt comes back after that very command, never after one you ran since, and in a new shell in its pane if the shell itself ends. Each time it ends again within ten seconds of starting it waits twice as long, up to a minute, and after five such ends in a row it gives up until you mark it again. |
 | `:keep off` | Takes the mark away. |
 
-It's only ever typed at the shell's prompt, while the shell has the terminal to itself. The marks that say a command ended and a prompt began aren't signed, so a program can print them; so a command's end is taken for one, and anything typed, only while the terminal's foreground process group is the shell's, the shell is still the program it started as, not one it `exec`'d, and it runs nothing in its own group, as a shell without job control does; and typing waits a tenth of a second to see that still holds. That leaves a little: a program that has left the shell's group yet reads the terminal, or a command line whose programs follow one another faster than that, could still be typed into. So could the shell's own `read`, `select` or zsh's `vared`, which the shell runs itself, so nothing tells them from its prompt: a kept command that's a function or script printing text it fetched, then asking with `read`, could have that text mark an end and a prompt, and the command would be typed as the answer. A run the daemon typed is the command's even if your shell doesn't sign it, as bash doesn't sign a command it leaves out of its history with `ignoredups`.
+It's only ever typed at the shell's prompt, while the shell has the terminal
+to itself. The marks that say a command ended and a prompt began aren't
+signed, so a program can print them; so a command's end is taken for one, and
+anything typed, only while the terminal's foreground process group is the
+shell's, the shell is still the program it started as, not one it `exec`'d,
+and it runs nothing in its own group, as a shell without job control does; and
+typing waits a tenth of a second to see that still holds. That leaves a
+little: a program that has left the shell's group yet reads the terminal, or a
+command line whose programs follow one another faster than that, could still
+be typed into. So could the shell's own `read`, `select` or zsh's `vared`,
+which the shell runs itself, so nothing tells them from its prompt: a kept
+command that's a function or script printing text it fetched, then asking with
+`read`, could have that text mark an end and a prompt, and the command would
+be typed as the answer. A run the daemon typed is the command's even if your
+shell doesn't sign it, as bash doesn't sign a command it leaves out of its
+history with `ignoredups`.
 
-A `$SHELL` that starts another shell rather than becoming it, as `sh -c fish`, a distrobox or toolbox wrapper, or a `nix-shell` does, never has its terminal to itself: nothing is typed into its terminals, by this or by agents' `run_in_terminal`, and what's said names the cause. Set the daemon's `$SHELL` to the real shell.
+A `$SHELL` that starts another shell rather than becoming it, as `sh -c fish`,
+a distrobox or toolbox wrapper, or a `nix-shell` does, never has its terminal
+to itself: nothing is typed into its terminals, by this or by agents'
+`run_in_terminal`, and what's said names the cause. Set the daemon's `$SHELL`
+to the real shell.
 
-Typing into a terminal kept running always, as <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop it, or a command typed ahead while it runs, pauses running it again: the user has taken over. Its tab says ` ↻‖`, and as the command ends it offers `R` to run it again, as after a restart. Marking it again, `:keep always`, ends the pause. So does running the command there again yourself, but only when your shell signs it: bash with `ignoredups` or `ignoreboth`, as Ubuntu sets it, doesn't sign the same command twice in a row, so `R` and <kbd>Enter</kbd> leave it paused, and `:keep always` is the way out. The mark stays for the next fresh start meanwhile, and the pause, and the waits between runs, outlast an upgrade and the tab going to the background and back.
+Typing into a terminal kept running always, as <kbd>Ctrl</kbd>+<kbd>C</kbd> to
+stop it, or a command typed ahead while it runs, pauses running it again: the
+user has taken over. Its tab says ` ↻‖`, and as the command ends it offers `R`
+to run it again, as after a restart. Marking it again, `:keep always`, ends
+the pause. So does running the command there again yourself, but only when
+your shell signs it: bash with `ignoredups` or `ignoreboth`, as Ubuntu sets
+it, doesn't sign the same command twice in a row, so `R` and <kbd>Enter</kbd>
+leave it paused, and `:keep always` is the way out. The mark stays for the
+next fresh start meanwhile, and the pause, and the waits between runs, outlast
+an upgrade and the tab going to the background and back.
 
-A tab holding a terminal kept running says ` ↻` after its name, ` ↻‖` while paused, and ` ↻✗` once it has given up; so does a [background tab](#background-tabs) in the list. Only you set the mark, from a window or with [`clackatoo keep`](~clackatoo/reference/cli#keep), and a device on the [web app](~clackatoo/reference/phone) can't. [Agents' tools](~clackatoo/reference/agents#what-the-agent-can-show-you) don't set it, and refuse a command line that runs `clackatoo keep` or `clackatoo bg`; but that's a guard against mistakes, not a boundary: a command an agent types into a terminal follows the [ask-before-running rules](~clackatoo/reference/agents#what-the-agent-can-show-you), and a script it runs could do anything you could. `clackatoo keep` run in the terminal itself keeps the command before it, never itself. The mark is kept with the workspaces, and handed over as the daemon upgrades, which keeps terminals running anyway. A terminal on another machine can't be marked from here.
+A tab holding a terminal kept running says ` ↻` after its name, ` ↻‖` while
+paused, and ` ↻✗` once it has given up; so does a
+[background tab](#background-tabs) in the list. Only you set the mark, from a
+window or with [`clackatoo keep`](~clackatoo/reference/cli#keep), and a device
+on the [web app](~clackatoo/reference/phone) can't.
+[Agents' tools](~clackatoo/reference/agents#what-the-agent-can-show-you) don't
+set it, and refuse a command line that runs `clackatoo keep` or
+`clackatoo bg`; but that's a guard against mistakes, not a boundary: a command
+an agent types into a terminal follows the
+[ask-before-running rules](~clackatoo/reference/agents#what-the-agent-can-show-you),
+and a script it runs could do anything you could. `clackatoo keep` run in the
+terminal itself keeps the command before it, never itself. The mark is kept
+with the workspaces, and handed over as the daemon upgrades, which keeps
+terminals running anyway. A terminal on another machine can't be marked from
+here.
 
-A pane closes when its program exits, as in other terminals. A tab closes with its last pane, and a workspace with its last tab, unless it has a [background tab](#background-tabs) still running, which comes back in its place. When the last workspace closes, so does the window.
+A pane closes when its program exits, as in other terminals. A tab closes with
+its last pane, and a workspace with its last tab, unless it has a
+[background tab](#background-tabs) still running, which comes back in its
+place. When the last workspace closes, so does the window.
 
 ### Background tabs
 
-A background tab is a tab kept running out of the tab bar, as a web server or a `trail serve` you only glance at now and then, so it doesn't take a tab's place. It keeps its splits, and holds terminals alone. Each workspace has its own; the daemon keeps them, so every window and the [web app](~clackatoo/reference/phone) sees them, they're handed over as the daemon upgrades, and they come back after a restart as tabs do, each terminal a new shell offering `R` to put what it ran at its prompt. A window from before protocol 96 doesn't show them, and leaves them be.
+A background tab is a tab kept running out of the tab bar, as a web server or
+a `trail serve` you only glance at now and then, so it doesn't take a tab's
+place. It keeps its splits, and holds terminals alone. Each workspace has its
+own; the daemon keeps them, so every window and the
+[web app](~clackatoo/reference/phone) sees them, they're handed over as the
+daemon upgrades, and they come back after a restart as tabs do, each terminal
+a new shell offering `R` to put what it ran at its prompt. A window from
+before protocol 96 doesn't show them, and leaves them be.
 
 | Keys | Command | Does |
 |---|---|---|
@@ -197,9 +513,26 @@ A background tab is a tab kept running out of the tab bar, as a web server or a 
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> `b` `l` | `:Background` | Lists the background tabs. Selecting the icon after the tabs does too. |
 | | `:bg CMD` | Starts `CMD` in a new background tab of the workspace shown, typed at a new shell's prompt in the focused pane's folder, as you would type it, so its shell's marks say when it runs and how it ends. Nothing is shown. [`clackatoo bg`](~clackatoo/reference/cli#bg) does the same from a shell, and an agent can too, with [`run_in_background`](~clackatoo/reference/agents#what-the-agent-can-show-you). |
 
-After the tabs, an icon says how many of the workspace's background tabs are running: `⚙ 2`. A tab counts as running while a command runs in one of its terminals, as their shells' marks say, which bash, zsh and fish 4 make when clackatoo starts them as your shell; one whose shell is at its prompt again is idle, and a terminal whose shell doesn't mark its commands counts as running while it's alive. With none running, the icon goes. A command in one that fails, or a shell in one that exits with a failure, turns the icon red with its exit status, as a failed command's mark is, `⚙ 1 ✗ 2`, until a window lists them.
+After the tabs, an icon says how many of the workspace's background tabs are
+running: `⚙ 2`. A tab counts as running while a command runs in one of its
+terminals, as their shells' marks say, which bash, zsh and fish 4 make when
+clackatoo starts them as your shell; one whose shell is at its prompt again is
+idle, and a terminal whose shell doesn't mark its commands counts as running
+while it's alive. With none running, the icon goes. A command in one that
+fails, or a shell in one that exits with a failure, turns the icon red with
+its exit status, as a failed command's mark is, `⚙ 1 ✗ 2`, until a window
+lists them.
 
-The list is the [finder's](#the-finder), with this workspace's background tabs first, then the other workspaces': each with its name (its program's title, else the command its shell runs or ran last, else its folder), how it's getting on (`running`, `idle`, `exited 2`, with any failure since in red), the TCP ports its programs listen on (`· :8080`), and the workspace of one from another. Beside them is the last screenful of the one picked. Both are looked at again every two seconds while the list is open, and never while it's closed: the daemon finds the ports apart from its other work, from the sockets the processes of each terminal's shell's session hold, so a server that leaves its shell's session, as a daemon does, isn't seen. Typing narrows them.
+The list is the [finder's](#the-finder), with this workspace's background tabs
+first, then the other workspaces': each with its name (its program's title,
+else the command its shell runs or ran last, else its folder), how it's
+getting on (`running`, `idle`, `exited 2`, with any failure since in red), the
+TCP ports its programs listen on (`· :8080`), and the workspace of one from
+another. Beside them is the last screenful of the one picked. Both are looked
+at again every two seconds while the list is open, and never while it's
+closed: the daemon finds the ports apart from its other work, from the sockets
+the processes of each terminal's shell's session hold, so a server that leaves
+its shell's session, as a daemon does, isn't seen. Typing narrows them.
 
 | Key, in the list | Does |
 |---|---|
@@ -208,17 +541,79 @@ The list is the [finder's](#the-finder), with this workspace's background tabs f
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, or for a background tab of another machine's workspace, forwards the ports it listens on here, each to the same port, as `:portforward 8080` does. |
 | <kbd>Esc</kbd> | Closes the list. |
 
-A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it; a window from before protocol 96, which doesn't know they're there, can't. A workspace keeps 64 background tabs at most, and chats don't go to the background, only terminals.
+A background tab whose terminals have ended stays, its last screen readable,
+until it's dismissed or brought back: nothing vanishes by itself. Closing a
+workspace closes its background tabs with it; a window from before protocol
+96, which doesn't know they're there, can't. A workspace keeps 64 background
+tabs at most, and chats don't go to the background, only terminals.
 
-A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) shows its background tabs here as your own do: in its icon, in the list, with the ports they listen on and their ` ↻` marks, and everything above works on them, on that machine: `:bg`, `:bgpane`, `:bg CMD` (in its focused pane's folder there), <kbd>Enter</kbd>, <kbd>Ctrl</kbd>+<kbd>D</kbd> and `:keep`. `:bg CMD` beside a pane of one of your own workspaces borrowed from another machine runs the command on that machine, in that pane's folder: a new shell it lends you, in a background tab of your workspace, which shows how it's getting on as that machine says. It's kept, once its program ends, until you dismiss it, which closes it there (once that machine is reached again, if it can't be now), or bring it back, as a tab of your workspace, a new shell there if it had ended. It comes back after either machine restarts, and through either upgrading. That machine needs this release of clackatoo or later. A borrowed pane itself can't go to the background, nor can a tab holding one.
+A workspace on
+[another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+shows its background tabs here as your own do: in its icon, in the list, with
+the ports they listen on and their ` ↻` marks, and everything above works on
+them, on that machine: `:bg`, `:bgpane`, `:bg CMD` (in its focused pane's
+folder there), <kbd>Enter</kbd>, <kbd>Ctrl</kbd>+<kbd>D</kbd> and `:keep`.
+`:bg CMD` beside a pane of one of your own workspaces borrowed from another
+machine runs the command on that machine, in that pane's folder: a new shell
+it lends you, in a background tab of your workspace, which shows how it's
+getting on as that machine says. It's kept, once its program ends, until you
+dismiss it, which closes it there (once that machine is reached again, if it
+can't be now), or bring it back, as a tab of your workspace, a new shell there
+if it had ended. It comes back after either machine restarts, and through
+either upgrading. That machine needs this release of clackatoo or later. A
+borrowed pane itself can't go to the background, nor can a tab holding one.
 
 ### The command line
 
-In normal mode, `:` opens a command line, in the palette in the middle of the window. <kbd>Enter</kbd> runs the command. <kbd>Esc</kbd>, or <kbd>Backspace</kbd> past the colon, closes it.
+In normal mode, `:` opens a command line, in the palette in the middle of the
+window. <kbd>Enter</kbd> runs the command. <kbd>Esc</kbd>, or
+<kbd>Backspace</kbd> past the colon, closes it.
 
-While it's open, the bottom bar keeps the mode and the tabs, and the focused pane's cursor is drawn hollow, since what you type goes to the line. The same holds for a search, a new name, the finder and the machine picker. Suggestions appear as you type without changing your text, with short descriptions beneath their names. Commands, options, and argument choices explain their purpose; file, workspace, and machine suggestions explain what selecting them does. <kbd>Tab</kbd> completes the word before the caret: a command's name, a kind of pane after a split's mark (`:|Te`), an option after `:set`, with `no` or `inv` before a switch and `name=` before a choice's values, a file or folder after `:e`, `:w`, `:Editor` and `:Explore` (spaces in names are written `\ `), a workspace after `:ws`, a machine after a kind of pane's `@` and after `:ws new@`, a lesson after `:Tutor`, and the words `:gitsigns`, `:devices` and `:Review` take. One choice goes in when you press <kbd>Tab</kbd>. With more, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>, or <kbd>Ctrl</kbd>+<kbd>N</kbd> and <kbd>Ctrl</kbd>+<kbd>P</kbd>, cycle through the matches; once cycling, <kbd>Down</kbd> and <kbd>Up</kbd> do too, and past either end back to what you typed. <kbd>Enter</kbd> runs only the text in the prompt, and <kbd>Escape</kbd> closes it. Files are looked up in the background and complete only when the focused pane's files are on this machine; a slow folder says `listing…` while it's read. Connected host names are suggested as you type; explicit <kbd>Tab</kbd> also includes SSH config and recent connections.
+While it's open, the bottom bar keeps the mode and the tabs, and the focused
+pane's cursor is drawn hollow, since what you type goes to the line. The same
+holds for a search, a new name, the finder and the machine picker. Suggestions
+appear as you type without changing your text, with short descriptions beneath
+their names. Commands, options, and argument choices explain their purpose;
+file, workspace, and machine suggestions explain what selecting them does.
+<kbd>Tab</kbd> completes the word before the caret: a command's name, a kind
+of pane after a split's mark (`:|Te`), an option after `:set`, with `no` or
+`inv` before a switch and `name=` before a choice's values, a file or folder
+after `:e`, `:w`, `:Editor` and `:Explore` (spaces in names are written `\ `),
+a workspace after `:ws`, a machine after a kind of pane's `@` and after
+`:ws new@`, a lesson after `:Tutor`, and the words `:gitsigns`, `:devices` and
+`:Review` take. One choice goes in when you press <kbd>Tab</kbd>. With more,
+<kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>, or
+<kbd>Ctrl</kbd>+<kbd>N</kbd> and <kbd>Ctrl</kbd>+<kbd>P</kbd>, cycle through
+the matches; once cycling, <kbd>Down</kbd> and <kbd>Up</kbd> do too, and past
+either end back to what you typed. <kbd>Enter</kbd> runs only the text in the
+prompt, and <kbd>Escape</kbd> closes it. Files are looked up in the background
+and complete only when the focused pane's files are on this machine; a slow
+folder says `listing…` while it's read. Connected host names are suggested as
+you type; explicit <kbd>Tab</kbd> also includes SSH config and recent
+connections.
 
-<kbd>Up</kbd> and <kbd>Down</kbd> go back through the commands you've typed, in this window and others, keeping to those that start with what's typed. They're kept in `clackatoo/history` under `$XDG_STATE_HOME`, the last 100, readable only by you; a line you start with a space isn't kept, nor is a device's pairing code, and a line of either kind is left out when the file is read, if an older build kept it. <kbd>Left</kbd>, <kbd>Right</kbd>, <kbd>Home</kbd> and <kbd>End</kbd> move the caret, and <kbd>Ctrl</kbd> or <kbd>Shift</kbd> with <kbd>Left</kbd> or <kbd>Right</kbd> move it a WORD, anything between blanks, as Vim's command line does. The command line, every pane's search (a terminal's, an editor's, a chat's, an explorer's, a board's, and a review's) and an editor's new name all take keys this way; the names and entries typed into an explorer or a board, and the finder, don't. <kbd>Ctrl</kbd>+<kbd>U</kbd> deletes everything before the caret, and <kbd>Ctrl</kbd>+<kbd>W</kbd> or <kbd>Ctrl</kbd>+<kbd>Backspace</kbd> the word before it. <kbd>Alt</kbd> and a key types the key's character. <kbd>Ctrl</kbd>+<kbd>R</kbd> and a register's name puts in what the register holds: <kbd>Ctrl</kbd>+<kbd>R</kbd> <kbd>Ctrl</kbd>+<kbd>W</kbd> the word under an editor's cursor, <kbd>Ctrl</kbd>+<kbd>R</kbd> `:` the last command, and <kbd>Ctrl</kbd>+<kbd>R</kbd> `/` the last search. A count before `:` in an editor starts the line with that many lines, `5:` giving `:.,.+4`; in any other pane, `5:` opens the command line as `:` does. From a selection it's `'<,'>`, count or not.
+<kbd>Up</kbd> and <kbd>Down</kbd> go back through the commands you've typed,
+in this window and others, keeping to those that start with what's typed.
+They're kept in `clackatoo/history` under `$XDG_STATE_HOME`, the last 100,
+readable only by you; a line you start with a space isn't kept, nor is a
+device's pairing code, and a line of either kind is left out when the file is
+read, if an older build kept it. <kbd>Left</kbd>, <kbd>Right</kbd>,
+<kbd>Home</kbd> and <kbd>End</kbd> move the caret, and <kbd>Ctrl</kbd> or
+<kbd>Shift</kbd> with <kbd>Left</kbd> or <kbd>Right</kbd> move it a WORD,
+anything between blanks, as Vim's command line does. The command line, every
+pane's search (a terminal's, an editor's, a chat's, an explorer's, a board's,
+and a review's) and an editor's new name all take keys this way; the names and
+entries typed into an explorer or a board, and the finder, don't.
+<kbd>Ctrl</kbd>+<kbd>U</kbd> deletes everything before the caret, and
+<kbd>Ctrl</kbd>+<kbd>W</kbd> or <kbd>Ctrl</kbd>+<kbd>Backspace</kbd> the word
+before it. <kbd>Alt</kbd> and a key types the key's character.
+<kbd>Ctrl</kbd>+<kbd>R</kbd> and a register's name puts in what the register
+holds: <kbd>Ctrl</kbd>+<kbd>R</kbd> <kbd>Ctrl</kbd>+<kbd>W</kbd> the word
+under an editor's cursor, <kbd>Ctrl</kbd>+<kbd>R</kbd> `:` the last command,
+and <kbd>Ctrl</kbd>+<kbd>R</kbd> `/` the last search. A count before `:` in an
+editor starts the line with that many lines, `5:` giving `:.,.+4`; in any
+other pane, `5:` opens the command line as `:` does. From a selection it's
+`'<,'>`, count or not.
 
 | Command | Does |
 |---|---|
@@ -252,48 +647,109 @@ While it's open, the bottom bar keeps the mode and the tabs, and the focused pan
 | `:reload` | Runs the [config](~clackatoo/reference/config) again, from the start. |
 | `:set nonu`, `:set rnu!`… | Changes [options](~clackatoo/reference/config#options), or shows them, as Vim's `:set` does. |
 
-The first character of a split says which way the divider runs, `|` upright or `-` flat, and `<` or `^` after it puts the new pane first. A mark alone opens a terminal, so `:|` is `:|Terminal`. Capitalised words name kinds of pane: `Terminal`, `Agent`, `Editor`, which takes the file's path after it, and `Explore` (or `Ex`), which takes a folder, and `Review`; `:|Explore` and `:-Review` open a new explorer or review beside the focused pane.
+The first character of a split says which way the divider runs, `|` upright or
+`-` flat, and `<` or `^` after it puts the new pane first. A mark alone opens
+a terminal, so `:|` is `:|Terminal`. Capitalised words name kinds of pane:
+`Terminal`, `Agent`, `Editor`, which takes the file's path after it, and
+`Explore` (or `Ex`), which takes a folder, and `Review`; `:|Explore` and
+`:-Review` open a new explorer or review beside the focused pane.
 
-Canonical names use capitals for panes, pickers and overlays (`Terminal`, `Files`, `Registers`, `Marks`, `Messages`), and lowercase for actions (`write`, `format`, `agentundo`, `reviewkeep`). Command names and their aliases ignore case: `:Terminal`, `:terminal`, and `:TERMINAL` do the same thing. Autocomplete always shows the canonical spelling and matches regardless of case. Existing spellings still work. Arguments keep their case, including filenames, hosts, patterns, option values and Normal-mode keys. Mixed-purpose commands such as `set` and `connect` are named for their primary action; `edit` operates in the current editor, while `Editor` opens a pane.
+Canonical names use capitals for panes, pickers and overlays (`Terminal`,
+`Files`, `Registers`, `Marks`, `Messages`), and lowercase for actions
+(`write`, `format`, `agentundo`, `reviewkeep`). Command names and their
+aliases ignore case: `:Terminal`, `:terminal`, and `:TERMINAL` do the same
+thing. Autocomplete always shows the canonical spelling and matches regardless
+of case. Existing spellings still work. Arguments keep their case, including
+filenames, hosts, patterns, option values and Normal-mode keys. Mixed-purpose
+commands such as `set` and `connect` are named for their primary action;
+`edit` operates in the current editor, while `Editor` opens a pane.
 
-A number goes to that line in an editor, or else that tab. A command with a range of lines before it, or one of Vim's for lines, goes to the focused editor; from visual mode, `:` starts with `'<,'>`.
+A number goes to that line in an editor, or else that tab. A command with a
+range of lines before it, or one of Vim's for lines, goes to the focused
+editor; from visual mode, `:` starts with `'<,'>`.
 
-A new pane goes on the machine of the pane it's made from: the one split, or the focused one for a new tab or explorer, so `:Terminal`, `:e`, `:Explore` and the finder in a pane on desk are desk's. `@host` after a kind of pane picks the machine instead (see [a pane on another machine](~clackatoo/reference/remote#a-pane-on-another-machine)).
+A new pane goes on the machine of the pane it's made from: the one split, or
+the focused one for a new tab or explorer, so `:Terminal`, `:e`, `:Explore`
+and the finder in a pane on desk are desk's. `@host` after a kind of pane
+picks the machine instead (see
+[a pane on another machine](~clackatoo/reference/remote#a-pane-on-another-machine)).
 
-A new terminal starts in the directory that the pane it splits is in. A new tab's terminal starts in the directory of the workspace's focused pane. That's the directory of whatever is in front in that pane, such as a nested shell or an editor that changed directory, or else the shell's own.
+A new terminal starts in the directory that the pane it splits is in. A new
+tab's terminal starts in the directory of the workspace's focused pane. That's
+the directory of whatever is in front in that pane, such as a nested shell or
+an editor that changed directory, or else the shell's own.
 
-Workspace names are unique, and can't contain `@`, which names workspaces on other machines. If a command fails, such as renaming a workspace to a name another has, the bottom bar says why until the next key, in red, and if that's too long for the bar, whole above it for a few seconds. `:Messages` shows what the bar has said lately. A command, an option or a lesson that isn't one says only so, as `no command ‘nonsens’`, and offers the nearest name when a letter or two is off: `:Fils` asks `did you mean ‘:Files’?`, and `:set nonumbr` asks about `‘:set nonumber’`. It never offers `:q` or `:wq` for a slip. Suggestions list the matching names as you type.
+Workspace names are unique, and can't contain `@`, which names workspaces on
+other machines. If a command fails, such as renaming a workspace to a name
+another has, the bottom bar says why until the next key, in red, and if that's
+too long for the bar, whole above it for a few seconds. `:Messages` shows what
+the bar has said lately. A command, an option or a lesson that isn't one says
+only so, as `no command ‘nonsens’`, and offers the nearest name when a letter
+or two is off: `:Fils` asks `did you mean ‘:Files’?`, and `:set nonumbr` asks
+about `‘:set nonumber’`. It never offers `:q` or `:wq` for a slip. Suggestions
+list the matching names as you type.
 
 ### Resizing panes
 
-Drag the gap between two panes to move it. It moves a whole column or row at a time, and the programs on either side are told their new size as it goes. A double click on the gap shares that split's space equally again.
+Drag the gap between two panes to move it. It moves a whole column or row at a
+time, and the programs on either side are told their new size as it goes. A
+double click on the gap shares that split's space equally again.
 
-In normal mode, <kbd>Alt</kbd>+<kbd>H</kbd>, <kbd>Alt</kbd>+<kbd>J</kbd>, <kbd>Alt</kbd>+<kbd>K</kbd> and <kbd>Alt</kbd>+<kbd>L</kbd> move the focused pane's edge on that side by a column or row, so <kbd>Alt</kbd>+<kbd>L</kbd> widens a pane with a pane to its right. A pane with no edge on that side moves its other edge instead, so <kbd>Alt</kbd>+<kbd>L</kbd> narrows the rightmost pane. No pane gets smaller than one cell.
+In normal mode, <kbd>Alt</kbd>+<kbd>H</kbd>, <kbd>Alt</kbd>+<kbd>J</kbd>,
+<kbd>Alt</kbd>+<kbd>K</kbd> and <kbd>Alt</kbd>+<kbd>L</kbd> move the focused
+pane's edge on that side by a column or row, so <kbd>Alt</kbd>+<kbd>L</kbd>
+widens a pane with a pane to its right. A pane with no edge on that side moves
+its other edge instead, so <kbd>Alt</kbd>+<kbd>L</kbd> narrows the rightmost
+pane. No pane gets smaller than one cell.
 
-A new pane in a split gets the split's average share, so a split you never resized stays equal. Sizes are kept by the daemon, like the rest of the layout, and other windows show the change.
+A new pane in a split gets the split's average share, so a split you never
+resized stays equal. Sizes are kept by the daemon, like the rest of the
+layout, and other windows show the change.
 
 ### Moving around
 
-In normal mode, <kbd>Ctrl</kbd>+<kbd>H</kbd>, <kbd>Ctrl</kbd>+<kbd>J</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>Ctrl</kbd>+<kbd>L</kbd> move to the pane to the left, below, above or right. Tabs are `:1`, `:2` and so on, and workspaces `:ws NAME`. [<kbd>Ctrl</kbd>+<kbd>B</kbd>](#ctrl-b) does all of this in either mode.
+In normal mode, <kbd>Ctrl</kbd>+<kbd>H</kbd>, <kbd>Ctrl</kbd>+<kbd>J</kbd>,
+<kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>Ctrl</kbd>+<kbd>L</kbd> move to the pane
+to the left, below, above or right. Tabs are `:1`, `:2` and so on, and
+workspaces `:ws NAME`. [<kbd>Ctrl</kbd>+<kbd>B</kbd>](#ctrl-b) does all of
+this in either mode.
 
-Wherever you go, you arrive in the window's mode. That holds when you move, use the mouse, switch tabs or workspaces, jump, or open a pane, and when the pane you were in closes because you closed it, or its program ends right after you typed into it, as after `exit` or <kbd>Ctrl</kbd>+<kbd>D</kbd>. Arriving in insert mode, a terminal goes back to its live screen and a chat to its message box. An editor types at its cursor once its file's text has come; until then, what you type waits for it, and any other key, such as <kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>B</kbd>, is had at once in normal mode. A chat that's asking something is arrived at in normal mode, so a key can't answer it by chance. If anything else moves the focus, such as another window or an agent closing the pane or opening a file in it, you arrive in normal mode and the window goes to normal mode, so nothing you type lands where you didn't choose. Leaving a pane ends a selection, a half-typed command, a search or the command line. The pane keeps its place in history, or its cursor.
+Wherever you go, you arrive in the window's mode. That holds when you move,
+use the mouse, switch tabs or workspaces, jump, or open a pane, and when the
+pane you were in closes because you closed it, or its program ends right after
+you typed into it, as after `exit` or <kbd>Ctrl</kbd>+<kbd>D</kbd>. Arriving
+in insert mode, a terminal goes back to its live screen and a chat to its
+message box. An editor types at its cursor once its file's text has come;
+until then, what you type waits for it, and any other key, such as
+<kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>B</kbd>, is had at once in normal mode.
+A chat that's asking something is arrived at in normal mode, so a key can't
+answer it by chance. If anything else moves the focus, such as another window
+or an agent closing the pane or opening a file in it, you arrive in normal
+mode and the window goes to normal mode, so nothing you type lands where you
+didn't choose. Leaving a pane ends a selection, a half-typed command, a search
+or the command line. The pane keeps its place in history, or its cursor.
 
-The window remembers where you've been, as Vim's jump list does: the panes you moved between, and the places you jumped from in files, folders, terminals, chats and lists. Long moves such as `gg` and `G`, and accepted searches including `n` and `N`, are jumps. Search previews do not add places.
+The window remembers where you've been, as Vim's jump list does: the panes you
+moved between, and the places you jumped from in files, folders, terminals,
+chats and lists. Long moves such as `gg` and `G`, and accepted searches
+including `n` and `N`, are jumps. Search previews do not add places.
 
 | Keys | In | Does |
 |---|---|---|
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> <kbd>Ctrl</kbd>+<kbd>I</kbd> | normal mode | Back and forward through the places in the tab shown. A count goes that many places: `3` <kbd>Ctrl</kbd>+<kbd>O</kbd> goes back three, or nowhere if there aren't three. |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> | either mode | Back and forward through everywhere: panes, tabs, and workspaces. |
 
-Going back first remembers where you are, so going forward comes back to it. Going back and then jumping somewhere new forgets the way forward. Panes that have closed are skipped. Each window has its own list.
+Going back first remembers where you are, so going forward comes back to it.
+Going back and then jumping somewhere new forgets the way forward. Panes that
+have closed are skipped. Each window has its own list.
 
 ### Macros and marks across panes
 
-In normal mode, `q` and a register start recording, `q` stops, and `@a`,
-`3@a` and `@@` replay, in editors, terminals, chats, explorers, boards and
-reviews. The keys can move between panes and continue there. Explorer,
-board, and review panes close with `Q` so `q` is available for recording.
-See [macros](~clackatoo/reference/editor#macros) for registers, waiting, and
+In normal mode, `q` and a register start recording, `q` stops, and `@a`, `3@a`
+and `@@` replay, in editors, terminals, chats, explorers, boards and reviews.
+The keys can move between panes and continue there. Explorer, board, and
+review panes close with `Q` so `q` is available for recording. See
+[macros](~clackatoo/reference/editor#macros) for registers, waiting, and
 stopping on a failed command.
 
 `ma` sets a mark in the current file or pane; `mA` sets a window-wide mark.
@@ -302,18 +758,31 @@ to its line. Capital marks can take you between pane kinds. `''` returns to
 the place before the last jump in this file or pane, and again comes back.
 
 Saved terminal positions follow line numbers while history grows. A new
-snapshot or history renumbering invalidates them. Chat positions use
-absolute turns, so loading older messages preserves them; replacing a branch
-invalidates them. Folded chat content opens when returning to its mark.
-Marks on live activity cards are not kept until their content is part of a
-turn. Boards and reviews restore entries by identity, and an explorer
-remembers its path. Known missing items and closed panes are skipped in
-jump history; a missing named mark reports that its position is unavailable.
-Marks and jump history are local to this window and are not kept on restart.
+snapshot or history renumbering invalidates them. Chat positions use absolute
+turns, so loading older messages preserves them; replacing a branch
+invalidates them. Folded chat content opens when returning to its mark. Marks
+on live activity cards are not kept until their content is part of a turn.
+Boards and reviews restore entries by identity, and an explorer remembers its
+path. Known missing items and closed panes are skipped in jump history; a
+missing named mark reports that its position is unavailable. Marks and jump
+history are local to this window and are not kept on restart.
 
 ### <kbd>Ctrl</kbd>+<kbd>B</kbd>
 
-<kbd>Ctrl</kbd>+<kbd>B</kbd> and one more key work in either mode, as tmux's prefix does. While <kbd>Ctrl</kbd>+<kbd>B</kbd> waits, the bottom bar marks it `^B` by the mode, and a panel above the bar lists every key it takes, with what each does; a key that starts others says `+` and what follows. With two panes or more, each shows its number. Other keys that start others, as <kbd>Space</kbd> does in normal mode, are marked at once and list theirs after `whichkeydelay`, so keys typed quickly never flash the panel. The panel is made from the bindings: a key your config binds says what its `desc` says, or "from your config" without one, and a key that starts others says `+` and its group's name, as <kbd>Space</kbd> `p` says `+project`, or else what they share, or how many keys can follow. <kbd>Esc</kbd>, or any other key, cancels. These keys, and the others on this page that the window takes rather than the program, are bindings like any you make, so [the config](~clackatoo/reference/config) can change them or take them away.
+<kbd>Ctrl</kbd>+<kbd>B</kbd> and one more key work in either mode, as tmux's
+prefix does. While <kbd>Ctrl</kbd>+<kbd>B</kbd> waits, the bottom bar marks it
+`^B` by the mode, and a panel above the bar lists every key it takes, with
+what each does; a key that starts others says `+` and what follows. With two
+panes or more, each shows its number. Other keys that start others, as
+<kbd>Space</kbd> does in normal mode, are marked at once and list theirs after
+`whichkeydelay`, so keys typed quickly never flash the panel. The panel is
+made from the bindings: a key your config binds says what its `desc` says, or
+"from your config" without one, and a key that starts others says `+` and its
+group's name, as <kbd>Space</kbd> `p` says `+project`, or else what they
+share, or how many keys can follow. <kbd>Esc</kbd>, or any other key, cancels.
+These keys, and the others on this page that the window takes rather than the
+program, are bindings like any you make, so
+[the config](~clackatoo/reference/config) can change them or take them away.
 
 | <kbd>Ctrl</kbd>+<kbd>B</kbd>, then | Does |
 |---|---|
@@ -333,11 +802,20 @@ Marks and jump history are local to this window and are not kept on restart.
 | `b`, then `t` `p` `l` | Sends the tab or the pane to the [background](#background-tabs), or lists the background tabs. |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Sends <kbd>Ctrl</kbd>+<kbd>B</kbd> to the program. |
 
-The workspace picker lists the workspaces whose names hold what you type, those starting with it first. <kbd>Up</kbd> and <kbd>Down</kbd>, or <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>, pick one, and <kbd>Enter</kbd> moves to it. If nothing matches, <kbd>Enter</kbd> makes a workspace by the name typed.
+The workspace picker lists the workspaces whose names hold what you type,
+those starting with it first. <kbd>Up</kbd> and <kbd>Down</kbd>, or
+<kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>, pick one, and
+<kbd>Enter</kbd> moves to it. If nothing matches, <kbd>Enter</kbd> makes a
+workspace by the name typed.
 
 ### The finder
 
-The finder picks a file from the project the focused pane is in: the files git doesn't ignore, leaving out hidden ones; or with `:Grep`, the lines in them a pattern matches; or the files open. It looks from the project's root: the one the file's language server was started for, or else its repository's, or for a terminal, the repository its program is in. Outside your home directory, only a project is searched, never a bare directory.
+The finder picks a file from the project the focused pane is in: the files git
+doesn't ignore, leaving out hidden ones; or with `:Grep`, the lines in them a
+pattern matches; or the files open. It looks from the project's root: the one
+the file's language server was started for, or else its repository's, or for a
+terminal, the repository its program is in. Outside your home directory, only
+a project is searched, never a bare directory.
 
 | Keys, in normal mode | Opens |
 |---|---|
@@ -350,9 +828,13 @@ The finder picks a file from the project the focused pane is in: the files git d
 | `<Space>?` | The files open, `[+]` after those with changes |
 | `<Space>ds` | What's wrong in the project's files, as their language servers say, the worst first: the files open, and those not open that a server has checked, as rust-analyzer checks a whole crate, each `error`, `warning`, `info` or `hint` in the editor's color for it |
 
-What you type matches as fzf's does: letters in order, words each on their own, `'word` exactly, `^word` at the start, `word$` at the end, `!word` leaves out. A grep's pattern is a regular expression, or plain text if it isn't one. The letters it matched are picked out, in every list.
+What you type matches as fzf's does: letters in order, words each on their
+own, `'word` exactly, `^word` at the start, `word$` at the end, `!word` leaves
+out. A grep's pattern is a regular expression, or plain text if it isn't one.
+The letters it matched are picked out, in every list.
 
-When nothing matches what you type, the list says so once it has finished looking.
+When nothing matches what you type, the list says so once it has finished
+looking.
 
 | Key | Does |
 |---|---|
@@ -365,59 +847,194 @@ When nothing matches what you type, the list says so once it has finished lookin
 | <kbd>Ctrl</kbd>+<kbd>U</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> | Deletes what's typed, or its last word: its last letters and digits, and anything after them, as in a list's prompts |
 | <kbd>Esc</kbd> | Closes the finder |
 
-A click picks one, a double click opens it, and the wheel moves through them. A paste is typed on one line, its line breaks as spaces. The [machine picker](~clackatoo/reference/remote#picking-a-machine) and the [start page](~clackatoo/reference/agents#the-start-page) take the same keys for what's typed, for moving, and for the mouse. Beside the list, if the window is wide enough, is the file round the line picked, colored as an editor colors it, with a grep's match picked out in its line. A file that's open is colored as its buffer is; one that isn't is colored by the language its name ends in. A name with no ending such as `Makefile`, a language that isn't installed, or a daemon older than protocol 84 leaves it plain, and a preview from the middle of a file can be colored wrongly inside a long comment. An empty file says so. Opening one is a [jump](~clackatoo/reference/editor#jumps), so <kbd>Ctrl</kbd>+<kbd>O</kbd> comes back. <kbd>Space</kbd> starts these keys in normal mode, so <kbd>Space</kbd> alone doesn't move the cursor, unless a command is half typed, as in `d<Space>`.
+A click picks one, a double click opens it, and the wheel moves through them.
+A paste is typed on one line, its line breaks as spaces. The
+[machine picker](~clackatoo/reference/remote#picking-a-machine) and the
+[start page](~clackatoo/reference/agents#the-start-page) take the same keys
+for what's typed, for moving, and for the mouse. Beside the list, if the
+window is wide enough, is the file round the line picked, colored as an editor
+colors it, with a grep's match picked out in its line. A file that's open is
+colored as its buffer is; one that isn't is colored by the language its name
+ends in. A name with no ending such as `Makefile`, a language that isn't
+installed, or a daemon older than protocol 84 leaves it plain, and a preview
+from the middle of a file can be colored wrongly inside a long comment. An
+empty file says so. Opening one is a
+[jump](~clackatoo/reference/editor#jumps), so <kbd>Ctrl</kbd>+<kbd>O</kbd>
+comes back. <kbd>Space</kbd> starts these keys in normal mode, so
+<kbd>Space</kbd> alone doesn't move the cursor, unless a command is half
+typed, as in `d<Space>`.
 
 ## Typing
 
-In insert mode, keys reach the program the way xterm sends them, which nearly every program understands:
+In insert mode, keys reach the program the way xterm sends them, which nearly
+every program understands:
 
-- Text types itself. <kbd>Ctrl</kbd> with a letter sends its control character (<kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>D</kbd>…). <kbd>Alt</kbd> sends <kbd>Escape</kbd> before the key.
-- <kbd>Enter</kbd>, <kbd>Backspace</kbd>, <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Tab</kbd>, and <kbd>Escape</kbd> send their usual codes. <kbd>Ctrl</kbd>+<kbd>Backspace</kbd> deletes a word in most shells.
-- Arrows, <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>Insert</kbd>, <kbd>Delete</kbd>, <kbd>Page Up</kbd>, <kbd>Page Down</kbd> and <kbd>F1</kbd> to <kbd>F12</kbd> send escape sequences, with any modifiers held.
-- When a program asks for them, arrows and the number pad send application codes, which Vim and less expect.
+- Text types itself. <kbd>Ctrl</kbd> with a letter sends its control character
+  (<kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>D</kbd>…).
+  <kbd>Alt</kbd> sends <kbd>Escape</kbd> before the key.
+- <kbd>Enter</kbd>, <kbd>Backspace</kbd>, <kbd>Tab</kbd>,
+  <kbd>Shift</kbd>+<kbd>Tab</kbd>, and <kbd>Escape</kbd> send their usual
+  codes. <kbd>Ctrl</kbd>+<kbd>Backspace</kbd> deletes a word in most shells.
+- Arrows, <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>Insert</kbd>,
+  <kbd>Delete</kbd>, <kbd>Page Up</kbd>, <kbd>Page Down</kbd> and
+  <kbd>F1</kbd> to <kbd>F12</kbd> send escape sequences, with any modifiers
+  held.
+- When a program asks for them, arrows and the number pad send application
+  codes, which Vim and less expect.
 
-<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies text [selected with the mouse](#the-mouse); neither reaches the program. If the program has asked for bracketed paste, the text is marked as pasted, so editors don't treat it as typing and shells don't run it line by line. Otherwise newlines are sent as <kbd>Enter</kbd>, but for those at the very end, which are dropped, so the last line pasted waits at the prompt rather than running, even with blank lines copied after it, as `yj` over a command and the blank line under it copies. Only the end is kept from running: every line before the last still runs, as <kbd>Enter</kbd> would run it. Either way, control characters other than tab and line breaks are left out, as xterm leaves them out, so text a program [copied](~clackatoo/reference/terminal-emulation) can't act as keys when you paste it: an escape as an arrow, or <kbd>Ctrl</kbd>+<kbd>C</kbd>. Whether the program asked for bracketed paste is as the window last saw it, so a paste right after a command starts can reach a program, or a shell, that has turned it off since, and be typed as keys. The phone pastes the same way, and asks first when lines before the last would run.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes, and
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies text
+[selected with the mouse](#the-mouse); neither reaches the program. If the
+program has asked for bracketed paste, the text is marked as pasted, so
+editors don't treat it as typing and shells don't run it line by line.
+Otherwise newlines are sent as <kbd>Enter</kbd>, but for those at the very
+end, which are dropped, so the last line pasted waits at the prompt rather
+than running, even with blank lines copied after it, as `yj` over a command
+and the blank line under it copies. Only the end is kept from running: every
+line before the last still runs, as <kbd>Enter</kbd> would run it. Either way,
+control characters other than tab and line breaks are left out, as xterm
+leaves them out, so text a program
+[copied](~clackatoo/reference/terminal-emulation) can't act as keys when you
+paste it: an escape as an arrow, or <kbd>Ctrl</kbd>+<kbd>C</kbd>. Whether the
+program asked for bracketed paste is as the window last saw it, so a paste
+right after a command starts can reach a program, or a shell, that has turned
+it off since, and be typed as keys. The phone pastes the same way, and asks
+first when lines before the last would run.
 
 Typing while scrolled up returns the view to the live screen.
 
 ### Pasting an image
 
-<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> pastes the image on the clipboard, such as a screenshot, into the program, in insert, normal or visual mode; in a [chat](~clackatoo/reference/agents) it attaches the image to the message, as <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> does there. In a terminal, the daemon whose terminal it is, on this machine or [another](~clackatoo/reference/remote#an-image-from-this-machine-s-clipboard), keeps the image in a file of its own, `~/.cache/clackatoo/pastes/` then the time it was pasted, as `20261108-224501-1.png`, and pastes the file's path, as dropping a file on the terminal does. Claude Code, Codex, and other programs that take images read a pasted image path as the image. At a shell's prompt (bash, zsh, or fish) the path is quoted if it needs to be and has a space after it; any other program gets the path as it is. What you type while the image is on its way, as <kbd>Enter</kbd>, follows the path, never goes before it. A path with a control character in it, from a folder named so with `CLACKATOO_PASTES`, is never typed: the bar says so. The folder is only yours, as is each file, and images are deleted after three days, the oldest first once together they're over 256 MiB. An image is at most 16 million pixels and about 6 MiB as PNG, as in chats.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> pastes the image
+on the clipboard, such as a screenshot, into the program, in insert, normal or
+visual mode; in a [chat](~clackatoo/reference/agents) it attaches the image to
+the message, as <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> does there. In a
+terminal, the daemon whose terminal it is, on this machine or
+[another](~clackatoo/reference/remote#an-image-from-this-machine-s-clipboard),
+keeps the image in a file of its own, `~/.cache/clackatoo/pastes/` then the
+time it was pasted, as `20261108-224501-1.png`, and pastes the file's path, as
+dropping a file on the terminal does. Claude Code, Codex, and other programs
+that take images read a pasted image path as the image. At a shell's prompt
+(bash, zsh, or fish) the path is quoted if it needs to be and has a space
+after it; any other program gets the path as it is. What you type while the
+image is on its way, as <kbd>Enter</kbd>, follows the path, never goes before
+it. A path with a control character in it, from a folder named so with
+`CLACKATOO_PASTES`, is never typed: the bar says so. The folder is only yours,
+as is each file, and images are deleted after three days, the oldest first
+once together they're over 256 MiB. An image is at most 16 million pixels and
+about 6 MiB as PNG, as in chats.
 
-With `:set pasteimage=clipboard`, the daemon instead puts the image on its own machine's clipboard, with `wl-copy` or `xclip`, in the desktop session it [follows](~clackatoo/reference/terminal-emulation#the-display), then types <kbd>Ctrl</kbd>+<kbd>V</kbd>, for a program that reads the clipboard itself, as Claude Code does. `wl-copy` or `xclip` runs with the daemon's own environment, with the desktop's display variables in place of the daemon's, never a terminal's or an agent's. That needs you signed in to that machine's desktop: if you aren't, or neither program is installed, it pastes the path instead, and the bottom bar says why.
+With `:set pasteimage=clipboard`, the daemon instead puts the image on its own
+machine's clipboard, with `wl-copy` or `xclip`, in the desktop session it
+[follows](~clackatoo/reference/terminal-emulation#the-display), then types
+<kbd>Ctrl</kbd>+<kbd>V</kbd>, for a program that reads the clipboard itself,
+as Claude Code does. `wl-copy` or `xclip` runs with the daemon's own
+environment, with the desktop's display variables in place of the daemon's,
+never a terminal's or an agent's. That needs you signed in to that machine's
+desktop: if you aren't, or neither program is installed, it pastes the path
+instead, and the bottom bar says why.
 
-<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes text only. When the clipboard holds an image and no text, the bottom bar says which keys paste it: `PasteImage`'s, as you've bound them. `:Tutor` has a step on it.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes text only. When the
+clipboard holds an image and no text, the bottom bar says which keys paste it:
+`PasteImage`'s, as you've bound them. `:Tutor` has a step on it.
 
-Text can be typed through an input method, as Chinese, Japanese and Korean are, such as IBus on GNOME. What's being composed shows underlined where it will go, at the cursor or in the bottom bar, with the input method's choices beside it, and the text chosen is typed as if keyed. The input method is used in insert mode, the command line and searches; in normal mode, keys are clackatoo's commands, so it's left out, and it's never used for a password. `:set noime` turns it off.
+Text can be typed through an input method, as Chinese, Japanese and Korean
+are, such as IBus on GNOME. What's being composed shows underlined where it
+will go, at the cursor or in the bottom bar, with the input method's choices
+beside it, and the text chosen is typed as if keyed. The input method is used
+in insert mode, the command line and searches; in normal mode, keys are
+clackatoo's commands, so it's left out, and it's never used for a password.
+`:set noime` turns it off.
 
 ## Scrolling
 
-The mouse wheel scrolls the pane under the pointer. Over a window bar or gap, it scrolls the focused pane instead; this also works for editors, explorers, boards and reviews, including smooth scrolling and trackpad motion. In a terminal, it scrolls history in either mode. On the alternate screen, which full-screen programs use and which has no history, the wheel sends arrow keys instead in insert mode, so less, Vim and htop scroll themselves. In normal mode it moves normal mode's cursor up and down there, and never reaches the program. The wheel follows the mode of the pane under the pointer, and the focused pane's is the window's. A program that takes [the mouse](#the-mouse) gets the wheel itself, in insert mode.
+The mouse wheel scrolls the pane under the pointer. Over a window bar or gap,
+it scrolls the focused pane instead; this also works for editors, explorers,
+boards and reviews, including smooth scrolling and trackpad motion. In a
+terminal, it scrolls history in either mode. On the alternate screen, which
+full-screen programs use and which has no history, the wheel sends arrow keys
+instead in insert mode, so less, Vim and htop scroll themselves. In normal
+mode it moves normal mode's cursor up and down there, and never reaches the
+program. The wheel follows the mode of the pane under the pointer, and the
+focused pane's is the window's. A program that takes [the mouse](#the-mouse)
+gets the wheel itself, in insert mode.
 
-While the view is scrolled up, a pill at the pane's bottom right says how far, and how to get back: `↓ 42 lines · G to return` in normal mode, `type to return` in insert mode, where typing goes back to the live screen. A pane without the focus says only how far. In a pane too small for the pill, the bottom bar's note says it instead, as `↑42`. New output doesn't move what you're reading.
+While the view is scrolled up, a pill at the pane's bottom right says how far,
+and how to get back: `↓ 42 lines · G to return` in normal mode,
+`type to return` in insert mode, where typing goes back to the live screen. A
+pane without the focus says only how far. In a pane too small for the pill,
+the bottom bar's note says it instead, as `↑42`. New output doesn't move what
+you're reading.
 
 ## The mouse
 
-Selecting a pane focuses it. What else the mouse does depends on the program in the pane.
+Selecting a pane focuses it. What else the mouse does depends on the program
+in the pane.
 
 **Selecting.** Usually the mouse selects text:
 
-- Dragging selects characters. Dragging past the top or bottom of the pane scrolls it.
-- A double click selects a word. Paths and URLs count as one word, so `~/src/main.rs` comes whole.
+- Dragging selects characters. Dragging past the top or bottom of the pane
+  scrolls it.
+- A double click selects a word. Paths and URLs count as one word, so
+  `~/src/main.rs` comes whole.
 - A triple click selects whole lines.
-- With <kbd>Alt</kbd> held, or <kbd>Ctrl</kbd> and <kbd>Alt</kbd>, dragging selects a block of columns. Over a program that takes the mouse, add <kbd>Shift</kbd>.
+- With <kbd>Alt</kbd> held, or <kbd>Ctrl</kbd> and <kbd>Alt</kbd>, dragging
+  selects a block of columns. Over a program that takes the mouse, add
+  <kbd>Shift</kbd>.
 
-Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. It goes only there, as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. A middle click also focuses and pastes into editors and chats, and into searches or names already being typed in explorers, boards and reviews. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies it to the clipboard, and `"+`, as shown: by characters, with no newline after a last line, even of lines a triple click selected. And `y` in normal mode yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying); a count or a register typed first, as `"a`, waits with the selection, as in Vim's visual mode, so `"ay` keeps it in `"a`. Meanwhile the bar says VISUAL (or V-LINE, or V-BLOCK). Any other key forgets it. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
+Letting go copies the selection to the primary selection, `"*`, and a middle
+click pastes it, as elsewhere on Linux. It goes only there, as Vim puts a
+mouse selection in `"*` and leaves the unnamed register as it was, so `p` in
+an editor still puts what you last yanked. A middle click also focuses and
+pastes into editors and chats, and into searches or names already being typed
+in explorers, boards and reviews.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies it to the clipboard, and
+`"+`, as shown: by characters, with no newline after a last line, even of
+lines a triple click selected. And `y` in normal mode yanks it, as `y` yanks
+anything, into the [registers](#selecting-and-copying); a count or a register
+typed first, as `"a`, waits with the selection, as in Vim's visual mode, so
+`"ay` keeps it in `"a`. Meanwhile the bar says VISUAL (or V-LINE, or V-BLOCK).
+Any other key forgets it. The selection stays highlighted until the next key
+or click. In normal mode, a click also moves the cursor there.
 
-**Programs that take the mouse.** Programs such as Neovim, htop and less can ask for clicks, drags and the wheel, and get them while their pane is in insert mode on the live screen. The pointer is then an arrow rather than a text cursor. Hold <kbd>Shift</kbd> to select text anyway. A drag stays with the pane it started in, even when the pointer leaves it.
+**Programs that take the mouse.** Programs such as Neovim, htop and less can
+ask for clicks, drags and the wheel, and get them while their pane is in
+insert mode on the live screen. The pointer is then an arrow rather than a
+text cursor. Hold <kbd>Shift</kbd> to select text anyway. A drag stays with
+the pane it started in, even when the pointer leaves it.
 
-Programs that ask are also told when their pane gains or loses the focus, which Neovim uses to reload files changed meanwhile.
+Programs that ask are also told when their pane gains or loses the focus,
+which Neovim uses to reload files changed meanwhile.
 
 
-**Links.** Hold <kbd>Ctrl</kbd> and the link under the pointer is underlined, and the pointer becomes a hand. <kbd>Ctrl</kbd>+click opens it. Links are what programs print as links (`ls --hyperlink`, gcc, systemd, and git do), plus URLs (`http://`, `https://`, `file://`, `mailto:`) and file paths in the text, such as `src/main.rs:12:5` from rustc or `src/main.rs:12:` from grep. A URL opens in your browser, or whatever the desktop opens it with. A link's text needn't be where it goes, so only a plain `http://` or `https://` address, or `mailto:` and an address alone, opens at once; for any other, such as `ssh://` or `git://`, whose handler could take part of it for an option, the bar asks, with where it goes shown whole under the question, every character but ASCII's letters, digits and punctuation written as `<U+202E>`, so nothing in it can hide or pass for something else: `y` opens it, and any other key, a paste, or a key you didn't press for the question (one a macro or binding types, or one pressed earlier and held while the window waited) doesn't. One too long to show whole, over about 250 characters, isn't opened, and the bar says so; nor is one the window was too small to show whole, until it's opened again in a bigger one. A file opens in an editor pane at that line: in an editor already in the tab, else beside the terminal if it's wide enough, else in a tab of its own. A relative path is from the directory the shell is in. <kbd>Ctrl</kbd>+<kbd>O</kbd> comes back. A `file://` link naming another machine isn't opened, and the bar says why. When a program takes the mouse, <kbd>Ctrl</kbd>+click is the program's, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+click opens the link.
+**Links.** Hold <kbd>Ctrl</kbd> and the link under the pointer is underlined,
+and the pointer becomes a hand. <kbd>Ctrl</kbd>+click opens it. Links are what
+programs print as links (`ls --hyperlink`, gcc, systemd, and git do), plus
+URLs (`http://`, `https://`, `file://`, `mailto:`) and file paths in the text,
+such as `src/main.rs:12:5` from rustc or `src/main.rs:12:` from grep. A URL
+opens in your browser, or whatever the desktop opens it with. A link's text
+needn't be where it goes, so only a plain `http://` or `https://` address, or
+`mailto:` and an address alone, opens at once; for any other, such as `ssh://`
+or `git://`, whose handler could take part of it for an option, the bar asks,
+with where it goes shown whole under the question, every character but ASCII's
+letters, digits and punctuation written as `<U+202E>`, so nothing in it can
+hide or pass for something else: `y` opens it, and any other key, a paste, or
+a key you didn't press for the question (one a macro or binding types, or one
+pressed earlier and held while the window waited) doesn't. One too long to
+show whole, over about 250 characters, isn't opened, and the bar says so; nor
+is one the window was too small to show whole, until it's opened again in a
+bigger one. A file opens in an editor pane at that line: in an editor already
+in the tab, else beside the terminal if it's wide enough, else in a tab of its
+own. A relative path is from the directory the shell is in.
+<kbd>Ctrl</kbd>+<kbd>O</kbd> comes back. A `file://` link naming another
+machine isn't opened, and the bar says why. When a program takes the mouse,
+<kbd>Ctrl</kbd>+click is the program's, and
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+click opens the link.
 ## Normal mode
 
-Normal mode has a cursor of its own, a yellow block, which moves through the terminal's history and screen as one document. It starts where the program's cursor is, and the program's cursor is hidden until you return to insert mode.
+Normal mode has a cursor of its own, a yellow block, which moves through the
+terminal's history and screen as one document. It starts where the program's
+cursor is, and the program's cursor is hidden until you return to insert mode.
 
 | Keys | Move |
 |---|---|
@@ -442,9 +1059,19 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd> | The view a line down or up, or as many as a count says, with the cursor kept in it. |
 | `zt` `zz` `zb` | The view scrolled to put the cursor's line at its top, middle or bottom, as far as history goes and no further than the live screen. With a count, that line, counted as `G` counts, the cursor going to it in the column it's in, as Vim's does. |
 
-Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
+Moving past the top of the view scrolls into history. In normal mode the view
+holds still while output arrives, so the cursor stays on its text. On the
+alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `p` or `"ap`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. <kbd>Esc</kbd> after keys half typed only forgets them, as in Vim: `vg` or `vi` and <kbd>Esc</kbd> is still in visual mode, and a second <kbd>Esc</kbd> leaves it. <kbd>Esc</kbd> after only a count or a register, as `v3` or `v"a`, does what <kbd>Esc</kbd> alone does, and leaves visual mode.
+The keys are read as an editor reads them, so a command half typed, as `y3` or
+`"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows
+it. A command a terminal doesn't take, as `dw`, `x`, `p` or `"ap`, does
+nothing, all its keys spent, as in a file Vim won't change: so after `d`, the
+next key is the command's too, `:` included. <kbd>Esc</kbd> after keys half
+typed only forgets them, as in Vim: `vg` or `vi` and <kbd>Esc</kbd> is still
+in visual mode, and a second <kbd>Esc</kbd> leaves it. <kbd>Esc</kbd> after
+only a count or a register, as `v3` or `v"a`, does what <kbd>Esc</kbd> alone
+does, and leaves visual mode.
 
 ### Selecting and copying
 
@@ -464,15 +1091,37 @@ The keys are read as an editor reads them, so a command half typed, as `y3` or `
 | `"a` and any of these | Keeps what's copied in the register named, as in an editor: `"ayy`, `"Ayw` adds to `"a`, `"+yib` puts a command's output on the clipboard. A register before anything else does nothing. |
 | <kbd>Esc</kbd> | Drops the selection. |
 
-A selection by characters lights each line to a cell past its text, which is what `y` copies; `V` lights whole lines, the pane's width. `y` on a block copies a line for each row, without the blanks at their ends, and never joins a wrapped line to the next. A copy stops at 100,000 lines or 4 MiB, and says so. A daemon too old to copy blocks copies from corner to corner, and says so.
+A selection by characters lights each line to a cell past its text, which is
+what `y` copies; `V` lights whole lines, the pane's width. `y` on a block
+copies a line for each row, without the blanks at their ends, and never joins
+a wrapped line to the next. A copy stops at 100,000 lines or 4 MiB, and says
+so. A daemon too old to copy blocks copies from corner to corner, and says so.
 
-Any motion extends a selection, including `gg`, `G` and searches. What you copy lights up for a moment, so you can see what went. Copied text is what the program printed: a line that wrapped only because it reached the window's edge comes out as one line, and blanks at the ends of lines are left out.
+Any motion extends a selection, including `gg`, `G` and searches. What you
+copy lights up for a moment, so you can see what went. Copied text is what the
+program printed: a line that wrapped only because it reached the window's edge
+comes out as one line, and blanks at the ends of lines are left out.
 
-What `y` copies goes into the [registers](~clackatoo/reference/editor#registers) exactly as an editor's yank does: into the unnamed register, which `p` in an editor puts, and `"0`, or into the register named before it; and, as the [option](~clackatoo/reference/config#options) `clipboard` says, onto the clipboard, as it is unless you change it, or the primary selection. With `clipboard=none` it stays in the window's registers, and `"+y` or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> puts it on the clipboard. It keeps its kind, so `p` puts lines copied by lines as lines below the cursor's, and a block as a block. Lines copied by lines end with a newline, as an editor's do and as Vim's `"+yy` does. Pasted into a terminal, that never runs the line: a shell that takes bracketed paste, as bash, zsh and fish do, takes it as text, and to any other program the newlines that end a paste aren't sent (see [Typing](#typing)), though lines before the last still run.
+What `y` copies goes into the
+[registers](~clackatoo/reference/editor#registers) exactly as an editor's yank
+does: into the unnamed register, which `p` in an editor puts, and `"0`, or
+into the register named before it; and, as the
+[option](~clackatoo/reference/config#options) `clipboard` says, onto the
+clipboard, as it is unless you change it, or the primary selection. With
+`clipboard=none` it stays in the window's registers, and `"+y` or
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> puts it on the clipboard. It
+keeps its kind, so `p` puts lines copied by lines as lines below the cursor's,
+and a block as a block. Lines copied by lines end with a newline, as an
+editor's do and as Vim's `"+yy` does. Pasted into a terminal, that never runs
+the line: a shell that takes bracketed paste, as bash, zsh and fish do, takes
+it as text, and to any other program the newlines that end a paste aren't sent
+(see [Typing](#typing)), though lines before the last still run.
 
 ### Text objects
 
-After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of text around the cursor, as in Vim. `i` takes what's inside, `a` takes it all. In visual mode, the object becomes the selection.
+After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of
+text around the cursor, as in Vim. `i` takes what's inside, `a` takes it all.
+In visual mode, the object becomes the selection.
 
 | Keys | Picks out |
 |---|---|
@@ -485,13 +1134,17 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 | `it` `at` | What's between the HTML or XML tags around the cursor, or with the cursor on a tag, its own; with `a`, the tags too, as Vim's. A count goes out that many tags; in visual mode, typed again, they take the tags too, then the next pair out. A closing tag on a line of its own leaves its line break to `it`, as in Vim. |
 | `ib` `ab` | A [command's](#commands) output; with `a`, its prompt and command line too. |
 
-In Vim, `b` is another name for `(`. Here it's the command, the more useful thing in a terminal, and `(` still means parentheses.
+In Vim, `b` is another name for `(`. Here it's the command, the more useful
+thing in a terminal, and `(` still means parentheses.
 
-With the cursor past the end of a line's text, as it is after what you've typed at a prompt, objects are found from the line's last character, as in Neovim's terminal: `yiw` copies the word you typed last.
+With the cursor past the end of a line's text, as it is after what you've
+typed at a prompt, objects are found from the line's last character, as in
+Neovim's terminal: `yiw` copies the word you typed last.
 
 ### Commands
 
-When the shell marks its prompts and commands, clackatoo knows where each command's prompt and output are, and how it exited.
+When the shell marks its prompts and commands, clackatoo knows where each
+command's prompt and output are, and how it exited.
 
 | Keys | Does |
 |---|---|
@@ -500,18 +1153,45 @@ When the shell marks its prompts and commands, clackatoo knows where each comman
 | `yab` | Copies the command with its prompt and output, ready to paste into a bug report. |
 | `vib` `vab` | Selects them. |
 
-A command's output runs from its first line to the line before the next prompt, leaving out blank lines at the end. If the command printed nothing, `yib` says `no output`. If the cursor isn't in a command, the bottom bar says `no block here`.
+A command's output runs from its first line to the line before the next
+prompt, leaving out blank lines at the end. If the command printed nothing,
+`yib` says `no output`. If the cursor isn't in a command, the bottom bar says
+`no block here`.
 
 Which shells mark their commands:
 
-- **fish** 4 and later, by itself. clackatoo also runs a small script once your startup files have run (`fish -C`), which marks each command again with the terminal's secret, so it can be offered after a restart. As the script runs after your startup files, a program they start, such as a prompt's daemon, starts while the secret's file is still there, and could read it.
-- **bash**, when it's your shell (`$SHELL`) and clackatoo starts it. clackatoo starts it with a startup script of its own, which reads your `~/.bashrc` first, then adds the marks to `PS1`, `PS0` and `PROMPT_COMMAND`. The command goes with its mark, from bash's history. bash before 4.4, or with `shopt -u promptvars` in your `~/.bashrc`, can't sign its commands, so it keeps no secret, and offers nothing after a restart; nor does one that stops signing later, at its next prompt, as when `promptvars` is turned off or `PS0` set afresh. bash started any other way, such as `clackatoo new -- bash`, is left as it is.
-- **zsh**, when it's your shell and clackatoo starts it. clackatoo points ZDOTDIR at a `.zshenv` of its own, which puts ZDOTDIR back, reads your `.zshenv`, and adds its hooks once your `.zshrc` has run, so oh-my-zsh, powerlevel10k (instant prompt included) and a ZDOTDIR of your own all work. A shell started with `exec zsh`, or inside another, isn't marked.
+- **fish** 4 and later, by itself. clackatoo also runs a small script once
+  your startup files have run (`fish -C`), which marks each command again with
+  the terminal's secret, so it can be offered after a restart. As the script
+  runs after your startup files, a program they start, such as a prompt's
+  daemon, starts while the secret's file is still there, and could read it.
+- **bash**, when it's your shell (`$SHELL`) and clackatoo starts it. clackatoo
+  starts it with a startup script of its own, which reads your `~/.bashrc`
+  first, then adds the marks to `PS1`, `PS0` and `PROMPT_COMMAND`. The command
+  goes with its mark, from bash's history. bash before 4.4, or with
+  `shopt -u promptvars` in your `~/.bashrc`, can't sign its commands, so it
+  keeps no secret, and offers nothing after a restart; nor does one that stops
+  signing later, at its next prompt, as when `promptvars` is turned off or
+  `PS0` set afresh. bash started any other way, such as
+  `clackatoo new -- bash`, is left as it is.
+- **zsh**, when it's your shell and clackatoo starts it. clackatoo points
+  ZDOTDIR at a `.zshenv` of its own, which puts ZDOTDIR back, reads your
+  `.zshenv`, and adds its hooks once your `.zshrc` has run, so oh-my-zsh,
+  powerlevel10k (instant prompt included) and a ZDOTDIR of your own all work.
+  A shell started with `exec zsh`, or inside another, isn't marked.
 - fish before 4 doesn't.
 
 Commands are kept through an [upgrade](~clackatoo/reference/cli#upgrade).
 
-A command that failed ends its prompt's line with a small red `✗` and its exit status, as `✗ 2`, two cells after the line's text, on the screen and in history. A line too long for it, as one a prompt on the right takes to the edge, isn't marked; a prompt of two lines is marked on its first. The mark isn't part of the text: copying, searching, and selecting leave it out. The [`blockmarks` option](~clackatoo/reference/config#options) marks every finished command, the ones that worked with a faint `✓` (`all`), or none (`none`). Marks are kept through an upgrade, and need a daemon of protocol 86 or later.
+A command that failed ends its prompt's line with a small red `✗` and its exit
+status, as `✗ 2`, two cells after the line's text, on the screen and in
+history. A line too long for it, as one a prompt on the right takes to the
+edge, isn't marked; a prompt of two lines is marked on its first. The mark
+isn't part of the text: copying, searching, and selecting leave it out. The
+[`blockmarks` option](~clackatoo/reference/config#options) marks every
+finished command, the ones that worked with a faint `✓` (`all`), or none
+(`none`). Marks are kept through an upgrade, and need a daemon of protocol 86
+or later.
 
 ### Searching
 
@@ -522,15 +1202,50 @@ A command that failed ends its prompt's line with a small red `✗` and its exit
 | `n` `N` | Searches again, the same way or the other way. A count goes that many matches, never round more than once, in one answer from the daemon; an older daemon is asked a match at a time. |
 | <kbd>Esc</kbd> | Puts out the last search's lit matches, until the next search, `n` or `N`; in visual mode, leaves it, keeping them. |
 
-A search ignores case unless the text has a capital letter in it, as the [`ignorecase` and `smartcase` options](~clackatoo/reference/config#options) start; set them to change it. It covers all of history and wraps around at either end, saying `search wrapped to top` (or `to bottom`) when it does. The cursor moves to the match, which is highlighted, and every other match on the screen or the history in view is lit more faintly, as Vim's `hlsearch` lights them, one after another along each line, never overlapping, until <kbd>Esc</kbd> or `:noh`, and again at the next search, `n` or `N`. Only the lines in view are looked through for them, at most 512 on a line, and only in normal mode: in insert mode the program has the screen, and only the match found stays lit. The [`hlsearch` option](~clackatoo/reference/config#options) off lights only the match found. If there's none, the bottom bar says `not found`.
+A search ignores case unless the text has a capital letter in it, as the
+[`ignorecase` and `smartcase` options](~clackatoo/reference/config#options)
+start; set them to change it. It covers all of history and wraps around at
+either end, saying `search wrapped to top` (or `to bottom`) when it does. The
+cursor moves to the match, which is highlighted, and every other match on the
+screen or the history in view is lit more faintly, as Vim's `hlsearch` lights
+them, one after another along each line, never overlapping, until
+<kbd>Esc</kbd> or `:noh`, and again at the next search, `n` or `N`. Only the
+lines in view are looked through for them, at most 512 on a line, and only in
+normal mode: in insert mode the program has the screen, and only the match
+found stays lit. The [`hlsearch` option](~clackatoo/reference/config#options)
+off lights only the match found. If there's none, the bottom bar says
+`not found`.
 
-While you type the search, the cursor goes to the match it would find from where you started, the view follows, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). <kbd>Esc</kbd> puts the cursor and the view back; <kbd>Enter</kbd> keeps them, and is the search. The daemon is asked after each key, but only once it has answered the last, so typing fast never queues searches, and the match shown stays until the next answer moves it; nothing you type waits for these answers. With no match, the cursor goes back where it started. A count before `/` isn't shown until <kbd>Enter</kbd>. With the [`incsearch` option](~clackatoo/reference/config#options) off, nothing moves until <kbd>Enter</kbd>.
+While you type the search, the cursor goes to the match it would find from
+where you started, the view follows, and its matches are lit, as Neovim's
+`incsearch` shows them, in an editor too (see
+[Shown as you type](~clackatoo/reference/editor#shown-as-you-type)).
+<kbd>Esc</kbd> puts the cursor and the view back; <kbd>Enter</kbd> keeps them,
+and is the search. The daemon is asked after each key, but only once it has
+answered the last, so typing fast never queues searches, and the match shown
+stays until the next answer moves it; nothing you type waits for these
+answers. With no match, the cursor goes back where it started. A count before
+`/` isn't shown until <kbd>Enter</kbd>. With the
+[`incsearch` option](~clackatoo/reference/config#options) off, nothing moves
+until <kbd>Enter</kbd>.
 
-Copying and searching both happen in the daemon, which holds all of history, so neither waits for the window to fetch the lines involved. Keys you type after a search, `n`, `N`, `[[` or `]]` wait for its answer, so they act where it leaves the cursor. <kbd>Esc</kbd> drops the keys typed after the search, and stops a macro; the search still lands, and then <kbd>Esc</kbd> acts, putting out what it lit, as Vim's `/foo` <kbd>Enter</kbd> <kbd>Esc</kbd> does. <kbd>Ctrl</kbd>+<kbd>C</kbd> waits behind the search too. If the daemon takes more than 5 seconds to answer, the keys waiting go on without it, so nothing you typed for the program is lost, and the bar says so.
+Copying and searching both happen in the daemon, which holds all of history,
+so neither waits for the window to fetch the lines involved. Keys you type
+after a search, `n`, `N`, `[[` or `]]` wait for its answer, so they act where
+it leaves the cursor. <kbd>Esc</kbd> drops the keys typed after the search,
+and stops a macro; the search still lands, and then <kbd>Esc</kbd> acts,
+putting out what it lit, as Vim's `/foo` <kbd>Enter</kbd> <kbd>Esc</kbd> does.
+<kbd>Ctrl</kbd>+<kbd>C</kbd> waits behind the search too. If the daemon takes
+more than 5 seconds to answer, the keys waiting go on without it, so nothing
+you typed for the program is lost, and the bar says so.
 
 ### Lists
 
-An [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boards) and a [review](~clackatoo/reference/agents#reviewing-its-changes) read keys as terminals and editors do, with the cursor on an item, a file, an entry or a line, rather than a character. They share these, and add their own:
+An [explorer](~clackatoo/reference/explorer), a
+[board](~clackatoo/reference/boards) and a
+[review](~clackatoo/reference/agents#reviewing-its-changes) read keys as
+terminals and editors do, with the cursor on an item, a file, an entry or a
+line, rather than a character. They share these, and add their own:
 
 | Keys | Does |
 |---|---|
@@ -542,21 +1257,55 @@ An [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boa
 | `zt` `zz` `zb` | The cursor's item at the view's top, middle or bottom. |
 | `/` `?` `n` `N` | Searches forward or back, with the editor's patterns and case options, round from the end to the start: the names shown, a board's entries, a review's lines, files, and comments. A count before `/`, `?`, `n` or `N` goes that many matches, round no more than once. |
 
-A search is typed as every pane's is (see [Searching](#searching)): edited as the command line is, <kbd>Up</kbd> and <kbd>Down</kbd> going back through the searches typed before, in every pane. While you type it, the cursor goes to the item it would find from where you started, as [`incsearch`](~clackatoo/reference/config#options) shows it, and <kbd>Esc</kbd> puts the cursor and the view back. What it matches is lit, as [`hlsearch`](~clackatoo/reference/config#options) lights it: in an explorer, the names; in a board, the text of its entries; in a review, its lines, files' names and comments; the first match in the item the search went to brighter, until <kbd>Esc</kbd> in normal mode or `:noh`. A search that finds nothing says so, and stops a macro.
+A search is typed as every pane's is (see [Searching](#searching)): edited as
+the command line is, <kbd>Up</kbd> and <kbd>Down</kbd> going back through the
+searches typed before, in every pane. While you type it, the cursor goes to
+the item it would find from where you started, as
+[`incsearch`](~clackatoo/reference/config#options) shows it, and
+<kbd>Esc</kbd> puts the cursor and the view back. What it matches is lit, as
+[`hlsearch`](~clackatoo/reference/config#options) lights it: in an explorer,
+the names; in a board, the text of its entries; in a review, its lines, files'
+names and comments; the first match in the item the search went to brighter,
+until <kbd>Esc</kbd> in normal mode or `:noh`. A search that finds nothing
+says so, and stops a macro.
 
-A command half typed, as `3` or `g`, shows at the start of the bar, and leaving the pane forgets it. Leaving also cancels an unfinished search and restores its starting cursor and view. File-name prompts, file-operation confirmations, and board-note drafts stay open when focus leaves. A count before <kbd>Ctrl</kbd>+<kbd>D</kbd> or <kbd>Ctrl</kbd>+<kbd>U</kbd> sets the distance for subsequent half-page moves in that pane, until its height changes. A key they don't take, as `d` or `"`, waits for the rest of its command, then does nothing. <kbd>Ctrl</kbd>+<kbd>?</kbd> lists the keys of the pane you're in, read from how it reads them.
+A command half typed, as `3` or `g`, shows at the start of the bar, and
+leaving the pane forgets it. Leaving also cancels an unfinished search and
+restores its starting cursor and view. File-name prompts, file-operation
+confirmations, and board-note drafts stay open when focus leaves. A count
+before <kbd>Ctrl</kbd>+<kbd>D</kbd> or <kbd>Ctrl</kbd>+<kbd>U</kbd> sets the
+distance for subsequent half-page moves in that pane, until its height
+changes. A key they don't take, as `d` or `"`, waits for the rest of its
+command, then does nothing. <kbd>Ctrl</kbd>+<kbd>?</kbd> lists the keys of the
+pane you're in, read from how it reads them.
 
 ## The cursor
 
-In insert mode, the cursor has the shape the program asks for: a block, an underline or a bar, which Vim and shells in vi mode switch between. If the program hasn't asked, it's a bar. In normal mode it's always clackatoo's yellow block. In panes without the focus, and while the window isn't focused, either cursor is drawn as an outline.
+In insert mode, the cursor has the shape the program asks for: a block, an
+underline or a bar, which Vim and shells in vi mode switch between. If the
+program hasn't asked, it's a bar. In normal mode it's always clackatoo's
+yellow block. In panes without the focus, and while the window isn't focused,
+either cursor is drawn as an outline.
 
 ## Drawing
 
-The window draws with the GPU, and only when something changed: a quiet terminal costs no CPU. It redraws at most once per frame, so a flood of output costs one frame's drawing per frame.
+The window draws with the GPU, and only when something changed: a quiet
+terminal costs no CPU. It redraws at most once per frame, so a flood of output
+costs one frame's drawing per frame.
 
-On a machine with two GPUs, the window uses the one the system lists first, which is the one driving the screen: on a desktop, usually the graphics card the monitors are plugged into, and on a laptop, the integrated GPU. Frames drawn on the other GPU might never reach the screen. To choose differently, set `WGPU_POWER_PREF` to `high` for the faster GPU, or `low` for the one that uses less power.
+On a machine with two GPUs, the window uses the one the system lists first,
+which is the one driving the screen: on a desktop, usually the graphics card
+the monitors are plugged into, and on a laptop, the integrated GPU. Frames
+drawn on the other GPU might never reach the screen. To choose differently,
+set `WGPU_POWER_PREF` to `high` for the faster GPU, or `low` for the one that
+uses less power.
 
-The window draws with Vulkan, or with OpenGL where Vulkan can't draw. On some laptops with two GPUs, OpenGL opens a window much sooner: to choose between them, Vulkan asks both about themselves, and that can take more than a second, while OpenGL can use the screen's GPU without asking the other. When setting up the GPU takes over half a second, the window says so on stderr, and suggests trying OpenGL:
+The window draws with Vulkan, or with OpenGL where Vulkan can't draw. On some
+laptops with two GPUs, OpenGL opens a window much sooner: to choose between
+them, Vulkan asks both about themselves, and that can take more than a second,
+while OpenGL can use the screen's GPU without asking the other. When setting
+up the GPU takes over half a second, the window says so on stderr, and
+suggests trying OpenGL:
 
 ```sh
 clackatoo config renderer opengl
@@ -564,22 +1313,43 @@ clackatoo config renderer opengl
 
 If the API chosen can't draw, the window uses the other.
 
-Box-drawing characters (`─` `│` `┌` `╭` `═`…) and block elements (`█` `▄` `░`…) are drawn by clackatoo rather than taken from the font, so that borders in htop, tmux or Vim join up across lines at any size. The diagonal lines come from the font.
+Box-drawing characters (`─` `│` `┌` `╭` `═`…) and block elements (`█` `▄`
+`░`…) are drawn by clackatoo rather than taken from the font, so that borders
+in htop, tmux or Vim join up across lines at any size. The diagonal lines come
+from the font.
 
-A character with others joined to it, such as a letter with accents, an emoji sequence joined with zero-width joiners (👩&#x200D;💻), or a keycap (#️⃣), is shaped: the font's own rules decide which glyphs draw it and where they go. An emoji presentation selector (U+FE0F, as in ❤️) draws the character from an emoji font.
+A character with others joined to it, such as a letter with accents, an emoji
+sequence joined with zero-width joiners (👩&#x200D;💻), or a keycap (#️⃣), is
+shaped: the font's own rules decide which glyphs draw it and where they go. An
+emoji presentation selector (U+FE0F, as in ❤️) draws the character from an
+emoji font.
 
-A flag (🇬🇧) or an emoji with a skin tone (👍🏽) is drawn as one emoji, if the emoji font has it. Each keeps the columns programs count for its parts, so a skin-toned emoji is followed by two blank columns.
+A flag (🇬🇧) or an emoji with a skin tone (👍🏽) is drawn as one emoji, if the
+emoji font has it. Each keeps the columns programs count for its parts, so a
+skin-toned emoji is followed by two blank columns.
 
 ## Not supported
 
 - Moving panes to another place in the layout.
-- History lines are shown at the width they were printed at. A line that wrapped in a narrower window doesn't rewrap when the window gets wider.
+- History lines are shown at the width they were printed at. A line that
+  wrapped in a narrower window doesn't rewrap when the window gets wider.
 
 ## Learning clackatoo
 
-`:Tutor` teaches clackatoo a lesson at a time, as vimtutor teaches Vim. It opens the finder on the lessons, each with how far you've got; <kbd>Enter</kbd> opens the one picked, and `:Tutor NAME` opens one by name, such as `:Tutor text-objects`. The lessons are basics, text-objects, words, registers, mouse, blocks, substitute, wrap, markdown, font, indenting, snippets, explorer, shell, finder, agents, remote, and background.
+`:Tutor` teaches clackatoo a lesson at a time, as vimtutor teaches Vim. It
+opens the finder on the lessons, each with how far you've got;
+<kbd>Enter</kbd> opens the one picked, and `:Tutor NAME` opens one by name,
+such as `:Tutor text-objects`. The lessons are basics, text-objects, words,
+registers, mouse, blocks, substitute, wrap, markdown, font, indenting,
+snippets, explorer, shell, finder, agents, remote, and background.
 
-A lesson opens in a tab of its own: the lesson on the left, and on the right a practice pane, an editor on a file made for it or a terminal running your shell. Do what the step says in the practice pane: once it's done, its heading lights up, then stays green with a ✓ beside it, and the next step is lit and scrolled to. A step with nothing to do is to read. Lessons draw code as chats do, on a background of its own and never split between rows, with step titles in bold, and a lesson's explorer is headed with the lesson's name.
+A lesson opens in a tab of its own: the lesson on the left, and on the right a
+practice pane, an editor on a file made for it or a terminal running your
+shell. Do what the step says in the practice pane: once it's done, its heading
+lights up, then stays green with a ✓ beside it, and the next step is lit and
+scrolled to. A step with nothing to do is to read. Lessons draw code as chats
+do, on a background of its own and never split between rows, with step titles
+in bold, and a lesson's explorer is headed with the lesson's name.
 
 | Keys | Does |
 |---|---|
@@ -587,9 +1357,19 @@ A lesson opens in a tab of its own: the lesson on the left, and on the right a p
 | `[s` | Goes back to the step before. |
 | `:q`, in either of a lesson's panes | Ends the lesson, closing both. |
 
-The lesson can't be changed: a change to it is put back. Lessons work in a folder of their own, `clackatoo/tutor` in `$XDG_CACHE_HOME` (or `~/.cache`), which goes when the lesson ends; a lesson's explorer can't leave it. A file of yours opened in the practice pane is left as it is, unsaved changes and all, when the lesson ends. Where each lesson was left is kept in `clackatoo/tutor` in `$XDG_STATE_HOME` (or `~/.local/state`), so the next window picks up there. With `--remote`, the tutor says it needs the daemon on this machine.
+The lesson can't be changed: a change to it is put back. Lessons work in a
+folder of their own, `clackatoo/tutor` in `$XDG_CACHE_HOME` (or `~/.cache`),
+which goes when the lesson ends; a lesson's explorer can't leave it. A file of
+yours opened in the practice pane is left as it is, unsaved changes and all,
+when the lesson ends. Where each lesson was left is kept in `clackatoo/tutor`
+in `$XDG_STATE_HOME` (or `~/.local/state`), so the next window picks up there.
+With `--remote`, the tutor says it needs the daemon on this machine.
 
 ### What's new
 
-The first time a window of a new build opens, if the build has something new, the bottom bar says `clackatoo updated · :Tutor new` until the next key; a first install says `Welcome to clackatoo · :Tutor to start`. `:Tutor new` lists what's been added, newest first, those not listed before first and marked `new`; <kbd>Enter</kbd> opens the lesson that teaches it.
+The first time a window of a new build opens, if the build has something new,
+the bottom bar says `clackatoo updated · :Tutor new` until the next key; a
+first install says `Welcome to clackatoo · :Tutor to start`. `:Tutor new`
+lists what's been added, newest first, those not listed before first and
+marked `new`; <kbd>Enter</kbd> opens the lesson that teaches it.
 

@@ -7,7 +7,10 @@ related:
   - clackatoo/reference/cli
 ---
 
-A chat talks to its agent through the agent's adapter, a program speaking ACP, the Agent Client Protocol: JSON-RPC messages, one a line, over the adapter's stdin and stdout. When a chat does something you didn't expect, the messages show whether the agent said it or clackatoo made it so.
+A chat talks to its agent through the agent's adapter, a program speaking ACP,
+the Agent Client Protocol: JSON-RPC messages, one a line, over the adapter's
+stdin and stdout. When a chat does something you didn't expect, the messages
+show whether the agent said it or clackatoo made it so.
 
 ## Turning a trace on
 
@@ -17,9 +20,18 @@ Start the daemon with `CLACKATOO_ACP_TRACE` set to a directory:
 CLACKATOO_ACP_TRACE=~/acp-traces clackatoo daemon
 ```
 
-Every agent the daemon starts from then on writes to a new file of its own there, named for the agent and the adapter's process ID, as `claude-12345.log`. A chat whose agent stops and starts again gets a new file. A file is never added to: if the name is taken, as when a process ID comes round again, the trace goes to `claude-12345.log.2`, `.3` and so on.
+Every agent the daemon starts from then on writes to a new file of its own
+there, named for the agent and the adapter's process ID, as
+`claude-12345.log`. A chat whose agent stops and starts again gets a new file.
+A file is never added to: if the name is taken, as when a process ID comes
+round again, the trace goes to `claude-12345.log.2`, `.3` and so on.
 
-The directory is made if it isn't there, readable by you only, and each file is readable by you only. A directory of your own that others can read, as one made `0755`, is fine: they can see the files' names, not what's in them. The daemon traces nowhere if the directory isn't yours, if anyone else can write in it, or if it's a symbolic link, and the log says why. Files are made in it directly, never through a link.
+The directory is made if it isn't there, readable by you only, and each file
+is readable by you only. A directory of your own that others can read, as one
+made `0755`, is fine: they can see the files' names, not what's in them. The
+daemon traces nowhere if the directory isn't yours, if anyone else can write
+in it, or if it's a symbolic link, and the log says why. Files are made in it
+directly, never through a link.
 
 Each line is one message or one line the adapter wrote to stderr:
 
@@ -27,30 +39,50 @@ Each line is one message or one line the adapter wrote to stderr:
 2026-10-28T22:08:42.021Z agent claude[12345] -> {"jsonrpc":"2.0","id":0,"method":"initialize",...}
 ```
 
-The time is in UTC. `->` is what clackatoo sent, `<-` what the adapter sent, and `!!` a line of its stderr.
+The time is in UTC. `->` is what clackatoo sent, `<-` what the adapter sent,
+and `!!` a line of its stderr.
 
 ## What's left out
 
-A trace is meant to be shareable, so obvious secrets are replaced by `[redacted]`:
+A trace is meant to be shareable, so obvious secrets are replaced by
+`[redacted]`:
 
-- the string values of fields named for keys, tokens, passwords, secrets, cookies and credentials, told by the words in their names (`api_key`, `refreshToken`); a token to go on from, as `nextPageToken`, stays, as do `tokenizer` and counts like `inputTokens`;
+- the string values of fields named for keys, tokens, passwords, secrets,
+  cookies and credentials, told by the words in their names (`api_key`,
+  `refreshToken`); a token to go on from, as `nextPageToken`, stays, as do
+  `tokenizer` and counts like `inputTokens`;
 - every value of an MCP server's environment and headers (their names stay);
-- bearer tokens, and API keys by their prefixes, such as `sk-`, `ghp_` and `xoxb-`, wherever they start a word, as in `OPENAI_API_KEY=sk-…`;
-- the values of names for secrets given one in text: `GITHUB_TOKEN=…`, `?token=…`, `api_key: …`, `"password": "…"`, and `Authorization: Basic …`, whose scheme, `Basic`, `Bearer`, `Digest`, `Token` or `Negotiate`, stays.
+- bearer tokens, and API keys by their prefixes, such as `sk-`, `ghp_` and
+  `xoxb-`, wherever they start a word, as in `OPENAI_API_KEY=sk-…`;
+- the values of names for secrets given one in text: `GITHUB_TOKEN=…`,
+  `?token=…`, `api_key: …`, `"password": "…"`, and `Authorization: Basic …`,
+  whose scheme, `Basic`, `Bearer`, `Digest`, `Token` or `Negotiate`, stays.
 
-API keys known by their prefixes are Anthropic's and OpenAI's (`sk-`), GitHub's (`ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`), GitLab's (`glpat-`), Slack's (`xoxb-`, `xoxp-`), AWS's access keys (`AKIA`) and Google's API keys (`AIza`).
+API keys known by their prefixes are Anthropic's and OpenAI's (`sk-`),
+GitHub's (`ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`), GitLab's (`glpat-`),
+Slack's (`xoxb-`, `xoxp-`), AWS's access keys (`AKIA`) and Google's API keys
+(`AIza`).
 
-This is a safety net, not a guarantee: files' text and your messages are in a trace as they were sent, so read one before you share it.
+This is a safety net, not a guarantee: files' text and your messages are in a
+trace as they were sent, so read one before you share it.
 
-A message over 1 MiB, such as an edit to a big file, whose diff carries the whole file, is traced as its first 64 KiB and its length. Smaller ones are checked for secrets as they pass, which costs the daemon a little time on each, so leave the trace off when you aren't using it.
+A message over 1 MiB, such as an edit to a big file, whose diff carries the
+whole file, is traced as its first 64 KiB and its length. Smaller ones are
+checked for secrets as they pass, which costs the daemon a little time on
+each, so leave the trace off when you aren't using it.
 
 ## How big it gets
 
-Past 16 MiB, a trace file is set aside as `….log.1`, replacing the one set aside before, and a new one begun. So each agent keeps at most about 32 MiB, however long the daemon runs with the trace on. Old files aren't deleted: clear the directory when you're done.
+Past 16 MiB, a trace file is set aside as `….log.1`, replacing the one set
+aside before, and a new one begun. So each agent keeps at most about 32 MiB,
+however long the daemon runs with the trace on. Old files aren't deleted:
+clear the directory when you're done.
 
 ## Tests with real agents
 
-The daemon's tests named `a_real_…` talk to a real Claude Code or Codex. Each is ignored unless asked for, uses the cheapest model, and traces to `$TMPDIR/acp-NAME`:
+The daemon's tests named `a_real_…` talk to a real Claude Code or Codex. Each
+is ignored unless asked for, uses the cheapest model, and traces to
+`$TMPDIR/acp-NAME`:
 
 ```sh
 cargo build --workspace --examples
@@ -58,4 +90,8 @@ cd crates/daemon
 CLACKATOO_DISPLAY=off cargo test --test daemon a_real_session_of_six_turns -- --ignored --nocapture
 ```
 
-Run them one at a time. They use the accounts `claude` and `codex` are signed in to. Most run the adapter the daemon would run, unless `CLACKATOO_REAL_AGENT` (Claude Code) or `CLACKATOO_REAL_CODEX` (Codex) gives a command, and with none say they were skipped and pass; a few older ones need `CLACKATOO_REAL_AGENT`.
+Run them one at a time. They use the accounts `claude` and `codex` are signed
+in to. Most run the adapter the daemon would run, unless
+`CLACKATOO_REAL_AGENT` (Claude Code) or `CLACKATOO_REAL_CODEX` (Codex) gives a
+command, and with none say they were skipped and pass; a few older ones need
+`CLACKATOO_REAL_AGENT`.

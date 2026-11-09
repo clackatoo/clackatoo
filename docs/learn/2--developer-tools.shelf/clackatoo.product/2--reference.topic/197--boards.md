@@ -7,7 +7,9 @@ related:
   - clackatoo/reference/window
 ---
 
-A board is a list of entries that you and your agents share. An agent working on part of a job can see what others have taken, take a piece itself, and leave what it found for the next.
+A board is a list of entries that you and your agents share. An agent working
+on part of a job can see what others have taken, take a piece itself, and
+leave what it found for the next.
 
 ## Opening a board
 
@@ -18,16 +20,23 @@ A board is a list of entries that you and your agents share. An agent working on
 | `:Board`, `:Boards` | Picks a board in the finder: the workspace's and every workspace's, archived ones last. |
 | `:Board@desk` | Picks one of [desk's](~clackatoo/reference/remote#a-pane-on-another-machine) boards in the finder, and opens it on desk, beside the focused pane. |
 
-A board you make belongs to the workspace shown. One an agent makes belongs to its chat's workspace, or to every workspace if it asks.
+A board you make belongs to the workspace shown. One an agent makes belongs to
+its chat's workspace, or to every workspace if it asks.
 
-Select an entry with the mouse; double-click it to edit its text, as `e` does. <kbd>Escape</kbd> cancels the draft. While a draft or search is open, the mouse leaves it alone. The wheel moves by visible rows, including within entries taller than the pane.
+Select an entry with the mouse; double-click it to edit its text, as `e` does.
+<kbd>Escape</kbd> cancels the draft. While a draft or search is open, the
+mouse leaves it alone. The wheel moves by visible rows, including within
+entries taller than the pane.
 
 ## Entries
 
-Each entry says what it is, who wrote it and how long ago, then what it says, and what it points to: a file and line, or a chat's turn. The newest is at the bottom, and the cursor follows it until you move it.
+Each entry says what it is, who wrote it and how long ago, then what it says,
+and what it points to: a file and line, or a chat's turn. The newest is at the
+bottom, and the cursor follows it until you move it.
 
 - A **note** is something to know.
-- A **claim** is a piece of work someone has taken. It shows who holds it and for how long.
+- A **claim** is a piece of work someone has taken. It shows who holds it and
+  for how long.
 - A **result** is what came of a piece of work.
 
 | Key | Does |
@@ -43,7 +52,10 @@ Each entry says what it is, who wrote it and how long ago, then what it says, an
 
 ## Claims
 
-Only agents make claims. While a claim is held, no other chat can claim the same thing, whatever its capitals. A claim lasts 2 hours unless the agent asks for another time, 24 at most. Claiming again renews it. Its holder or you can release it, and once it expires anyone can take it.
+Only agents make claims. While a claim is held, no other chat can claim the
+same thing, whatever its capitals. A claim lasts 2 hours unless the agent asks
+for another time, 24 at most. Claiming again renews it. Its holder or you can
+release it, and once it expires anyone can take it.
 
 ## What agents can do
 
@@ -60,16 +72,30 @@ A chat's agent is told the names of the boards there are when its chat starts.
 
 ## Archiving
 
-An archived board can be read but not written on until it's unarchived. Archived boards aren't listed unless asked for. A full board can still be archived.
+An archived board can be read but not written on until it's unarchived.
+Archived boards aren't listed unless asked for. A full board can still be
+archived.
 
 ## Where boards are kept
 
-Each board is a file in `~/.local/share/clackatoo/boards`: JSON, one line per change, readable with any text tool. Boards last through upgrades, the daemon stopping, and reboots: an upgrade waits until every change is written before it goes ahead. If the machine stops mid-write, the half-written last line is dropped. A damaged file is moved to `quarantine/` in that folder, and the others carry on. Only one daemon at a time keeps the boards in a folder: a second one has none. `CLACKATOO_BOARDS` sets another folder for the daemon, or `off` for none.
+Each board is a file in `~/.local/share/clackatoo/boards`: JSON, one line per
+change, readable with any text tool. Boards last through upgrades, the daemon
+stopping, and reboots: an upgrade waits until every change is written before
+it goes ahead. If the machine stops mid-write, the half-written last line is
+dropped. A damaged file is moved to `quarantine/` in that folder, and the
+others carry on. Only one daemon at a time keeps the boards in a folder: a
+second one has none. `CLACKATOO_BOARDS` sets another folder for the daemon, or
+`off` for none.
 
-A board holds at most 10,000 changes or 8 MB, and there are at most 200 boards. A board's name is at most 64 characters, an entry's text 16 KB, and an entry links to 32 places at most. Remote windows see the same boards through the daemon.
+A board holds at most 10,000 changes or 8 MB, and there are at most 200
+boards. A board's name is at most 64 characters, an entry's text 16 KB, and an
+entry links to 32 places at most. Remote windows see the same boards through
+the daemon.
 
 ## Known limits
 
 - Links in an entry can't be opened from the pane.
-- A board can't be renamed or deleted from clackatoo, and entries can't be removed.
-- Boards belong to a workspace by its name: rename the workspace, and its boards stay with the old name.
+- A board can't be renamed or deleted from clackatoo, and entries can't be
+  removed.
+- Boards belong to a workspace by its name: rename the workspace, and its
+  boards stay with the old name.
