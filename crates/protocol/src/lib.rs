@@ -149,7 +149,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 146;
+pub const PROTOCOL_VERSION: u32 = 143;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1633,7 +1633,7 @@ pub enum Request {
     /// are made there, so its files must be there too. Answered with
     /// [`Response::Text`], the folder made, for [`TutorFiles::Make`], and
     /// [`Response::Done`] for the rest. Never from a web device. Only to a
-    /// daemon of protocol 146 or later ([`wire::TUTOR_FILES`]).
+    /// daemon of protocol 143 or later ([`wire::TUTOR_FILES`]).
     Tutor(TutorFiles),
 }
 

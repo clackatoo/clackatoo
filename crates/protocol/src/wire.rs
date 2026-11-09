@@ -405,7 +405,7 @@ gates! {
     /// for a window whose daemon is on another (CLACKA-243):
     /// `Request::Tutor` (`TutorFiles`). An older daemon is never asked:
     /// the window refuses the lesson.
-    TUTOR_FILES = 146,
+    TUTOR_FILES = 143,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

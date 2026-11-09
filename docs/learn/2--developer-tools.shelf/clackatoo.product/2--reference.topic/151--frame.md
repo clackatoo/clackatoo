@@ -413,7 +413,7 @@ its files are, even in a workspace of another machine's after `:connect`. With
 runtime folder (`$XDG_RUNTIME_DIR/clackatoo`), and removes them as the lesson
 ends. Only that window may change or remove them; those of a window that has
 gone are removed once they've been left a week, or as more than 16 build up,
-the oldest first. A daemon there from before protocol 146 can't make them, and
+the oldest first. A daemon there from before protocol 143 can't make them, and
 the bar says it needs updating.
 
 ### What's new
