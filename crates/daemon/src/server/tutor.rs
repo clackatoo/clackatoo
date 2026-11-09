@@ -16,7 +16,9 @@
 //! nothing through a link. Each file is made new (`O_EXCL`, `O_NOFOLLOW`),
 //! for the user alone; the lesson's text, written again, goes to a new
 //! file renamed over the old. A web device is refused: a phone has no
-//! lessons, and nothing else may write files through this.
+//! lessons, and nothing else may write files through this. So is a daemon
+//! relaying for clients of its own: a window asks its own daemon, never
+//! one another daemon reaches.
 //!
 //! The window removes a lesson's folder as the lesson ends. One left
 //! behind, as by a window that stopped without doing so, goes once it's
@@ -38,8 +40,8 @@ use mio::Token;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 
-use super::Daemon;
 use super::pastes::{is_stamped, open_folder, stamp, stamped};
+use super::{Daemon, Source};
 
 /// How long a lesson's folder left behind is kept.
 const KEPT_FOR: Duration = Duration::from_hours(7 * 24);
@@ -59,6 +61,14 @@ impl Daemon {
     pub(super) fn tutor_files(&self, token: Token, files: TutorFiles) -> Result<Response, Error> {
         if self.device_of(token).is_some() {
             return Err(Error::Other("a phone has no lessons".into()));
+        }
+        if matches!(
+            self.sources.get(token.0),
+            Some(Source::Client(client)) if client.relays || client.machine.is_some()
+        ) {
+            return Err(Error::Other(
+                "only a window's own daemon makes its lessons' files".into(),
+            ));
         }
         let lessons = self.lessons_folder().map_err(|why| {
             Error::Other(format!(
@@ -280,6 +290,64 @@ mod tests {
         let folder = open_folder(&path).unwrap();
         let path = std::fs::canonicalize(path).unwrap();
         Lessons { path, folder }
+    }
+
+    /// A daemon in `dir`, its socket there, not running.
+    fn daemon(dir: &Path) -> Daemon {
+        crate::server::agent_files::tests::daemon_with_chat(dir).0
+    }
+
+    /// A client of `daemon`'s, greeted, over a socket pair whose other end
+    /// is returned, to be kept open.
+    fn client(daemon: &mut Daemon) -> (Token, std::os::unix::net::UnixStream) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let mut stream = mio::net::UnixStream::from_std(ours);
+        let token = Token(daemon.sources.vacant_key());
+        (daemon.poll.registry())
+            .register(&mut stream, token, mio::Interest::READABLE)
+            .unwrap();
+        let mut client = crate::server::Client::new(crate::server::Link::Unix(stream));
+        client.greeted = true;
+        daemon.sources.insert(Source::Client(client));
+        (token, theirs)
+    }
+
+    /// Makes the lesson `basics`'s files, as the client at `token` asks.
+    fn make(daemon: &mut Daemon, token: Token) -> Result<Response, Error> {
+        let make = TutorFiles::Make {
+            lesson: "basics".into(),
+            text: "# Basics\n".into(),
+            files: Vec::new(),
+        };
+        daemon.tutor_files(token, make)
+    }
+
+    #[test]
+    fn a_daemon_relaying_makes_no_lessons_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = daemon(dir.path());
+        let (window, _window) = client(&mut daemon);
+        assert!(matches!(make(&mut daemon, window), Ok(Response::Text(_))));
+        let (relaying, _relaying) = client(&mut daemon);
+        let Some(Source::Client(client)) = daemon.sources.get_mut(relaying.0) else {
+            unreachable!()
+        };
+        client.relays = true;
+        let Err(Error::Other(why)) = make(&mut daemon, relaying) else {
+            panic!("a relaying daemon made a lesson's files");
+        };
+        assert!(why.contains("own daemon"), "{why}");
+        let remove = TutorFiles::Remove {
+            dir: dir
+                .path()
+                .join("tutor/20261109-101500-1")
+                .display()
+                .to_string(),
+        };
+        assert!(daemon.tutor_files(relaying, remove).is_err());
+        let made = std::fs::read_dir(dir.path().join("tutor")).unwrap().count();
+        assert_eq!(made, 1);
     }
 
     #[test]
