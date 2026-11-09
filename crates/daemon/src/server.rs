@@ -1313,6 +1313,7 @@ impl Daemon {
         let mut uids = std::mem::take(&mut handover.state.uids);
         let mut branches = std::mem::take(&mut handover.state.branches);
         let mut forks = std::mem::take(&mut handover.state.forks);
+        let mut notices = std::mem::take(&mut handover.state.notices);
         let mut renumbered: Vec<TerminalId> = Vec::new();
         let mut continuations: std::collections::HashMap<_, _> =
             std::mem::take(&mut handover.state.chat_continuations)
@@ -1424,6 +1425,7 @@ impl Daemon {
                 chat.notify("Its other branches couldn't be kept through the upgrade.".to_owned());
             }
             chat.resume_forks(&mut forks);
+            chat.resume_notices(&mut notices);
             chat.resume_nesting(&nested);
             if let Some(images) = images {
                 chat.resume_previews(images);
@@ -1678,6 +1680,7 @@ impl Daemon {
         let mut uids = Vec::new();
         let mut branches = Vec::new();
         let mut forks = Vec::new();
+        let mut notices = Vec::new();
         let mut chat_continuations = Vec::new();
         let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
@@ -1732,6 +1735,7 @@ impl Daemon {
                     uids.extend(chat.hand_over_uids());
                     branches.extend(chat.hand_over_branches());
                     forks.extend(chat.hand_over_forks());
+                    notices.extend(chat.hand_over_notices());
                     if live {
                         let (handed, live) = chat.hand_over_live();
                         chats.push(handed);
@@ -1806,6 +1810,7 @@ impl Daemon {
                 uids,
                 branches,
                 forks,
+                notices,
                 agent_terminals,
                 federation,
                 mcp,

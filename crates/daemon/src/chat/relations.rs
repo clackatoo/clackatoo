@@ -33,8 +33,8 @@ pub(crate) struct Message {
     pub(crate) cause: Option<Cause>,
     /// For the notice that chats finished, once it says what: how each
     /// went, for clients to show the notice as a card (see
-    /// `Turn.notice`). Not handed over: a notice says what only as it
-    /// begins.
+    /// `Turn.notice`). Handed over beside the message, by its place (see
+    /// `HostedChat::hand_over_notices`).
     pub(crate) finished: Vec<FinishedChat>,
 }
 

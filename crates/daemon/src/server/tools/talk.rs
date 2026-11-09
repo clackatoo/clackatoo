@@ -3335,6 +3335,38 @@ mod tests {
         assert_eq!(daemon.chat_ref(a).unwrap().node().turns.len(), 2);
     }
 
+    /// What a notice says of the chats that finished goes through an
+    /// upgrade with the turn it started, so it still shows as their cards,
+    /// not as the agent's text under "Clackatoo · Subagents finished"
+    /// (CLACKA-244).
+    #[test]
+    fn a_notices_cards_go_through_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        finishes(&mut daemon, b, "built it");
+        relay(&mut daemon);
+        answers(&mut daemon, a, "done");
+        relay(&mut daemon);
+        let before = daemon.chat_ref(a).unwrap().node().turns[1].clone();
+        assert!(before.shows_finished(), "{before:#?}");
+        // And one that says what, still waiting its turn behind the
+        // turn under way.
+        let finished = before.notice.clone().unwrap().finished;
+        let waiting = Message::finished_notice(a);
+        drop(daemon.chat(a).unwrap().deliver(waiting).unwrap());
+        let said = Some(("[chat 2 finished] …".to_owned(), finished.clone()));
+        daemon.chat(a).unwrap().fill_finished_notice(said);
+        let resumed = upgraded(daemon);
+        let chat = resumed.chat_ref(a).unwrap();
+        let after = &chat.node().turns[1];
+        assert_eq!(after.notice, before.notice);
+        assert_eq!(after.from, before.from);
+        let inbox = &chat.relations().inbox;
+        assert!(inbox[0].is_finished_notice(), "{inbox:#?}");
+        assert_eq!(inbox[0].finished, finished);
+    }
+
     /// The notice waits while the chat is busy, and the chat's agent waits
     /// for the chat that finished meanwhile, which gives it the answer:
     /// the notice then has nothing to say, and goes, rather than start a

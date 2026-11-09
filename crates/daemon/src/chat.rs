@@ -1005,8 +1005,8 @@ impl HostedChat {
         resumed.relations = relations;
         for (index, sender) in senders {
             if let Some(turn) = resumed.node.turns.get_mut(index) {
-                // What a notice said of how chats went isn't handed
-                // over: it shows as clackatoo's still, with its text.
+                // A notice: what it said of how chats went comes back
+                // beside the chat (see `resume_notices`).
                 if relations::from_clackatoo(&sender) {
                     turn.notice = Some(TurnNotice::default());
                 }

@@ -19,6 +19,7 @@ use clackatoo_protocol::{
 };
 
 use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, Message, PROFILE_SETTING, tool_kind};
+use crate::handover;
 use crate::profiles::{self, Limits};
 
 /// The most of a chat's first message a card shows as its task, in
@@ -304,6 +305,68 @@ impl HostedChat {
                 }
             }
             None => drop(self.relations.inbox.pop_front()),
+        }
+    }
+
+    /// What its notices said of the chats that finished, for the next
+    /// build, which neither its turns nor its messages keep: nothing if
+    /// none said any (CLACKA-244).
+    pub(crate) fn hand_over_notices(&self) -> Option<handover::ChatNotices> {
+        let json = |finished: &[FinishedChat]| -> Vec<String> {
+            (finished.iter())
+                .filter_map(|chat| serde_json::to_string(chat).ok())
+                .collect()
+        };
+        let turns: Vec<(u32, u64, Vec<String>)> = (self.node.turns.iter().enumerate())
+            .filter_map(|(index, turn)| {
+                let finished = &turn.notice.as_ref()?.finished;
+                let index = u32::try_from(index).ok()?;
+                (!finished.is_empty()).then(|| (index, turn.sent, json(finished)))
+            })
+            .collect();
+        let inbox: Vec<(u32, Vec<String>)> = (self.relations.inbox.iter().enumerate())
+            .filter(|(_, message)| !message.finished.is_empty())
+            .filter_map(|(at, message)| Some((u32::try_from(at).ok()?, json(&message.finished))))
+            .collect();
+        (!turns.is_empty() || !inbox.is_empty()).then(|| handover::ChatNotices {
+            chat: self.id.0,
+            turns,
+            inbox,
+        })
+    }
+
+    /// Takes what the build before kept of what its notices said of the
+    /// chats that finished, if it kept anything for this chat: each turn
+    /// a notice started that's still where it was, from clackatoo, gets
+    /// its chats back, as does each notice still waiting its turn.
+    pub(crate) fn resume_notices(&mut self, notices: &mut Vec<handover::ChatNotices>) {
+        let Some(at) = notices.iter().position(|kept| kept.chat == self.id.0) else {
+            return;
+        };
+        let kept = notices.swap_remove(at);
+        let read = |json: Vec<String>| -> Vec<FinishedChat> {
+            (json.iter())
+                .filter_map(|chat| serde_json::from_str(chat).ok())
+                .collect()
+        };
+        for (index, sent, finished) in kept.turns {
+            let turn = usize::try_from(index)
+                .ok()
+                .and_then(|index| self.node.turns.get_mut(index));
+            if let Some(notice) = turn
+                .filter(|turn| turn.sent == sent)
+                .and_then(|turn| turn.notice.as_mut())
+            {
+                notice.finished = read(finished);
+            }
+        }
+        for (at, finished) in kept.inbox {
+            let message = usize::try_from(at)
+                .ok()
+                .and_then(|at| self.relations.inbox.get_mut(at));
+            if let Some(message) = message.filter(|message| message.is_finished_notice()) {
+                message.finished = read(finished);
+            }
         }
     }
 
