@@ -1373,6 +1373,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: ":setp saves an option for every window after, in settings.lua; :verbose set says where one was set",
     },
+    News {
+        id: "remotelessons",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "Lessons open in a window on another machine, and in another machine's workspace",
+    },
 ];
 
 impl News {

@@ -411,8 +411,10 @@ A lesson's panes always run on the machine of the window's own daemon, where
 its files are, even in a workspace of another machine's after `:connect`. With
 `--remote`, the daemon there makes the lesson's files, in `tutor` in its
 runtime folder (`$XDG_RUNTIME_DIR/clackatoo`), and removes them as the lesson
-ends. A daemon there from before protocol 146 can't, and the bar says it needs
-updating.
+ends. Only that window may change or remove them; those of a window that has
+gone are removed once they've been left a week, or as more than 16 build up,
+the oldest first. A daemon there from before protocol 146 can't make them, and
+the bar says it needs updating.
 
 ### What's new
 
