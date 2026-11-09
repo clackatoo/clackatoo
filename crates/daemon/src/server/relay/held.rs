@@ -738,7 +738,8 @@ impl Daemon {
 
     /// Says in `shown` the home directories of the other machines shown:
     /// each connected to's own, as it says, then those they pass on, as
-    /// they say them, the nearest first.
+    /// they say them, the nearest first; none of a connection asked not to
+    /// be passed on.
     fn homes_shown(&self, shown: &mut Workspaces) {
         let own = self.machine.id;
         let mut add = |id: MachineId, home: &str| {
@@ -749,12 +750,13 @@ impl Daemon {
                     .push(clackatoo_protocol::MachineHome { id, home });
             }
         };
-        for linked in &self.links.list {
+        // Nothing of a connection asked not to be passed on.
+        for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
             if let (Some(machine), Some(home)) = (&linked.machine, &linked.relayed.mirror.home) {
                 add(machine.id, home);
             }
         }
-        for linked in &self.links.list {
+        for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
             for known in &linked.relayed.mirror.homes {
                 add(known.id, &known.home);
             }
@@ -1029,5 +1031,57 @@ mod tests {
             "closed"
         );
         assert!(daemon.links.typed_parked.is_empty(), "forgotten with it");
+    }
+
+    /// A connection says where it, and what it passes on, keep their
+    /// user's files, `homes`, passing on `passed`.
+    fn said_homes(
+        homes: Vec<clackatoo_protocol::MachineHome>,
+        passed: Vec<MachineId>,
+    ) -> ServerMessage {
+        let passed = (passed.into_iter())
+            .map(|id| clackatoo_protocol::Passed {
+                id,
+                name: "passed".into(),
+                run: 1,
+                through: Vec::new(),
+                reached: true,
+                key: None,
+            })
+            .collect();
+        ServerMessage::Event(Event::Workspaces(Workspaces {
+            machine: Some(desk()),
+            home: Some("/home/desk".into()),
+            homes,
+            passed,
+            ..Workspaces::default()
+        }))
+    }
+
+    fn home(id: MachineId, home: &str) -> clackatoo_protocol::MachineHome {
+        clackatoo_protocol::MachineHome {
+            id,
+            home: home.into(),
+        }
+    }
+
+    /// Where a connection asked not to be passed on keeps its user's
+    /// files, or the machines it passes on do, is told to no one
+    /// (CLACKA-118).
+    #[test]
+    fn homes_of_a_connection_not_passed_on_are_told_to_no_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let server = MachineId([5; 16]);
+        let homes = vec![home(server, "/home/server")];
+        say(&mut there, &said_homes(homes, vec![server]));
+        daemon.read_reached(link, Reading::Look);
+        let shown = daemon.shown_workspaces().homes;
+        assert_eq!(
+            shown,
+            [home(desk().id, "/home/desk"), home(server, "/home/server")]
+        );
+        daemon.links.list[0].unshared = true;
+        assert!(daemon.shown_workspaces().homes.is_empty());
     }
 }
