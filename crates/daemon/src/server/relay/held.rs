@@ -737,9 +737,9 @@ impl Daemon {
     }
 
     /// Says in `shown` the home directories of the other machines shown:
-    /// each connected to's own, as it says, then those they pass on, as
-    /// they say them, the nearest first; none of a connection asked not to
-    /// be passed on.
+    /// each connected to's own, as it says, then those they pass on that
+    /// this daemon has no connection to, as they say them, the nearest
+    /// first; none of a connection asked not to be passed on.
     fn homes_shown(&self, shown: &mut Workspaces) {
         let own = self.machine.id;
         let mut add = |id: MachineId, home: &str| {
@@ -750,14 +750,19 @@ impl Daemon {
                     .push(clackatoo_protocol::MachineHome { id, home });
             }
         };
-        // Nothing of a connection asked not to be passed on.
+        // Of a machine this daemon has a connection to, only what that
+        // machine says; and nothing of one asked not to be passed on.
+        let linked_to = |id: MachineId| {
+            (self.links.list.iter())
+                .any(|linked| (linked.machine.as_ref()).is_some_and(|machine| machine.id == id))
+        };
         for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
             if let (Some(machine), Some(home)) = (&linked.machine, &linked.relayed.mirror.home) {
                 add(machine.id, home);
             }
         }
         for linked in self.links.list.iter().filter(|linked| !linked.unshared) {
-            for known in &linked.relayed.mirror.homes {
+            for known in (linked.relayed.mirror.homes.iter()).filter(|known| !linked_to(known.id)) {
                 add(known.id, &known.home);
             }
         }
@@ -1083,5 +1088,33 @@ mod tests {
         );
         daemon.links.list[0].unshared = true;
         assert!(daemon.shown_workspaces().homes.is_empty());
+    }
+
+    /// A connection is taken at its word only about itself and the
+    /// machines it passes on that this daemon has no connection to of its
+    /// own: never about another (CLACKA-118).
+    #[test]
+    fn homes_are_taken_only_from_whom_they_concern() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let laptop = Machine {
+            id: MachineId([6; 16]),
+            name: "laptop".into(),
+            run: 1,
+        };
+        let (_laptop_link, _laptop_there) = daemon.linked_for_test("laptop", laptop.clone());
+        let (server, unpassed) = (MachineId([5; 16]), MachineId([4; 16]));
+        let homes = vec![
+            home(server, "/home/server"),
+            home(laptop.id, "/home/not-laptops"),
+            home(unpassed, "/home/not-passed"),
+        ];
+        say(&mut there, &said_homes(homes, vec![server, laptop.id]));
+        daemon.read_reached(link, Reading::Look);
+        let shown = daemon.shown_workspaces().homes;
+        assert_eq!(
+            shown,
+            [home(desk().id, "/home/desk"), home(server, "/home/server")]
+        );
     }
 }

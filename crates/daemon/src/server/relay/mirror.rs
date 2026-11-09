@@ -428,12 +428,15 @@ impl Mirror {
 
     /// Takes in where `remote`, the workspaces the daemon there,
     /// `machine`, says it has, says its user's files are, and those of the
-    /// machines it passes on but `own`. Returns whether that changed.
+    /// machines it passes on, but `own`: what it says of any other machine
+    /// isn't its to say. Returns whether that changed.
     fn take_homes(&mut self, remote: &Workspaces, machine: MachineId, own: MachineId) -> bool {
         let said = |home: &String| home.len() <= LONGEST_HOME;
+        let passes_on = |id: MachineId| remote.passed.iter().any(|passed| passed.id == id);
         let home = remote.home.clone().filter(said);
         let homes: Vec<MachineHome> = (remote.homes.iter())
             .filter(|known| known.id != own && known.id != machine && said(&known.home))
+            .filter(|known| passes_on(known.id))
             .take(MOST_OTHERS)
             .cloned()
             .collect();
