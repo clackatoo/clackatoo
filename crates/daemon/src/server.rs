@@ -3580,7 +3580,10 @@ impl Daemon {
                 pane,
                 token: launch,
             } => self.reveal(token, pane, launch),
-            Request::Window => self.is_window(token),
+            Request::Window => {
+                self.is_window(token);
+                Ok(Response::Done)
+            }
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),

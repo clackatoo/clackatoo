@@ -68,14 +68,13 @@ impl Daemon {
         Ok(Response::Done)
     }
 
-    /// Answers [`Request::Window`](clackatoo_protocol::Request::Window)
-    /// from the client at `token`, which may be revealed panes from now
-    /// on if it's on this machine.
-    pub(super) fn is_window(&mut self, token: Token) -> Result<Response, Error> {
+    /// Notes that the client at `token` said it's a window
+    /// ([`Request::Window`](clackatoo_protocol::Request::Window)), which
+    /// may be revealed panes from now on if it's on this machine.
+    pub(super) fn is_window(&mut self, token: Token) {
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
             client.is_window = true;
         }
-        Ok(Response::Done)
     }
 
     /// Whether the client at `token` is on this machine: on the daemon's
