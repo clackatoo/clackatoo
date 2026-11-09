@@ -3944,6 +3944,28 @@ mod tests {
         );
     }
 
+    /// A chat the user stopped may still go on by itself, as its own
+    /// background work ends: that turn isn't cancelled, and what other
+    /// agents sent goes on waiting for the user through it (CLACKA-220).
+    #[test]
+    fn a_held_chat_going_on_by_itself_lets_nothing_waiting_go() {
+        use clackatoo_protocol::ChatAction;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        answers(&mut daemon, a, "done");
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        drop(daemon.chat(b).unwrap().act(ChatAction::Stop));
+        daemon.send_to_chat(a, b, "carry on").unwrap();
+        let chat = daemon.chat(b).unwrap();
+        assert!(chat.wake(Some("the build ended".to_owned())));
+        answers(&mut daemon, b, "the build passed");
+        relay(&mut daemon);
+        let held = daemon.chat_ref(b).unwrap();
+        assert_eq!(held.node().turns.len(), 2, "its own turn, and no other");
+        assert_eq!(held.relations().inbox.len(), 1);
+        assert!(held.held_by_stop());
+    }
+
     /// The user's Stop holds (CLACKA-220): a chat they stopped isn't
     /// started again by its subagent finishing, nor by another chat's
     /// message, nor by an upgrade. Both wait, and a chat waiting for it
