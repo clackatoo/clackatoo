@@ -1493,6 +1493,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: ":Settings opens in Easy: pages of the usual settings with switches, sliders and buttons; m goes to Advanced",
     },
+    News {
+        id: "settings-cog",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: "A cog at the top bar's right opens the settings menu, and closes it again",
+    },
 ];
 
 impl News {

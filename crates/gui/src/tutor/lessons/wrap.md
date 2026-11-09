@@ -84,7 +84,7 @@ An option your `init.lua` sets as it loads isn't saved, as `init.lua` runs after
 
 ## The settings menu
 
-`:Settings` opens a menu of your settings, in one of two modes. **Easy**, where it opens the first time, has pages of the settings most people change, each with a switch, buttons, a slider or the like, to use with the mouse or the keys. **Advanced** has every option and every key bound: what each does, its value, and where it was set. A change in either applies at once and is saved, as `:setp` saves it. `:Settings wrap` opens it searching for `wrap`: open it so.
+`:Settings`, or a click on the cog at the top right, opens a menu of your settings, in one of two modes. **Easy**, where it opens the first time, has pages of the settings most people change, each with a switch, buttons, a slider or the like, to use with the mouse or the keys. **Advanced** has every option and every key bound: what each does, its value, and where it was set. A change in either applies at once and is saved, as `:setp` saves it. `:Settings wrap` opens it searching for `wrap`: open it so.
 
 ```check
 finder settings

@@ -494,7 +494,10 @@ coroutine's, as only its lines can be seen from there.
 `:Settings` opens a menu of your settings over the panes, in one of two
 modes: **Easy**, pages of the settings most people change, each with a
 control, and **Advanced**, every option and every key bound, as a list to
-search. `:Settings wrap` opens it searching for `wrap`.
+search. `:Settings wrap` opens it searching for `wrap`. The cog at the top
+bar's right, a button's width apart from the window's buttons there, or at
+the right edge if they're on the left, opens it too, in the mode used last,
+and closes it again; it's lit while the menu is open.
 
 ### Easy and Advanced
 

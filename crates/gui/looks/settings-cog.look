@@ -1,0 +1,22 @@
+# The settings cog at the top bar's right: alone, under the mouse, lit
+# while the menu it opens is open, and closing it again; then with the
+# window's buttons on the left, and with none.
+size 1280x800
+keys <C-;>
+sleep 300
+shot cog
+move 1213 20
+shot cog-hover
+click 1213 20
+wait-for Appearance
+shot cog-open
+click 1213 20
+sleep 300
+shot cog-closed
+buttons close,minimize,maximize:
+move 640 400
+sleep 300
+shot cog-buttons-left
+buttons :
+sleep 300
+shot cog-no-buttons

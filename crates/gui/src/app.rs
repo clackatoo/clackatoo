@@ -899,6 +899,7 @@ impl App {
         let mut chrome = Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
         });
+        chrome.cog_lit = self.desk.settings_open();
         let sizes = crate::settings::view::Sizes {
             mono_em: fonts.mono_em(),
         };
@@ -1043,6 +1044,7 @@ impl App {
             | Hit::Background
             | Hit::Grant
             | Hit::Revoke
+            | Hit::Cog
             | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
@@ -1104,6 +1106,7 @@ impl App {
                     | Hit::Background
                     | Hit::Grant
                     | Hit::Revoke
+                    | Hit::Cog
                     | Hit::Hidden(..)
                     | Hit::Note
                     | Hit::Menu(_)
@@ -1440,6 +1443,11 @@ impl App {
             }
             Hit::Revoke => {
                 self.revoke_native();
+                Ok(())
+            }
+            Hit::Cog => {
+                self.desk.toggle_settings();
+                self.send_outbox();
                 Ok(())
             }
             // A count of names hidden scrolls its strip that way.
@@ -3243,6 +3251,7 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::Background
         | Hit::Grant
         | Hit::Revoke
+        | Hit::Cog
         | Hit::Hidden(..)
         | Hit::Note
         | Hit::Menu(_)

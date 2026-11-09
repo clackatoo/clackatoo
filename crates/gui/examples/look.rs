@@ -35,6 +35,7 @@
 //! | `size WxH` | Makes the window W × H points (1280 × 800 to start) |
 //! | `scale S` | Draws it at S pixels to a point (1 to start) |
 //! | `theme dark` | The window's colours; it has only the one theme so far |
+//! | `buttons LAYOUT` | Puts the window's buttons as GNOME's `button-layout` says: `close,minimize:` on the left, `:close` only close, `:` none |
 //! | `file PATH` | Makes an empty file in the project, the folder the first shell starts in |
 //! | `file PATH <<END`, lines, `END` | Makes a file of those lines |
 //! | `config <<END`, lines, `END` | Makes the window's `init.lua` of those lines, which it runs as it opens |
@@ -240,6 +241,7 @@ enum Command {
     Size([u32; 2]),
     Scale(f64),
     Theme,
+    Buttons(String),
     File(PathBuf, String),
     Config(String),
     Kept(String),
@@ -311,6 +313,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                     .with_context(|| format!("line {line_number}: `scale` takes a number"))?,
             ),
             "theme" if rest == "dark" => Command::Theme,
+            "buttons" => Command::Buttons(rest.to_owned()),
             "theme" => bail!("line {line_number}: the window has only the dark theme so far"),
             "file" | "config" | "kept" => {
                 let (path, until) = match rest.split_once("<<") {
@@ -892,6 +895,7 @@ impl Look {
                 window.keys("<CR>").map_err(|err| anyhow!(err))?;
             }
             Command::Move(at) => self.window()?.move_to(*at),
+            Command::Buttons(layout) => self.window()?.set_buttons(layout),
             Command::Click(at, button) => self.window()?.click(*at, *button),
             Command::Drag(from, to) => self.window()?.drag(*from, *to),
             Command::ScrollPixels(at, pixels) => self.window()?.scroll_pixels(*at, *pixels),

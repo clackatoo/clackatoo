@@ -271,6 +271,14 @@ impl Desk {
         self.settings.is_some()
     }
 
+    /// The top bar's cog: opens the settings menu, in the mode used last,
+    /// or closes it if it's open.
+    pub(crate) fn toggle_settings(&mut self) {
+        if self.settings.take().is_none() {
+            self.open_settings("");
+        }
+    }
+
     /// Whether the menu waits for the fonts installed, which
     /// [`Desk::font_families`] gives it.
     pub(crate) fn wants_font_families(&self) -> bool {

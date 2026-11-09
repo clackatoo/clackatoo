@@ -41,6 +41,8 @@ pub(crate) enum Icon {
     Phone,
     /// A padlock: what's locked.
     Lock,
+    /// A cog: the settings.
+    Cog,
 }
 
 impl Icon {
@@ -108,6 +110,13 @@ impl Icon {
             Self::Phone => concat!(
                 "M9 2H15A2 2 0 0 1 17 4V20A2 2 0 0 1 15 22H9A2 2 0 0 1 7 20V4A2 2 0 0 1 9 2Z ",
                 "M11 18H13"
+            )
+            .into(),
+            Self::Cog => concat!(
+                "M15 12A3 3 0 1 1 9 12A3 3 0 1 1 15 12 ",
+                "M18.5 12A6.5 6.5 0 1 1 5.5 12A6.5 6.5 0 1 1 18.5 12 ",
+                "M12 2.5V5.5 M12 18.5V21.5 M2.5 12H5.5 M18.5 12H21.5 ",
+                "M5.3 5.3L7.4 7.4 M16.6 16.6L18.7 18.7 M5.3 18.7L7.4 16.6 M16.6 7.4L18.7 5.3"
             )
             .into(),
             Self::Lock => concat!(
@@ -210,6 +219,7 @@ mod tests {
                 Icon::Keyboard,
                 Icon::Phone,
                 Icon::Lock,
+                Icon::Cog,
             ] {
                 assert_eq!(swash::zeno::validate_svg(&icon.path()), Ok(()), "{icon:?}");
                 let mask = icon.rasterize(size);

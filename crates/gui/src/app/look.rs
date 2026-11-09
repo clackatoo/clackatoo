@@ -350,6 +350,14 @@ impl Window {
         self.app.send_outbox();
     }
 
+    /// Puts the window's buttons where `layout` says, as GNOME's
+    /// `button-layout` does: `close,minimize:` on the left, `:close` only a
+    /// close button on the right, `:` none.
+    pub fn set_buttons(&mut self, layout: &str) {
+        self.app.buttons = crate::desktop::parse_buttons(layout);
+        self.app.request_redraw();
+    }
+
     /// Moves the window to a screen with `scale` pixels to a point,
     /// keeping its size in points.
     pub fn rescale(&mut self, scale: f64) {

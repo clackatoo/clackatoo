@@ -108,7 +108,7 @@ fn parse_font(name: &str) -> Option<(String, f32)> {
 /// A button layout as GNOME writes it: buttons for the left, a colon,
 /// buttons for the right, each list separated by commas. Names it doesn't
 /// draw, such as `appmenu`, are left out.
-fn parse_buttons(layout: &str) -> ButtonLayout {
+pub(crate) fn parse_buttons(layout: &str) -> ButtonLayout {
     let buttons = |names: &str| {
         names
             .split(',')

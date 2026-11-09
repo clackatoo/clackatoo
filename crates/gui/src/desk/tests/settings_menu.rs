@@ -967,3 +967,16 @@ fn a_save_that_fails_puts_back_what_easy_counted_on() {
     let (_, cursorline) = easy_row(&mut desk, "Highlight the cursor's line");
     assert_eq!(cursorline.control, ControlView::Toggle(true));
 }
+
+#[test]
+fn the_cog_opens_the_menu_in_the_mode_used_last_and_closes_it() {
+    use crate::settings::Mode;
+    let (mut desk, _dir) = configured("");
+    desk.toggle_settings();
+    assert_eq!(desk.settings_mode_shown(), Some(Mode::Advanced));
+    desk.toggle_settings();
+    assert!(desk.settings.is_none());
+    let (mut desk, _dir) = easy_configured("");
+    desk.toggle_settings();
+    assert_eq!(desk.settings_mode_shown(), Some(Mode::Easy));
+}

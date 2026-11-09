@@ -492,6 +492,11 @@ pub(crate) struct Chrome {
     /// window keeps it laid out, or Advanced's header over the finder (see
     /// [`Chrome::place_advanced_settings`]).
     pub(crate) settings: Option<std::rc::Rc<Laid>>,
+    /// The cog that opens the settings menu, at the top bar's right, apart
+    /// from the window's buttons there; and where its tip goes.
+    pub(crate) cog: (Rect, Rect),
+    /// The settings menu is open, which lights the cog.
+    pub(crate) cog_lit: bool,
 }
 
 /// What goes in the frame, besides where.
@@ -659,6 +664,33 @@ impl Chrome {
         let pill_y = top.y + (top.height - pill_height) / 2.0;
         let (buttons, workspaces_start, mut workspaces_end) =
             place_buttons(&geometry, contents.buttons);
+        // The settings cog, as big as a window button, at the right: a
+        // button's width apart from the buttons there, so it doesn't read as
+        // one of them, or at the edge if they're on the left, or none.
+        let cog = {
+            let diameter = (pill_height * 0.8).round();
+            let edge = if contents.buttons.right.is_empty() {
+                top.width - 3.0 * padding
+            } else {
+                // Where the first of the buttons there starts.
+                workspaces_end + 3.0 * padding - diameter
+            };
+            let rect = Rect {
+                x: (edge - diameter).max(workspaces_start).round(),
+                y: (top.y + (top.height - diameter) / 2.0).round(),
+                width: diameter,
+                height: diameter,
+            };
+            workspaces_end = rect.x - padding;
+            let said = (measure(COG_TIP, false) + 4.0 * padding).round();
+            let tip = Rect {
+                x: (rect.right() - said).max(padding).round(),
+                y: top.bottom() + padding,
+                width: said,
+                height: pill_height,
+            };
+            (rect, tip)
+        };
         // The grant's badge nearest the buttons, as it stays while alerts
         // come and go.
         let grant = contents.grant.map(|text| {
@@ -802,6 +834,8 @@ impl Chrome {
             rounded: contents.rounded,
             finder: (contents.finder).map(|view| place_finder(&geometry, view, measure)),
             settings: None,
+            cog,
+            cog_lit: false,
         }
     }
 
@@ -864,7 +898,7 @@ impl Chrome {
             // bar and buttons still work, and anything else closes it.
             if !laid.outer().contains(point) {
                 return match self.hit_under(point, maximised) {
-                    hit @ (Hit::Resize(_) | Hit::Button(_) | Hit::TopBar) => hit,
+                    hit @ (Hit::Resize(_) | Hit::Button(_) | Hit::Cog | Hit::TopBar) => hit,
                     _ => Hit::Settings(SettingsHit::Backdrop),
                 };
             }
@@ -904,6 +938,9 @@ impl Chrome {
         }
         if let Some(&(button, _)) = self.buttons.iter().find(|(_, rect)| rect.contains(point)) {
             return Hit::Button(button);
+        }
+        if self.cog.0.contains(point) {
+            return Hit::Cog;
         }
         if let Some(badge) = &self.grant
             && badge.rect.contains(point)
@@ -1004,6 +1041,7 @@ impl Chrome {
         for &(button, rect) in &self.buttons {
             self.paint_button(button, rect, hover == Hit::Button(button), &mut painted);
         }
+        self.paint_cog(hover == Hit::Cog, &mut painted);
         if let Some((text, rect)) = &self.alert {
             paint_alert(text, *rect, &self.geometry, &mut painted);
         }
@@ -1364,6 +1402,46 @@ impl Chrome {
         }
     }
 
+    /// The settings cog: on a soft circle while the mouse is over it, and
+    /// lit, in clackatoo's own colour, while the menu is open; with its
+    /// tip under it while the mouse is over it.
+    fn paint_cog<'a>(&'a self, hovered: bool, painted: &mut Painted<'a>) {
+        let (rect, tip) = self.cog;
+        if self.cog_lit {
+            painted.fills.push(Fill::rounded(
+                rect.to_array(),
+                Paint::AccentFaint,
+                rect.width / 2.0,
+            ));
+        } else if hovered {
+            painted.fills.push(Fill::rounded(
+                rect.to_array(),
+                Paint::Picked,
+                rect.width / 2.0,
+            ));
+        }
+        let paint = match (self.cog_lit, hovered) {
+            (true, _) => Paint::Accent,
+            (false, true) => Paint::Ink,
+            (false, false) => Paint::Icon,
+        };
+        let side = (rect.width * 0.62).round();
+        painted.fills.push(Fill::icon(
+            [
+                (rect.x + (rect.width - side) / 2.0).round(),
+                (rect.y + (rect.height - side) / 2.0).round(),
+                side,
+                side,
+            ],
+            crate::render::icons::Icon::Cog,
+            paint,
+        ));
+        // Not over the menu it opened.
+        if hovered && !self.cog_lit {
+            self.paint_tip(COG_TIP, tip, painted);
+        }
+    }
+
     /// A button: its icon alone, a line for minimise, a square for
     /// maximise and a cross for close, on a soft circle while the mouse is
     /// over it.
@@ -1401,6 +1479,9 @@ impl Chrome {
         }
     }
 }
+
+/// What the settings cog's tip says.
+const COG_TIP: &str = "Settings";
 
 /// The top of the line of text typed in the palette at `rect`.
 fn palette_text_y(rect: Rect, metrics: Metrics) -> f32 {
@@ -2790,6 +2871,8 @@ pub(crate) enum Hit {
     Finder(Option<usize>),
     /// The settings menu, and what of it. The panes under it get nothing.
     Settings(SettingsHit),
+    /// The cog in the top bar, which opens the settings menu, or closes it.
+    Cog,
     Nothing,
 }
 
@@ -2870,6 +2953,45 @@ mod tests {
             },
             &mut measure,
         )
+    }
+
+    #[test]
+    fn the_settings_cog_sits_apart_from_the_buttons_at_the_right_whatever_they_are() {
+        let right = ButtonLayout::default();
+        let bar = chrome(Status::tabs(), &right);
+        let (cog, tip) = bar.cog;
+        let first_button = (bar.buttons.iter())
+            .map(|(_, rect)| rect.x)
+            .fold(f32::INFINITY, f32::min);
+        // A button's width apart, as big as one, in line with them.
+        let (_, button) = bar.buttons[0];
+        assert_eq!(cog.width, button.width);
+        assert_eq!(cog.y, button.y);
+        assert_eq!(first_button - cog.right(), cog.width);
+        let middle = [cog.x + cog.width / 2.0, cog.y + cog.height / 2.0];
+        assert_eq!(bar.hit(middle, false), Hit::Cog);
+        // Its tip goes under it, inside the window.
+        assert!(tip.y >= bar.geometry.top.bottom() && tip.right() <= 800.0);
+        // The bar left of it still drags the window, and the workspaces end
+        // before it.
+        assert_eq!(bar.hit([cog.x - 3.0, middle[1]], false), Hit::TopBar);
+        assert_eq!(bar.hit([400.0, 18.0], false), Hit::TopBar);
+        let last = bar.workspaces.last().expect("workspaces");
+        assert!(last.rect.right() < cog.x);
+        // With the buttons on the left, or none, it's at the right edge.
+        for layout in ["close,minimize,maximize:", ":", ":close"] {
+            let buttons = crate::desktop::parse_buttons(layout);
+            let placed = chrome(Status::tabs(), &buttons);
+            let (cog, _) = placed.cog;
+            if buttons.right.is_empty() {
+                assert_eq!(cog.right(), 800.0 - 3.0 * METRICS.padding, "{layout}");
+            } else {
+                let (_, close) = placed.buttons[0];
+                assert_eq!(close.x - cog.right(), cog.width, "{layout}");
+            }
+            let middle = [cog.x + cog.width / 2.0, cog.y + cog.height / 2.0];
+            assert_eq!(placed.hit(middle, false), Hit::Cog, "{layout}");
+        }
     }
 
     #[test]
