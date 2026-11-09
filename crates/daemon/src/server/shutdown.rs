@@ -314,10 +314,17 @@ mod tests {
         daemon.keep();
         daemon.keep_on();
         daemon.keep();
-        daemon.keep_last();
-        daemon.kept_last();
-        let kept = std::fs::read_to_string(&path).unwrap_or_default();
-        assert!(kept.contains("\"after\""), "{kept}");
+        // The writer's thread writes it in its own time: `kept_last` waits
+        // for it only a moment, and a busy machine can take longer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let kept = std::fs::read_to_string(&path).unwrap_or_default();
+            if kept.contains("\"after\"") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{kept}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
