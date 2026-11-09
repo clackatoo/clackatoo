@@ -12,6 +12,7 @@
 //! its own. Those values, and what set each, are kept here too, by window,
 //! so every option's provenance has one home.
 
+use crate::options::Window as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

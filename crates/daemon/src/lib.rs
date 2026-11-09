@@ -61,6 +61,7 @@ pub mod remote;
 mod rpc;
 mod runtime;
 mod saved;
+pub mod schema;
 mod server;
 mod shell;
 mod signals;

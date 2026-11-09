@@ -1,6 +1,7 @@
 //! The desk's options: setting them, from `:set` and config, saving them
 //! with `:setpersist`, and passing them on to the panes they change.
 
+use crate::options::Window as _;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;

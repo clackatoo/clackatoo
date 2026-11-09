@@ -41,6 +41,7 @@
 //! | `o` | Opens the line that set it |
 //! | Esc, `q` | Clears what's typed, or else closes the menu |
 
+use crate::options::Window as _;
 use std::collections::HashMap;
 use std::path::Path;
 

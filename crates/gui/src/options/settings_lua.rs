@@ -28,6 +28,7 @@
 //! block comment it can't follow, is never thrown away: the file isn't
 //! written, and the line is named.
 
+use crate::options::Window as _;
 use std::fmt::Write as _;
 
 use super::{Info, Kind, Value, lookup};

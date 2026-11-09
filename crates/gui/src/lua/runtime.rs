@@ -29,6 +29,7 @@
 //! given [`HANDLER_TIME`] of running, counted across its slices, from when
 //! it starts or its answer comes until it finishes or waits.
 
+use crate::options::Window as _;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;

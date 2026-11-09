@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// What set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Source {
+pub enum Source {
     /// Nothing: it's as it starts.
     Default,
     /// The window, as it opened: startup.toml, or the command line.
@@ -27,15 +27,17 @@ pub(crate) enum Source {
 
 /// A line in a file of Lua.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Place {
-    pub(crate) file: Arc<str>,
-    pub(crate) line: u32,
+pub struct Place {
+    /// The file's path.
+    pub file: Arc<str>,
+    /// The line, from 1.
+    pub line: u32,
 }
 
 impl Place {
     /// As the bar says it: `client/init.lua:3`, the file's path from the
     /// config directory `dir` if it's in it.
-    pub(crate) fn said(&self, dir: Option<&Path>) -> String {
+    pub fn said(&self, dir: Option<&Path>) -> String {
         let path = Path::new(&*self.file);
         let path = dir
             .and_then(|dir| path.strip_prefix(dir).ok())
@@ -46,34 +48,35 @@ impl Place {
 
 /// Who last set something, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SetBy {
-    pub(crate) source: Source,
+pub struct SetBy {
+    /// What set it.
+    pub source: Source,
     /// It was set while the config loaded, `settings.lua` then `init.lua`,
     /// rather than after, by `:set`, a handler or a key.
-    pub(crate) loading: bool,
+    pub loading: bool,
     /// The user's own line that set it: the outermost of their code's
     /// frames, a line of `init.lua` as it loads, or of the handler that
     /// ran.
-    pub(crate) at: Option<Place>,
+    pub at: Option<Place>,
     /// Where it was really set, if that's elsewhere: a helper, in a module,
     /// that `at` called.
-    pub(crate) inner: Option<Place>,
+    pub inner: Option<Place>,
 }
 
 impl SetBy {
     /// Nothing set it.
-    pub(crate) const DEFAULT: Self = Self::by(Source::Default);
+    pub const DEFAULT: Self = Self::by(Source::Default);
 
     /// The window as it opened.
-    pub(crate) const STARTUP: Self = Self::by(Source::Startup);
+    pub const STARTUP: Self = Self::by(Source::Startup);
 
     /// The window, as it ran, as `:set` or one of its own keys sets
     /// options.
-    pub(crate) const RUNTIME: Self = Self::by(Source::Runtime);
+    pub const RUNTIME: Self = Self::by(Source::Runtime);
 
     /// Saved in its file, by the settings menu or `:setpersist`, as the
     /// config run again would set it.
-    pub(crate) const SAVED: Self = Self {
+    pub const SAVED: Self = Self {
         source: Source::Settings,
         loading: true,
         at: None,
@@ -91,13 +94,13 @@ impl SetBy {
 
     /// Whether it's the user's own config as it loaded, which outdoes what
     /// `:setpersist` would save: `settings.lua` runs first.
-    pub(crate) fn config_loading(&self) -> bool {
+    pub fn config_loading(&self) -> bool {
         self.source == Source::Config && self.loading
     }
 
     /// Where the user's code set it, as the bar says it: `client/init.lua:3`,
     /// or `client/init.lua:3 (in lua/keys.lua:8)`.
-    pub(crate) fn place(&self, dir: Option<&Path>) -> Option<String> {
+    pub fn place(&self, dir: Option<&Path>) -> Option<String> {
         let at = self.at.as_ref()?.said(dir);
         Some(match &self.inner {
             Some(inner) => format!("{at} (in {})", inner.said(dir)),
@@ -107,7 +110,7 @@ impl SetBy {
 
     /// What set it, as `:verbose set` says it, files' paths from the config
     /// directory `dir`.
-    pub(crate) fn said(&self, dir: Option<&Path>) -> String {
+    pub fn said(&self, dir: Option<&Path>) -> String {
         let place = self.place(dir).unwrap_or_else(|| "its config".into());
         match (self.source, self.loading) {
             (Source::Default, _) => "as it starts".into(),

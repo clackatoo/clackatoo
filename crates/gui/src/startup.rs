@@ -14,6 +14,7 @@
 //! `clackatoo config` and `:setpersist` both write it, keeping its
 //! comments.
 
+use crate::options::Window as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
