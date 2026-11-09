@@ -399,7 +399,9 @@ mod tests {
     fn history_from_before_a_restart_is_dimmed_under_a_line() {
         let mut old = terminal(40, 3, "one\r\n\x1b[31mtwo\x1b[m\r\nthree");
         old.compact_scrollback();
-        let kept = old.copy_to_keep(100).lines(None, usize::MAX);
+        let kept = old
+            .copy_to_keep(100)
+            .lines(clackatoo_term::Keeping::default(), usize::MAX);
         let history = kept.history(&Config::default(), "-- restarted --").unwrap();
         let mut terminal = terminal(40, 3, "");
         assert_eq!(terminal.take_kept_history(history, 0), Some(3));

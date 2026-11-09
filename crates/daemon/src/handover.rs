@@ -362,13 +362,14 @@ pub(crate) struct State {
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct History {
     pub(crate) terminal: u32,
-    /// Its history isn't kept, but for `blocks`: the user marked it so.
+    /// Its history isn't kept, but for the blocks the user kept, which
+    /// are marked on their lines, with `hints`: the user marked it so.
     pub(crate) off: bool,
     /// The first line kept: those before it were forgotten.
     pub(crate) from: u64,
-    /// The lines kept though it's marked off, as the start and end of
-    /// each run, the end not included.
-    pub(crate) blocks: Vec<(u64, u64)>,
+    /// How its lines were numbered as `from` was set: its history's
+    /// generation and its width.
+    pub(crate) numbered: (u64, u64),
     /// The lines with hints of how private they are, by number, with the
     /// hints' bits (see `clackatoo_term::Hints`).
     pub(crate) hints: Vec<(u64, u8)>,
@@ -4771,7 +4772,7 @@ mod tests {
                 terminal: 1,
                 off: true,
                 from: 3,
-                blocks: vec![(4, 9)],
+                numbered: (4, 80),
                 hints: vec![(5, 6)],
                 restarted: Some((2, 1_794_000_000)),
             }],

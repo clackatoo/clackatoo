@@ -481,6 +481,13 @@ impl HostedTerminal {
         self.emulator.take_kept_history(kept, at)
     }
 
+    /// Marks the lines numbered within `lines` as the user kept them,
+    /// across a restart, though its history is marked not to be (see
+    /// [`clackatoo_term::Hints::KEPT`]).
+    pub(crate) fn keep_lines(&mut self, lines: std::ops::Range<u64>) {
+        self.emulator.add_hints(lines, clackatoo_term::Hints::KEPT);
+    }
+
     /// Puts back how private its lines are, and where its history from
     /// before a restart ends, as the build it was handed over by said.
     pub(crate) fn restore_history_marks(

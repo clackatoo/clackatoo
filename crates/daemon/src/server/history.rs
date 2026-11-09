@@ -25,12 +25,11 @@
 //! ever run or given to the shell.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::path::Path;
 use std::time::Instant;
 
 use clackatoo_protocol::{Error, HistoryKeeping, PaneId, Response, TerminalId};
-use clackatoo_term::{Hints, KeptHistory, Which};
+use clackatoo_term::{Hints, Keeping, KeptHistory, Which};
 use mio::Token;
 
 use super::{Daemon, Hosted};
@@ -74,32 +73,51 @@ pub(super) struct Histories {
     removed: HashSet<TerminalId>,
 }
 
-/// What's kept of a terminal's history beyond its lines.
+/// What's kept of a terminal's history beyond its lines. The blocks the
+/// user kept though it's marked off are marked on their rows, which carry
+/// the mark wherever their text goes (`Hints::KEPT`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Marks {
-    /// Its history isn't kept, but for `blocks`: the user marked it so.
+    /// Its history isn't kept, but for the blocks kept: the user marked
+    /// it so.
     off: bool,
     /// The first line kept: those before were forgotten.
     from: u64,
-    /// The lines kept though it's marked off.
-    blocks: Vec<Range<u64>>,
+    /// How the terminal's lines were numbered as `from` was set: its
+    /// history's generation and its width. Numbered again since, `from`
+    /// may name another line, so everything there was then is forgotten.
+    numbered: (u64, usize),
 }
 
 impl Marks {
-    /// The lines kept, as ranges, if not all of them.
-    fn only(&self) -> Option<Vec<Range<u64>>> {
-        if self.off {
-            let only = (self.blocks.iter())
-                .map(|block| block.start.max(self.from)..block.end)
-                .filter(|block| !block.is_empty())
-                .collect();
-            Some(only)
-        } else if self.from > 0 {
-            Some(std::iter::once(self.from..u64::MAX).collect())
-        } else {
-            None
+    /// Which lines are kept.
+    fn keeping(&self) -> Keeping {
+        Keeping {
+            from: self.from,
+            marked_only: self.off,
         }
     }
+
+    /// Makes sure `from` still holds back everything forgotten in
+    /// `terminal`, whose lines may have been numbered again since: by a
+    /// reset, or a resize that rewrapped them. If they were, all there is
+    /// now is forgotten, which holds back more, never less.
+    fn follow(&mut self, terminal: &clackatoo_term::Terminal) {
+        let numbered = numbering(terminal);
+        if self.from > 0 && self.numbered != numbered {
+            let primary = terminal.primary();
+            self.from = primary.scrollback_end() + primary.height() as u64;
+            self.numbered = numbered;
+        }
+    }
+}
+
+/// How `terminal`'s main screen's lines are numbered now: its history's
+/// generation, which changes as they're numbered afresh, and its width,
+/// which rewraps them.
+fn numbering(terminal: &clackatoo_term::Terminal) -> (u64, usize) {
+    let primary = terminal.primary();
+    (primary.history_generation(), primary.width())
 }
 
 /// The time now, in seconds since 1970.
@@ -249,20 +267,18 @@ impl Daemon {
             }
             terminal.compact_scrollback();
         }
-        let marks = self.histories.marks.get(&id).cloned().unwrap_or_default();
-        let only = marks.only();
-        let key = history::key(self.id, id.0);
-        let job = if only.as_ref().is_some_and(Vec::is_empty) {
-            Job::Remove
-        } else {
-            let Some(Hosted::Pty(terminal)) = self.terminals.get(&id).map(|slot| &slot.terminal)
-            else {
-                return true;
-            };
-            Job::Write {
-                copy: Box::new(terminal.emulator().copy_to_keep(lines)),
-                only,
+        let keeping = match self.histories.marks.get_mut(&id) {
+            Some(marks) => {
+                marks.follow(terminal.emulator());
+                marks.keeping()
             }
+            None => Keeping::default(),
+        };
+        let key = history::key(self.id, id.0);
+        // None kept writes nothing, and removes the file.
+        let job = Job::Write {
+            copy: Box::new(terminal.emulator().copy_to_keep(lines)),
+            keeping,
         };
         if let Some(writer) = self.history_writer() {
             writer.send(key, job);
@@ -354,14 +370,16 @@ impl Daemon {
                 "terminals' history isn't kept: CLACKATOO_HISTORY is off".into(),
             ));
         }
-        let emulator = (self.terminals.get(&terminal))
-            .and_then(|slot| slot.terminal.grid())
-            .ok_or(Error::IsAChat(terminal))?;
+        let Some(Hosted::Pty(pty)) =
+            (self.terminals.get_mut(&terminal)).map(|slot| &mut slot.terminal)
+        else {
+            return Err(Error::IsAChat(terminal));
+        };
         let marks = self.histories.marks.entry(terminal).or_default();
+        marks.follow(pty.emulator());
         let said = match how {
             HistoryKeeping::On => {
                 marks.off = false;
-                marks.blocks.clear();
                 format!("pane {pane}'s history is kept across a restart")
             }
             HistoryKeeping::Off => {
@@ -373,6 +391,7 @@ impl Daemon {
                 // from the cursor's line on, is kept. Behind a full-screen
                 // program, the main screen's cursor isn't where it shows,
                 // so all of that screen is.
+                let emulator = pty.emulator();
                 let primary = emulator.primary();
                 let rows = if emulator.is_alternate_screen() {
                     primary.height()
@@ -381,19 +400,19 @@ impl Daemon {
                 };
                 let line = primary.scrollback_end() + rows as u64;
                 marks.from = marks.from.max(line);
-                marks.blocks.retain(|block| block.end > line);
+                marks.numbered = numbering(emulator);
                 format!("pane {pane}'s history kept so far is forgotten")
             }
             HistoryKeeping::BlockAt(line) => {
-                let block = emulator.block(line, Which::At).ok_or_else(|| {
+                let block = pty.emulator().block(line, Which::At).ok_or_else(|| {
                     Error::Other(format!("pane {pane} has no command there to keep"))
                 })?;
-                let lines = block.first..block.last + 1;
+                // Marked on its rows, which carry it wherever its text goes.
+                pty.keep_lines(block.first..block.last + 1);
                 let shown = block
                     .command
                     .map_or_else(|| "its output".to_owned(), |command| format!("`{command}`"));
                 if marks.off {
-                    marks.blocks.push(lines);
                     format!("{shown} is kept across a restart")
                 } else {
                     format!("{shown} is kept, as all of pane {pane}'s history is")
@@ -499,14 +518,12 @@ impl Daemon {
         }
         if off {
             // What came back of a terminal marked off is what the user kept
-            // of it: it's kept again.
-            let blocks = end.map(|end| 0..end).into_iter().collect();
+            // of it, its rows still marked so: it's kept again.
             self.histories.marks.insert(
                 id,
                 Marks {
                     off,
-                    from: 0,
-                    blocks,
+                    ..Marks::default()
                 },
             );
         }
@@ -562,9 +579,7 @@ impl Daemon {
             terminal: id.0,
             off: marks.off,
             from: marks.from,
-            blocks: (marks.blocks.iter())
-                .map(|block| (block.start, block.end))
-                .collect(),
+            numbered: (marks.numbered.0, marks.numbered.1 as u64),
             hints,
             restarted,
         };
@@ -590,12 +605,14 @@ impl Daemon {
                 .map(|&(line, bits)| (line, Hints::from_bits_truncate(bits)))
                 .collect();
             terminal.restore_history_marks(&hints, history.restarted);
+            // The next build may number lines afresh, which `follow` sees.
             let marks = Marks {
                 off: history.off,
                 from: history.from,
-                blocks: (history.blocks.iter())
-                    .map(|&(start, end)| start..end)
-                    .collect(),
+                numbered: (
+                    history.numbered.0,
+                    usize::try_from(history.numbered.1).unwrap_or(usize::MAX),
+                ),
             };
             if marks != Marks::default() {
                 self.histories.marks.insert(id, marks);
@@ -756,6 +773,67 @@ pub(in crate::server) mod tests {
             (daemon.terminals.get_mut(&terminal)).map(|slot| &mut slot.terminal)
         {
             pty.emulator_mut().advance(output.as_bytes());
+        }
+    }
+
+    /// A block kept in a terminal marked off is marked on its own rows: a
+    /// reset, which numbers lines afresh, keeps nothing that came after
+    /// where it was.
+    #[test]
+    fn a_block_kept_in_a_terminal_marked_off_keeps_nothing_after_a_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = keeping(dir.path(), true);
+        let any = Token(usize::MAX);
+        assert!((daemon.serve_keep_history(any, pane, HistoryKeeping::Off)).is_ok());
+        let prompt = "\x1b]133;A\x07$ \x1b]133;B\x07";
+        let ran = |command: &str, output: &str| {
+            format!("{prompt}{command}\r\n\x1b]133;C\x07{output}\r\n\x1b]133;D;0\x07")
+        };
+        print(&mut daemon, terminal, &ran("echo kept", "kept"));
+        print(&mut daemon, terminal, &ran("echo dropped", "dropped"));
+        print(&mut daemon, terminal, prompt);
+        let asked = daemon.serve_keep_history(any, pane, HistoryKeeping::BlockAt(1));
+        assert!(asked.is_ok(), "{asked:?}");
+        let kept = written(&mut daemon, terminal);
+        assert_eq!(kept, ["$ echo kept", "kept"]);
+        // Reset, lines numbered afresh: where the block was is new text.
+        print(&mut daemon, terminal, "\x1bcnew one\r\nnew two\r\n");
+        assert_eq!(written(&mut daemon, terminal), Vec::<String>::new());
+    }
+
+    /// Lines forgotten stay forgotten as the terminal is narrowed and
+    /// widened, which numbers its lines again.
+    #[test]
+    fn lines_forgotten_stay_forgotten_through_a_resize() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = keeping(dir.path(), true);
+        for n in 0..14 {
+            print(
+                &mut daemon,
+                terminal,
+                &format!("secret {n} {}\r\n", "x".repeat(30)),
+            );
+        }
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::Forget);
+        assert!(asked.is_ok(), "{asked:?}");
+        print(&mut daemon, terminal, "after\r\n");
+        assert!(
+            written(&mut daemon, terminal)
+                .iter()
+                .all(|line| !line.contains("secret"))
+        );
+        for cols in [12, 40] {
+            if let Some(Hosted::Pty(pty)) =
+                (daemon.terminals.get_mut(&terminal)).map(|slot| &mut slot.terminal)
+            {
+                pty.emulator_mut().resize(Size::new(cols, 10).unwrap());
+            }
+            print(&mut daemon, terminal, "later\r\n");
+            let kept = written(&mut daemon, terminal);
+            assert!(
+                kept.iter().all(|line| !line.contains("secret")),
+                "{cols}: {kept:?}"
+            );
         }
     }
 

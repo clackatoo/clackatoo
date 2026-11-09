@@ -11,8 +11,6 @@
 //!
 //! [`KeptLines`] is a file format: frozen, as [`crate::Snapshot`] is.
 
-use std::ops::Range;
-
 use crate::hints::{Hints, NOT_KEPT};
 use crate::row::{Row, RowBuilder};
 use crate::scrollback::Scrollback;
@@ -46,6 +44,16 @@ pub struct KeptLines {
 struct KeptLine {
     line: Line,
     hints: u8,
+}
+
+/// Which of a terminal's lines are kept (see [`KeptCopy::lines`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keeping {
+    /// None numbered before this: they were forgotten.
+    pub from: u64,
+    /// Only those the user kept all the same, [`Hints::KEPT`]: the
+    /// terminal's history is marked not to be kept.
+    pub marked_only: bool,
 }
 
 /// History made from [`KeptLines`], ready to be taken by a new terminal
@@ -97,11 +105,11 @@ impl Terminal {
 impl KeptCopy {
     /// The copy's lines, oldest first, the screen's last blank rows left
     /// out, as plain data, taking no more than `most_bytes` with what
-    /// frames each line, the oldest let go first. With `only`, only the lines numbered within
-    /// those ranges are kept. A run of lines never to be written to disk
-    /// becomes one placeholder line.
+    /// frames each line, the oldest let go first, and only those `keeping`
+    /// says. A run of lines never to be written to disk becomes one
+    /// placeholder line.
     #[must_use]
-    pub fn lines(&self, only: Option<&[Range<u64>]>, most_bytes: usize) -> KeptLines {
+    pub fn lines(&self, keeping: Keeping, most_bytes: usize) -> KeptLines {
         let end = self.history.end();
         let shown = self
             .screen
@@ -122,7 +130,7 @@ impl KeptCopy {
         let mut lines = Vec::new();
         let mut placeholder = false;
         let mut push = |number: u64, hints: Hints, row: &Row| {
-            if only.is_some_and(|only| !only.iter().any(|range| range.contains(&number))) {
+            if number < keeping.from || keeping.marked_only && !hints.contains(Hints::KEPT) {
                 return;
             }
             if hints.contains(Hints::NOSAVE) {
@@ -251,7 +259,7 @@ mod tests {
     fn kept_lines_keep_their_styles_and_come_back_as_history() {
         let mut old = terminal("one\r\n\x1b[1;31mtwo\x1b[m\r\nthree\r\nfour\r\nfive\r\nsix");
         old.compact_scrollback();
-        let kept = old.copy_to_keep(100).lines(None, usize::MAX);
+        let kept = old.copy_to_keep(100).lines(Keeping::default(), usize::MAX);
         assert_eq!(kept.texts(), ["one", "two", "three", "four", "five", "six"]);
         let history = kept.history(&Config::default(), "── restarted ──").unwrap();
         let mut new = terminal("");
@@ -283,7 +291,7 @@ mod tests {
         let mut old = terminal("a\r\npw1\r\npw2\r\nb\r\nc\r\nd\r\ne");
         old.add_hints(1..3, Hints::NOSAVE | Hints::NOAGENT);
         old.add_hints(3..4, Hints::NOAGENT);
-        let kept = old.copy_to_keep(100).lines(None, usize::MAX);
+        let kept = old.copy_to_keep(100).lines(Keeping::default(), usize::MAX);
         assert_eq!(kept.texts(), ["a", NOT_KEPT, "b", "c", "d", "e"]);
         let history = kept.history(&Config::default(), "--").unwrap();
         let mut new = terminal("");
@@ -293,16 +301,35 @@ mod tests {
 
     #[test]
     fn only_the_lines_asked_for_and_the_newest_bytes_are_kept() {
-        let old = terminal("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        let mut old = terminal("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        old.add_hints(1..3, Hints::KEPT);
         let copy = old.copy_to_keep(100);
+        let keeping = |from, marked_only| Keeping { from, marked_only };
         assert_eq!(
-            copy.lines(Some(&[1..3, 5..6]), usize::MAX).texts(),
-            ["b", "c", "f"]
+            copy.lines(keeping(4, false), usize::MAX).texts(),
+            ["e", "f"]
         );
-        assert_eq!(copy.lines(None, 2 * (LINE_FRAMING + 1)).texts(), ["e", "f"]);
+        assert_eq!(copy.lines(keeping(0, true), usize::MAX).texts(), ["b", "c"]);
+        assert_eq!(copy.lines(keeping(2, true), usize::MAX).texts(), ["c"]);
+        // Kept by the user, a line never to be written still isn't.
+        let mut other = terminal("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        other.add_hints(1..3, Hints::KEPT);
+        other.add_hints(2..3, Hints::NOSAVE);
+        let copy = other.copy_to_keep(100);
+        assert_eq!(
+            copy.lines(keeping(0, true), usize::MAX).texts(),
+            ["b", NOT_KEPT]
+        );
+        assert_eq!(
+            copy.lines(Keeping::default(), 2 * (LINE_FRAMING + 1))
+                .texts(),
+            ["e", "f"]
+        );
         // History holds a and b; the screen, c to f.
         assert_eq!(
-            old.copy_to_keep(1).lines(None, usize::MAX).texts(),
+            old.copy_to_keep(1)
+                .lines(Keeping::default(), usize::MAX)
+                .texts(),
             ["b", "c", "d", "e", "f"]
         );
     }

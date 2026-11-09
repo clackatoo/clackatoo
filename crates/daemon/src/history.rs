@@ -34,7 +34,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -42,7 +41,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use clackatoo_term::{KeptCopy, KeptLines};
+use clackatoo_term::{Keeping, KeptCopy, KeptLines};
 use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
@@ -256,11 +255,11 @@ fn now() -> u64 {
 
 /// What the thread is asked to do with a terminal's file.
 pub(crate) enum Job {
-    /// Writes the lines of `copy` numbered within `only`, or all, or
-    /// removes the file if none are kept.
+    /// Writes the lines of `copy` that `keeping` says, or removes the
+    /// file if none are kept.
     Write {
         copy: Box<KeptCopy>,
-        only: Option<Vec<Range<u64>>>,
+        keeping: Keeping,
     },
     /// Removes the file.
     Remove,
@@ -409,8 +408,8 @@ fn run(dir: &Path, bytes: usize, shared: &Shared) {
         };
         drop(queue);
         let done = match job {
-            Job::Write { copy, only } => {
-                let lines = copy.lines(only.as_deref(), bytes);
+            Job::Write { copy, keeping } => {
+                let lines = copy.lines(keeping, bytes);
                 drop(copy);
                 if lines.is_empty() {
                     remove_one(dir, &key).map_err(|err| err.to_string())
@@ -468,7 +467,7 @@ mod tests {
             key.clone(),
             Job::Write {
                 copy: copy("one\r\n\x1b[32mtwo\x1b[m\r\nthree"),
-                only: None,
+                keeping: Keeping::default(),
             },
         );
         assert!(writer.stop(Duration::from_secs(10)));
@@ -505,7 +504,7 @@ mod tests {
             key.clone(),
             Job::Write {
                 copy: Box::new(terminal.copy_to_keep(100)),
-                only: None,
+                keeping: Keeping::default(),
             },
         );
         assert!(writer.stop(Duration::from_secs(10)));
@@ -534,7 +533,7 @@ mod tests {
             key.clone(),
             Job::Write {
                 copy: copy("mine"),
-                only: None,
+                keeping: Keeping::default(),
             },
         );
         assert!(writer.stop(Duration::from_secs(10)));
@@ -586,7 +585,7 @@ mod tests {
             key.clone(),
             Job::Write {
                 copy: copy("one\r\ntwo\r\nthree\r\nfour\r\nfive"),
-                only: None,
+                keeping: Keeping::default(),
             },
         );
         assert!(writer.stop(Duration::from_secs(10)));
@@ -606,7 +605,7 @@ mod tests {
             key.clone(),
             Job::Write {
                 copy: copy("mine"),
-                only: None,
+                keeping: Keeping::default(),
             },
         );
         assert!(writer.stop(Duration::from_secs(10)));
@@ -631,7 +630,7 @@ mod tests {
                 key.clone(),
                 Job::Write {
                     copy: copy("before"),
-                    only: None,
+                    keeping: Keeping::default(),
                 },
             );
         }
@@ -641,7 +640,7 @@ mod tests {
                 key.clone(),
                 Job::Write {
                     copy: copy("after"),
-                    only: None,
+                    keeping: Keeping::default(),
                 },
             );
         }
@@ -668,7 +667,7 @@ mod tests {
                 key(1, 1),
                 Job::Write {
                     copy: copy("text"),
-                    only: None,
+                    keeping: Keeping::default(),
                 },
             );
         }
@@ -690,7 +689,7 @@ mod tests {
                 key.clone(),
                 Job::Write {
                     copy: copy("text"),
-                    only: None,
+                    keeping: Keeping::default(),
                 },
             );
         }
@@ -700,7 +699,10 @@ mod tests {
             two.clone(),
             Job::Write {
                 copy: copy("text"),
-                only: Some(Vec::new()),
+                keeping: Keeping {
+                    from: u64::MAX,
+                    marked_only: false,
+                },
             },
         );
         writer.sweep(HashSet::from([one.clone()]));

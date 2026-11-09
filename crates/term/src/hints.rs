@@ -10,6 +10,10 @@
 //! Programs will set them with their own escape sequence (CLACKA-242's
 //! second part). Until then, [`Terminal::add_hints`] sets them.
 //!
+//! One mark that isn't a hint rides with them, as it must follow the text
+//! the same way: [`Hints::KEPT`], the user's own, which only the user
+//! sets, never a program.
+//!
 //! [`Terminal::add_hints`]: crate::Terminal::add_hints
 
 use bitflags::bitflags;
@@ -25,6 +29,11 @@ bitflags! {
         const NOSAVE = 1 << 1;
         /// Kept from agents: what they read of the terminal leaves it out.
         const NOAGENT = 1 << 2;
+        /// Not a hint, but the user's mark (`gs`): kept across a restart
+        /// though the terminal's history is marked not to be, unless it's
+        /// [`NOSAVE`](Self::NOSAVE). Set only by the user, never by a
+        /// program's escape sequence.
+        const KEPT = 1 << 3;
     }
 }
 
