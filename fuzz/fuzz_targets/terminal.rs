@@ -6,12 +6,14 @@
 //! The input is four bytes, then what the program writes: the width less
 //! one, the height less one (mod 64), how much is written between looks
 //! less one, and the scrollback in fours of lines, its lowest bit asking
-//! for a resize at every fourth look. Any stream is a seed, with four
+//! for a resize at every fourth look, its next two the width rules (VS16
+//! widening, grapheme clusters), and its next the size of a cell in
+//! pixels said at every fourth look too. Any stream is a seed, with four
 //! bytes before it.
 
 #![no_main]
 
-use clackatoo_term::{Compaction, Config, Damage, Position, Size, Terminal};
+use clackatoo_term::{Compaction, Config, Damage, Position, Size, Terminal, Widths};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -29,6 +31,10 @@ fuzz_target!(|data: &[u8]| {
             _ => Compaction::Eager,
         },
         local_host: None,
+        widths: Widths {
+            vs16: scrollback & 2 != 0,
+            graphemes: scrollback & 4 != 0,
+        },
     };
     let mut terminal = Terminal::new(size(width, height), &config);
     let mut damage = Damage::new();
@@ -37,6 +43,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = terminal.take_replies();
         let _ = terminal.take_clipboard();
         let _ = terminal.take_history_cleared();
+        let _ = terminal.take_notice();
         terminal.take_damage(&mut damage);
         damage.clear();
         if terminal.scrollback_needs_compaction() {
@@ -46,9 +53,14 @@ fuzz_target!(|data: &[u8]| {
             let (&last, rest) = piece.split_last().expect("chunks aren't empty");
             terminal.resize(size(last, rest.last().copied().unwrap_or(height)));
         }
+        if scrollback & 8 != 0 && look % 4 == 1 {
+            let first = piece[0];
+            terminal.set_cell_pixels(Some([u16::from(first), u16::from(chunk)]));
+        }
     }
     let _ = (terminal.title(), terminal.cwd(), terminal.cursor());
     let _ = (terminal.input_modes(), terminal.shell_state());
+    let _ = (terminal.pointer(), terminal.margins(), terminal.pixels());
     terminal.compact_scrollback();
 
     // Read as windows ask: text, and searches from anywhere.
