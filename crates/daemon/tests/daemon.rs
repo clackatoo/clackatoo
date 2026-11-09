@@ -6269,6 +6269,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Login { .. }
             | Event::Forwarded(_)
             | Event::Said(_)
+            | Event::Paired { .. }
             | Event::NativeRequest { .. }
             | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {
