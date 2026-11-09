@@ -8681,8 +8681,17 @@ fn an_image_pasted_into_another_machines_terminal_is_kept_there() {
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert_eq!(std::fs::read(&kept[0]).unwrap(), png);
     assert!(!world.host("laptop").join("pastes").exists());
-    let name = kept[0].file_name().unwrap().to_str().unwrap().to_owned();
-    wait_for_view(&mut window, terminal, &name);
+    // Typed there, at the shell's prompt, the path wrapping as it may.
+    let path = kept[0].to_str().unwrap().to_owned();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let shown = screen_text(&window.capture(terminal).unwrap()).replace('\n', "");
+        if shown.contains(&path) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{path} never came: {shown}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(window);
 
     // Through a link at an older protocol, it's refused here.
