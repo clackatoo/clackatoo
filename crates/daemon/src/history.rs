@@ -617,6 +617,42 @@ mod tests {
         assert!(read(dir.path(), &key).is_err());
     }
 
+    /// logind's lock is let go only once nothing waits: what was asked
+    /// before it, however much there was, and anything asked after while
+    /// that was being done.
+    #[test]
+    fn the_lock_waits_for_everything_asked_of_the_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = Writer::start(dir.path().to_owned(), usize::MAX).unwrap();
+        let (lock, held) = rustix::pipe::pipe().unwrap();
+        let keys: Vec<String> = (0..64).map(|terminal| key(1, terminal)).collect();
+        for key in &keys[..32] {
+            writer.send(
+                key.clone(),
+                Job::Write {
+                    copy: copy("before"),
+                    only: None,
+                },
+            );
+        }
+        writer.let_go(held);
+        for key in &keys[32..] {
+            writer.send(
+                key.clone(),
+                Job::Write {
+                    copy: copy("after"),
+                    only: None,
+                },
+            );
+        }
+        let mut byte = [0];
+        assert_eq!(rustix::io::read(&lock, &mut byte).unwrap(), 0);
+        for key in &keys[..32] {
+            assert!(path_of(dir.path(), key).exists(), "{key}");
+        }
+        assert!(writer.stop(Duration::from_secs(10)));
+    }
+
     /// Each terminal has one job waiting at most, a newer one in the
     /// older's place, so a stuck disk holds one copy of each terminal's
     /// lines, not one for every time they were written.

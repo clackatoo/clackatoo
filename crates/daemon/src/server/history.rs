@@ -45,6 +45,10 @@ const MOST_PUT_OFF: u8 = 4;
 /// of the loop, unless every one is wanted at once.
 const MOST_A_TURN: usize = 8;
 
+/// How soon a change the user asked of a terminal's history file, which
+/// couldn't be made, is tried again.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The most threads reading history files as the daemon starts.
 const MOST_READERS: usize = 8;
 
@@ -375,12 +379,19 @@ impl Daemon {
         if *marks == Marks::default() {
             self.histories.marks.remove(&terminal);
         }
-        // Written at once: forgetting can't wait.
-        if !self.keep_history(terminal, true) {
-            self.histories.changed.insert(terminal, 0);
-        }
         self.workspaces_changed();
-        Ok(Response::Text(said))
+        // Written, or removed, at once: forgetting can't wait. Said done
+        // only once it's on its way to the disk; otherwise tried again in
+        // a moment, and said so.
+        if self.history_writer().is_some() && self.keep_history(terminal, true) {
+            Ok(Response::Text(said))
+        } else {
+            self.histories.changed.insert(terminal, MOST_PUT_OFF);
+            self.histories.due = Some(Instant::now() + RETRY);
+            Err(Error::Other(format!(
+                "pane {pane}'s history can't be written now: it's tried again in a moment"
+            )))
+        }
     }
 
     /// Whether terminal `id`'s history is marked not to be kept, for the
@@ -598,5 +609,58 @@ fn read_one(
             log::warn!("a terminal's history kept couldn't be read ({key}): {err:?}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) mod tests {
+    use std::time::Duration;
+
+    use clackatoo_protocol::{NewTerminal, Size};
+
+    use super::*;
+
+    /// A daemon keeping terminals' history in `dir`, if `keeping`, with a
+    /// terminal running `cat` in a workspace, and its pane.
+    pub(in crate::server) fn keeping(dir: &Path, keeping: bool) -> (Daemon, TerminalId, PaneId) {
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir);
+        let mut config = daemon.config.clone();
+        config.workspaces = keeping.then(|| dir.join("state/workspaces"));
+        config.history = Some(crate::HistoryConfig::in_dir(dir.join("state/history")));
+        daemon.keeping = super::super::restore::Keeping::new(&config);
+        daemon.config = config;
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        let pane = daemon.workspaces.new_workspace("kept".to_owned(), terminal);
+        (daemon, terminal, pane)
+    }
+
+    /// The user is told what they asked of a terminal's history is done
+    /// only once it's on its way to the disk; otherwise it's tried again.
+    #[test]
+    fn forgetting_is_said_done_only_once_it_is_on_its_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _, pane) = keeping(dir.path(), true);
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::Forget);
+        assert!(matches!(asked, Ok(Response::Text(_))), "{asked:?}");
+        assert!(daemon.histories.writer.is_some());
+
+        // Not keeping them, as when another daemon does, nothing can be
+        // written.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = keeping(dir.path(), false);
+        let asked = daemon.serve_keep_history(Token(usize::MAX), pane, HistoryKeeping::Off);
+        assert!(
+            matches!(&asked, Err(Error::Other(why)) if why.contains("tried again")),
+            "{asked:?}"
+        );
+        assert!(daemon.histories.changed.contains_key(&terminal));
+        let soon = Instant::now() + Duration::from_secs(1);
+        assert!(daemon.histories.due.is_some_and(|due| due <= soon));
     }
 }
