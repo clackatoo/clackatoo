@@ -1459,7 +1459,11 @@ impl HostedChat {
             .images
             .iter()
             .filter_map(|image| {
-                let mut preview = image.preview.clone()?;
+                // Only its pixels are the client's: which image it is, the
+                // daemon says, once it's kept.
+                let mut preview =
+                    (image.preview.clone()).filter(clackatoo_protocol::ChatPreview::has_pixels)?;
+                preview.image = None;
                 preview.original =
                     (self.originals).insert(crate::images::Source::Base64(image.data.clone()));
                 Some(preview)
@@ -5258,6 +5262,37 @@ mod tests {
         assert!(chat.node.turns[0].previews.is_empty());
         assert!(chat.node.turns[0].prompt.contains("Image"));
         assert_eq!(chat.node.turns[19].previews[0].rgba, preview.rgba);
+        // A client says nothing of which image its thumbnail is, nor sends
+        // one without pixels.
+        for sent in [
+            clackatoo_protocol::ChatPreview {
+                image: Some(clackatoo_protocol::ImageId([8; 16])),
+                ..preview.clone()
+            },
+            clackatoo_protocol::ChatPreview {
+                rgba: Vec::new().into(),
+                image: Some(clackatoo_protocol::ImageId([8; 16])),
+                ..preview.clone()
+            },
+        ] {
+            let image = clackatoo_protocol::ChatImage {
+                data: "cG5n".into(),
+                width: 256,
+                height: 256,
+                preview: Some(sent),
+            };
+            let pixels = image.preview.as_ref().unwrap().has_pixels();
+            assert_eq!(image.valid(), pixels);
+            let prompt = Prompt {
+                text: "named".into(),
+                images: vec![image],
+            };
+            let mut other = super::tests::chat();
+            other.begin(prompt.shown(), prompt, (None, None), &mut Vec::new());
+            let previews = &other.node.turns[0].previews;
+            assert_eq!(previews.len(), usize::from(pixels));
+            assert!(previews.iter().all(|preview| preview.image.is_none()));
+        }
         assert_eq!(chat.node.turns[19].previews[0].original, 20);
         let bytes: usize = chat
             .node

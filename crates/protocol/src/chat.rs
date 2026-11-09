@@ -2223,7 +2223,9 @@ impl ChatImage {
             && u64::from(self.width) * u64::from(self.height) <= Self::MAX_PIXELS
             && !self.data.is_empty()
             && self.data.len() <= Self::MAX_DATA
-            && self.preview.as_ref().is_none_or(ChatPreview::valid)
+            // A client's thumbnail has its pixels: the image it names, if
+            // any, is the daemon's to say.
+            && (self.preview.as_ref()).is_none_or(|preview| preview.valid() && preview.has_pixels())
     }
 
     /// What the draft and the transcript say about this attachment.
