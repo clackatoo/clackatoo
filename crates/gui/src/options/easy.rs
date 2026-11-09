@@ -109,6 +109,12 @@ impl Page {
 pub(crate) struct Choice {
     pub(crate) label: &'static str,
     pub(crate) values: &'static [&'static str],
+    /// Other values that do the same, which light it too, as
+    /// `noignorecase smartcase` matches case as `Match` does.
+    pub(crate) also: &'static [&'static [&'static str]],
+    /// Values no choice is, but this is the nearest to, which `h` and `l`
+    /// step from, unlit: `nonumber relativenumber` from `Relative`.
+    pub(crate) near: &'static [&'static [&'static str]],
 }
 
 /// How Easy shows and changes an entry's options.
@@ -175,19 +181,13 @@ pub(crate) struct Entry {
     pub(crate) control: Control,
 }
 
-impl Entry {
-    /// What it's known by in the menu's history of changes: its option's
-    /// name, as Advanced knows it, or for several, their names.
-    pub(crate) fn name(&self) -> String {
-        match &self.control {
-            Control::Keys(action) => format!("keys {action:?}"),
-            control => control.options().join(" "),
-        }
-    }
-}
-
 const fn choice(label: &'static str, values: &'static [&'static str]) -> Choice {
-    Choice { label, values }
+    Choice {
+        label,
+        values,
+        also: &[],
+        near: &[],
+    }
 }
 
 const fn toggle(
@@ -281,7 +281,10 @@ pub(crate) const ENTRIES: &[Entry] = &[
         &[
             choice("Off", &["false", "false"]),
             choice("On", &["true", "false"]),
-            choice("Relative", &["true", "true"]),
+            Choice {
+                near: &[&["false", "true"]],
+                ..choice("Relative", &["true", "true"])
+            },
         ],
     ),
     toggle(
@@ -369,7 +372,11 @@ pub(crate) const ENTRIES: &[Entry] = &[
         &[
             choice("Smart", &["true", "true"]),
             choice("Ignore", &["true", "false"]),
-            choice("Match", &["false", "false"]),
+            // Without ignorecase, smartcase does nothing.
+            Choice {
+                also: &[&["false", "true"]],
+                ..choice("Match", &["false", "false"])
+            },
         ],
     ),
     toggle(
@@ -734,19 +741,25 @@ mod tests {
             }
             if let Control::Segmented { options, choices } = &entry.control {
                 assert!(choices.len() >= 2, "{label}");
+                let mut distinct = std::collections::HashSet::new();
                 for choice in *choices {
-                    assert_eq!(choice.values.len(), options.len(), "{label}");
-                    for (name, value) in options.iter().zip(choice.values) {
-                        let info = find(name).unwrap();
-                        match info.kind {
-                            Kind::Bool => assert!(["true", "false"].contains(value), "{label}"),
-                            _ => assert!(info.parse(value).is_ok(), "{label}: {value}"),
+                    let every = std::iter::once(choice.values)
+                        .chain(choice.also.iter().copied())
+                        .chain(choice.near.iter().copied());
+                    for values in every {
+                        assert_eq!(values.len(), options.len(), "{label}");
+                        assert!(distinct.insert(values), "{label}: {values:?} twice");
+                        for (name, value) in options.iter().zip(values) {
+                            let info = find(name).unwrap();
+                            match info.kind {
+                                Kind::Bool => {
+                                    assert!(["true", "false"].contains(value), "{label}");
+                                }
+                                _ => assert!(info.parse(value).is_ok(), "{label}: {value}"),
+                            }
                         }
                     }
                 }
-                let distinct: std::collections::HashSet<_> =
-                    choices.iter().map(|choice| choice.values).collect();
-                assert_eq!(distinct.len(), choices.len(), "{label}: two alike");
                 // A single option's choices are all it can be.
                 if let [name] = options
                     && let Kind::Choice(words) = find(name).unwrap().kind

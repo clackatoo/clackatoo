@@ -29,6 +29,10 @@ pub(crate) enum Change {
     },
     /// Keys bound to keys to type, or if not `bound`, taken out.
     Keys { mapping: Mapping, bound: bool },
+    /// Options kept in `settings.lua`, saved together, each as its value
+    /// or taken out, in one write, as the settings menu saves a control
+    /// that sets several.
+    Options(Vec<(&'static Info, Option<Value>)>),
 }
 
 impl Change {
@@ -36,7 +40,7 @@ impl Change {
     pub(crate) fn file(&self) -> &'static str {
         match self {
             Self::Option { info, .. } => file(info),
-            Self::Keys { .. } => "client/settings.lua",
+            Self::Keys { .. } | Self::Options(_) => "client/settings.lua",
         }
     }
 }
@@ -125,6 +129,18 @@ fn write(dir: &Path, change: &Change) -> anyhow::Result<()> {
     let settings = client.join("settings.lua");
     let (info, value) = match change {
         Change::Option { info, value } => (*info, value.clone()),
+        Change::Options(options) => {
+            if let Some((info, _)) = (options.iter()).find(|(info, _)| info.scope != Scope::Window)
+            {
+                anyhow::bail!("{} isn't kept in settings.lua", info.name);
+            }
+            let adds = options.iter().any(|(_, value)| value.is_some());
+            return locked(&client, || {
+                settings_lua(&settings, adds, |model| {
+                    (options.iter()).try_for_each(|(info, value)| model.set(info, value.clone()))
+                })
+            });
+        }
         Change::Keys { mapping, bound } => {
             let changed = locked(&client, || {
                 let mut changed = false;

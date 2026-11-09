@@ -139,6 +139,17 @@ impl Store {
         self.changes += 1;
     }
 
+    /// Puts back what `info`'s option was configured to, as `configured`
+    /// was, as when a save the menu counted on failed.
+    pub(crate) fn put_configured(
+        &mut self,
+        info: &'static Info,
+        configured: Option<(Value, SetBy)>,
+    ) {
+        self.configured[info.index()] = configured;
+        self.changes += 1;
+    }
+
     /// What `info`'s option is configured to for every window, whatever's
     /// been set since: as the config set it as it loaded, or it's been
     /// saved since, or else as the process started it.

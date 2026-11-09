@@ -125,6 +125,8 @@ enum Asked {
     Devices,
     /// What a new chat could be, for the start page.
     ChatChoices,
+    /// The same, for the settings menu's cards of agents.
+    SettingsAgents,
     /// The chats, every one, to mark the tabs and workspaces with what
     /// they're doing.
     Chats,
@@ -300,6 +302,13 @@ const REFUSED_FOR: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// How long a pane an agent points out stays lit.
 const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A save of an option the settings menu counts on: how many are on their
+/// way, and what it was configured to before them.
+type Pending = (
+    usize,
+    Option<(crate::options::Value, crate::options::SetBy)>,
+);
 
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
@@ -495,6 +504,13 @@ pub(crate) struct Desk {
     /// The file the mode the settings menu was used in last is kept in,
     /// for it to open in next, if there's one: none in tests.
     pub(crate) settings_mode_file: Option<std::path::PathBuf>,
+    /// Counts what's changed the settings menu, which says whether what
+    /// was laid out of it is still right (see `Desk::settings_shown_key`).
+    settings_revision: u64,
+    /// Options the menu is saving, counted on as saved already: how many
+    /// saves of each are on their way, and what it was configured to
+    /// before them, to put back if one fails.
+    settings_pending: std::collections::HashMap<&'static str, Pending>,
     /// What the last new chat started from the start page had, for the
     /// next to start with.
     last_chat: crate::start::LastChat,
@@ -1917,6 +1933,7 @@ impl Desk {
                 self.background_preview_came(tab, response)
             }
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
+            Some(Asker::Window(Asked::SettingsAgents)) => self.settings_agents(response),
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
             Some(Asker::Window(Asked::Reattached(terminal))) => {
                 if let Response::Error(err) = response {

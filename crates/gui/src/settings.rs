@@ -310,11 +310,50 @@ enum Undo {
     Keys(Vec<(Mapping, bool)>),
 }
 
-/// The changes the menu has made, row by row, newest last, to undo: kept
-/// by the window while the menu's closed, so it can be opened again to
-/// undo them.
+/// The changes the menu has made, to undo: kept by the window while the
+/// menu's closed, so it can be opened again to undo them. Each is noted,
+/// numbered, under the name of everything it changed, an option's or
+/// keys', newest last, so a change Easy made to two options together is
+/// undone from either of their rows, in either mode, and from Easy's.
 #[derive(Debug, Default)]
-pub(crate) struct History(HashMap<String, Vec<Undo>>);
+pub(crate) struct History {
+    by_name: HashMap<String, Vec<(u64, Undo)>>,
+    /// How many changes have been noted, which numbers them.
+    count: u64,
+}
+
+impl History {
+    /// Notes how to undo a change of what `names` name.
+    fn push(&mut self, names: impl IntoIterator<Item = String>, undo: &Undo) {
+        self.count += 1;
+        for name in names {
+            let changes = self.by_name.entry(name).or_default();
+            changes.push((self.count, undo.clone()));
+        }
+    }
+
+    /// The newest change noted under any of `names`: its number, and how
+    /// to undo it.
+    fn newest(&self, names: &[String]) -> Option<(u64, &Undo)> {
+        (names.iter())
+            .filter_map(|name| self.by_name.get(name)?.last())
+            .max_by_key(|(number, _)| *number)
+            .map(|(number, undo)| (*number, undo))
+    }
+
+    /// Takes change `number` out from under every name it's noted under.
+    fn remove(&mut self, number: u64) {
+        for changes in self.by_name.values_mut() {
+            changes.retain(|(each, _)| *each != number);
+        }
+        self.by_name.retain(|_, changes| !changes.is_empty());
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
 
 /// What's being changed in a row, while it is.
 #[derive(Debug)]
@@ -508,6 +547,13 @@ impl SettingsMenu {
                     self.easy.found();
                     Outcome::Changed
                 };
+            (Stroke::Tab | Stroke::BackTab, _) if self.typing =>
+                Hint::Action("Stop typing, keeping the search"),
+                {
+                    self.typing = false;
+                    self.easy.found();
+                    Outcome::Changed
+                };
             (_, Some('m')) =>
                 Hint::Action("Switch between Easy and Advanced"),
                 self.switch_mode();
@@ -532,10 +578,10 @@ impl SettingsMenu {
             (_, Some('{')) if easy =>
                 Hint::Action("Page before"),
                 self.easy_page(-1);
-            (Stroke::Right, _) | (_, Some('l')) if easy =>
+            (Stroke::Right, _) | (_, Some('l')) if easy && !self.typing =>
                 Hint::Action("Next value, or from the pages into the page"),
                 self.easy_step(1, facts, history);
-            (Stroke::Left, _) | (_, Some('h')) if easy =>
+            (Stroke::Left, _) | (_, Some('h')) if easy && !self.typing =>
                 Hint::Action("Value before"),
                 self.easy_step(-1, facts, history);
             (_, Some('r')) if easy =>
@@ -577,10 +623,10 @@ impl SettingsMenu {
             (Stroke::BackTab, _) | (_, Some('{')) =>
                 Hint::Action("Section before"),
                 self.next_section(false);
-            (Stroke::Right, _) | (_, Some('l')) =>
+            (Stroke::Right, _) | (_, Some('l')) if !self.typing =>
                 Hint::Action("Next value"),
                 self.step(1, facts, history);
-            (Stroke::Left, _) | (_, Some('h')) =>
+            (Stroke::Left, _) | (_, Some('h')) if !self.typing =>
                 Hint::Action("Value before"),
                 self.step(-1, facts, history);
             (_, Some('r')) =>
@@ -850,19 +896,14 @@ impl SettingsMenu {
         history: &mut History,
     ) -> Outcome {
         let set = Set { info, live, saved };
-        self.change_all(info.name.to_owned(), vec![set], facts, history)
+        self.change_all(vec![set], facts, history)
     }
 
     /// Changes options together, as `sets` say, unless one's locked,
-    /// noting how to undo them as one change, under `name`. Those already
-    /// as they're to be are left alone.
-    fn change_all(
-        &mut self,
-        name: String,
-        sets: Vec<Set>,
-        facts: &Facts,
-        history: &mut History,
-    ) -> Outcome {
+    /// noting how to undo them as one change, under each of their names.
+    /// Those already as they're to be are left alone.
+    fn change_all(&mut self, sets: Vec<Set>, facts: &Facts, history: &mut History) -> Outcome {
+        let names: Vec<String> = sets.iter().map(|set| set.info.name.to_owned()).collect();
         if let Some((info, by)) =
             (sets.iter()).find_map(|set| Some((set.info, facts.locked(set.info)?)))
         {
@@ -893,7 +934,7 @@ impl SettingsMenu {
                 saved: facts.saved(set.info),
             })
             .collect();
-        history.0.entry(name).or_default().push(Undo::Options(undo));
+        history.push(names, &Undo::Options(undo));
         Outcome::Set(changed)
     }
 
@@ -964,15 +1005,16 @@ impl SettingsMenu {
         let Some(name) = self.picked_name() else {
             return Outcome::Nothing;
         };
-        self.undo_named(name, facts, history)
+        self.undo_named(&[name], facts, history)
     }
 
-    /// Undoes the last change the menu made, in either mode, to what's
-    /// known in its history as `name`.
-    fn undo_named(&mut self, name: String, facts: &Facts, history: &mut History) -> Outcome {
-        let Some(undo) = history.0.get_mut(&name).and_then(Vec::pop) else {
-            return self.refuse(&format!("the menu hasn't changed {name}"));
+    /// Undoes the last change the menu made, in either mode, to anything
+    /// `names` name in its history.
+    fn undo_named(&mut self, names: &[String], facts: &Facts, history: &mut History) -> Outcome {
+        let Some((number, undo)) = history.newest(names) else {
+            return self.refuse(&format!("the menu hasn't changed {}", names.join(" or ")));
         };
+        let undo = undo.clone();
         // What the user's own config sets or binds as it loads outdoes what
         // undoing would save, so the change is kept, to undo once it's not.
         let locked = match &undo {
@@ -986,18 +1028,20 @@ impl SettingsMenu {
             }),
         };
         if let Some((by, what, does)) = locked {
-            history.0.entry(name).or_default().push(undo);
             let place = by.place(facts.dir).unwrap_or_else(|| "your config".into());
             return self.refuse(&format!("{place} {does} {what} now, so it can't be undone"));
         }
         match undo {
-            Undo::Options(sets) => Outcome::Set(sets),
-            Undo::Keys(changes) if facts.automating => {
-                // Kept, for the user to undo.
-                history.0.entry(name).or_default().push(Undo::Keys(changes));
-                self.refuse(AGENTS_SAVE_NO_KEYS)
+            // Kept, for the user to undo.
+            Undo::Keys(_) if facts.automating => self.refuse(AGENTS_SAVE_NO_KEYS),
+            Undo::Options(sets) => {
+                history.remove(number);
+                Outcome::Set(sets)
             }
-            Undo::Keys(changes) => Outcome::Keys(changes),
+            Undo::Keys(changes) => {
+                history.remove(number);
+                Outcome::Keys(changes)
+            }
         }
     }
 
@@ -1036,11 +1080,7 @@ impl SettingsMenu {
             to: to.clone(),
             desc: bound.label.clone(),
         };
-        history
-            .0
-            .entry(bound.name())
-            .or_default()
-            .push(Undo::Keys(vec![(mapping.clone(), true)]));
+        history.push([bound.name()], &Undo::Keys(vec![(mapping.clone(), true)]));
         Outcome::Keys(vec![(mapping, false)])
     }
 
@@ -1116,11 +1156,7 @@ impl SettingsMenu {
         };
         let mut undo = vec![(mapping.clone(), false)];
         undo.extend(before.into_iter().map(|before| (before, true)));
-        history
-            .0
-            .entry(bound.name())
-            .or_default()
-            .push(Undo::Keys(undo));
+        history.push([bound.name()], &Undo::Keys(undo));
         Outcome::Keys(vec![(mapping, true)])
     }
 
@@ -1184,6 +1220,12 @@ impl SettingsMenu {
             },
             Some(Editing::Keys { .. }) | None => Outcome::Nothing,
         }
+    }
+
+    /// Whether letters type into the search.
+    #[cfg(test)]
+    pub(crate) fn typing(&self) -> bool {
+        self.typing
     }
 
     /// Whether it waits for the fonts installed, which [`fonts`](Self::fonts)
@@ -2040,6 +2082,6 @@ mod tests {
             "{:?}",
             menu.said
         );
-        assert!(history.0.is_empty());
+        assert!(history.is_empty());
     }
 }

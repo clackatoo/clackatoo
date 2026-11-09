@@ -17,8 +17,35 @@ use crate::settings::{Facts, History, Mode, Outcome, SettingsMenu};
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
-    /// of the window, and the changes it's made before.
+    /// of the window, and the changes it's made before: something it does
+    /// that may change what the menu shows.
     fn with_settings<R>(
+        &mut self,
+        with: impl FnOnce(&mut SettingsMenu, &Facts, &mut History) -> R,
+    ) -> Option<R> {
+        self.settings_changed();
+        self.looking_at_settings(with)
+    }
+
+    /// The menu may show something else: what was drawn of it is old.
+    pub(super) fn settings_changed(&mut self) {
+        self.settings_revision += 1;
+    }
+
+    /// What the menu shows, as far as what's drawn of it goes: while this
+    /// is the same, what was laid out of it last is still right, whatever
+    /// the mouse is over (see `App::chrome`).
+    pub(crate) fn settings_shown_key(&self) -> Option<(u64, u64, u64)> {
+        self.settings.as_ref()?;
+        let options = self.options.store().changes();
+        let keys = self
+            .client_ref()
+            .map_or(0, crate::client::Client::keys_changes);
+        Some((self.settings_revision, options, keys))
+    }
+
+    /// As [`Desk::with_settings`], for what only looks at the menu.
+    fn looking_at_settings<R>(
         &mut self,
         with: impl FnOnce(&mut SettingsMenu, &Facts, &mut History) -> R,
     ) -> Option<R> {
@@ -67,12 +94,16 @@ impl Desk {
             SettingsMenu::new(query, case, mode, &facts, client.keys_changes())
         };
         self.settings = Some(menu);
-        // The agents the daemon knows, for Easy's cards.
+        self.settings_changed();
+        // The agents the daemon knows, for Easy's cards. No pane, as no
+        // chat's directory is wanted.
         if self.connected {
-            let pane = self.shown.map(|shown| shown.pane);
             self.request(
-                clackatoo_protocol::Request::ChatChoices { pane, on: None },
-                Asked::ChatChoices,
+                Request::ChatChoices {
+                    pane: None,
+                    on: None,
+                },
+                Asked::SettingsAgents,
             );
         }
     }
@@ -95,8 +126,13 @@ impl Desk {
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| {
-                // Replaced whole, so a window reading it never sees half.
-                let partial = path.with_extension("partial");
+                // Replaced whole, so a window reading it never sees half,
+                // from a name of its own, so two windows writing at once
+                // don't write into one file.
+                static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let count = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let partial =
+                    path.with_extension(format!("{}-{count}.partial", std::process::id()));
                 std::fs::write(&partial, format!("{}\n", mode.word()))?;
                 std::fs::rename(&partial, path)
             });
@@ -152,8 +188,10 @@ impl Desk {
 
     /// Easy's page was drawn from its part `top`, as it scrolled.
     pub(crate) fn settings_drawn(&mut self, top: usize) {
-        if let Some(menu) = &mut self.settings {
-            menu.easy_drawn(top);
+        if let Some(menu) = &mut self.settings
+            && menu.easy_drawn(top)
+        {
+            self.settings_changed();
         }
     }
 
@@ -162,13 +200,23 @@ impl Desk {
         if self.settings_mode_shown() != Some(Mode::Easy) {
             return None;
         }
-        self.with_settings(|menu, facts, _| menu.easy_view(facts))
+        self.looking_at_settings(|menu, facts, _| menu.easy_view(facts))
     }
 
-    /// Takes in the agents the daemon knows, for Easy's cards.
-    pub(super) fn settings_agents(&mut self, choices: &clackatoo_protocol::ChatChoices) {
+    /// Takes in the agents the daemon knows, for Easy's cards, if the menu
+    /// is still open. Returns whether to draw.
+    pub(super) fn settings_agents(&mut self, response: clackatoo_protocol::Response) -> bool {
+        let choices = match response {
+            clackatoo_protocol::Response::ChatChoices(choices) => choices,
+            clackatoo_protocol::Response::Error(err) => {
+                log::warn!("the daemon wouldn't say which agents it knows: {err}");
+                return false;
+            }
+            _ => return false,
+        };
+        self.settings_changed();
         let Some(menu) = &mut self.settings else {
-            return;
+            return false;
         };
         let agents = (choices.agents.iter())
             .map(|provider| {
@@ -180,6 +228,7 @@ impl Desk {
             })
             .collect();
         menu.set_agents(agents);
+        true
     }
 
     /// A click on row `row` of the menu, or a double click if `open`.
@@ -214,7 +263,7 @@ impl Desk {
         if self.settings_mode_shown() != Some(Mode::Advanced) {
             return None;
         }
-        self.with_settings(|menu, facts, _| menu.view(facts, list, preview))
+        self.looking_at_settings(|menu, facts, _| menu.view(facts, list, preview))
     }
 
     /// Whether the settings menu is open.
@@ -234,6 +283,7 @@ impl Desk {
     /// monospace, for the menu's font picker.
     pub(crate) fn font_families(&mut self, families: Vec<(String, bool)>) {
         let font = self.options.font.clone();
+        self.settings_changed();
         if let Some(menu) = &mut self.settings {
             menu.fonts(families, &font);
         }
@@ -245,16 +295,20 @@ impl Desk {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Close => self.settings = None,
             Outcome::Set(sets) => {
+                let mut saved = Vec::new();
                 for set in sets {
                     // One read only as a window opens is saved, for windows
                     // opened after.
                     if !set.info.restart {
                         self.set_option(set.info, set.live, SetBy::RUNTIME);
                     }
-                    self.save_change(Change::Option {
-                        info: set.info,
-                        value: set.saved,
-                    });
+                    self.counting_on_saving(set.info, set.saved.clone());
+                    saved.push((set.info, set.saved));
+                }
+                // Several, as one control sets them, in one write.
+                match <[_; 1]>::try_from(saved) {
+                    Ok([(info, value)]) => self.save_change(Change::Option { info, value }),
+                    Err(saved) => self.save_change(Change::Options(saved)),
                 }
             }
             Outcome::Mode(mode) => self.remember_settings_mode(mode),
@@ -268,6 +322,40 @@ impl Desk {
                 self.settings = None;
                 self.open_config_line(&place);
             }
+        }
+    }
+
+    /// Counts on `info`'s option being saved as `value`: the menu shows and
+    /// steps from it as configured so at once, as keys pressed before the
+    /// file's written must, and it's put back if the save fails (see
+    /// [`Desk::settings_save_came`]).
+    fn counting_on_saving(
+        &mut self,
+        info: &'static crate::options::Info,
+        value: Option<crate::options::Value>,
+    ) {
+        let before = self.options.store().configured(info).cloned();
+        let (count, _) = (self.settings_pending)
+            .entry(info.name)
+            .or_insert((0, before));
+        *count += 1;
+        let ((), _) = (self.options).change(|store, _| store.saved(info, value));
+    }
+
+    /// A save of `info`'s option the menu counted on came back, as
+    /// `worked` says: if it failed, it's configured as it was before.
+    pub(super) fn settings_save_came(&mut self, info: &'static crate::options::Info, worked: bool) {
+        let Some((count, before)) = self.settings_pending.get_mut(info.name) else {
+            return;
+        };
+        *count -= 1;
+        if worked && *count > 0 {
+            return;
+        }
+        let before = before.clone();
+        self.settings_pending.remove(info.name);
+        if !worked {
+            let ((), _) = (self.options).change(|store, _| store.put_configured(info, before));
         }
     }
 

@@ -393,6 +393,7 @@ impl Desk {
         } = saved;
         let (info, value) = match change {
             Change::Option { info, value } => (info, value),
+            Change::Options(options) => return self.said_saved_together(options, file, result),
             Change::Keys { mapping, bound } => {
                 let keys = crate::keymap::display(&mapping.keys);
                 return match result {
@@ -405,6 +406,7 @@ impl Desk {
                 };
             }
         };
+        self.settings_save_came(info, result.is_ok());
         if let Err(why) = result {
             return self.warn_saved(format!("{} wasn't saved: {why}", info.name));
         }
@@ -426,9 +428,44 @@ impl Desk {
         });
     }
 
+    /// Says what came of saving `options` together in `file`, as one
+    /// line: `saved number norelativenumber in client/settings.lua`.
+    fn said_saved_together(
+        &mut self,
+        options: Vec<(&'static options::Info, Option<options::Value>)>,
+        file: &str,
+        result: Result<(), String>,
+    ) {
+        let names: Vec<&str> = options.iter().map(|(info, _)| info.name).collect();
+        for (info, _) in &options {
+            self.settings_save_came(info, result.is_ok());
+        }
+        if let Err(why) = result {
+            return self.warn_saved(format!("{} weren't saved: {why}", names.join(" and ")));
+        }
+        let mut shown = Vec::new();
+        let mut gone = Vec::new();
+        for (info, value) in options {
+            let ((), _) = (self.options).change(|store, _| store.saved(info, value.clone()));
+            match value {
+                Some(value) => shown.push(options::show_value(info, &value)),
+                None => gone.push(info.name),
+            }
+        }
+        let mut said = Vec::new();
+        if !shown.is_empty() {
+            said.push(format!("saved {} in {file}", shown.join(" ")));
+        }
+        if !gone.is_empty() {
+            said.push(format!("{} saved in {file} no more", gone.join(" and ")));
+        }
+        self.say_saved(said.join("; "));
+    }
+
     /// Says what was saved, in the bar, and along the settings menu's foot
     /// if it's open.
     fn say_saved(&mut self, said: String) {
+        self.settings_changed();
         if let Some(menu) = &mut self.settings {
             menu.saved(&said, false);
         }
@@ -437,6 +474,7 @@ impl Desk {
 
     /// Says what wasn't saved, and why, as [`Desk::say_saved`] does.
     fn warn_saved(&mut self, said: String) {
+        self.settings_changed();
         if let Some(menu) = &mut self.settings {
             menu.saved(&said, true);
         }

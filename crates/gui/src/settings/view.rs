@@ -152,6 +152,8 @@ pub(crate) const FONT_ROWS: usize = 10;
 pub(crate) enum SettingsHit {
     /// The panel, away from anything that acts.
     Panel,
+    /// Off the panel, over what it dims: a click closes the menu.
+    Backdrop,
     /// The search box.
     Search,
     /// The switch to a mode.
@@ -221,25 +223,30 @@ pub(crate) struct Laid {
     /// The first part of the page shown, kept as the page scrolls: the
     /// sample, a heading, a row or the note at its foot, in order.
     pub(crate) top: usize,
-    /// Whether it's all of Easy, which takes every point of the window,
-    /// rather than Advanced's switch.
+    /// Whether it's all of Easy, rather than Advanced's header.
     modal: bool,
+    /// The menu's whole panel, in either mode: off it, a click closes it.
+    outer: Rect,
     /// The row whose slider is being dragged.
     sliding: Option<u16>,
 }
 
 impl Laid {
-    /// Whether it's all of Easy, over the whole window, rather than
-    /// Advanced's switch.
+    /// Whether it's all of Easy, rather than Advanced's header.
     pub(crate) fn modal(&self) -> bool {
         self.modal
+    }
+
+    /// The menu's whole panel, in either mode.
+    pub(crate) fn outer(&self) -> Rect {
+        self.outer
     }
 
     /// What `point` is over, if it's over the panel; or for Easy, which
     /// dims the panes, anywhere.
     pub(crate) fn hit(&self, point: [f32; 2]) -> Option<SettingsHit> {
         if !self.panel.contains(point) {
-            return self.modal.then_some(SettingsHit::Panel);
+            return None;
         }
         let hit = (self.hits.iter().rev())
             .find(|(rect, _)| rect.contains(point))
@@ -664,6 +671,7 @@ pub(crate) fn lay_out_header(
         measure,
         laid: Laid {
             panel: header,
+            outer: panel(geometry),
             ..Laid::default()
         },
     };
@@ -687,6 +695,7 @@ pub(crate) fn lay_out(
         measure,
         laid: Laid {
             panel,
+            outer: panel,
             modal: true,
             sliding: view.sliding.and_then(|row| u16::try_from(row).ok()),
             ..Laid::default()
@@ -924,8 +933,12 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
         blocks.push(Block::Note);
     }
     let rows: Vec<&RowView> = view.sections.iter().flat_map(|each| &each.rows).collect();
+    // Each row's words broken to fit, once.
+    let shaped: Vec<Shaped> = (rows.iter())
+        .map(|row| shape(lay, row, room.width))
+        .collect();
     let heights: Vec<f32> = (blocks.iter())
-        .map(|&block| block_height(lay, view, &rows, block, room.width))
+        .map(|&block| block_height(lay, view, &shaped, block, room.width))
         .collect();
     // The gap before each, after the one before it.
     let gaps: Vec<f32> = (blocks.iter().enumerate())
@@ -941,9 +954,15 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     let last_shown = |top: usize| -> usize {
         let mut used = 0.0;
         let mut last = top;
+        // The part at the top, and a heading's first row, are drawn even if
+        // taller than all the room, cut off at its foot.
+        let must = match blocks.get(top) {
+            Some(Block::Heading(_)) => top + 1,
+            _ => top,
+        };
         for at in top..blocks.len() {
             let gap = if at == top { 0.0 } else { gaps[at] };
-            if used + gap + heights[at] > room.height {
+            if used + gap + heights[at] > room.height && at > must {
                 break;
             }
             used += gap + heights[at];
@@ -1002,6 +1021,14 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     // rows' are laid out into a list of their own and added after.
     let mut row_fills: Vec<Fill> = Vec::new();
     let mut card_fills: Vec<Fill> = Vec::new();
+    // What the page draws, to cut off at its foot: a part taller than all
+    // the room there is is drawn as far as the room goes.
+    let (fills_from, texts_from, hits_from, hovers_from) = (
+        lay.laid.fills.len(),
+        lay.laid.texts.len(),
+        lay.laid.hits.len(),
+        lay.laid.hovers.len(),
+    );
     let shown = if blocks.is_empty() {
         0..0
     } else {
@@ -1041,7 +1068,7 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
                 lay_row(
                     lay,
                     view,
-                    rows[row],
+                    (rows[row], &shaped[row]),
                     row,
                     Rect { y, height, ..room },
                     !first_in_card && !cards,
@@ -1075,6 +1102,30 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     }
     lay.laid.fills.extend(card_fills);
     lay.laid.fills.extend(row_fills);
+    let bottom = room.bottom();
+    let clip = [
+        room.x - lay.u(8.0),
+        room.y - lay.u(8.0),
+        room.width + lay.u(16.0),
+        bottom - room.y + lay.u(8.0),
+    ];
+    for fill in &mut lay.laid.fills[fills_from..] {
+        *fill = fill.clipped(clip);
+    }
+    for (_, fill) in &mut lay.laid.hovers[hovers_from..] {
+        *fill = fill.clipped(clip);
+    }
+    let texts = lay.laid.texts.split_off(texts_from);
+    (lay.laid.texts).extend(
+        texts
+            .into_iter()
+            .filter(|text| text.origin[1] + text.size[1] <= bottom),
+    );
+    let hits = lay.laid.hits.split_off(hits_from);
+    (lay.laid.hits).extend(hits.into_iter().filter_map(|(rect, hit)| {
+        let height = rect.height.min(bottom - rect.y);
+        (height > 0.0).then_some((Rect { height, ..rect }, hit))
+    }));
     // A bar down the page's right, if it's longer than the room, saying
     // how much is above and below.
     if !blocks.is_empty() && (top > 0 || last + 1 < blocks.len()) {
@@ -1111,12 +1162,12 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     }
 }
 
-/// How tall `block` is, in a page `width` wide.
+/// How tall `block` is, in a page `width` wide, its rows `shaped`.
 #[allow(clippy::cast_precision_loss)]
 fn block_height(
     lay: &mut Lay<'_>,
     view: &EasyView,
-    rows: &[&RowView],
+    shaped: &[Shaped],
     block: Block,
     width: f32,
 ) -> f32 {
@@ -1133,19 +1184,7 @@ fn block_height(
             let lines = lay.lines_of(note, width, HELP, Ink::Muted).len();
             lines as f32 * lay.line(HELP)
         }
-        Block::Row(_, row) => {
-            let row = rows[row];
-            if let ControlView::Cards(cards) = &row.control {
-                let columns = cards.len().clamp(1, 4);
-                let lines = cards.len().div_ceil(columns);
-                return lines as f32 * lay.u(96.0) + lines.saturating_sub(1) as f32 * lay.u(12.0);
-            }
-            let control = control_size(lay, &row.control);
-            let lock = lock_width(lay, row);
-            let text_width = text_width(lay, width, control[0], lock);
-            let text = text_height(lay, row, text_width);
-            text.max(control[1]) + lay.u(28.0)
-        }
+        Block::Row(_, row) => shaped[row].height,
     }
 }
 
@@ -1155,27 +1194,107 @@ fn preview_line(lay: &Lay<'_>, scale: f32) -> f32 {
     (lay.geometry.metrics.cell[1] * scale * 1.2).round()
 }
 
-/// How wide the label and help of a row `width` wide is, beside a control
-/// `control` wide and a lock's chip `lock` wide.
-fn text_width(lay: &Lay<'_>, width: f32, control: f32, lock: f32) -> f32 {
-    (width - lay.u(36.0) - control - lay.u(24.0) - lock).max(lay.u(120.0))
+/// A row as it fits a page: its words broken into lines, where its control
+/// and the place it's locked at go, and how tall it all is, worked out
+/// once a frame.
+#[derive(Debug)]
+struct Shaped {
+    label: Vec<String>,
+    /// Its help and notes, a line each, in their inks.
+    lines: Vec<(String, Ink)>,
+    control: [f32; 2],
+    /// How wide the chip saying where it's locked is, with the gap after
+    /// it, or 0.
+    lock: f32,
+    /// The control goes under the words, as there's no room beside them.
+    stacked: bool,
+    /// How tall the words are; for agents' cards, their grid.
+    words: f32,
+    height: f32,
 }
 
-/// How tall a row's label, help and notes are, broken to `width`.
+/// The narrowest the words beside a control may be, in points: any
+/// narrower, and the control goes under them.
+const NARROWEST_WORDS: f32 = 160.0;
+
+/// `row` as it fits a page `width` wide.
 #[allow(clippy::cast_precision_loss)]
-fn text_height(lay: &mut Lay<'_>, row: &RowView, width: f32) -> f32 {
-    let mut height = lay.line(TextFont::Ui);
-    let mut more = 0;
-    if !row.help.is_empty() {
-        more += lay.lines_of(&row.help, width, HELP, Ink::Muted).len();
+fn shape(lay: &mut Lay<'_>, row: &RowView, width: f32) -> Shaped {
+    let lock = lock_width(lay, row);
+    if let ControlView::Cards(cards) = &row.control {
+        let columns = cards.len().clamp(1, 4);
+        let rows = cards.len().div_ceil(columns);
+        let grid = rows as f32 * lay.u(96.0) + rows.saturating_sub(1) as f32 * lay.u(12.0);
+        // Under the cards, where they're locked, and what they are now;
+        // the help only says why they're locked.
+        let help = if row.lock.is_some() {
+            &row.help[..]
+        } else {
+            ""
+        };
+        let lines = help_lines(lay, help, &row.notes, (width - lock).max(1.0));
+        let words = lines.len() as f32 * lay.line(HELP);
+        let chip = if lock > 0.0 { lay.u(28.0) } else { 0.0 };
+        let foot = if words > 0.0 || chip > 0.0 {
+            lay.u(10.0) + words.max(chip)
+        } else {
+            0.0
+        };
+        return Shaped {
+            label: Vec::new(),
+            lines,
+            control: [0.0, 0.0],
+            lock,
+            stacked: false,
+            words: grid,
+            height: grid + foot,
+        };
     }
-    for (note, ink) in &row.notes {
-        more += lay.lines_of(note, width, HELP, *ink).len();
+    let control = control_size(lay, &row.control);
+    let beside = width - lay.u(36.0) - control[0] - lay.u(24.0) - lock;
+    let stacked = beside < lay.u(NARROWEST_WORDS);
+    let text_width = if stacked { width - lay.u(36.0) } else { beside };
+    let label = lay.lines_of(&row.label, text_width, TextFont::Ui, Ink::Plain);
+    let lines = help_lines(lay, &row.help, &row.notes, text_width);
+    let mut words = label.len().max(1) as f32 * lay.line(TextFont::Ui);
+    if !lines.is_empty() {
+        words += lay.u(2.0) + lines.len() as f32 * lay.line(HELP);
     }
-    if more > 0 {
-        height += lay.u(2.0) + more as f32 * lay.line(HELP);
+    let chip = if lock > 0.0 { lay.u(28.0) } else { 0.0 };
+    let height = if stacked {
+        words + lay.u(10.0) + control[1].max(chip) + lay.u(28.0)
+    } else {
+        words.max(control[1]).max(chip) + lay.u(28.0)
+    };
+    Shaped {
+        label,
+        lines,
+        control,
+        lock,
+        stacked,
+        words,
+        height,
     }
-    height
+}
+
+/// `help`, then `notes`, broken onto lines `width` wide, each in its
+/// ink.
+fn help_lines(
+    lay: &mut Lay<'_>,
+    help: &str,
+    notes: &[(String, Ink)],
+    width: f32,
+) -> Vec<(String, Ink)> {
+    let mut lines = Vec::new();
+    for line in lay.lines_of(help, width, HELP, Ink::Muted) {
+        lines.push((line, Ink::Muted));
+    }
+    for (note, ink) in notes {
+        for line in lay.lines_of(note, width, HELP, *ink) {
+            lines.push((line, *ink));
+        }
+    }
+    lines
 }
 
 /// How wide the chip saying where a locked row is set is, with the gap
@@ -1231,8 +1350,43 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
     }
 }
 
-/// Lays out `row`, numbered `index` among every section's rows, in
-/// `rect`, with a line above it if `divided`.
+/// Lays out the chip saying `place` is where row `number` is locked, from
+/// `x`, centred on `middle`.
+fn lay_lock(lay: &mut Lay<'_>, place: &str, number: u16, x: f32, middle: f32) {
+    let text = lay.width(place, SMALL_VALUE, Ink::Accent);
+    let chip = Rect {
+        x,
+        y: (middle - lay.u(14.0)).round(),
+        width: text + lay.u(38.0),
+        height: lay.u(28.0),
+    };
+    lay.fill(
+        Fill::rounded(chip.to_array(), Paint::AccentFaint, lay.u(14.0))
+            .bordered(lay.geometry.edge, Paint::AccentEdge),
+    );
+    lay.icon(
+        [chip.x + lay.u(17.0), middle],
+        12.0,
+        Icon::Lock,
+        Paint::Accent,
+    );
+    lay.text_mid(
+        chip.x + lay.u(28.0),
+        middle,
+        place,
+        Ink::Accent,
+        SMALL_VALUE,
+    );
+    let hit = SettingsHit::Lock(number);
+    lay.hover(
+        hit,
+        Fill::rounded(chip.to_array(), Paint::AccentFaint, lay.u(14.0)),
+    );
+    lay.hit(chip, hit);
+}
+
+/// Lays out `row`, as `shaped`, numbered `index` among every section's
+/// rows, in `rect`, with a line above it if `divided`.
 #[allow(
     clippy::too_many_lines,
     reason = "a row's text, its lock and its control"
@@ -1240,15 +1394,31 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
 fn lay_row(
     lay: &mut Lay<'_>,
     view: &EasyView,
-    row: &RowView,
+    (row, shaped): (&RowView, &Shaped),
     index: usize,
     rect: Rect,
     divided: bool,
 ) {
     let number = u16::try_from(index).unwrap_or(u16::MAX);
     let focused = view.focus == Some(index) && !view.on_side;
+    let locked = row.lock.is_some();
     if let ControlView::Cards(cards) = &row.control {
-        return lay_cards(lay, cards, number, rect, focused);
+        let grid = Rect {
+            height: shaped.words,
+            ..rect
+        };
+        lay_cards(lay, cards, number, grid, focused, locked);
+        // Under them, where they're locked, and what they are now.
+        let y = grid.bottom() + lay.u(10.0);
+        if let Some(place) = &row.lock {
+            lay_lock(lay, place, number, rect.x, y + lay.u(14.0));
+        }
+        let mut y = y;
+        for (line, ink) in &shaped.lines {
+            lay.text([rect.x + shaped.lock, y], line, *ink, HELP);
+            y += lay.line(HELP);
+        }
+        return;
     }
     if divided {
         lay.fill(Fill::solid(
@@ -1268,71 +1438,48 @@ fn lay_row(
         ));
     }
     lay.hit(rect, SettingsHit::Row(number));
-    let locked = row.lock.is_some();
-    let size = control_size(lay, &row.control);
-    let lock = lock_width(lay, row);
-    let middle = rect.y + rect.height / 2.0;
-    let control = Rect {
-        x: rect.right() - lay.u(18.0) - size[0],
-        y: (middle - size[1] / 2.0).round(),
-        width: size[0],
-        height: size[1],
-    };
-    // The label, and under it the help and notes.
-    let width = text_width(lay, rect.width, size[0], lock);
-    let text_height = text_height(lay, row, width);
-    let mut y = (middle - text_height / 2.0).round();
+    let size = shaped.control;
     let x = rect.x + lay.u(18.0);
+    // The words, at the left; the control right of them, or under them.
+    let (mut y, control) = if shaped.stacked {
+        let top = rect.y + lay.u(14.0);
+        let middle = top + shaped.words + lay.u(10.0) + size[1].max(lay.u(28.0)) / 2.0;
+        let control = Rect {
+            x: x + shaped.lock,
+            y: (middle - size[1] / 2.0).round(),
+            width: size[0],
+            height: size[1],
+        };
+        (top, control)
+    } else {
+        let middle = rect.y + rect.height / 2.0;
+        let control = Rect {
+            x: rect.right() - lay.u(18.0) - size[0],
+            y: (middle - size[1] / 2.0).round(),
+            width: size[0],
+            height: size[1],
+        };
+        ((middle - shaped.words / 2.0).round(), control)
+    };
     let label_ink = if locked { Ink::Muted } else { Ink::Plain };
-    lay.text([x, y], &row.label, label_ink, TextFont::Ui);
-    y += lay.line(TextFont::Ui) + lay.u(2.0);
-    let mut lines: Vec<(String, Ink)> = Vec::new();
-    if !row.help.is_empty() {
-        for line in lay.lines_of(&row.help, width, HELP, Ink::Muted) {
-            lines.push((line, Ink::Muted));
-        }
+    for line in &shaped.label {
+        lay.text([x, y], line, label_ink, TextFont::Ui);
+        y += lay.line(TextFont::Ui);
     }
-    for (note, ink) in &row.notes {
-        for line in lay.lines_of(note, width, HELP, *ink) {
-            lines.push((line, *ink));
-        }
-    }
-    for (line, ink) in lines {
-        lay.text([x, y], &line, ink, HELP);
+    y += lay.u(2.0);
+    for (line, ink) in &shaped.lines {
+        lay.text([x, y], line, *ink, HELP);
         y += lay.line(HELP);
     }
     // Where it's locked, before the control.
     if let Some(place) = &row.lock {
-        let text = lay.width(place, SMALL_VALUE, Ink::Accent);
-        let chip = Rect {
-            x: control.x - lay.u(12.0) - text - lay.u(38.0),
-            y: (middle - lay.u(14.0)).round(),
-            width: text + lay.u(38.0),
-            height: lay.u(28.0),
+        let middle = control.y + control.height / 2.0;
+        let from = if shaped.stacked {
+            x
+        } else {
+            control.x - shaped.lock
         };
-        lay.fill(
-            Fill::rounded(chip.to_array(), Paint::AccentFaint, lay.u(14.0))
-                .bordered(lay.geometry.edge, Paint::AccentEdge),
-        );
-        lay.icon(
-            [chip.x + lay.u(17.0), middle],
-            12.0,
-            Icon::Lock,
-            Paint::Accent,
-        );
-        lay.text_mid(
-            chip.x + lay.u(28.0),
-            middle,
-            place,
-            Ink::Accent,
-            SMALL_VALUE,
-        );
-        let hit = SettingsHit::Lock(number);
-        lay.hover(
-            hit,
-            Fill::rounded(chip.to_array(), Paint::AccentFaint, lay.u(14.0)),
-        );
-        lay.hit(chip, hit);
+        lay_lock(lay, place, number, from, middle);
     }
     lay_control(lay, &row.control, control, number, locked);
     if focused && !locked {
@@ -1630,7 +1777,7 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
 /// Lays out the agents' cards, side by side, as many as four to a line,
 /// in `rect`, for row `row`.
 #[allow(clippy::cast_precision_loss)]
-fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: bool) {
+fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: bool, locked: bool) {
     let columns = cards.len().clamp(1, 4);
     let gap = lay.u(12.0);
     let width = ((rect.width - gap * (columns - 1) as f32) / columns as f32).floor();
@@ -1645,20 +1792,21 @@ fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: b
         };
         let hit = SettingsHit::Control(row, Part::Card(u8::try_from(at).unwrap_or(0)));
         let radius = lay.u(12.0);
-        let (fill, border, thickness) = if card.picked {
-            (Paint::Subagent, Paint::Agents, lay.u(1.5))
-        } else {
-            (Paint::Card, Paint::CardEdge, lay.geometry.edge)
+        // Locked, greyed: the one picked only outlined.
+        let (fill, border, thickness) = match (card.picked, locked) {
+            (true, false) => (Paint::Subagent, Paint::Agents, lay.u(1.5)),
+            (true, true) => (Paint::Card, Paint::Track, lay.u(1.5)),
+            (false, _) => (Paint::Card, Paint::CardEdge, lay.geometry.edge),
         };
         lay.fill(Fill::rounded(place.to_array(), fill, radius).bordered(thickness, border));
-        if !card.picked {
+        if !card.picked && !locked {
             lay.hover(
                 hit,
                 Fill::rounded(place.to_array(), Paint::Clear, radius)
                     .bordered(lay.u(1.5), Paint::Track),
             );
         }
-        if focused && card.picked {
+        if focused && card.picked && !locked {
             let ring = lay.u(3.0);
             lay.fill(
                 Fill::rounded(
@@ -1676,7 +1824,8 @@ fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: b
         }
         let x = place.x + lay.u(16.0);
         let mut y = place.y + lay.u(16.0);
-        lay.text([x, y], &card.title, Ink::Bold, CARD_TITLE);
+        let title_ink = if locked { Ink::Muted } else { Ink::Bold };
+        lay.text([x, y], &card.title, title_ink, CARD_TITLE);
         // The dot, filled for the one picked.
         let dot = lay.u(18.0);
         let dot_rect = [
@@ -1686,7 +1835,8 @@ fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: b
             dot,
         ];
         let dot_fill = if card.picked {
-            Fill::rounded(dot_rect, Paint::Agents, dot / 2.0)
+            let paint = if locked { Paint::Icon } else { Paint::Agents };
+            Fill::rounded(dot_rect, paint, dot / 2.0)
         } else {
             Fill::rounded(dot_rect, Paint::Clear, dot / 2.0).bordered(lay.u(2.0), Paint::Track)
         };
@@ -1697,7 +1847,9 @@ fn lay_cards(lay: &mut Lay<'_>, cards: &[Card], row: u16, rect: Rect, focused: b
         if let Some((note, ink)) = &card.note {
             lay.text([x, y], note, *ink, SMALL);
         }
-        lay.hit(place, hit);
+        if !locked {
+            lay.hit(place, hit);
+        }
     }
 }
 
@@ -1933,10 +2085,143 @@ mod tests {
         );
         // Dragged past its end, it's at its end.
         assert_eq!(laid.sliding_at(track.right() + 100.0), Some(1000));
-        // Off the panel, Easy still takes the point, dimming the panes.
-        assert_eq!(laid.hit([2.0, 2.0]), Some(SettingsHit::Panel));
+        // Off the panel is the chrome's to say (see `Chrome::hit`).
+        assert_eq!(laid.hit([2.0, 2.0]), None);
         // Every word drawn is within the panel.
         let panel = panel(&geometry);
         assert!(laid.texts.iter().all(|text| panel.contains(text.origin)));
+    }
+
+    const METRICS: Metrics = Metrics {
+        cell: [10.0, 20.0],
+        ui_line: 16.0,
+        padding: 4.0,
+    };
+
+    fn laid_out(view: &EasyView, size: [u32; 2]) -> Laid {
+        let geometry = Geometry::new(size, METRICS);
+        #[allow(clippy::cast_precision_loss)]
+        let mut measure = |text: &str, _bold: bool| 8.0 * text.chars().count() as f32;
+        lay_out(view, &geometry, Sizes { mono_em: 8.0 }, &mut measure)
+    }
+
+    fn page_of(row: RowView) -> EasyView {
+        let mut view = slider_page();
+        view.sliding = None;
+        view.sections[0].rows = vec![row];
+        view
+    }
+
+    #[test]
+    fn agents_cards_locked_are_greyed_unclickable_with_the_lock_and_notes() {
+        let card = |title: &str, picked| Card {
+            title: title.into(),
+            command: title.to_lowercase(),
+            note: None,
+            picked,
+        };
+        let view = page_of(RowView {
+            label: "Agent".into(),
+            help: "Your init.lua sets this, and it wins over what's saved here.".into(),
+            notes: vec![(
+                "Currently codex, set since the config loaded.".into(),
+                Ink::Caution,
+            )],
+            lock: Some("init.lua:3".into()),
+            control: ControlView::Cards(vec![card("Claude", true), card("Codex", false)]),
+        });
+        let laid = laid_out(&view, [1280, 800]);
+        assert!(
+            !(laid.hits.iter()).any(|(_, hit)| matches!(hit, SettingsHit::Control(..))),
+            "no card takes a click"
+        );
+        assert!(
+            laid.hits
+                .iter()
+                .any(|(_, hit)| *hit == SettingsHit::Lock(0))
+        );
+        assert!(
+            laid.hovers.is_empty()
+                || !(laid.hovers.iter()).any(|(hit, _)| matches!(hit, SettingsHit::Control(..)))
+        );
+        let said: Vec<&str> = laid
+            .texts
+            .iter()
+            .map(|text| text.content.as_str())
+            .collect();
+        assert!(said.contains(&"init.lua:3"), "{said:?}");
+        assert!(
+            said.iter().any(|text| text.starts_with("Currently")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_page_puts_a_wide_control_under_its_words() {
+        let view = page_of(RowView {
+            label: "Paste an image (Ctrl+Shift+Alt+V) as".into(),
+            help: "A file path works with Claude Code and Codex on any machine.".into(),
+            notes: Vec::new(),
+            lock: None,
+            control: ControlView::Segmented {
+                labels: vec!["A file path", "The clipboard", "Somewhere else entirely"],
+                picked: Some(0),
+            },
+        });
+        let laid = laid_out(&view, [700, 800]);
+        let control = (laid.hits.iter())
+            .filter(|(_, hit)| matches!(hit, SettingsHit::Control(..)))
+            .map(|(rect, _)| *rect)
+            .reduce(|a, b| Rect {
+                x: a.x.min(b.x),
+                y: a.y.min(b.y),
+                width: a.right().max(b.right()) - a.x.min(b.x),
+                height: a.bottom().max(b.bottom()) - a.y.min(b.y),
+            })
+            .expect("the control");
+        // No word of the row's overlaps it.
+        for text in &laid.texts {
+            let [x, y] = text.origin;
+            let [w, h] = text.size;
+            let row_word = ["Paste", "A file path works"]
+                .iter()
+                .any(|start| text.content.starts_with(start));
+            if row_word {
+                let apart = x + w <= control.x
+                    || x >= control.right()
+                    || y + h <= control.y
+                    || y >= control.bottom();
+                assert!(apart, "{} overlaps the control", text.content);
+            }
+        }
+    }
+
+    #[test]
+    fn a_part_taller_than_the_room_is_cut_off_at_the_foot() {
+        let view = page_of(RowView {
+            label: "Tall".into(),
+            help: "word ".repeat(400),
+            notes: Vec::new(),
+            lock: None,
+            control: ControlView::Toggle(true),
+        });
+        let geometry = Geometry::new([1280, 500], METRICS);
+        let laid = laid_out(&view, [1280, 500]);
+        // The page's room ends a little above the panel's foot.
+        let foot = panel(&geometry).bottom() - 44.0 - 12.0;
+        let words: Vec<&Placed> = (laid.texts.iter())
+            .filter(|text| text.content.starts_with("word"))
+            .collect();
+        assert!(!words.is_empty());
+        assert!(
+            words
+                .iter()
+                .all(|text| text.origin[1] + text.size[1] <= foot)
+        );
+        assert!(
+            (laid.hits.iter())
+                .filter(|(_, hit)| matches!(hit, SettingsHit::Row(_) | SettingsHit::Control(..)))
+                .all(|(rect, _)| rect.bottom() <= foot)
+        );
     }
 }

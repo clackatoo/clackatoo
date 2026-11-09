@@ -520,7 +520,7 @@ your config loaded, with `:set` or a key, says what it is currently under its
 help. One your `init.lua` sets as it loads is greyed out, with the place it's
 set, as `init.lua:12`, which a click or <kbd>Enter</kbd> opens. A change saves
 at once, and the foot of the menu says what was saved where, as "Saved
-norelativenumber in client/settings.lua". `u` undoes a row's last change,
+nonumber norelativenumber in client/settings.lua", one write for the two. `u` undoes a row's last change,
 in either mode: a control that set several options undoes them together.
 
 The **Keys** page lists the keys for what's done most, such as a new tab or a
@@ -536,7 +536,11 @@ menu yet: the pages that would have them say so.
 
 The search finds what Easy has, then what only Advanced has, which says **in
 Advanced**: <kbd>Enter</kbd> or a click on one switches to Advanced, with it
-picked. Everything works by the mouse, as it looks, and by the keys:
+picked. While you type a search, the arrows and letters only type, and
+<kbd>Tab</kbd> or <kbd>Enter</kbd> leaves the box. A click off the menu
+closes it, as <kbd>Esc</kbd> does, though the window's edges, top bar and
+buttons still work. Everything works by the mouse, as it looks, and by the
+keys:
 
 | Key | Does in Easy |
 |---|---|

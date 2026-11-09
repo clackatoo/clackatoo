@@ -561,7 +561,7 @@ fn easy_changes_several_options_as_one_saves_them_and_undoes_them_together() {
     );
     // Off, by a click: both options, live and saved.
     desk.settings_pointer(SettingsHit::Control(row, Part::Segment(0)));
-    saved(&mut desk, 2);
+    saved(&mut desk, 1);
     assert!(!desk.options.number && !desk.options.relativenumber);
     let file = read(&dir, "client/settings.lua");
     assert!(file.contains("client.opt.number = false\n"), "{file}");
@@ -571,7 +571,7 @@ fn easy_changes_several_options_as_one_saves_them_and_undoes_them_together() {
     );
     assert_eq!(
         easy(&mut desk).footer,
-        "Saved norelativenumber in client/settings.lua"
+        "Saved nonumber norelativenumber in client/settings.lua"
     );
     // `l` steps to On, and `u` undoes it, then Off, as one each.
     type_keys(&mut desk, "l");
@@ -581,7 +581,7 @@ fn easy_changes_several_options_as_one_saves_them_and_undoes_them_together() {
     saved(&mut desk, 1);
     assert!(!desk.options.number);
     type_keys(&mut desk, "u");
-    saved(&mut desk, 2);
+    saved(&mut desk, 1);
     assert!(desk.options.number && desk.options.relativenumber);
     assert!(!read(&dir, "client/settings.lua").contains("number"));
     // A switch, by the keys: the next row, turned off.
@@ -755,4 +755,215 @@ fn easy_pages_go_by_tab_braces_and_clicks_and_the_keys_page_records_keys() {
     type_keys(&mut desk, "u");
     saved(&mut desk, 1);
     assert!(!read(&dir, "client/settings.lua").contains("<A-t>"));
+}
+
+#[test]
+fn typing_a_search_never_changes_a_setting_and_tab_leaves_the_box() {
+    for advanced in [false, true] {
+        let (mut desk, dir) = easy_configured("");
+        command(&mut desk, "Settings");
+        if advanced {
+            type_keys(&mut desk, "m");
+        }
+        type_keys(&mut desk, "/wrap");
+        named(&mut desk, NamedKey::ArrowRight);
+        named(&mut desk, NamedKey::ArrowLeft);
+        assert!(desk.options.wrap && desk.options.cursorline && desk.options.number);
+        assert!(!dir.path().join("client/settings.lua").exists());
+        named(&mut desk, NamedKey::Tab);
+        assert!(
+            !desk.settings.as_ref().unwrap().typing(),
+            "Tab leaves the box"
+        );
+        // Letters act again.
+        type_keys(&mut desk, "q");
+        assert!(desk.settings.is_none());
+    }
+}
+
+#[test]
+fn a_change_easy_made_to_two_options_is_undone_from_either_mode() {
+    use crate::settings::view::{Part, SettingsHit};
+    let (mut desk, dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    let (row, _) = easy_row(&mut desk, "Line numbers");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Segment(0)));
+    saved(&mut desk, 1);
+    assert!(!desk.options.number && !desk.options.relativenumber);
+    // From Advanced's row of one of them: both come back, in one write.
+    type_keys(&mut desk, "m/relativenumber");
+    named(&mut desk, NamedKey::Enter);
+    assert!(menu(&mut desk).0.starts_with("relativenumber"));
+    type_keys(&mut desk, "u");
+    saved(&mut desk, 1);
+    assert!(desk.options.number && desk.options.relativenumber);
+    assert!(!read(&dir, "client/settings.lua").contains("number"));
+    // And the other way: Advanced's change, undone from Easy's row.
+    named(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, "/relativenumber");
+    named(&mut desk, NamedKey::Enter);
+    type_keys(&mut desk, "l");
+    saved(&mut desk, 1);
+    assert!(!desk.options.relativenumber);
+    named(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, "m");
+    desk.settings_pointer(SettingsHit::Row(row));
+    type_keys(&mut desk, "u");
+    saved(&mut desk, 1);
+    assert!(desk.options.relativenumber);
+}
+
+#[test]
+fn easy_steps_the_size_from_its_value_past_the_sliders_end() {
+    use crate::settings::view::SettingsHit;
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "setp fontsize=30");
+    saved(&mut desk, 1);
+    command(&mut desk, "Settings");
+    let (row, _) = easy_row(&mut desk, "Size");
+    desk.settings_pointer(SettingsHit::Row(row));
+    type_keys(&mut desk, "l");
+    saved(&mut desk, 1);
+    assert_eq!(desk.options.fontsize.to_string(), "30.5");
+    type_keys(&mut desk, "hh");
+    saved(&mut desk, 2);
+    assert_eq!(desk.options.fontsize.to_string(), "29.5");
+}
+
+#[test]
+fn a_slider_dragged_stays_its_row_whatever_the_keys_do() {
+    use crate::settings::view::{Part, SettingsHit};
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    let (row, _) = easy_row(&mut desk, "Size");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Slider(500)));
+    type_keys(&mut desk, "jj");
+    desk.settings_slide(1000);
+    desk.settings_slid();
+    saved(&mut desk, 1);
+    assert_eq!(desk.options.fontsize.to_string(), "24");
+    assert!(
+        desk.options.number && desk.options.relativenumber,
+        "nothing else"
+    );
+}
+
+#[test]
+fn choices_alike_light_together_and_others_step_from_the_nearest() {
+    use crate::settings::view::{ControlView, SettingsHit};
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "setp noignorecase");
+    command(&mut desk, "setp norelativenumber");
+    command(&mut desk, "setp nonumber");
+    command(&mut desk, "setp relativenumber");
+    saved(&mut desk, 4);
+    command(&mut desk, "Settings");
+    // Without ignorecase, smartcase does nothing: it's Match.
+    type_keys(&mut desk, "}");
+    let (_, case) = easy_row(&mut desk, "Letter case");
+    assert!(
+        matches!(
+            case.control,
+            ControlView::Segmented {
+                picked: Some(2),
+                ..
+            }
+        ),
+        "{case:?}"
+    );
+    // nonumber relativenumber is no choice, but nearest Relative.
+    type_keys(&mut desk, "{");
+    let (row, numbers) = easy_row(&mut desk, "Line numbers");
+    assert!(
+        matches!(numbers.control, ControlView::Segmented { picked: None, .. }),
+        "{numbers:?}"
+    );
+    desk.settings_pointer(SettingsHit::Row(row));
+    type_keys(&mut desk, "h");
+    saved(&mut desk, 1);
+    assert!(desk.options.number && !desk.options.relativenumber, "On");
+}
+
+#[test]
+fn o_on_a_row_half_locked_opens_the_lock() {
+    use crate::settings::view::SettingsHit;
+    let (mut desk, _dir) = easy_configured("client.opt.rnu = true\n");
+    command(&mut desk, "Settings");
+    let (row, numbers) = easy_row(&mut desk, "Line numbers");
+    assert_eq!(numbers.lock.as_deref(), Some("init.lua:1"));
+    answer_all(&mut desk);
+    desk.settings_pointer(SettingsHit::Row(row));
+    type_keys(&mut desk, "o");
+    assert!(desk.settings.is_none());
+    let requests = answer_all(&mut desk);
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            Request::Split {
+                terminal: PaneTerminal::File(OpenFile { path, .. }),
+                ..
+            } if path.ends_with("client/init.lua")
+        )),
+        "{requests:#?}"
+    );
+}
+
+#[test]
+fn a_jump_to_advanced_from_a_search_isnt_remembered_and_a_click_off_it_closes_it() {
+    use crate::settings::Mode;
+    use crate::settings::view::SettingsHit;
+    let (mut desk, dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    type_keys(&mut desk, "/numberwidth");
+    named(&mut desk, NamedKey::Enter);
+    let found = easy(&mut desk)
+        .sections
+        .iter()
+        .map(|section| section.rows.len())
+        .sum::<usize>();
+    for _ in 1..found {
+        type_keys(&mut desk, "j");
+    }
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(desk.settings_mode_shown(), Some(Mode::Advanced));
+    assert!(!dir.path().join("settings-mode").exists());
+    desk.settings_pointer(SettingsHit::Backdrop);
+    assert!(desk.settings.is_none());
+    command(&mut desk, "Settings");
+    assert_eq!(desk.settings_mode_shown(), Some(Mode::Easy));
+}
+
+#[test]
+fn what_easy_shows_is_the_same_until_something_changes_it() {
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    let key = desk.settings_shown_key();
+    let _ = easy(&mut desk);
+    let _ = desk.finder_view((30, 100), None);
+    assert_eq!(desk.settings_shown_key(), key, "looking changes nothing");
+    type_keys(&mut desk, "j");
+    assert_ne!(desk.settings_shown_key(), key);
+    let key = desk.settings_shown_key();
+    command(&mut desk, "set nowrap");
+    assert_ne!(desk.settings_shown_key(), key, "an option set elsewhere");
+}
+
+#[test]
+fn a_save_that_fails_puts_back_what_easy_counted_on() {
+    use crate::settings::view::{ControlView, Part, SettingsHit};
+    let (mut desk, dir) = easy_configured("");
+    // A line clackatoo didn't write, which it won't save over.
+    std::fs::write(dir.path().join("client/settings.lua"), "local x = 1\n").unwrap();
+    command(&mut desk, "Settings");
+    let (row, _) = easy_row(&mut desk, "Highlight the cursor's line");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
+    // Counted on at once...
+    let (_, cursorline) = easy_row(&mut desk, "Highlight the cursor's line");
+    assert_eq!(cursorline.control, ControlView::Toggle(false));
+    // ...and put back when the save fails.
+    saved(&mut desk, 1);
+    let view = easy(&mut desk);
+    assert!(view.warning, "{}", view.footer);
+    let (_, cursorline) = easy_row(&mut desk, "Highlight the cursor's line");
+    assert_eq!(cursorline.control, ControlView::Toggle(true));
 }

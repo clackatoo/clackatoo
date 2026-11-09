@@ -6,6 +6,7 @@ mod native;
 
 use crate::shortcuts::bindings::Hint;
 
+use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -535,6 +536,8 @@ pub(crate) struct App {
     /// Where the strips of workspaces and tabs are scrolled to, kept from
     /// one frame to the next so they hold still.
     scrolls: Scrolls,
+    /// Easy, as it was laid out last, and for what (see `App::chrome`).
+    settings_laid: Option<(SettingsKey, Rc<crate::settings::view::Laid>)>,
     /// Whether the bar's note was cut short when last laid out, which is
     /// when a warning shows whole above it for a while, so the window must
     /// wake to take it away.
@@ -659,6 +662,7 @@ impl App {
             pointer: None,
             hover: Hit::Nothing,
             scrolls: Scrolls::default(),
+            settings_laid: None,
             noticing: false,
             cursor_icon: CursorIcon::Default,
             last_click: None,
@@ -816,11 +820,7 @@ impl App {
         // The settings menu, unless the keys' help is over it.
         let settings = match self.desk.settings_mode_shown() {
             _ if self.shortcut_help.is_some() || self.notice.is_some() => None,
-            Some(crate::settings::Mode::Easy) => {
-                (self.desk.easy_view()).map(|view| chrome::SettingsShown::Easy(Box::new(view)))
-            }
-            Some(crate::settings::Mode::Advanced) => Some(chrome::SettingsShown::Advanced),
-            None => None,
+            mode => mode,
         };
         let mut contents = if self.notice.is_some() {
             Contents {
@@ -899,16 +899,40 @@ impl App {
         let mut chrome = Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
         });
-        if let Some(settings) = settings {
-            let sizes = crate::settings::view::Sizes {
-                mono_em: fonts.mono_em(),
-            };
-            chrome.place_settings(settings, sizes, &mut |text, bold| {
-                fonts.ui_width(text, bold)
-            });
-        }
-        if let Some(top) = chrome.settings_top() {
-            self.desk.settings_drawn(top);
+        let sizes = crate::settings::view::Sizes {
+            mono_em: fonts.mono_em(),
+        };
+        let mut measure = |text: &str, bold| fonts.ui_width(text, bold);
+        match settings {
+            Some(crate::settings::Mode::Easy) => {
+                // Laid out again only once something it shows has changed:
+                // the mouse moving changes only what's lit under it.
+                let key = SettingsKey {
+                    menu: self.desk.settings_shown_key(),
+                    size: geometry.size,
+                    metrics: geometry.metrics,
+                    mono_em: sizes.mono_em,
+                };
+                let laid = match &self.settings_laid {
+                    Some((laid_for, laid)) if *laid_for == key => Some(Rc::clone(laid)),
+                    _ => self.desk.easy_view().map(|view| {
+                        let laid = Rc::new(crate::settings::view::lay_out(
+                            &view,
+                            &geometry,
+                            sizes,
+                            &mut measure,
+                        ));
+                        self.settings_laid = Some((key, Rc::clone(&laid)));
+                        self.desk.settings_drawn(laid.top);
+                        laid
+                    }),
+                };
+                chrome.settings = laid;
+            }
+            Some(crate::settings::Mode::Advanced) => {
+                chrome.place_advanced_settings(sizes, &mut measure);
+            }
+            None => self.settings_laid = None,
         }
         // The strips scroll only as far as they must, from where they were.
         self.scrolls = chrome.scrolls;
@@ -1002,6 +1026,7 @@ impl App {
 
     /// Follows the mouse to `point`: the cursor's shape, and what's drawn
     /// lit up under it.
+    #[allow(clippy::too_many_lines, reason = "each thing the mouse can be over")]
     fn pointer_moved(&mut self, point: [f32; 2]) {
         self.pointer = Some(point);
         if self.shortcut_help.is_some() {
@@ -1021,7 +1046,13 @@ impl App {
             | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
-            Hit::Settings(hit) if hit != crate::settings::view::SettingsHit::Panel => {
+            Hit::Settings(hit)
+                if !matches!(
+                    hit,
+                    crate::settings::view::SettingsHit::Panel
+                        | crate::settings::view::SettingsHit::Backdrop
+                ) =>
+            {
                 CursorIcon::Pointer
             }
             Hit::Panes if let Some(axis) = self.desk.divider_at(point) => match axis {
@@ -3219,6 +3250,16 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::Settings(_)
         | Hit::Nothing => Ok(()),
     }
+}
+
+/// What Easy was laid out for: what the menu showed, and the window's
+/// size and text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SettingsKey {
+    menu: Option<(u64, u64, u64)>,
+    size: [f32; 2],
+    metrics: Metrics,
+    mono_em: f32,
 }
 
 /// The sizes the window's frame is worked out from, for `fonts` and

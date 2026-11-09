@@ -45,10 +45,19 @@ pub(super) struct Easy {
     /// The keys moved last, not the mouse: what they're on is shown.
     keys: bool,
     /// A slider being dragged: its row, and the value it's at.
-    sliding: Option<(usize, Value)>,
+    sliding: Option<Sliding>,
     /// Each entry's words, which a search matches.
     items: Items,
     ranking: Ranking,
+}
+
+/// A slider being dragged: its row and entry, kept from when the button
+/// went down, whatever the keys do meanwhile, and the value it's at.
+#[derive(Debug)]
+struct Sliding {
+    row: usize,
+    entry: &'static Entry,
+    value: Value,
 }
 
 /// A row Easy shows: an entry of its own, or, found by a search, one only
@@ -63,7 +72,7 @@ enum Shown {
 const ADVANCED_FOUND: usize = 8;
 
 /// What the foot says until something's saved.
-const SAVES: &str = "Changes save to client/settings.lua as you make them";
+const SAVES: &str = "Changes save as you make them";
 
 impl Easy {
     pub(super) fn new(case: Case) -> Self {
@@ -350,15 +359,17 @@ impl SettingsMenu {
     }
 
     /// Switches to Advanced, with its row `index` picked.
+    /// A jump, not a switch: the menu still opens in the mode it was
+    /// switched to last.
     fn go_to_advanced(&mut self, index: usize) -> Outcome {
         self.typing = false;
-        let outcome = self.go_to_mode(Mode::Advanced);
+        self.go_to_mode(Mode::Advanced);
         if let Some(rank) =
             (0..self.ranking.len()).find(|&rank| self.ranking.get(rank) == Some(index))
         {
             self.picker.set_selected(rank);
         }
-        outcome
+        Outcome::Changed
     }
 
     /// Changes `entry`'s options as its control does when it's pressed,
@@ -385,7 +396,7 @@ impl SettingsMenu {
                 self.easy_step_entry(entry, 1, false, facts, history)
             }
             (Control::Slider { .. }, Some(Part::Slider(at))) => {
-                self.slide_to(entry, at);
+                self.slide_to(self.easy.focus, entry, at);
                 self.easy_slid(facts, history)
             }
             (Control::Cards(_), Some(Part::Card(at))) => {
@@ -473,7 +484,8 @@ impl SettingsMenu {
             }
             Control::Segmented { choices, .. } => {
                 let len = choices.len();
-                let next = picked_choice(entry, facts).map_or(0, |at| stepped(at, by, len, round));
+                let near = choice_of(entry, |info| facts.store.configured_value(info), true);
+                let next = near.map_or(0, |at| stepped(at, by, len, round));
                 self.pick_choice(entry, next, facts, history)
             }
             Control::Cards(_) => {
@@ -488,19 +500,21 @@ impl SettingsMenu {
                 let value = Value::Text(agents[next].0.clone());
                 self.change(info, value.clone(), Some(value), facts, history)
             }
-            Control::Slider {
-                option,
-                min,
-                max,
-                step,
-                ..
-            } => {
+            Control::Slider { option, step, .. } => {
+                // From the real value, within the option's own range: the
+                // slider only shows one past its ends at the end.
                 let info = find(option).expect("an option");
-                let now = hundredths(&facts.store.configured_value(info)).clamp(*min, *max);
+                let (low, high) = match info.kind {
+                    Kind::Decimal { min, max } | Kind::Number { min, max, .. } => {
+                        (min.saturating_mul(100), max.saturating_mul(100))
+                    }
+                    _ => return Outcome::Nothing,
+                };
+                let now = hundredths(&facts.store.configured_value(info));
                 let next = if by > 0 {
-                    (now + step).min(*max)
+                    now.saturating_add(*step).min(high)
                 } else {
-                    now.saturating_sub(*step).max(*min)
+                    now.saturating_sub(*step).max(low)
                 };
                 let value = of_hundredths(info, next);
                 self.change(info, value.clone(), Some(value), facts, history)
@@ -555,7 +569,7 @@ impl SettingsMenu {
                 })
             })
             .collect();
-        self.change_all(entry.name(), sets, facts, history)
+        self.change_all(sets, facts, history)
     }
 
     /// `r`: puts the row focused back as it starts.
@@ -577,7 +591,7 @@ impl SettingsMenu {
                 saved: None,
             })
             .collect();
-        self.change_all(entry.name(), sets, facts, history)
+        self.change_all(sets, facts, history)
     }
 
     /// `u`: undoes the last change to the row focused.
@@ -585,21 +599,18 @@ impl SettingsMenu {
         let Some(Shown::Entry(entry)) = self.easy_focused() else {
             return Outcome::Nothing;
         };
-        let name = match entry.control {
+        // The newest change to any of its options, made here or in
+        // Advanced.
+        let names: Vec<String> = match entry.control {
             Control::Keys(action) => match key_bound(action, facts) {
-                Some(bound) => bound.name(),
+                Some(bound) => vec![bound.name()],
                 None => return Outcome::Nothing,
             },
-            _ => entry.name(),
+            _ => (entry.control.options().iter())
+                .map(|&name| name.to_owned())
+                .collect(),
         };
-        // A row of several options undoes changes made to it here, or to
-        // its one option in Advanced.
-        if !history.0.contains_key(&name)
-            && let [only] = entry.control.options()
-        {
-            return self.undo_named((*only).to_owned(), facts, history);
-        }
-        self.undo_named(name, facts, history)
+        self.undo_named(&names, facts, history)
     }
 
     /// `o`: opens the line that set the row focused, if a line did.
@@ -607,10 +618,13 @@ impl SettingsMenu {
         let Some(Shown::Entry(entry)) = self.easy_focused() else {
             return Outcome::Nothing;
         };
-        let by = (entry.control.options().iter())
-            .filter_map(|name| find(name).ok())
-            .map(|info| facts.store.set_by_in(facts.window, info))
-            .find(|by| by.at.is_some());
+        // Where it's locked first, as Enter and its place open.
+        let by = locked(entry, facts).or_else(|| {
+            (entry.control.options().iter())
+                .filter_map(|name| find(name).ok())
+                .map(|info| facts.store.set_by_in(facts.window, info))
+                .find(|by| by.at.is_some())
+        });
         match by {
             Some(by) => self.open_set_by(by, facts),
             None => self.refuse("no line of config set it"),
@@ -619,7 +633,7 @@ impl SettingsMenu {
 
     /// A slider is dragged to `at` thousandths along: its value is shown,
     /// and the sample drawn at it, but nothing's set until it's let go.
-    fn slide_to(&mut self, entry: &'static Entry, at: u16) {
+    fn slide_to(&mut self, row: usize, entry: &'static Entry, at: u16) {
         let Control::Slider {
             option,
             min,
@@ -636,17 +650,13 @@ impl SettingsMenu {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let steps = (along * span / f64::from(step)).round() as u32;
         let value = of_hundredths(info, (min + steps * step).min(max));
-        let row = self.easy.focus;
-        self.easy.sliding = Some((row, value));
+        self.easy.sliding = Some(Sliding { row, entry, value });
     }
 
     /// The slider dragged is let go: its value is set and saved.
     pub(crate) fn easy_slid(&mut self, facts: &Facts, history: &mut History) -> Outcome {
-        let Some((row, value)) = self.easy.sliding.take() else {
+        let Some(Sliding { entry, value, .. }) = self.easy.sliding.take() else {
             return Outcome::Nothing;
-        };
-        let Some(Shown::Entry(entry)) = self.easy_rows().get(row).copied() else {
-            return Outcome::Changed;
         };
         let Some(info) = entry
             .control
@@ -665,13 +675,10 @@ impl SettingsMenu {
     /// The mouse, with its button held, moved to `at` thousandths along
     /// the slider being dragged.
     pub(crate) fn slide(&mut self, at: u16) -> Outcome {
-        let Some((row, _)) = self.easy.sliding else {
+        let Some(Sliding { row, entry, .. }) = self.easy.sliding else {
             return Outcome::Nothing;
         };
-        let Some(Shown::Entry(entry)) = self.easy_rows().get(row).copied() else {
-            return Outcome::Nothing;
-        };
-        self.slide_to(entry, at);
+        self.slide_to(row, entry, at);
         Outcome::Changed
     }
 
@@ -692,7 +699,7 @@ impl SettingsMenu {
         self.easy.keys = false;
         match hit {
             SettingsHit::Panel => Outcome::Nothing,
-            SettingsHit::Close => Outcome::Close,
+            SettingsHit::Backdrop | SettingsHit::Close => Outcome::Close,
             SettingsHit::Mode(mode) => self.go_to_mode(mode),
             SettingsHit::Advanced => self.go_to_mode(Mode::Advanced),
             SettingsHit::Search => {
@@ -737,7 +744,7 @@ impl SettingsMenu {
                         if locked(entry, facts).is_some() {
                             return Outcome::Changed;
                         }
-                        self.slide_to(entry, at);
+                        self.slide_to(usize::from(row), entry, at);
                         Outcome::Changed
                     }
                     (Shown::Entry(entry), SettingsHit::Control(_, part)) => {
@@ -802,9 +809,12 @@ impl SettingsMenu {
         self.said_saved = Some((said, warning));
     }
 
-    /// The page as the window last drew it, from its part `top`.
-    pub(crate) fn easy_drawn(&mut self, top: usize) {
+    /// The page as the window last drew it, from its part `top`. Returns
+    /// whether that changes what it shows.
+    pub(crate) fn easy_drawn(&mut self, top: usize) -> bool {
+        let changed = self.easy.top != top || self.easy.reveal;
         self.easy.drawn(top);
+        changed
     }
 
     /// What Easy draws.
@@ -826,13 +836,20 @@ impl SettingsMenu {
             (page.title().to_owned(), page.subtitle().to_owned())
         };
         self.easy.focus = self.easy.focus.min(found.saturating_sub(1));
-        let mut index = 0;
+        // Every key bound, once, if a row shows keys.
+        let keys_shown = (sections.iter().flat_map(|(_, rows)| rows)).any(|shown| {
+            matches!(shown, Shown::Entry(entry) if matches!(entry.control, Control::Keys(_)))
+        });
+        let all = if keys_shown {
+            bindings(facts.keys)
+        } else {
+            Vec::new()
+        };
         let mut drawn = Vec::new();
         for (heading, rows) in sections {
             let mut views = Vec::new();
             for shown in rows {
-                views.push(self.row_view(shown, index, searching, facts));
-                index += 1;
+                views.push(self.row_view(shown, searching, facts, &all));
             }
             drawn.push(SectionView {
                 heading,
@@ -877,13 +894,13 @@ impl SettingsMenu {
             footer,
             warning,
             fonts,
-            sliding: self.easy.sliding.as_ref().map(|(row, _)| *row),
+            sliding: self.easy.sliding.as_ref().map(|sliding| sliding.row),
         }
     }
 
-    /// Row `index` as it's drawn.
+    /// A row as it's drawn, with `all` the keys bound, if it shows keys.
     #[allow(clippy::too_many_lines, reason = "each kind of control")]
-    fn row_view(&mut self, shown: Shown, index: usize, searching: bool, facts: &Facts) -> RowView {
+    fn row_view(&mut self, shown: Shown, searching: bool, facts: &Facts, all: &[Bound]) -> RowView {
         let entry = match shown {
             Shown::Entry(entry) => entry,
             Shown::Advanced(at) => {
@@ -933,31 +950,19 @@ impl SettingsMenu {
         });
         if differs && lock.is_none() {
             let now = match &entry.control {
-                Control::Segmented { options, choices } => {
-                    let now: Vec<Value> = infos.iter().map(|info| facts.store.get(info)).collect();
-                    (choices.iter())
-                        .find(|choice| {
-                            (options.iter().zip(choice.values).zip(&now)).all(
-                                |((name, word), value)| {
-                                    find(name)
-                                        .ok()
-                                        .and_then(|info| choice_value(info, word))
-                                        .as_ref()
-                                        == Some(value)
-                                },
-                            )
-                        })
-                        .map_or_else(
-                            || {
-                                (infos.iter())
-                                    .map(|info| {
-                                        crate::options::show_value(info, &facts.store.get(info))
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            },
-                            |choice| choice.label.to_owned(),
-                        )
+                Control::Segmented { choices, .. } => {
+                    let at = choice_of(entry, |info| facts.store.get(info), false);
+                    (at.and_then(|at| choices.get(at))).map_or_else(
+                        || {
+                            (infos.iter())
+                                .map(|info| {
+                                    crate::options::show_value(info, &facts.store.get(info))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        },
+                        |choice| choice.label.to_owned(),
+                    )
                 }
                 _ => infos.first().map_or_else(String::new, |info| {
                     easy_value(entry, info, &facts.store.get(info))
@@ -991,7 +996,7 @@ impl SettingsMenu {
                 option, min, max, ..
             } => {
                 let value = match &self.easy.sliding {
-                    Some((row, value)) if *row == index => value.clone(),
+                    Some(sliding) if std::ptr::eq(sliding.entry, entry) => sliding.value.clone(),
                     _ => configured(option),
                 };
                 let span = f64::from(max - min).max(1.0);
@@ -1035,7 +1040,6 @@ impl SettingsMenu {
             Control::Keys(action) => {
                 // Keys bound to the action, and keys bound to type those,
                 // as the menu saves them.
-                let all = bindings(facts.keys);
                 let normal = |bound: &&Bound| bound.modes.contains(&KeyMode::Normal);
                 let own: Vec<&Bound> = (all.iter())
                     .filter(normal)
@@ -1160,7 +1164,11 @@ impl SettingsMenu {
         }
         // The size being dragged to, against the size it's drawn at now.
         let scale = match &self.easy.sliding {
-            Some((_, Value::Decimal(size))) => {
+            Some(Sliding {
+                entry,
+                value: Value::Decimal(size),
+                ..
+            }) if entry.control.options() == ["fontsize"] => {
                 let now = match facts.shown(find("fontsize").expect("an option")) {
                     Value::Decimal(now) => now.as_f32(),
                     _ => size.as_f32(),
@@ -1199,15 +1207,27 @@ fn stepped(at: usize, by: isize, len: usize, round: bool) -> usize {
 
 /// Which of `entry`'s choices its options are configured as, if any.
 fn picked_choice(entry: &Entry, facts: &Facts) -> Option<usize> {
+    choice_of(entry, |info| facts.store.configured_value(info), false)
+}
+
+/// Which of `entry`'s choices its options, as `value` gives them, are, or
+/// do the same as; or with `near`, are nearest to, though no choice.
+fn choice_of(entry: &Entry, value: impl Fn(&Info) -> Value, near: bool) -> Option<usize> {
     let Control::Segmented { options, choices } = &entry.control else {
         return None;
     };
-    choices.iter().position(|choice| {
-        (options.iter().zip(choice.values)).all(|(name, word)| {
-            find(name).is_ok_and(|info| {
-                choice_value(info, word).as_ref() == Some(&facts.store.configured_value(info))
-            })
+    let now: Vec<Option<Value>> = (options.iter())
+        .map(|name| find(name).ok().map(&value))
+        .collect();
+    let is = |values: &[&str]| {
+        (options.iter().zip(values).zip(&now)).all(|((name, word), now)| {
+            find(name).is_ok_and(|info| choice_value(info, word) == *now)
         })
+    };
+    choices.iter().position(|choice| {
+        is(choice.values)
+            || choice.also.iter().any(|values| is(values))
+            || near && choice.near.iter().any(|values| is(values))
     })
 }
 
