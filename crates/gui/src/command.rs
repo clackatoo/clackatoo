@@ -155,6 +155,8 @@ pub(crate) enum Command {
     Zoom,
     /// Open again the pane or tab closed last.
     Reopen,
+    /// Label what's worth picking in the focused pane, to pick by label.
+    Hints,
     /// `:bd`: close the focused pane's chat for good, a subagent's too,
     /// whose pane `:q` only sends back to the background.
     CloseChat,
@@ -446,6 +448,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "close" => return Ok(Command::Close),
         "zoom" => return Ok(Command::Zoom),
         "reopen" => return Ok(Command::Reopen),
+        "hints" => return Ok(Command::Hints),
         "reload" => return Ok(Command::Reload),
         "set" | "se" | "setpersist" | "setp" => {
             return Ok(Command::Set {
@@ -1024,6 +1027,7 @@ command_names! {
     "close" => "Close the focused pane",
     "zoom" => "Zoom the focused pane to fill its tab, or unzoom",
     "reopen" => "Open again the pane or tab closed last",
+    "hints" => "Label links, paths and hashes in the pane to pick by key",
     "bdelete" => "Close this chat for good, a subagent's too",
     "bg" => "Move the tab to the background, or run a command there",
     "bgpane" => "Move the focused terminal to the background",
@@ -1232,6 +1236,7 @@ mod tests {
         ("close", ""),
         ("zoom", ""),
         ("reopen", ""),
+        ("hints", ""),
         ("bdelete", ""),
         ("bd", "bdelete"),
         ("reload", ""),

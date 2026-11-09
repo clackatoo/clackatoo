@@ -12,6 +12,7 @@
 //! | `\|` `-` | Splits the pane, to the right or below |
 //! | `x` | Closes the pane |
 //! | `z` | Zooms the pane to fill its tab, or puts the splits back, as tmux's `z` does (see [`super::layouts`]) |
+//! | `f` | Labels the links, paths, addresses and hashes in the pane, to open, copy or type by label, as tmux-fingers does (see [`super::hints`]) |
 //! | `o` `i` | Back and forward through the jump list, within the tab (see [`super::jumps`]) |
 //! | `a` | Opens a chat with an agent, to the right |
 //! | `w` | Picks a workspace, or makes one, in the palette |
@@ -116,6 +117,8 @@ pub(crate) enum Action {
     Zoom,
     /// The pane or tab closed last, opened again.
     Reopen,
+    /// Hints mode: what's worth picking in the focused pane, labelled.
+    Hints,
     /// Back through the jump list, or forward, within the tab or anywhere.
     Jump {
         back: bool,
@@ -258,6 +261,8 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b>x", Action::Close, Some("close pane"));
     // As tmux's.
     bind("niv", "<C-b>z", Action::Zoom, Some("zoom pane"));
+    // As tmux-fingers' prefix F, lower case to need no Shift.
+    bind("niv", "<C-b>f", Action::Hints, Some("hints"));
     let jump = |back| Action::Jump {
         back,
         within_tab: true,
@@ -547,6 +552,7 @@ impl Desk {
             Action::Close => self.run(Command::Close),
             Action::Zoom => self.run(Command::Zoom),
             Action::Reopen => self.run(Command::Reopen),
+            Action::Hints => self.run(Command::Hints),
             Action::ParentChat => self.go_to_parent_chat(),
             // `3<C-o>` goes back three places, as in Vim.
             Action::Jump { back, within_tab } => {

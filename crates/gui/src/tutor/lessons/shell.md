@@ -99,6 +99,20 @@ Links are also what programs print as links, such as `ls --hyperlink`, gcc and g
 
 When a program takes the mouse, as htop does, Ctrl+click is the program's, and Ctrl+Shift+click opens the link.
 
+## Pick by label
+
+Ctrl+B and then `f`, or `:hints`, labels every link, file name, mail and IP address and git hash on screen with a letter or two, as kitty's hints and tmux-fingers do, in terminals, editors and chats alike. Type a label to open what it labels, as Ctrl+click would, asking first for a link that isn't a plain web one; what can't be opened, as a hash, is copied. With Shift on its last letter, it's copied, as Ctrl+Shift+C copies; with Alt, it's typed at the prompt. Esc puts the labels away. The `hintpattern` option adds a regular expression of your own, as `CLACKA-\d+`.
+
+```setup
+run "echo commit 7e84c2e9 is at https://example.com"
+```
+
+Press Ctrl+B and then `f`, then type the hash's label, holding Shift.
+
+```check
+copied "7e84c2e9"
+```
+
 ## After a restart
 
 clackatoo keeps your workspaces, tabs and panes as they change, so they come back after a restart, a shutdown, a crash or a power cut: each terminal as a new shell in the folder it was in, each editor on its file with its cursor where it was, explorers, boards, reviews, and chats, which go on with their agent's session once you look at one or send it a message. Scrollback and running programs don't come back.

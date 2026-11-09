@@ -180,6 +180,7 @@ mod elsewhere;
 mod explorers;
 mod finding;
 mod formatting;
+mod hints;
 mod jumps;
 mod layouts;
 mod lessons;
@@ -195,6 +196,7 @@ mod places;
 mod restored;
 mod scrolling;
 mod view;
+pub(crate) use hints::HintMark;
 pub(crate) use restored::Offer;
 mod reviews;
 mod script;
@@ -408,6 +410,8 @@ pub(crate) struct Desk {
     /// A link's target the bar asks whether to open, until the next key
     /// (see [`Desk::open_url`]).
     link_asked: Option<links::LinkAsked>,
+    /// The hints labelled in the focused pane, while hints mode is on.
+    hinting: Option<hints::Hinting>,
     /// The terminal whose pane a mouse button went down in, and the
     /// button: it gets the drag, wherever the pointer goes.
     dragging: Option<(TerminalId, MouseButton)>,
@@ -608,8 +612,8 @@ impl Desk {
     /// Where typed text goes now, if keys type text rather than being
     /// commands, as they are in normal mode.
     pub(crate) fn text_goes_to(&self) -> Option<TextTarget> {
-        // A link asked about takes keys, not text.
-        if self.link_asked.is_some() {
+        // A link asked about takes keys, not text, as hints do.
+        if self.link_asked.is_some() || self.hinting.is_some() {
             return None;
         }
         if self.input.is_some() || self.finding() {
@@ -892,6 +896,9 @@ impl Desk {
     /// What the status line shows, but with nothing under what's typed.
     fn status_alone(&self) -> Status {
         if let Some(status) = self.link_status() {
+            return status;
+        }
+        if let Some(status) = self.hint_status() {
             return status;
         }
         if let Some(input) = &self.input {
@@ -2058,6 +2065,10 @@ impl Desk {
         if self.drop_question_key(pressed) {
             return true;
         }
+        // And hints, a label's letters.
+        if self.hint_key(press) {
+            return true;
+        }
         if self.chat_modal_key(press) {
             return true;
         }
@@ -2855,6 +2866,7 @@ impl Desk {
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
             Command::Zoom => self.toggle_zoom(),
+            Command::Hints => self.start_hints(),
             Command::Reopen => self.reopen(),
             Command::CloseChat => self.close_chat(),
             Command::Edit { place, path } => self.open_file(place, path),
@@ -3067,6 +3079,7 @@ mod tests {
     mod blank;
     mod dragging;
     mod folders;
+    mod hints;
     mod lessons;
     mod machines;
     mod markdown;
@@ -4763,6 +4776,7 @@ mod tests {
                 ("-", "split below"),
                 ("x", "close pane"),
                 ("z", "zoom pane"),
+                ("f", "hints"),
                 ("o", "jump back"),
                 ("i", "jump forward"),
                 ("a", "agent chat"),

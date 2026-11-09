@@ -1391,6 +1391,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Ctrl+Shift+T or :reopen opens again the pane or tab you closed last, where it was",
     },
+    News {
+        id: "hints",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Ctrl+B f labels links, paths, addresses and hashes in any pane, to open, copy or type by key",
+    },
 ];
 
 impl News {

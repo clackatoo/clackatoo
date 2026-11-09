@@ -688,6 +688,12 @@ options! {
     /// does; and the matches of `:g`'s pattern. Nothing changes until
     /// Enter, and Esc puts the view back. `none` shows nothing.
     inccommand("icm", "Preview substitutions while typing") in Search: InCommand = InCommand::NoSplit;
+    /// A regular expression whose matches hints mode labels too, after
+    /// links, paths, addresses and hashes, as Rust's `regex` crate reads
+    /// it: `CLACKA-\d+`, say, or several joined with `|`. Empty, as it
+    /// starts, adds none. One that can't be read is said in the bar as
+    /// hints start, and left out.
+    hintpattern("hpat", "Extra regex that hints mode labels") in Search: String = String::new();
     /// As a word is typed in an editor, or a character its language server
     /// says should ask, such as `.`, ask the server what could be typed
     /// and show it in a menu under the cursor. Off, Ctrl+Space, Ctrl+N and

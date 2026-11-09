@@ -2303,6 +2303,45 @@ pub(crate) fn paint_pane_numbers(
     (fills, texts)
 }
 
+/// Hints mode's labels (see `desk::hints`): each hint underlined in
+/// clackatoo's colour, and the letters of its label still to type over
+/// its start, on that colour, in the terminal's font.
+pub(crate) fn paint_hints<'a>(
+    geometry: &Geometry,
+    marks: &[crate::desk::HintMark<'a>],
+) -> (Vec<Fill>, Vec<Text<'a>>) {
+    let [cell_width, cell_height] = geometry.metrics.cell;
+    let stroke = (cell_height / 12.0).round().max(1.0);
+    let mut fills = Vec::new();
+    let mut texts = Vec::new();
+    for mark in marks {
+        let Some(&[x, y, _, height]) = mark.rects.first() else {
+            continue;
+        };
+        for &[x, y, width, height] in mark.rects {
+            fills.push(Fill::solid(
+                [x, y + height - stroke, width, stroke],
+                Paint::Accent,
+            ));
+        }
+        let left = mark.label.get(mark.typed..).unwrap_or_default();
+        #[allow(clippy::cast_precision_loss, reason = "a letter or two")]
+        let width = (left.chars().count() as f32 * cell_width).round();
+        let top = (y + (height - cell_height) / 2.0).round();
+        fills.push(Fill::solid(
+            [x.round(), top, width, cell_height],
+            Paint::Accent,
+        ));
+        texts.push(Text {
+            origin: [x.round(), top],
+            content: left,
+            ink: Ink::OnColor,
+            font: TextFont::Mono,
+        });
+    }
+    (fills, texts)
+}
+
 /// The pill over `tile`'s bottom right that says how far its terminal is
 /// scrolled back, `pill`, as [`Pane::pill`](crate::pane::Pane::pill) words
 /// it: raised as the palette is, its distance in the text colour and the

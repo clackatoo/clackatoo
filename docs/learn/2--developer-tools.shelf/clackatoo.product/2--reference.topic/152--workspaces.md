@@ -396,6 +396,7 @@ other pane, `5:` opens the command line as `:` does. From a selection it's
 | `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/chats-together#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
 | `:reopen` | [Opens again](#opening-again-what-was-closed) the pane or tab closed last. |
 | `:zoom` | [Zooms the focused pane](#zooming-a-pane) to fill its tab, or puts the splits back. |
+| `:hints` | Labels what's worth picking in the focused pane, as [hints](#hints) say. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
 | `:bd`, `:bdelete` | Closes the focused chat for good, pane and all: a subagent's too, which `:q` and `:close` only send back to the background. |
 | `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor-files#writing). |
@@ -498,6 +499,30 @@ Going back first remembers where you are, so going forward comes back to it.
 Going back and then jumping somewhere new forgets the way forward. Panes that
 have closed are skipped. Each window has its own list.
 
+### Hints
+
+<kbd>Ctrl</kbd>+<kbd>B</kbd> `f`, or `:hints`, labels everything worth picking
+in the focused pane with a letter or two, as kitty's hints and tmux-fingers
+do: URLs, file paths with their `:line:col`, mail addresses, IP addresses, and
+git hashes (7 to 64 hex digits, holding a digit and a letter). It reads what
+the pane draws, so it works the same in a terminal, an editor, an explorer, a
+board, a review or a chat. A link wrapped over two rows of a terminal is one
+hint. Those nearest the bottom get the home row's letters first.
+
+| Type | Does |
+|---|---|
+| A label | Opens it, as <kbd>Ctrl</kbd>+click does: a URL with your browser, asking first for one that isn't a plain web link or a mail address; a path in an editor at its line, from the pane's folder; a mail address in your mail program. What can't be opened, such as a hash, is copied. |
+| A label, <kbd>Shift</kbd> on its last letter | Copies it, as <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies. |
+| A label, <kbd>Alt</kbd> on its last letter | Types it into the pane, as a paste: at the prompt, at an editor's cursor, or in a chat's box. |
+| <kbd>Backspace</kbd> | Takes back the last letter typed. |
+| <kbd>Esc</kbd>, or any other key | Puts the labels away. |
+
+The [`hintpattern`](~clackatoo/reference/config#options) option adds a
+regular expression of your own, as Rust's `regex` crate reads it:
+`client.opt.hintpattern = [[CLACKA-\d+]]` labels issue numbers too, and
+several join with `|`. One that can't be read is said in the bar, and left
+out. A Markdown file shown rendered has nothing labelled yet.
+
 ### Macros and marks across panes
 
 In normal mode, `q` and a register start recording, `q` stops, and `@a`, `3@a`
@@ -551,6 +576,7 @@ program, are bindings like any you make, so
 | `a` | Opens a [chat with an agent](~clackatoo/reference/agents) to the right. |
 | `x` | Closes the pane; a subagent's goes back to the background. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> [opens it again](#opening-again-what-was-closed). |
 | `z` | [Zooms the pane](#zooming-a-pane) to fill its tab, or puts the splits back. |
+| `f` | Labels what's worth picking in the pane, as [hints](#hints) say. |
 | `u` | From a [subagent's](~clackatoo/reference/chats-together#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
 | `r` | Opens the [machine picker](~clackatoo/reference/connecting#picking-a-machine), to open a window on another machine, as `:connect` does. |

@@ -285,7 +285,7 @@ impl ChatView {
 
     /// The bytes of `shown`'s lines, laid out as `layout`, that are in
     /// view, if any are.
-    fn bytes_in_view(
+    pub(in crate::chat) fn bytes_in_view(
         &self,
         shown: &super::paint::Shown,
         layout: &parley::Layout<super::Brush>,

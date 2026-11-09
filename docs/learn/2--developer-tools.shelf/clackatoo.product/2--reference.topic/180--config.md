@@ -332,6 +332,7 @@ short name, as in Vim, which works everywhere the long one does.
 |---|---|---|---|
 | `showhost` | `shh` | When a workspace from another machine shows its machine after its name, as `notes@desk`: only while another workspace has the same name (`ambiguous`), always (`always`), or never (`never`). | `ambiguous` |
 | `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/connecting#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
+| `hintpattern` | `hpat` | A regular expression whose matches [hints](~clackatoo/reference/workspaces#hints) label too, as `CLACKA-\d+`. One that can't be read is said in the bar as hints start. | none |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as
 `client.opt.number = 1`, is a mistake. `renderer` and `priority` are read only

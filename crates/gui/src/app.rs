@@ -2642,7 +2642,7 @@ impl App {
         // A pill over each terminal scrolled back from its live screen,
         // but for while something is raised over the panes, which its
         // text would show through, as texts are drawn over every fill.
-        if !chrome.raises_over_panes(self.hover) && !desk.numbering_panes() {
+        if !chrome.raises_over_panes(self.hover) && !desk.numbering_panes() && !desk.hinting() {
             // What each subagent's band says.
             for (tile, band, parts) in &bands {
                 texts.extend(chrome::paint_band(geometry, tile, *band, parts).1);
@@ -2665,6 +2665,13 @@ impl App {
             let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
             over.extend(fills);
             texts.extend(numbers);
+        }
+        // Hints: each one's label, over its start, to pick it by.
+        let marks = desk.hint_marks();
+        if !marks.is_empty() && self.shortcut_help.is_none() {
+            let (fills, labels) = chrome::paint_hints(geometry, &marks);
+            over.extend(fills);
+            texts.extend(labels);
         }
         let transparent = self.frame.as_ref()?.transparent;
         let picture = Picture {

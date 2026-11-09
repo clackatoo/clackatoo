@@ -164,7 +164,6 @@ pub(crate) fn mention_at(text: &str, at: usize) -> Option<Found> {
 }
 
 /// Every link in `text`, in order.
-#[cfg(test)]
 pub(crate) fn find_all(text: &str) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
     let mut at = 0;

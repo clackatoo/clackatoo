@@ -19,6 +19,7 @@ mod filling;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod handoff;
+mod hints;
 mod images;
 pub(crate) mod mentions;
 mod navigation;

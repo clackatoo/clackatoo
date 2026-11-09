@@ -94,6 +94,24 @@ impl Desk {
     }
 }
 
+impl<'a> PaneView<'a> {
+    /// The rows a pane of cells draws, `rows` of them for a terminal,
+    /// which draws as many as fit: `None` for a chat, which draws text
+    /// laid out instead.
+    pub(super) fn scene_rows(self, rows: usize) -> Option<Vec<&'a clackatoo_term::Row>> {
+        match self {
+            Self::Editor(_, editor, _) => Some(editor.scene().0),
+            Self::Explorer(_, explorer) => Some(explorer.scene().0),
+            Self::Board(_, board) => Some(board.scene().0),
+            Self::Review(_, review) => Some(review.scene().0),
+            Self::Browser(browser) => Some(browser.scene()),
+            Self::Other(other) => Some(other.scene()),
+            Self::Terminal(_, terminal) => Some(terminal.scene(rows).0),
+            Self::Chat(..) => None,
+        }
+    }
+}
+
 impl PaneView<'_> {
     pub(super) fn focus(self) -> Focus {
         match self {

@@ -37,6 +37,7 @@ mod form;
 mod forwards;
 mod glyphs;
 mod handoff;
+mod hints;
 mod history;
 mod hlsearch;
 pub mod hosts;
