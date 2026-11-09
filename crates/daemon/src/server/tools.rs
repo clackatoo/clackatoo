@@ -3023,25 +3023,15 @@ mod keeping_whose {
         daemon.maintain_agent_terminals(now + Duration::from_secs(1));
         assert!(!daemon.agent_terminal(unseen).unwrap().waiting);
         // Exercise the user Focus request, then focus elsewhere: selection stays sticky.
+        let focus = |pane| Request::Focus {
+            pane,
+            looking: false,
+        };
         let pane = daemon.workspaces.get().pane_showing(selected).unwrap();
-        assert!(matches!(
-            daemon.respond(
-                Request::Focus {
-                    pane,
-                    looking: false
-                },
-                mio::Token(usize::MAX)
-            ),
-            Response::Done
-        ));
+        let asked = daemon.respond(focus(pane), mio::Token(usize::MAX));
+        assert!(matches!(asked, Response::Done));
         let parent = daemon.workspaces.get().pane_showing(chat).unwrap();
-        daemon.respond(
-            Request::Focus {
-                pane: parent,
-                looking: false,
-            },
-            mio::Token(usize::MAX),
-        );
+        daemon.respond(focus(parent), mio::Token(usize::MAX));
         let saved = daemon.hand_over_agent_terminals();
         daemon.tools.commanded.clear();
         daemon.resume_agent_terminals(Some(saved));

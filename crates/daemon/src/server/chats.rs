@@ -2808,7 +2808,7 @@ mod tests {
         daemon.groups.end(
             group,
             &agent_group("claude"),
-            End::Gently(Duration::from_secs(60)),
+            End::Gently(Duration::from_mins(1)),
         );
         // Past the chat made with the daemon, numbered by hand.
         let mut id = daemon.next_terminal();
