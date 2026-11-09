@@ -924,14 +924,23 @@ impl Daemon {
                 };
                 self.wait_for(token, at, mark, Then::Pass)
             }
-            Request::Resize { terminal, size } => {
+            Request::Resize {
+                terminal,
+                size,
+                cell,
+            } => {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
-                    return Routed::Here(Request::Resize { terminal, size });
+                    return Routed::Here(Request::Resize {
+                        terminal,
+                        size,
+                        cell,
+                    });
                 };
                 // Sizes asked for while it's down are of no use later.
                 let resize = Request::Resize {
                     terminal: remote,
                     size,
+                    cell,
                 };
                 let _ = self.send_upstream(at, &ClientMessage::Request(resize), Expect::Nothing);
                 Routed::Answered(Response::Done)

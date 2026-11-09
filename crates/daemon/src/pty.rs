@@ -139,7 +139,7 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
         OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    rustix::termios::tcsetwinsize(&master, winsize(size))?;
+    rustix::termios::tcsetwinsize(&master, winsize(size, None))?;
 
     let mut command = Command::new(program.path);
     // Never at the daemon's priority: before the hook below, so it runs
@@ -232,9 +232,13 @@ impl Pty {
         rustix::termios::tcgetpgrp(&self.master).ok()
     }
 
-    /// Sets the window size the program sees. The kernel sends it SIGWINCH.
-    pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
-        Ok(rustix::termios::tcsetwinsize(&self.master, winsize(size))?)
+    /// Sets the window size the program sees, in cells and, if known,
+    /// pixels (`[width, height]`). The kernel sends it SIGWINCH.
+    pub(crate) fn resize(&self, size: Size, pixels: Option<[u16; 2]>) -> io::Result<()> {
+        Ok(rustix::termios::tcsetwinsize(
+            &self.master,
+            winsize(size, pixels),
+        )?)
     }
 }
 
@@ -244,11 +248,12 @@ impl AsRawFd for Pty {
     }
 }
 
-fn winsize(size: Size) -> Winsize {
+fn winsize(size: Size, pixels: Option<[u16; 2]>) -> Winsize {
+    let [width, height] = pixels.unwrap_or_default();
     Winsize {
         ws_row: size.rows(),
         ws_col: size.cols(),
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+        ws_xpixel: width,
+        ws_ypixel: height,
     }
 }

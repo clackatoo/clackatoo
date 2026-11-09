@@ -197,7 +197,7 @@ desktop; nothing about it passes between machines.
 | `CSI` other | `g` (clear tab stops), `r` (scroll region), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn), `t` (window operations: `22` and `23` push and pop the title, with a second parameter of 0 or 2, ten titles deep, each kept to 4096 bytes; see [queries](#queries-answered) for `18`), `>u` `<u` `=u` (the [kitty keyboard protocol](#keyboard)) |
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
-| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)) |
+| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)), 2048 ([resize reports](#resize-reports)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
 | `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)) |
 
@@ -215,7 +215,7 @@ desktop; nothing about it passes between machines.
 | `OSC 10 ; ?`, `OSC 11 ; ?`, `OSC 12 ; ?` (the text's, background's, and cursor's colors) | `OSC 11 ; rgb:1d1d/1f1f/2121 ST`, ended with BEL if the question was. Several at once, as `OSC 10 ; ? ; ?`, are answered in turn. Neovim asks for the background as it starts, to choose its light or dark colors, as vim, bat and delta do. |
 | `OSC 4 ; <index> ; ?` (a palette entry, several pairs at once) | `OSC 4 ; <index> ; rgb:… ST` for each |
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
-| `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels (`14t`, `16t`) aren't answered: the daemon knows the terminal's size in cells alone. Nor is the title read back (`21t`), which would let a program type what it set. |
+| `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels, the text area's (`14t`, as `CSI 4 ; <height> ; <width> t`) and a cell's (`16t`, as `CSI 6 ; <height> ; <width> t`), are answered once a window has said how big it draws a cell, as it does when it sizes the terminal; until then, not at all. Nor is the title read back (`21t`), which would let a program type what it set. |
 | `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say, the name said back only if it's hex, and `DCS 0 + r ST` otherwise: no answer ever says back what a program printed, which could have it type anything into the shell. It says `xterm-256color`'s name (`TN`) and colors (`Co`), 24-bit color (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and colored underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
 | `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own) and the scroll region (`r`); `DCS 0 $ r ST` for any other. |
 
@@ -293,6 +293,20 @@ rules, with what was printed side by side with the mode off kept apart.
 Selecting, searching and copying go by cells, so a cluster is one character to
 them. Text printed with the mode on in the last column that a cluster would
 widen stays one column, as variation selector 16 does there.
+
+## Resize reports
+
+A program that asks with mode 2048 (`CSI ? 2048 h`), as Neovim and
+notcurses can, is told the terminal's size in-band, in its input, as soon as
+it asks and after every resize: `CSI 48 ; <lines> ; <columns> ; <height> ;
+<width> t`, the last two the text area in pixels, or 0 while no window has
+said how big it draws a cell. It needn't wait for `SIGWINCH`, which can come
+before the terminal is redrawn at its new size. The window sizing the terminal
+says how big it draws a cell, so a bigger font is a resize too, in pixels;
+the kernel's window size has the pixels too, as `TIOCGWINSZ` reads it. A
+phone fitting a terminal leaves the pixels as the window said them. The mode
+goes on through an upgrade in place; the size in pixels comes back with the
+window's next resize.
 
 ## Synchronized output
 
@@ -374,5 +388,5 @@ These are ignored:
   about them is [answered](#queries-answered).
 - Key repeats and releases (the kitty keyboard protocol's flag 2), and
   <kbd>Super</kbd>, Hyper and Meta as modifiers.
-- In-band resize reports (mode 2048) and mouse reports in pixels (mode 1016).
+- Mouse reports in pixels (mode 1016).
 - Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).

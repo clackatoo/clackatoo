@@ -1427,6 +1427,24 @@ impl Desk {
         let Some(placement) = self.placement() else {
             return;
         };
+        // How big a cell is drawn, in whole pixels.
+        let cell = (self.area.as_ref()).and_then(|area| {
+            let pixels = |size: f32| {
+                let size = size.round();
+                (size >= 1.0 && size <= f32::from(u16::MAX)).then(|| {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a whole number in u16's range"
+                    )]
+                    let size = size as u16;
+                    size
+                })
+            };
+            Some([pixels(area.cell[0])?, pixels(area.cell[1])?])
+        });
+        // Only a daemon that reads it is told how big a cell is.
+        let cell = cell.filter(|_| self.daemon_has(wire::TERMINAL_STANDARDS_2));
         let Some(tab) = self.shown_tab() else { return };
         let panes = tab.layout.panes();
         for (id, tile) in placement.panes {
@@ -1489,7 +1507,7 @@ impl Desk {
             if let Some(chat) = self.chats.get_mut(&terminal) {
                 chat.resize(size);
             } else if let Some(pane) = self.panes.get_mut(&terminal) {
-                pane.resize(size);
+                pane.resize(size, cell);
             }
         }
     }

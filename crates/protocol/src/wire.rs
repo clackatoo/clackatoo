@@ -437,7 +437,9 @@ gates! {
     /// `widths`, the rules a terminal's lines are rebuilt by, as
     /// variation selector 16 widening an emoji. An older peer is sent
     /// lines as the rules before would rebuild them in the same columns
-    /// (`Line::from_row_for`).
+    /// (`Line::from_row_for`). And `Request::Resize`'s `cell`, the size a
+    /// window draws a cell in pixels, for programs asking a terminal's
+    /// size in pixels (mode 2048, `CSI 14 t`).
     TERMINAL_STANDARDS_2 = 147,
 }
 

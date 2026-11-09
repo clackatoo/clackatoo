@@ -916,6 +916,25 @@ impl HostedTerminal {
     /// they'd make more than [`MAX_PENDING_REPLIES`] wait: then they're
     /// dropped, all of them, as a cut one is worse than none. With nothing
     /// waiting they go however long, as a clipboard's contents may be.
+    /// Says how big a window draws a cell, in pixels (see
+    /// [`Terminal::set_cell_pixels`]), which programs reading the window's
+    /// size in pixels are told: the terminal's size, and its program, if
+    /// it asked to be told of resizes.
+    pub(crate) fn set_cell_pixels(&mut self, cell: Option<[u16; 2]>) {
+        if self.fed.is_none() {
+            self.resize_drawn(self.emulator.size(), cell);
+        }
+    }
+
+    /// Writes the program the replies the emulator has for it, as a
+    /// resize it asked to be told of makes.
+    fn queue_any_replies(&mut self) {
+        let replies = self.emulator.take_replies();
+        if !replies.is_empty() && self.pty.is_some() && self.fed.is_none() {
+            self.queue_replies(&replies);
+        }
+    }
+
     fn queue_replies(&mut self, replies: &[u8]) {
         self.flush_input();
         if !self.input.is_empty() && self.input.len() + replies.len() > MAX_PENDING_REPLIES {
@@ -946,14 +965,25 @@ impl HostedTerminal {
     /// Changes the terminal's size: the emulator's, and the one its program
     /// sees.
     pub(crate) fn resize(&mut self, size: Size) {
-        if size == self.emulator.size() {
-            return;
-        }
+        self.resize_drawn(size, None);
+    }
+
+    /// As [`resize`](Self::resize), drawn in cells `cell` pixels big, if
+    /// that's said, as `[width, height]`: else as big as was last said.
+    pub(crate) fn resize_drawn(&mut self, size: Size, cell: Option<[u16; 2]>) {
+        let before = (self.emulator.size(), self.emulator.pixels());
         // Resize the emulator first, so output written for the new size
         // after SIGWINCH lands on a screen of that size.
-        self.emulator.resize(size);
+        match cell {
+            Some(cell) => self.emulator.resize_to(size, Some(cell)),
+            None => self.emulator.resize(size),
+        }
+        if (self.emulator.size(), self.emulator.pixels()) == before {
+            return;
+        }
+        self.queue_any_replies();
         if let Some(pty) = &self.pty
-            && let Err(err) = pty.resize(size)
+            && let Err(err) = pty.resize(size, self.emulator.pixels())
         {
             log::warn!(
                 "terminal {}: setting the window size failed: {err}",
@@ -962,7 +992,7 @@ impl HostedTerminal {
         }
         // Recordings have one size, in their header, so a replay of what
         // follows would be wrong.
-        if self.recording.take().is_some() {
+        if self.emulator.size() != before.0 && self.recording.take().is_some() {
             log::info!("terminal {}: recording stopped by a resize", self.id);
         }
     }

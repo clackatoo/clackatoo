@@ -1712,6 +1712,23 @@ fn a_long_command_ending_is_told_but_not_an_end_a_program_printed() {
 }
 
 #[test]
+fn a_program_asking_is_told_of_resizes_with_the_window_s_pixels() {
+    let daemon = TestDaemon::start();
+    let script = r"stty raw -echo; printf '\033[?2048h'; \
+                   head -c 15 | od -An -tx1; head -c 20 | od -An -tx1; sleep 5";
+    let (terminal, mut clients) = followed(&daemon, script, 1, 0);
+    // Told at once, with no pixels known.
+    wait_for_answer(&mut clients[0], terminal, b"\x1b[48;10;80;0;0t");
+    let resize = Request::Resize {
+        terminal,
+        size: Size::new(100, 10).unwrap(),
+        cell: Some([8, 16]),
+    };
+    assert_eq!(clients[0].request(&resize).unwrap(), Response::Done);
+    wait_for_answer(&mut clients[0], terminal, b"\x1b[48;10;100;160;800t");
+}
+
+#[test]
 fn a_terminal_is_marked_for_the_phone_and_its_view_says_so() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

@@ -783,6 +783,15 @@ pub enum Request {
         terminal: TerminalId,
         /// The new size.
         size: Size,
+        /// How big the window asking draws a cell, in pixels, as `[width,
+        /// height]`, for programs that ask the terminal's size in pixels.
+        /// `None` from a client that doesn't say, or older than protocol
+        /// 143: the size it last said is kept.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS_2 }, _>",
+            deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS_2 }, _, _>"
+        )]
+        cell: Option<[u16; 2]>,
     },
     /// Starts sending the terminal's view: a snapshot, then a patch
     /// whenever it changes (see the crate docs). Attaching twice is

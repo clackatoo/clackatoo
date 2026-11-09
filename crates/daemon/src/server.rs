@@ -3695,9 +3695,13 @@ impl Daemon {
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
             }
-            Request::Resize { terminal, size } => {
-                self.resize_asked(terminal, size).map(|()| Response::Done)
-            }
+            Request::Resize {
+                terminal,
+                size,
+                cell,
+            } => self
+                .resize_asked(terminal, size, cell)
+                .map(|()| Response::Done),
             Request::Attach { terminal } => self.attach(token, terminal).map(|()| Response::Done),
             Request::AttachRecent { terminal, first } => (|| {
                 self.attach(token, terminal)?;

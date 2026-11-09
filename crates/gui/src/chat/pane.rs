@@ -675,8 +675,14 @@ impl ChatPane {
     /// the size a window last fitted it to is the size it is.
     pub(crate) fn resize(&mut self, size: Size) {
         let terminal = self.terminal();
-        self.requests
-            .request(Request::Resize { terminal, size }, Pending::Other);
+        self.requests.request(
+            Request::Resize {
+                terminal,
+                size,
+                cell: None,
+            },
+            Pending::Other,
+        );
     }
 
     /// Applies a view update. Returns whether it must be redrawn.
@@ -851,7 +857,7 @@ mod tests {
     fn a_chat_takes_over_its_terminals_mode_and_the_requests_it_sent() {
         let mut terminal = Pane::new(TerminalId(4));
         terminal.enter_normal_mode();
-        terminal.resize(clackatoo_protocol::Size::new(80, 24).unwrap());
+        terminal.resize(clackatoo_protocol::Size::new(80, 24).unwrap(), None);
         let resize = terminal.take_outbox();
         let ViewUpdate::Snapshot(view) = snapshot(crate::chat::fixtures::talk(&[("hi", "hello")]))
         else {

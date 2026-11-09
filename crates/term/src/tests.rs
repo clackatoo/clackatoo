@@ -671,6 +671,44 @@ mod queries {
     }
 
     #[test]
+    fn a_program_asking_is_told_of_each_resize_in_band() {
+        let mut t = terminal(10, 5);
+        // Told at once, with no size in pixels until a window says.
+        t.advance(b"\x1b[?2048h\x1b[?2048$p");
+        assert_eq!(t.take_replies(), b"\x1b[48;5;10;0;0t\x1b[?2048;1$y");
+        t.set_cell_pixels(Some([8, 16]));
+        assert_eq!(t.take_replies(), b"\x1b[48;5;10;80;80t");
+        t.resize(Size::new(20, 3).unwrap());
+        assert_eq!(t.take_replies(), b"\x1b[48;3;20;48;160t");
+        // Nothing when nothing changed, nor once it's off.
+        t.resize(Size::new(20, 3).unwrap());
+        t.set_cell_pixels(Some([8, 16]));
+        assert_eq!(t.take_replies(), b"");
+        t.advance(b"\x1b[?2048l");
+        t.resize(Size::new(30, 3).unwrap());
+        assert_eq!(t.take_replies(), b"");
+        // Kept through an upgrade, as a mode.
+        t.advance(b"\x1b[?2048h");
+        let _ = t.take_replies();
+        let mut restored = Terminal::restore(&t.snapshot(), &Config::default()).unwrap();
+        restored.advance(b"\x1b[?2048$p");
+        assert_eq!(restored.take_replies(), b"\x1b[?2048;1$y");
+    }
+
+    #[test]
+    fn sizes_in_pixels_are_reported_once_a_window_has_said_them() {
+        let mut t = terminal(10, 5);
+        t.set_cell_pixels(Some([8, 16]));
+        t.advance(b"\x1b[14t\x1b[16t");
+        assert_eq!(t.take_replies(), b"\x1b[4;80;80t\x1b[6;16;8t");
+        assert_eq!(t.pixels(), Some([80, 80]));
+        // A cell of no size is none said.
+        t.set_cell_pixels(Some([0, 16]));
+        t.advance(b"\x1b[14t\x1b[16t");
+        assert_eq!(t.take_replies(), b"");
+    }
+
+    #[test]
     fn the_text_area_is_reported_in_cells_and_nothing_in_pixels() {
         assert_eq!(replies("\x1b[18t"), "\x1b[8;5;10t");
         // Nor is the title read back, which a program could be made to
@@ -817,7 +855,12 @@ mod queries {
             asked.extend_from_slice(
                 b"\x1b[?99999$p\x1b[65535$p\x1b[18t\x1b[>c\x1b[>q\x1b[?u\x1b[5n\x1b[6n\x1b[c",
             );
-            asked.extend_from_slice(b"\x1b[?2027h\x1b[?2027$p");
+            asked.extend_from_slice(
+                b"\x1b[?2027h\x1b[?2027$p\x1b[?2048h\x1b[?2048$p\x1b[14t\x1b[16t",
+            );
+            t.set_cell_pixels(Some([9, 18]));
+            t.resize(Size::new(11, 6).unwrap());
+            t.resize(Size::new(10, 5).unwrap());
             t.advance(&asked);
             let replies = t.take_replies();
             assert!(!replies.is_empty());

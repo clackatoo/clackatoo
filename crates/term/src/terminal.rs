@@ -181,9 +181,42 @@ impl Terminal {
     /// Changes the terminal's size. Lines on the primary screen are rewrapped
     /// to the new width, and the cursor stays on the same character; the
     /// alternate screen is cropped or extended, since the programs that use
-    /// it redraw after a resize.
+    /// it redraw after a resize. A program that asked to be told (mode
+    /// 2048) is.
     pub fn resize(&mut self, size: Size) {
+        self.resize_to(size, self.emulator.cell_pixels);
+    }
+
+    /// Says how big a cell is drawn, in pixels, as `[width, height]`, or
+    /// that nobody has said, with `None`: the size in pixels programs are
+    /// told of (mode 2048, `CSI 14 t`, `CSI 16 t`) is the cells' times
+    /// this. A program that asked to be told of resizes is told of a
+    /// change.
+    pub fn set_cell_pixels(&mut self, cell: Option<[u16; 2]>) {
+        self.resize_to(self.emulator.size, cell);
+    }
+
+    /// [`resize`](Self::resize) and
+    /// [`set_cell_pixels`](Self::set_cell_pixels) at once: a program that
+    /// asked to be told of resizes is told once.
+    pub fn resize_to(&mut self, size: Size, cell: Option<[u16; 2]>) {
+        let cell = cell.filter(|&[width, height]| width > 0 && height > 0);
+        if size == self.emulator.size && cell == self.emulator.cell_pixels {
+            return;
+        }
+        self.emulator.cell_pixels = cell;
         self.emulator.resize(size);
+        if self.emulator.modes.contains(Modes::RESIZE_REPORTS) {
+            self.emulator.report_size();
+        }
+    }
+
+    /// The size of the text area in pixels, as `[width, height]`, if a
+    /// cell's size in pixels was said (see
+    /// [`set_cell_pixels`](Self::set_cell_pixels)).
+    #[must_use]
+    pub fn pixels(&self) -> Option<[u16; 2]> {
+        self.emulator.text_pixels()
     }
 
     /// The primary screen, whose history the terminal keeps, whichever
@@ -709,6 +742,9 @@ bitflags! {
         /// Mode 2027: characters are printed by grapheme clusters, as
         /// Unicode's segmentation has them, a cluster to a cell.
         const GRAPHEMES = 1 << 10;
+        /// Mode 2048: the program is told of each resize, in-band, as
+        /// `CSI 48 ; rows ; cols ; height ; width t`.
+        const RESIZE_REPORTS = 1 << 11;
     }
 }
 
@@ -910,6 +946,8 @@ pub(crate) struct Emulator {
     progress: Option<TaskProgress>,
     /// The colours the terminal is drawn in, as a window said them.
     palette: Option<Palette>,
+    /// How big a cell is drawn, in pixels, as a window said it.
+    cell_pixels: Option<[u16; 2]>,
     /// The device control string being collected, if it's a request this
     /// terminal answers (see [`crate::requests`]).
     pub(crate) request: Option<Request>,
@@ -974,6 +1012,7 @@ impl Emulator {
             keyboard_alternate: keyboard::Stack::default(),
             progress: None,
             palette: None,
+            cell_pixels: None,
             request: None,
             cwd: None,
             blocks: Blocks::default(),
@@ -1629,6 +1668,13 @@ impl Emulator {
             2026 => self.modes.set(Modes::SYNCHRONIZED, on),
             // Only where the rows are rebuilt by clusters too.
             2027 if self.config.widths.graphemes => self.modes.set(Modes::GRAPHEMES, on),
+            // Told at once, as it asks, and then at each resize.
+            2048 => {
+                self.modes.set(Modes::RESIZE_REPORTS, on);
+                if on {
+                    self.report_size();
+                }
+            }
             6 => {
                 self.modes.set(Modes::ORIGIN, on);
                 self.move_to_origin(0, 0);
@@ -1718,6 +1764,7 @@ impl Emulator {
             2004 => Modes::BRACKETED_PASTE,
             2026 => Modes::SYNCHRONIZED,
             2027 if self.config.widths.graphemes => Modes::GRAPHEMES,
+            2048 => Modes::RESIZE_REPORTS,
             47 | 1047 | 1049 => return Some(self.screen == Screen::Alternate),
             _ => return None,
         };
@@ -1802,6 +1849,18 @@ impl Emulator {
         // the icon's name alone, which there's none of.
         let title = matches!(which.unwrap_or(0), 0 | 2);
         match op {
+            // The text area's size in pixels, and a cell's, once a window
+            // has said: until then, nothing, as nothing true can be said.
+            14 => {
+                if let Some([width, height]) = self.text_pixels() {
+                    self.reply(format!("\x1b[4;{height};{width}t").as_bytes());
+                }
+            }
+            16 => {
+                if let Some([width, height]) = self.cell_pixels {
+                    self.reply(format!("\x1b[6;{height};{width}t").as_bytes());
+                }
+            }
             18 => {
                 let reply = format!("\x1b[8;{};{}t", self.height(), self.width());
                 self.reply(reply.as_bytes());
@@ -1814,6 +1873,31 @@ impl Emulator {
             }
             _ => log::trace!("unhandled window operation {op}"),
         }
+    }
+
+    /// The text area's size in pixels, as `[width, height]`, if a cell's
+    /// is known: the cells' times a cell's, at most what fits a `u16`.
+    fn text_pixels(&self) -> Option<[u16; 2]> {
+        let [width, height] = self.cell_pixels?;
+        let times = |cells: u16, pixels: u16| {
+            u16::try_from(u32::from(cells) * u32::from(pixels)).unwrap_or(u16::MAX)
+        };
+        Some([
+            times(self.size.cols(), width),
+            times(self.size.rows(), height),
+        ])
+    }
+
+    /// Mode 2048's report of the terminal's size: `CSI 48 ; rows ; cols ;
+    /// height ; width t`, its size in pixels 0 if it isn't known.
+    pub(crate) fn report_size(&mut self) {
+        let [width, height] = self.text_pixels().unwrap_or([0, 0]);
+        let reply = format!(
+            "\x1b[48;{};{};{height};{width}t",
+            self.height(),
+            self.width()
+        );
+        self.reply(reply.as_bytes());
     }
 
     /// Keeps the title to put back later, as vim does as it starts.
@@ -1928,9 +2012,10 @@ impl Emulator {
         let secret = self.secret.take();
         // So do names that are the owner's.
         let kept = (self.names_kept).then(|| (std::mem::take(&mut self.title), self.cwd.take()));
-        let palette = self.palette;
+        let (palette, cell_pixels) = (self.palette, self.cell_pixels);
         *self = Self::new(self.size, &self.config);
         self.palette = palette;
+        self.cell_pixels = cell_pixels;
         // The shell, which knows it, outlives the reset.
         self.secret = secret;
         if let Some((title, cwd)) = kept {

@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(marked(&pane, 5).len(), 1);
         // Another window decides the terminal's size; this pane shows ten
         // columns of it, too few for the mark.
-        pane.resize(Size::new(10, 5).unwrap());
+        pane.resize(Size::new(10, 5).unwrap(), None);
         assert_eq!(marked(&pane, 5), []);
     }
 

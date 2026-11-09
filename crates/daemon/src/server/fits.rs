@@ -111,24 +111,47 @@ impl Daemon {
 
     /// Resizes terminal `id` to `size`, as a client asked, unless it's
     /// fitted: then it's the size the terminal goes back to.
-    pub(super) fn resize_asked(&mut self, id: TerminalId, size: Size) -> Result<(), Error> {
+    pub(super) fn resize_asked(
+        &mut self,
+        id: TerminalId,
+        size: Size,
+        cell: Option<[u16; 2]>,
+    ) -> Result<(), Error> {
         let slot = self
             .terminals
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         match &mut slot.fit {
-            Some(fit) => fit.restore = size,
-            None => self.resize_terminal(id, size),
+            Some(fit) => {
+                fit.restore = size;
+                // How big a window draws a cell, which a phone's fit
+                // leaves as the window said.
+                if cell.is_some()
+                    && let Some(terminal) = slot.terminal.pty()
+                {
+                    terminal.set_cell_pixels(cell);
+                }
+            }
+            None => self.resize_terminal_drawn(id, size, cell),
         }
         Ok(())
     }
 
     /// Resizes terminal `id` to `size`.
     fn resize_terminal(&mut self, id: TerminalId, size: Size) {
+        self.resize_terminal_drawn(id, size, None);
+    }
+
+    /// Resizes terminal `id` to `size`, drawn in cells `cell` pixels big,
+    /// if the window says.
+    fn resize_terminal_drawn(&mut self, id: TerminalId, size: Size, cell: Option<[u16; 2]>) {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
-        slot.terminal.resize(size);
+        match (cell, slot.terminal.pty()) {
+            (Some(cell), Some(terminal)) => terminal.resize_drawn(size, Some(cell)),
+            _ => slot.terminal.resize(size),
+        }
         // Rewrapping may have pushed rows into scrollback.
         self.schedule_compaction(id);
         self.collect_damage(id);

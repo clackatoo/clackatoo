@@ -1272,6 +1272,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs that ask (mode 2027) get a grapheme cluster to a cell: flags, toned emoji and Indic syllables line up",
     },
     News {
+        id: "resize-reports",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs can be told each resize in-band (mode 2048), and the size in pixels (CSI 14t, 16t, TIOCGWINSZ)",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

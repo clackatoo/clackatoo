@@ -915,7 +915,11 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn resize(&mut self, terminal: TerminalId, size: Size) -> Result<(), ClientError> {
-        self.done(&Request::Resize { terminal, size })
+        self.done(&Request::Resize {
+            terminal,
+            size,
+            cell: None,
+        })
     }
 
     /// Fetches every workspace, and asks for an [`Event::Workspaces`]

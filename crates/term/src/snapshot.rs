@@ -775,7 +775,7 @@ impl From<SavedCursorState> for SavedCursor {
 }
 
 /// Each mode flag, whether it is a DEC private mode, and its number.
-const NUMBERED: [(LiveModes, bool, u16); 11] = [
+const NUMBERED: [(LiveModes, bool, u16); 12] = [
     (LiveModes::INSERT, false, 4),
     (LiveModes::LINEFEED_NEWLINE, false, 20),
     (LiveModes::APP_CURSOR_KEYS, true, 1),
@@ -787,6 +787,7 @@ const NUMBERED: [(LiveModes, bool, u16); 11] = [
     (LiveModes::BRACKETED_PASTE, true, 2004),
     (LiveModes::SYNCHRONIZED, true, 2026),
     (LiveModes::GRAPHEMES, true, 2027),
+    (LiveModes::RESIZE_REPORTS, true, 2048),
 ];
 
 impl Modes {

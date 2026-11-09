@@ -1211,6 +1211,7 @@ mod tests {
             ClientMessage::Request(Request::Resize {
                 terminal: TerminalId(1),
                 size: Size::new(80, 24).unwrap(),
+                cell: None,
             }),
             ClientMessage::Edit {
                 buffer: BufferId(2),

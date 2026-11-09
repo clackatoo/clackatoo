@@ -112,6 +112,9 @@ pub(crate) struct Pane {
     requests: Requests<Pending>,
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
+    /// How big a cell was said to be drawn, in pixels, as it was last
+    /// asked.
+    cell: Option<[u16; 2]>,
     screen: Option<Screen>,
     history: History,
     /// Saved positions are invalidated by screen replacement or switching.
@@ -197,6 +200,7 @@ impl Pane {
         Self {
             requests: Requests::new(terminal),
             requested_size: None,
+            cell: None,
             screen: None,
             history: History::default(),
             place_generation: 0,
@@ -396,12 +400,14 @@ impl Pane {
     }
 
     /// Asks the daemon to make the terminal `size`, unless it was asked
-    /// already and is that size.
-    pub(crate) fn resize(&mut self, size: Size) {
+    /// already and is that size, saying it draws a cell `cell` pixels
+    /// big, if it knows.
+    pub(crate) fn resize(&mut self, size: Size, cell: Option<[u16; 2]>) {
         let current = self.screen.as_ref().map(|screen| screen.size);
-        if self.requested_size == Some(size) && current == Some(size) {
+        if self.requested_size == Some(size) && current == Some(size) && self.cell == cell {
             return;
         }
+        self.cell = cell;
         // Only a new height forgets the half page a count set, as Vim's
         // `scroll` is set afresh when the window's height changes.
         if self.requested_size.or(current).map(Size::rows) != Some(size.rows()) {
@@ -412,6 +418,7 @@ impl Pane {
             Request::Resize {
                 terminal: self.terminal(),
                 size,
+                cell,
             },
             Pending::Other,
         );
@@ -1618,23 +1625,43 @@ mod tests {
     fn the_size_is_asked_for_again_after_reconnecting_or_another_resize() {
         let size = Size::new(12, 5).unwrap();
         let mut pane = pane(&terminal(""));
-        pane.resize(size);
+        pane.resize(size, None);
         assert!(asked_to_resize(&mut pane));
-        pane.resize(size);
+        pane.resize(size, None);
         assert!(!asked_to_resize(&mut pane), "it was asked already");
 
         pane.reconnected();
-        pane.resize(size);
+        pane.resize(size, None);
         assert!(asked_to_resize(&mut pane), "a new connection asks again");
 
         // Another window made it smaller.
         let smaller = Terminal::new(Size::new(10, 4).unwrap(), &Config::default());
         pane.view_changed(&ViewUpdate::Snapshot(View::capture(&smaller)));
-        pane.resize(size);
+        pane.resize(size, None);
         assert!(
             asked_to_resize(&mut pane),
             "the terminal changed size since"
         );
+    }
+
+    #[test]
+    fn a_cell_drawn_another_size_is_said_again() {
+        let size = Size::new(12, 5).unwrap();
+        let mut pane = pane(&terminal(""));
+        pane.resize(size, Some([8, 16]));
+        let said = pane.take_outbox();
+        assert!(said.iter().any(|message| matches!(
+            message,
+            ClientMessage::Request(Request::Resize {
+                cell: Some([8, 16]),
+                ..
+            })
+        )));
+        pane.resize(size, Some([8, 16]));
+        assert!(!asked_to_resize(&mut pane));
+        // A font made bigger: the same cells, more pixels.
+        pane.resize(size, Some([10, 20]));
+        assert!(asked_to_resize(&mut pane));
     }
 
     fn normal_mode(pane: &mut Pane) {
@@ -2186,9 +2213,9 @@ mod tests {
         assert_eq!(pane.pill(false).as_deref(), Some("↓ 3 lines"), "unfocused");
         // The pane's own size counts, not the terminal's, which another
         // window may decide.
-        pane.resize(Size::new(40, 3).unwrap());
+        pane.resize(Size::new(40, 3).unwrap(), None);
         assert_eq!(pane.pill(true), None, "too short a pane");
-        pane.resize(Size::new(40, 5).unwrap());
+        pane.resize(Size::new(40, 5).unwrap(), None);
         keys(&mut pane, "G");
         assert_eq!(pane.pill(true), None, "G went back");
 
@@ -3049,7 +3076,7 @@ mod tests {
         assert_eq!(cursor(&pane), ("line 9".into(), 4, 0));
         // A new width keeps it; only a new height forgets it.
         let size = pane.screen.as_ref().unwrap().size;
-        pane.resize(Size::new(size.cols() + 10, size.rows()).unwrap());
+        pane.resize(Size::new(size.cols() + 10, size.rows()).unwrap(), None);
         press(&mut pane, Key::Character("d".into()), CTRL);
         assert_eq!(cursor(&pane).0, "line 10");
     }

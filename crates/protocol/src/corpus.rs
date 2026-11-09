@@ -254,6 +254,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Client(ClientMessage::Request(Request::Resize {
                 terminal,
                 size: size(),
+                cell: None,
             })),
         ),
         (
@@ -1740,6 +1741,12 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Client(ClientMessage::Request(Request::NotifyPhone {
                 terminal: TerminalId(5),
                 on: true,
+            })),
+            // A resize saying how big a cell is drawn.
+            Client(ClientMessage::Request(Request::Resize {
+                terminal: TerminalId(5),
+                size: Size::new(100, 30).unwrap(),
+                cell: Some([9, 19]),
             })),
         ]
         .map(|sample| (crate::wire::TERMINAL_STANDARDS_2, sample)),
