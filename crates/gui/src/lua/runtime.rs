@@ -219,7 +219,16 @@ impl Runtime {
     /// keep the user's own config from running, nor the other way round.
     fn load(&mut self, chunks: &[Chunk]) {
         for chunk in chunks {
-            let thread = (self.lua.load(&chunk.text))
+            let text = match &chunk.text {
+                Ok(text) => text,
+                Err(why) => {
+                    let said = format!("couldn't read {}: {why}", chunk.path);
+                    log::error!(target: "clackatoo::init.lua", "{said}");
+                    self.state.tell(FromLua::Error(said));
+                    continue;
+                }
+            };
+            let thread = (self.lua.load(text))
                 .set_name(format!("@{}", chunk.path))
                 .into_function()
                 .and_then(|function| self.lua.create_thread(function));
@@ -1003,11 +1012,11 @@ mod tests {
         runtime.lua.globals().set("REQUEST", request).unwrap();
         runtime.load(&[Chunk {
             path: "init.lua".into(),
-            text: "client.opt.nu = false\n\
+            text: Ok("client.opt.nu = false\n\
                    coroutine.yield(REQUEST, 7)\n\
                    client.opt.wrap = false\n\
                    client.keys.map('n', 'k', function() client.opt.ts = 8 end)\n"
-                .into(),
+                .into()),
             from: SetFrom::Config,
         }]);
         let loading = |said: &FromLua| match said {

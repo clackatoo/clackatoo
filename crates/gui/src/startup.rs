@@ -114,7 +114,8 @@ fn parse(text: &str) -> (ClientConfig, Vec<String>) {
             ("priority", Value::Choice(priority)) => {
                 config.priority = Some(priority == "high");
             }
-            _ => unreachable!("every setting is handled"),
+            // A setting declared for the file that this doesn't read yet.
+            (name, _) => problems.push(format!("`{name}` isn't read from here yet")),
         }
     }
     (config, problems)

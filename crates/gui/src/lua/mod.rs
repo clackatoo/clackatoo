@@ -54,7 +54,8 @@ pub(crate) enum Source {
 /// One file of the config, run in turn as it loads.
 pub(crate) struct Chunk {
     pub(crate) path: String,
-    pub(crate) text: String,
+    /// Its text, or why it couldn't be read.
+    pub(crate) text: Result<String, String>,
     /// What it sets is set by, as provenance says.
     pub(crate) from: SetFrom,
 }
@@ -62,7 +63,7 @@ pub(crate) struct Chunk {
 impl Source {
     /// The config's files, in the order they run: `settings.lua`, which
     /// clackatoo writes, then the user's own `init.lua`, which outdoes it;
-    /// each if it's there.
+    /// each if it's there, and one that can't be read, to say why.
     fn chunks(&self) -> Vec<Chunk> {
         match self {
             Self::Dir(dir) => [
@@ -72,7 +73,14 @@ impl Source {
             .into_iter()
             .filter_map(|(file, from)| {
                 let path = dir.join(file);
-                let text = std::fs::read_to_string(&path).ok()?;
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => Ok(text),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+                    Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                        Err("it isn't UTF-8 text".into())
+                    }
+                    Err(err) => Err(err.to_string()),
+                };
                 Some(Chunk {
                     path: path.display().to_string(),
                     text,
@@ -83,7 +91,7 @@ impl Source {
             #[cfg(test)]
             Self::Text(text) => vec![Chunk {
                 path: "init.lua".into(),
-                text: text.clone(),
+                text: Ok(text.clone()),
                 from: SetFrom::Config,
             }],
         }
@@ -1203,6 +1211,38 @@ mod tests {
                 [FromLua::Error(err)] if err == "init.lua:2: renderer is read as a window opens: \
                     :setpersist saves it in startup.toml, for windows opened after"
             ),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_file_that_cant_be_read_is_said_and_the_other_runs() {
+        let dir = config_dir(&[("client/init.lua", "client.opt.nu = false\n")]);
+        let settings = dir.path().join("client/settings.lua");
+        std::fs::write(&settings, b"client.opt.wrap = \"\xff\"\n").unwrap();
+        let start = || {
+            Lua::start(
+                Source::Dir(dir.path().into()),
+                Options::default(),
+                Box::new(|| {}),
+            )
+            .expect("Lua started")
+            .ready()
+        };
+        let said = plain(start());
+        let unreadable = format!("couldn't read {}: it isn't UTF-8 text", settings.display());
+        assert!(
+            matches!(
+                &said[..],
+                [FromLua::Error(err), FromLua::Set { .. }] if *err == unreadable
+            ),
+            "{said:?}"
+        );
+        // Alone, it's still said.
+        std::fs::remove_file(dir.path().join("client/init.lua")).unwrap();
+        let said = start();
+        assert!(
+            matches!(&said[..], [FromLua::Error(err)] if *err == unreadable),
             "{said:?}"
         );
     }
