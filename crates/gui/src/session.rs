@@ -166,6 +166,11 @@ pub(crate) enum SessionEvent {
         chat: TerminalId,
         token: Option<String>,
     },
+    /// The daemon on this machine, whose runtime directory this is, says
+    /// lingering would keep it quicker: the bar says so, once, if nothing
+    /// else is said there. Sent from a thread waiting for the daemon to say
+    /// how its priority went (see `clackatoo_daemon::priority`).
+    NeedsLinger(PathBuf),
 }
 
 /// A way to wake the window with a [`SessionEvent`], from another thread:
@@ -301,6 +306,14 @@ impl Session {
     /// The other machine, if the daemon is on one.
     pub(crate) fn remote(&self) -> Option<&Remote> {
         self.location.as_ref()?.remote()
+    }
+
+    /// The daemon's runtime directory, if it's on this machine.
+    pub(crate) fn local_runtime(&self) -> Option<&RuntimeDir> {
+        match self.location.as_ref()? {
+            Location::Local(runtime) | Location::Started(runtime) => Some(runtime),
+            Location::Remote(_) => None,
+        }
     }
 
     /// Whether a daemon on this machine is listening, as one is when the

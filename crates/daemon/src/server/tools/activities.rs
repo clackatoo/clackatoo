@@ -587,6 +587,7 @@ impl Daemon {
             ("Tool connection", if connections.is_empty() { "No live MCP connection".into() } else { "Connected".into() }),
             ("Catalogue discovery", if connections.contains(&true) { "Requested by the provider connection".into() } else { "Not observed on a live connection".into() }),
             ("Model acknowledgment", "Unconfirmed — this provider supplies no acknowledgment that the model saw its tools".into()),
+            ("Daemon priority", crate::priority::status_line()),
         ];
         serde_json::to_string(&rows).unwrap_or_default()
     }

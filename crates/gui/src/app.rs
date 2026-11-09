@@ -129,6 +129,27 @@ fn reconnect_wait(tries: u32) -> Duration {
     Duration::from_secs(doubled).min(RECONNECT_AT_MOST)
 }
 
+/// How long a window waits, once connected, for the daemon on this
+/// machine to say how its priority went: it asks for it as it starts.
+const PRIORITY_PATIENCE: Duration = Duration::from_secs(20);
+
+/// Waits, on a thread of its own, for the daemon on this machine, whose
+/// runtime directory is `runtime`, to say how its priority went, and
+/// sends [`SessionEvent::NeedsLinger`] through `proxy` if only lingering
+/// stood in its way.
+fn note_lingering(runtime: std::path::PathBuf, proxy: crate::session::Proxy) {
+    let started = std::thread::Builder::new()
+        .name("priority-note".into())
+        .spawn(move || {
+            if clackatoo_daemon::priority::needs_linger(&runtime, PRIORITY_PATIENCE) {
+                let _ = proxy.send_event(SessionEvent::NeedsLinger(runtime));
+            }
+        });
+    if let Err(err) = started {
+        log::debug!("won't look for what the daemon said of its priority: {err}");
+    }
+}
+
 /// Connecting again to a daemon on another machine, after the connection
 /// was lost, with the panes kept as they were.
 #[derive(Debug)]
@@ -3955,6 +3976,9 @@ impl App {
                 let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
                 self.tell_updates(news);
+                if let Some(runtime) = self.session.local_runtime() {
+                    note_lingering(runtime.path().to_owned(), self.session.proxy());
+                }
                 self.update_title();
                 self.request_redraw();
             }
@@ -4204,6 +4228,14 @@ impl App {
                 if let Some(picker) = &mut self.picker
                     && picker.found(found)
                 {
+                    self.request_redraw();
+                }
+            }
+            SessionEvent::NeedsLinger(runtime) => {
+                if self.desk.quiet()
+                    && let Some(note) = clackatoo_daemon::priority::linger_note(&runtime)
+                {
+                    self.desk.say(note.to_owned());
                     self.request_redraw();
                 }
             }

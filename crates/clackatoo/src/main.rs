@@ -9,6 +9,7 @@ mod display;
 mod language;
 mod logs;
 mod ping;
+mod priority;
 mod render;
 mod update;
 mod web;
@@ -247,6 +248,10 @@ enum Command {
     /// from: the desktop you're logged in to, the daemon's own
     /// environment, or none.
     Display,
+    /// Show how the daemon on this machine runs ahead of your other
+    /// programs: its priority through `RealtimeKit`, and its place of its
+    /// own under systemd, or why not.
+    Priority,
 }
 
 #[derive(Debug, Subcommand)]
@@ -658,6 +663,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Lent(args) => connections::lent(&args),
         Command::Machine(connection) => connections::machine(&connection),
         Command::Display => display::show(),
+        Command::Priority => priority::show(),
         Command::Mcp(args) => {
             let socket =
                 (args.socket).unwrap_or_else(|| RuntimeDir::for_current_user().socket_path());

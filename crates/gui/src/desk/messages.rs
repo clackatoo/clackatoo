@@ -56,6 +56,12 @@ impl Desk {
         self.message = Some(message);
     }
 
+    /// Whether nothing is said in the bar, which a note said now, and
+    /// only once, wouldn't hide.
+    pub(crate) fn quiet(&self) -> bool {
+        self.message.is_none()
+    }
+
     /// Warns `said`, what the daemon says of the workspaces for the bar
     /// ([`clackatoo_protocol::Event::Said`]), as that a machine lost panes
     /// it lent: on one line, cut short.

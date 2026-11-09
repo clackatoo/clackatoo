@@ -200,27 +200,31 @@ pub fn enable() {
 }
 
 /// Begins taking the daemon's priority and place, if [`enable`] asked,
-/// for the calling thread, the one that runs its loop. Before the daemon
-/// starts anything.
-pub(crate) fn begin() {
+/// for the calling thread, the one that runs its loop, saying how it went
+/// in `runtime`, the daemon's runtime directory. Before the daemon starts
+/// anything.
+pub(crate) fn begin(runtime: &Path) {
     if !WANTED.load(Ordering::SeqCst) {
         return;
     }
     match this_thread() {
-        Some(thread) => begin_for(thread),
-        None => log::info!("the daemon runs at its usual priority: its thread can't be found"),
+        Some(thread) => begin_for(thread, Some(runtime)),
+        None => tell(Status::usual("its thread can't be found"), Some(runtime)),
     }
 }
 
 /// Begins taking the daemon's priority, for `loop_thread`, and its place:
 /// at once, if it has one already, as after an upgrade, or else on a
 /// thread of its own, while the daemon starts. Its programs started
-/// meanwhile are moved into their leaves once there are some. Once only.
+/// meanwhile are moved into their leaves once there are some. How it
+/// went is said in the log, and in `runtime`, if given (see
+/// [`STATUS_FILE`]). Once only.
 #[doc(hidden)]
-pub fn begin_for(loop_thread: Pid) {
+pub fn begin_for(loop_thread: Pid, runtime: Option<&Path>) {
     if BEGUN.swap(true, Ordering::SeqCst) {
         return;
     }
+    let runtime = runtime.map(Path::to_owned);
     // Installs put where agents' programs go, however this goes.
     clackatoo_syntax::prepare_programs_with(|command| {
         prepare(command, Leaf::Agents);
@@ -233,7 +237,13 @@ pub fn begin_for(loop_thread: Pid) {
         *lock(&PLACE) = Place::Leaves(leaves);
     }
     if let Some(why) = switched_off() {
-        log::info!("the daemon runs at its usual priority: {why}");
+        let place = scope.map_or_else(|| "off".to_owned(), |scope| placed_in(&scope));
+        let status = Status {
+            priority: format!("off: {why}"),
+            place,
+            needs_linger: false,
+        };
+        tell(status, runtime.as_deref());
         return;
     }
     if let Some(scope) = &scope
@@ -242,7 +252,12 @@ pub fn begin_for(loop_thread: Pid) {
     {
         // Upgraded in place: nothing to ask for.
         RAISED.store(true, Ordering::SeqCst);
-        log::info!("the daemon runs at nice {nice}, in {scope}, as before its upgrade");
+        let status = Status {
+            priority: raised_to(nice),
+            place: placed_in(scope),
+            needs_linger: false,
+        };
+        tell(status, runtime.as_deref());
         *lock(&SETTLING) = Some(Settling::Done(Settled {
             nice: Some(nice),
             scope: Some(scope.clone()),
@@ -252,17 +267,22 @@ pub fn begin_for(loop_thread: Pid) {
     if scope.is_none() {
         *lock(&PLACE) = Place::Pending(Vec::new());
     }
+    let asking = runtime.clone();
     let settling = std::thread::Builder::new()
         .name("priority".into())
-        .spawn(move || settle(loop_thread, scope));
+        .spawn(move || settle(loop_thread, scope, asking.as_deref()));
     match settling {
         Ok(settling) => *lock(&SETTLING) = Some(Settling::Going(settling)),
         Err(err) => {
-            log::info!("the daemon runs at its usual priority: no thread to ask from: {err}");
             let mut place = lock(&PLACE);
             if matches!(*place, Place::Pending(_)) {
                 *place = Place::Nowhere;
             }
+            drop(place);
+            tell(
+                Status::usual(&format!("no thread to ask from: {err}")),
+                runtime.as_deref(),
+            );
         }
     }
 }
@@ -299,41 +319,216 @@ pub fn raise_this_thread(what: &'static str) {
 }
 
 /// Raises `loop_thread`, then gives the daemon a scope, unless it has
-/// `scope` already, and says how both went in one line.
-fn settle(loop_thread: Pid, scope: Option<String>) -> Settled {
+/// `scope` already, and says how both went (see [`tell`]).
+fn settle(loop_thread: Pid, scope: Option<String>, runtime: Option<&Path>) -> Settled {
     let nice = raise(loop_thread);
-    let placed = match scope {
-        Some(scope) => Ok(scope),
-        None => {
-            let placed = take_place();
-            let mut place = lock(&PLACE);
-            let early = match std::mem::replace(&mut *place, Place::Nowhere) {
-                Place::Pending(early) => early,
-                _ => Vec::new(),
-            };
-            placed.map(|(leaves, mut user)| {
-                let unit = leaves.unit.clone();
-                *place = Place::Leaves(leaves);
-                drop(place);
-                move_early(&early, &unit, &mut user);
-                unit
-            })
-        }
+    let placed = if let Some(scope) = scope {
+        Ok(scope)
+    } else {
+        let placed = take_place();
+        let mut place = lock(&PLACE);
+        let early = match std::mem::replace(&mut *place, Place::Nowhere) {
+            Place::Pending(early) => early,
+            _ => Vec::new(),
+        };
+        placed.map(|(leaves, mut user)| {
+            let unit = leaves.unit.clone();
+            *place = Place::Leaves(leaves);
+            drop(place);
+            move_early(&early, &unit, &mut user);
+            unit
+        })
     };
-    let said_nice = match &nice {
-        Ok(nice) => format!("at nice {nice}, through RealtimeKit,"),
-        Err(err) => format!("at its usual priority ({err})"),
+    let status = Status {
+        priority: match &nice {
+            Ok(nice) => raised_to(*nice),
+            Err(err) => format!("usual: {err}"),
+        },
+        place: match &placed {
+            Ok(scope) => placed_in(scope),
+            Err(not) => format!("where it started: {}", not.why),
+        },
+        needs_linger: placed.as_ref().is_err_and(|not| not.linger),
     };
-    match &placed {
-        Ok(scope) => log::info!(
-            "the daemon runs {said_nice} in {scope}, with what it starts in leaves beside it"
-        ),
-        Err(err) => log::info!("the daemon runs {said_nice} where it started: {err}"),
-    }
+    tell(status, runtime);
     Settled {
         nice: nice.ok(),
         scope: placed.ok(),
     }
+}
+
+// --- What's said of it ------------------------------------------------------
+
+/// The file in the daemon's runtime directory it says how its priority
+/// and place went in, for `clackatoo priority` and windows: a line each,
+/// `daemon: PID`, `priority: …` and `place: …`, then [`NEEDS_LINGER`] if
+/// the daemon would have taken a place of its own, but the user doesn't
+/// linger.
+pub const STATUS_FILE: &str = "priority";
+
+/// The line [`STATUS_FILE`] ends with when only lingering stands between
+/// the daemon and a place of its own.
+pub const NEEDS_LINGER: &str = "needs: linger";
+
+/// Beside [`STATUS_FILE`]: made by the first window that tells the user
+/// they don't linger, so no other window tells them again, until what the
+/// daemon says changes.
+const NOTED_FILE: &str = "priority.noted";
+
+/// What a window says, once, of a daemon that could have taken a place of
+/// its own but for lingering.
+const LINGER_NOTE: &str = "clackatoo would keep agents' builds from slowing your typing with \
+                           `loginctl enable-linger`: `clackatoo priority` says more";
+
+/// How the daemon's priority and place went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Status {
+    /// Its loop thread's priority, and why, if it's the usual.
+    priority: String,
+    /// Where it is, and why, if where it started.
+    place: String,
+    /// Whether only lingering stood between it and a place of its own.
+    needs_linger: bool,
+}
+
+impl Status {
+    /// At the usual priority, where it started, as `why` says.
+    fn usual(why: &str) -> Self {
+        Self {
+            priority: format!("usual: {why}"),
+            place: "where it started".to_owned(),
+            needs_linger: false,
+        }
+    }
+
+    /// What [`STATUS_FILE`] holds after its `daemon` line.
+    fn text(&self) -> String {
+        let mut text = format!("priority: {}\nplace: {}\n", self.priority, self.place);
+        if self.needs_linger {
+            text.push_str(NEEDS_LINGER);
+            text.push('\n');
+        }
+        text
+    }
+}
+
+/// Why the daemon has no place of its own.
+#[derive(Debug)]
+struct NotPlaced {
+    why: String,
+    /// Whether it would have, if the user lingered.
+    linger: bool,
+}
+
+impl From<String> for NotPlaced {
+    fn from(why: String) -> Self {
+        Self { why, linger: false }
+    }
+}
+
+impl From<&str> for NotPlaced {
+    fn from(why: &str) -> Self {
+        why.to_owned().into()
+    }
+}
+
+/// What it was, then, for the loop raised to `nice`.
+fn raised_to(nice: i32) -> String {
+    format!("nice {nice}, through RealtimeKit")
+}
+
+/// Where it is, in `scope`.
+fn placed_in(scope: &str) -> String {
+    format!("{scope}, with what it starts in leaves beside it")
+}
+
+/// How it went, kept for a chat's `:Capabilities`.
+static TOLD: Mutex<Option<Status>> = Mutex::new(None);
+
+/// Says how it went, in one line of the log, and in [`STATUS_FILE`] in
+/// `runtime`, if given. A window tells the user they don't linger again
+/// only if what's said changed (see [`linger_note`]).
+fn tell(status: Status, runtime: Option<&Path>) {
+    log::info!(
+        "the daemon's priority: {}; its place: {}",
+        status.priority,
+        status.place
+    );
+    if let Some(runtime) = runtime {
+        let file = runtime.join(STATUS_FILE);
+        let text = status.text();
+        let before = fs::read_to_string(&file).ok();
+        let said_before = before.as_deref().map(without_daemon);
+        if said_before != Some(text.as_str()) {
+            let _ = fs::remove_file(runtime.join(NOTED_FILE));
+        }
+        let whole = format!("daemon: {}\n{text}", std::process::id());
+        let partial = runtime.join(format!("{STATUS_FILE}.partial"));
+        let written = fs::write(&partial, whole).and_then(|()| fs::rename(&partial, &file));
+        if let Err(err) = written {
+            log::warn!("{} couldn't be written: {err}", file.display());
+        }
+    }
+    *lock(&TOLD) = Some(status);
+}
+
+/// What [`STATUS_FILE`]'s `text` says, without its first line, the
+/// daemon's pid.
+fn without_daemon(text: &str) -> &str {
+    match text.split_once('\n') {
+        Some((first, rest)) if first.starts_with("daemon: ") => rest,
+        _ => text,
+    }
+}
+
+/// How the daemon's priority and place went, on one line, for a chat's
+/// `:Capabilities`.
+pub(crate) fn status_line() -> String {
+    match &*lock(&TOLD) {
+        Some(status) if status.needs_linger => format!(
+            "Priority {}; place {}. `loginctl enable-linger`, then `clackatoo upgrade`, gives it a place of its own",
+            status.priority, status.place
+        ),
+        Some(status) => format!("Priority {}; place {}", status.priority, status.place),
+        None => "Not asked for, or still being asked for".to_owned(),
+    }
+}
+
+/// Whether the daemon whose runtime directory is `runtime` says only
+/// lingering stands between it and a place of its own: waits up to
+/// `patience` for a running daemon to say how its priority went, as it
+/// does a moment after it starts. Blocks: for a thread of its own.
+#[must_use]
+pub fn needs_linger(runtime: &Path, patience: Duration) -> bool {
+    let until = Instant::now() + patience;
+    loop {
+        if let Ok(text) = fs::read_to_string(runtime.join(STATUS_FILE))
+            && let Some(pid) = (text.lines().next())
+                .and_then(|line| line.strip_prefix("daemon: "))
+            // What a daemon that has stopped said is no one's.
+            && Path::new("/proc").join(pid).exists()
+        {
+            return text.lines().any(|line| line == NEEDS_LINGER);
+        }
+        if Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// What a window tells the user, once, of the daemon whose runtime
+/// directory is `runtime`, which [`needs_linger`]: `None` if another
+/// window has told them since the daemon last said so.
+#[must_use]
+pub fn linger_note(runtime: &Path) -> Option<&'static str> {
+    // The first window to make the mark says it; the rest find it made.
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(runtime.join(NOTED_FILE))
+        .ok()?;
+    Some(LINGER_NOTE)
 }
 
 /// Why the daemon is to run as it always has, if it is: the environment
@@ -504,8 +699,15 @@ fn raise(thread: Pid) -> Result<i32, String> {
     let mut body = Body::default();
     body.u64(u64::from(thread.as_raw_pid().cast_unsigned()));
     body.i32(min);
-    bus.ask(&call, &body, WAIT)
-        .map_err(|err| format!("RealtimeKit: {err}"))?;
+    bus.ask(&call, &body, WAIT).map_err(|err| {
+        if err.to_string().contains("AccessDenied") {
+            // polkit's rule for rtkit, as it comes: a local desktop login's
+            // programs only.
+            format!("RealtimeKit refused, as polkit allows it only from a local desktop login, not ssh ({err})")
+        } else {
+            format!("RealtimeKit: {err}")
+        }
+    })?;
     RAISED.store(true, Ordering::SeqCst);
     rustix::process::getpriority_process(Some(thread))
         .map_err(|err| format!("its nice can't be read: {err}"))
@@ -557,10 +759,10 @@ const MANAGER: &str = "org.freedesktop.systemd1.Manager";
 /// Gives the daemon a scope of its own, divided into leaves, with itself
 /// in its own: see the module's docs. Returns the leaves, and the
 /// connection to the user manager, for moving the programs started
-/// meanwhile.
-fn take_place() -> Result<(Leaves, Bus), String> {
+/// meanwhile. Or why not, and whether lingering would change that.
+fn take_place() -> Result<(Leaves, Bus), NotPlaced> {
     if !Path::new(CGROUPS).join("cgroup.controllers").exists() {
-        return Err("cgroups aren't mounted as systemd mounts them, all in one tree".to_owned());
+        return Err("cgroups aren't mounted as systemd mounts them, all in one tree".into());
     }
     let started = own_cgroup().map_err(|err| format!("its cgroup can't be read: {err}"))?;
     let uid = rustix::process::getuid().as_raw();
@@ -569,11 +771,12 @@ fn take_place() -> Result<(Leaves, Bus), String> {
             .and_then(|mut bus| lingers(&mut bus, uid))
             .map_err(|err| format!("whether you linger can't be told: {err}"))?;
         if !lingering {
-            return Err(
-                "a scope of its own would end with your last login, as you don't linger \
-                 (`loginctl enable-linger` lets it)"
+            return Err(NotPlaced {
+                why: "a scope of its own would end with your last login, as you don't linger \
+                      (`loginctl enable-linger` lets it)"
                     .to_owned(),
-            );
+                linger: true,
+            });
         }
     }
     let address = dbus::session_address().ok_or("there's no session bus")?;
@@ -887,7 +1090,6 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Read as _;
-    use std::os::fd::AsRawFd as _;
 
     #[test]
     fn the_cgroup_is_the_unified_trees() {
@@ -965,6 +1167,42 @@ mod tests {
         }
         // No other units: an empty array, padded to 8 for its elements.
         assert_eq!(&bytes[bytes.len() - 8..], &[0; 8]);
+    }
+
+    /// What the daemon says when only lingering stood in its way: windows
+    /// tell the user once, and again only once what it says changes.
+    #[test]
+    fn a_window_says_lingering_would_help_once_until_the_daemon_says_otherwise() {
+        let runtime = tempfile::tempdir().unwrap();
+        let runtime = runtime.path();
+        let needing = Status {
+            priority: raised_to(-15),
+            place: "where it started: you don't linger".to_owned(),
+            needs_linger: true,
+        };
+        assert!(!needs_linger(runtime, Duration::ZERO), "nothing said yet");
+        tell(needing.clone(), Some(runtime));
+        let text = fs::read_to_string(runtime.join(STATUS_FILE)).unwrap();
+        assert_eq!(without_daemon(&text), needing.text());
+        assert!(text.ends_with(&format!("{NEEDS_LINGER}\n")), "{text}");
+        assert!(needs_linger(runtime, Duration::ZERO));
+        assert!(linger_note(runtime).is_some());
+        assert!(linger_note(runtime).is_none(), "said once");
+        // Said again the same, as after an upgrade: not again.
+        tell(needing.clone(), Some(runtime));
+        assert!(linger_note(runtime).is_none());
+        // Said otherwise, then the same again: once more.
+        tell(Status::usual("no rtkit"), Some(runtime));
+        assert!(!needs_linger(runtime, Duration::ZERO));
+        tell(needing, Some(runtime));
+        assert!(linger_note(runtime).is_some());
+        // What a daemon that has stopped said is no one's.
+        fs::write(
+            runtime.join(STATUS_FILE),
+            format!("daemon: 999999999\n{NEEDS_LINGER}\n"),
+        )
+        .unwrap();
+        assert!(!needs_linger(runtime, Duration::ZERO));
     }
 
     #[test]

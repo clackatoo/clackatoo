@@ -319,7 +319,7 @@ fn serve_signalled(
 ) -> Result<(), ServeError> {
     // Before anything is started, on the thread that runs the loop: its
     // priority, and the daemon's place, if `clackatoo daemon` asked.
-    crate::priority::begin();
+    crate::priority::begin(runtime.path());
     let resumed = if resume {
         receive()
             .and_then(|handover| resume_from(handover, config))
