@@ -74,6 +74,25 @@ impl Groups {
         });
     }
 
+    /// Whether a group led by `name` is still on its way out, with
+    /// something left in it.
+    pub(super) fn ending(&self, name: &str) -> bool {
+        (self.ending.iter()).any(|ending| ending.name == name && ending.group.alive())
+    }
+
+    /// Ends the groups led by `name` firmly from now, as something waits
+    /// for them to go: those not sent SIGTERM yet are now, and SIGKILL
+    /// once their grace period has gone by again.
+    pub(super) fn hurry_named(&mut self, name: &str) {
+        let now = Instant::now();
+        for ending in (self.ending.iter_mut()).filter(|ending| ending.name == name) {
+            if !ending.termed {
+                ending.termed = ending.group.signal(Signal::TERM);
+                ending.due = now + ending.grace;
+            }
+        }
+    }
+
     /// When the next group is to be pushed on, if any is.
     pub(super) fn next_due(&self) -> Option<Instant> {
         self.ending.iter().map(|ending| ending.due).min()

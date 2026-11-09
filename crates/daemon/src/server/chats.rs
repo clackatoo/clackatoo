@@ -152,6 +152,16 @@ struct Asked {
 /// it's sent SIGKILL (see [`super::groups`]).
 const KILL_AFTER: Duration = Duration::from_secs(2);
 
+/// How often a chat waiting for what was left of its agent to go looks
+/// whether it has.
+const GROUP_LOOK: Duration = Duration::from_millis(50);
+
+/// What the process group of the agent called `name` is called as it goes
+/// (see [`super::groups`]).
+fn agent_group(name: &str) -> String {
+    format!("agent {name}")
+}
+
 /// How many times longer a chat waits for a session from an agent run
 /// through `npx` that hasn't started, before saying so: npx may be
 /// fetching it, which takes a while the first time.
@@ -539,6 +549,22 @@ impl Daemon {
             }
             // Once: a chat that moved to another agent since waits for
             // that one.
+            self.agents.held.retain(|&(chat, _)| chat != id);
+            self.agents.held.push((id, name));
+            self.collect_damage(id);
+            return;
+        }
+        // A session its agent's last process may still have open, as it
+        // goes after the chat closed: a new one goes on with it only once
+        // that one's group has gone, which is ended firmly now, so the two
+        // never write it at once (CLACKA-240).
+        let resumes = self.chat(id).is_some_and(|chat| chat.session().is_some());
+        if agent.is_none() && resumes && self.groups.ending(&agent_group(&name)) {
+            self.groups.hurry_named(&agent_group(&name));
+            if let Some(chat) = self.chat(id) {
+                chat.wait_for_agent_to_go();
+            }
+            log::info!("chat {id}: waiting for what was left of {name} to go");
             self.agents.held.retain(|&(chat, _)| chat != id);
             self.agents.held.push((id, name));
             self.collect_damage(id);
@@ -1013,15 +1039,31 @@ impl Daemon {
     /// When the next agent that has gone is let go however much of what
     /// it sent is still being parsed, or still coming, if one has gone.
     pub(super) fn next_gone_agent_due(&self) -> Option<Instant> {
-        (self.agents.running.values())
+        let gone = (self.agents.running.values())
             .filter_map(|slot| slot.agent.gone_due())
-            .min()
+            .min();
+        // Chats waiting for what was left of a stopped agent to go look
+        // again soon: only while one waits.
+        let waiting = (self.agents.held.iter())
+            .any(|(_, name)| self.agents.named(name).is_none())
+            .then(|| Instant::now() + GROUP_LOOK);
+        gone.into_iter().chain(waiting).min()
     }
 
     /// Lets go the agents that went a while ago, whose last messages have
     /// taken too long to parse, or which something they started keeps
     /// writing for.
     pub(super) fn let_gone_agents_go(&mut self) {
+        // Those waiting for what was left of a stopped agent, now it's
+        // gone.
+        let names: Vec<String> = (self.agents.held.iter())
+            .map(|(_, name)| name.clone())
+            .filter(|name| self.agents.named(name).is_none())
+            .filter(|name| !self.groups.ending(&agent_group(name)))
+            .collect();
+        for name in names {
+            self.ask_for_held(&name);
+        }
         let now = Instant::now();
         let due: Vec<AgentId> = (self.agents.running.iter())
             .filter(|(_, slot)| slot.agent.gone_due().is_some_and(|due| due <= now))
@@ -2511,7 +2553,7 @@ impl Daemon {
     /// ends its process group as `end` says.
     fn let_agent_go(&mut self, process: Process, name: &str, end: End) {
         match process.group() {
-            Ok(group) => self.groups.end(group, &format!("agent {name}"), end),
+            Ok(group) => self.groups.end(group, &agent_group(name), end),
             Err(err) => log::warn!("agent {name}: what it started can't be stopped: {err}"),
         }
         self.watch_orphan(Orphan::new(process));
@@ -2739,6 +2781,60 @@ mod tests {
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
     use crate::server::stopping::tests::example;
+
+    /// A chat going on with a session waits for what was left of its
+    /// agent's last process to go, which is ended firmly, before a new one
+    /// opens it (CLACKA-240).
+    #[test]
+    fn a_session_waits_for_what_was_left_of_its_agent_to_go() {
+        use std::os::unix::process::CommandExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        // What a stopped Claude Code left in its group, given long to go.
+        let mut left = std::process::Command::new("sleep")
+            .arg("100")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_child(&left),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let group = crate::group::Group::new(pidfd);
+        daemon
+            .groups
+            .end(group, &agent_group("claude"), End::Gently(Duration::from_secs(60)));
+        let id = daemon.next_terminal();
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let mut chat = HostedChat::new(
+            id,
+            clackatoo_protocol::Size::new(40, 10).unwrap(),
+            dir.path().display().to_string(),
+            &agent,
+            clackatoo_protocol::AgentTools::Ask,
+            true,
+            false,
+        );
+        chat.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "s1".into(),
+            title: String::new(),
+        });
+        daemon.add_chat(chat);
+        daemon.connect(id);
+        assert!(daemon.agents.held.iter().any(|(held, _)| *held == id));
+        assert!(daemon.agents.named("claude").is_none(), "none started yet");
+        assert!(daemon.next_gone_agent_due().is_some(), "it looks again soon");
+        // Ended firmly at once, it goes.
+        let status = left.wait().unwrap();
+        assert!(!status.success(), "it was stopped: {status:?}");
+        daemon.let_gone_agents_go();
+        assert!(!daemon.agents.held.iter().any(|(held, _)| *held == id));
+        assert!(daemon.next_gone_agent_due().is_none());
+    }
 
     #[test]
     fn what_a_subagent_did_stays_under_its_task_through_an_upgrade() {
