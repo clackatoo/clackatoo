@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.11.21 (2026-11-09)
+
+### Fixes
+
+- **daemon:** a shutdown no longer closes the panes of the shells it ends (aa2d6186)
+- **daemon:** logind started again is heard under its new name (45c96f82)
+- **daemon:** logind's lock is asked for again, and held workspaces let go (060e8a42)
+- **daemon:** logind's new names are heard from before its name is asked (e4acf62d)
+- **daemon:** only logind's own answer is taken for its lock (7d5b87f8)
+- **daemon:** panes kept for a killed program close as the daemon upgrades (24f36235)
+- **daemon:** only the user's terminals a signal ended keep their panes (670e5a84)
+- **web:** a Home Screen page takes the large viewport with the keyboard closed (acb89b3b)
+
 ## 2026.11.20 (2026-11-09)
 
 ### Fixes
