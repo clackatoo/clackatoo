@@ -172,7 +172,7 @@ impl Model {
             }) = self.lines.get_mut(last - found.len())
                 && *saved != Saved::Value(value.clone())
             {
-                *name = info.name.to_owned();
+                info.name.clone_into(name);
                 *saved = Saved::Value(value);
                 *read = None;
             }

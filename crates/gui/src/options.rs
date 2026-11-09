@@ -1665,13 +1665,13 @@ mod tests {
         const PAGE: &str = include_str!(
             "../../../docs/learn/2--developer-tools.shelf/clackatoo.product/2--reference.topic/180--config.md"
         );
+        const TABLE: &str = "| Option | Short | Is | Starts |";
         let section = PAGE
             .split_once("\n## Options\n")
             .and_then(|(_, rest)| rest.split("\n## ").next())
             .expect("the page has its options");
         // Only the rows of the tables of options, under a heading each: not
         // those of what `:set` takes, nor of any other table.
-        const TABLE: &str = "| Option | Short | Is | Starts |";
         let mut heading = "";
         let mut in_table = false;
         let mut listed = Vec::new();

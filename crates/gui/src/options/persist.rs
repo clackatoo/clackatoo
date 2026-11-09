@@ -198,9 +198,8 @@ pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> 
     let dir = path.parent().context("the file is in a directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("couldn't make {}", dir.display()))?;
     let name = path.file_name().context("the file has a name")?;
-    let mode = (std::fs::metadata(path))
-        .map(|metadata| metadata.permissions().mode() & 0o7777)
-        .unwrap_or(mode);
+    let mode =
+        (std::fs::metadata(path)).map_or(mode, |metadata| metadata.permissions().mode() & 0o7777);
     let partial = dir.join(format!(
         ".{}.{}.partial",
         name.to_string_lossy(),
@@ -213,13 +212,16 @@ pub(crate) fn replace(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> 
             .truncate(true)
             .mode(mode)
             .open(&partial)
-            .with_context(|| match link == path {
-                true => format!("couldn't write in {}", dir.display()),
-                false => format!(
-                    "couldn't write in {}, where {} links to",
-                    dir.canonicalize().as_deref().unwrap_or(dir).display(),
-                    link.display()
-                ),
+            .with_context(|| {
+                if link == path {
+                    format!("couldn't write in {}", dir.display())
+                } else {
+                    format!(
+                        "couldn't write in {}, where {} links to",
+                        dir.canonicalize().as_deref().unwrap_or(dir).display(),
+                        link.display()
+                    )
+                }
             })?;
         // As the old file was, whatever the umask says.
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
