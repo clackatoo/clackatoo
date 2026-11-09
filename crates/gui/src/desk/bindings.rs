@@ -195,7 +195,7 @@ impl std::ops::DerefMut for Keys {
 
 impl Keys {
     /// Notes `by` as what last bound or unbound `keys` in `modes`.
-    pub(crate) fn set_by(&mut self, modes: &[KeyMode], keys: &[Chord], by: SetBy) {
+    pub(crate) fn set_by(&mut self, modes: &[KeyMode], keys: &[Chord], by: &SetBy) {
         for &mode in modes {
             self.set_by.insert((mode, keys.to_vec()), by.clone());
         }

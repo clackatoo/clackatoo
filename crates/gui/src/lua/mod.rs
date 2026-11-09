@@ -90,6 +90,7 @@ impl Source {
     }
 
     /// The config directory, if it's one.
+    #[allow(clippy::unnecessary_wraps, reason = "tests' configs have none")]
     pub(crate) fn dir(&self) -> Option<&Path> {
         match self {
             Self::Dir(dir) => Some(dir),
@@ -1075,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one config, and what each line set")]
     fn settings_lua_runs_first_and_what_set_each_option_is_known_by_its_line() {
         use crate::options::find;
         use crate::options::provenance::{Place, Source as From};

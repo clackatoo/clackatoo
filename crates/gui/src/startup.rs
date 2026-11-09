@@ -42,18 +42,21 @@ fn settings() -> impl Iterator<Item = (&'static str, &'static Info)> {
 
 /// clackatoo's config directory: `$XDG_CONFIG_HOME/clackatoo`, or
 /// `~/.config/clackatoo`.
+#[must_use]
 pub fn dir() -> Option<PathBuf> {
     clackatoo_daemon::config_dir()
 }
 
 /// Where the file is: `client/startup.toml` in the [config
 /// directory](dir), beside the window's `init.lua`.
+#[must_use]
 pub fn path() -> Option<PathBuf> {
     Some(dir()?.join("client/startup.toml"))
 }
 
 /// Reads the file, printing what's wrong with it, if anything, to stderr.
 /// No file means no settings.
+#[must_use]
 pub fn load() -> ClientConfig {
     let Some(path) = path() else {
         return ClientConfig::default();
@@ -208,26 +211,30 @@ fn document(path: &Path) -> anyhow::Result<DocumentMut> {
 
 /// `clackatoo config`: every setting, as the file would hold it, with the
 /// ones it doesn't set commented out with their defaults.
+///
+/// # Errors
+///
+/// If the file can't be read, or isn't TOML.
 pub fn show_all(path: &Path) -> anyhow::Result<String> {
-    use std::fmt::Write;
     let document = document(path)?;
-    let mut out = format!("# {}\n", path.display());
-    for (key, info) in settings() {
-        match document.get(key) {
-            Some(item) => writeln!(out, "{key} = {}", item.to_string().trim()),
-            None => writeln!(
-                out,
-                "# {key} = {}  # the default",
-                toml_value(&info.default_value())
-            ),
-        }
-        .expect("writing to a String");
-    }
-    Ok(out)
+    let lines = settings().map(|(key, info)| match document.get(key) {
+        Some(item) => format!("{key} = {}\n", item.to_string().trim()),
+        None => format!(
+            "# {key} = {}  # the default\n",
+            toml_value(&info.default_value())
+        ),
+    });
+    Ok(std::iter::once(format!("# {}\n", path.display()))
+        .chain(lines)
+        .collect())
 }
 
 /// `clackatoo config NAME`: the setting's value, without quotes, or its
 /// default.
+///
+/// # Errors
+///
+/// If there's no such setting, or the file can't be read, or isn't TOML.
 pub fn get(path: &Path, name: &str) -> anyhow::Result<String> {
     let info = setting(name)?;
     let bare = |item: &Item| match item.as_str() {
@@ -248,25 +255,31 @@ pub fn get(path: &Path, name: &str) -> anyhow::Result<String> {
 
 /// `clackatoo config NAME VALUE`: sets it, keeping the rest of the file,
 /// comments and all, as it was. Empty text is the default.
+///
+/// # Errors
+///
+/// If there's no such setting, or it can't hold `text`, or the file can't
+/// be read or written, or isn't TOML.
 pub fn set(path: &Path, name: &str, text: &str) -> anyhow::Result<()> {
     let info = setting(name)?;
-    let value = match info.kind {
+    let item = if let Kind::Decimal { .. } = info.kind {
         // Any number in the range, as the file can hold.
-        Kind::Decimal { .. } => {
-            let number: f64 =
-                (text.parse()).map_err(|_| anyhow::anyhow!("`{name}` must be a number"))?;
-            let item = Item::Value(number.into());
-            check(name, info, &item).map_err(anyhow::Error::msg)?
-        }
-        _ => {
-            let item = Item::Value(text.into());
-            check(name, info, &item).map_err(anyhow::Error::msg)?
-        }
+        let number: f64 =
+            (text.parse()).map_err(|_| anyhow::anyhow!("`{name}` must be a number"))?;
+        Item::Value(number.into())
+    } else {
+        Item::Value(text.into())
     };
+    let value = check(name, info, &item).map_err(anyhow::Error::msg)?;
     persist(path, info, Some(value))
 }
 
 /// `clackatoo config --unset NAME`: back to the default.
+///
+/// # Errors
+///
+/// If there's no such setting, or the file can't be read or written, or
+/// isn't TOML.
 pub fn unset(path: &Path, name: &str) -> anyhow::Result<()> {
     persist(path, setting(name)?, None)
 }

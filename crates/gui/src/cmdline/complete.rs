@@ -211,7 +211,7 @@ fn option_description(choice: &str) -> String {
     let find = |name| {
         options::ALL
             .iter()
-            .find(|info| info.name == name || info.short == name)
+            .find(|info| info.name == name || (!info.short.is_empty() && info.short == name))
     };
     let (prefix, info) = if let Some(info) = find(name) {
         ("", Some(info))
@@ -332,7 +332,7 @@ fn matching<'a>(names: impl Iterator<Item = &'a str> + Clone, word: &str) -> Vec
 fn option_words(word: &str) -> Vec<String> {
     if let Some((name, value)) = word.split_once('=') {
         let words = (options::ALL.iter())
-            .find(|info| info.name == name || info.short == name)
+            .find(|info| info.name == name || (!info.short.is_empty() && info.short == name))
             .and_then(|info| match info.kind {
                 Kind::Choice(words) => Some(words),
                 _ => None,

@@ -351,6 +351,7 @@ impl Desk {
     /// Does one thing Lua says, unless `guarded` and it runs commands or
     /// changes panes or machines: then it says why it didn't (see
     /// [`Desk::controlled`]).
+    #[allow(clippy::too_many_lines, reason = "a short arm for each thing Lua says")]
     pub(super) fn lua_says(&mut self, message: FromLua, guarded: bool) {
         if guarded
             && let FromLua::Split { .. }
@@ -377,7 +378,7 @@ impl Desk {
             } => {
                 let desc = desc.as_deref().and_then(said_in_panel);
                 (self.keymap).bind(&modes, &keys, Binding::Lua(binding), desc.as_deref());
-                self.keymap.set_by(&modes, &keys, by);
+                self.keymap.set_by(&modes, &keys, &by);
                 self.forget_waiting();
             }
             FromLua::Remap {
@@ -389,7 +390,7 @@ impl Desk {
             } => {
                 let desc = desc.as_deref().and_then(said_in_panel);
                 (self.keymap).bind(&modes, &keys, Binding::Keys(to), desc.as_deref());
-                self.keymap.set_by(&modes, &keys, by);
+                self.keymap.set_by(&modes, &keys, &by);
                 self.forget_waiting();
             }
             FromLua::Group { modes, keys, name } => {
@@ -398,7 +399,7 @@ impl Desk {
             }
             FromLua::Unmap { modes, keys, by } => {
                 self.keymap.unbind(&modes, &keys);
-                self.keymap.set_by(&modes, &keys, by);
+                self.keymap.set_by(&modes, &keys, &by);
                 self.forget_waiting();
             }
             FromLua::Subscribe { handler, scope } => self.script.handlers.push((handler, scope)),

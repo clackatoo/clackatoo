@@ -1367,6 +1367,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Workspaces of terminals come back after a shutdown again: the daemon saves them before logind shuts down",
     },
+    News {
+        id: "setpersist",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: ":setp saves an option for every window after, in settings.lua; :verbose set says where one was set",
+    },
 ];
 
 impl News {

@@ -17,6 +17,8 @@
 //! build's sake. A line clackatoo didn't write is never thrown away: the
 //! file isn't written, and the line is named.
 
+use std::fmt::Write as _;
+
 use super::{Info, Kind, Value, lookup};
 
 /// What the file starts with.
@@ -109,7 +111,7 @@ impl Model {
                 Saved::Value(value) => literal(value),
                 Saved::Written(written) => written.clone(),
             };
-            text.push_str(&format!("client.opt.{name} = {literal}\n"));
+            writeln!(text, "client.opt.{name} = {literal}").expect("writing to a String");
         }
         text
     }
