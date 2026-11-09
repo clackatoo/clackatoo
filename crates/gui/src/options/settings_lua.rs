@@ -70,8 +70,12 @@ impl Model {
         Ok(model)
     }
 
-    /// Saves `info`'s option as `value`, or with none, saves it no more.
-    pub(crate) fn set(&mut self, info: &Info, value: Option<Value>) {
+    /// Saves `info`'s option as `value`, or with none, saves it no more;
+    /// or says why `value` isn't one it can hold.
+    pub(crate) fn set(&mut self, info: &Info, value: Option<Value>) -> Result<(), String> {
+        if let Some(value) = &value {
+            info.check(value)?;
+        }
         self.forget(info.name);
         if !info.short.is_empty() {
             self.forget(info.short);
@@ -80,6 +84,7 @@ impl Model {
             self.options
                 .push((info.name.to_owned(), Saved::Value(value)));
         }
+        Ok(())
     }
 
     fn forget(&mut self, name: &str) {
@@ -143,10 +148,25 @@ fn literal(value: &Value) -> String {
     }
 }
 
-/// `text` as a Lua string. Options' text has no control characters, so
-/// only a backslash and a quote need escaping.
+/// `text` as a Lua string: a backslash and a quote escaped, and any
+/// control character, which no option's text has, written as the `\ddd`
+/// of each of its bytes, so no text can end the line.
 fn quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut quoted = String::from('"');
+    for ch in text.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            ch if ch.is_control() => {
+                for byte in ch.encode_utf8(&mut [0; 4]).bytes() {
+                    write!(quoted, "\\{byte:03}").expect("writing to a String");
+                }
+            }
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// A value, as the file writes it: what [`literal`] writes, and no more.
@@ -224,20 +244,34 @@ fn whole(text: &str) -> Option<u32> {
 
 /// The text inside a Lua string's quotes, as [`quoted`] wrote it.
 fn unquoted(inside: &str) -> Option<String> {
-    let mut text = String::new();
-    let mut chars = inside.chars();
+    let mut bytes = Vec::new();
+    let mut chars = inside.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
             '\\' => match chars.next()? {
-                escaped @ ('\\' | '"') => text.push(escaped),
+                escaped @ ('\\' | '"') => bytes.push(escaped as u8),
+                digit @ '0'..='9' => {
+                    // Up to three digits, as Lua reads them.
+                    let mut byte = u32::from(digit) - u32::from('0');
+                    for _ in 0..2 {
+                        match chars.peek() {
+                            Some(&next @ '0'..='9') => {
+                                byte = byte * 10 + (u32::from(next) - u32::from('0'));
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    bytes.push(u8::try_from(byte).ok()?);
+                }
                 _ => return None,
             },
             '"' => return None,
             ch if ch.is_control() => return None,
-            ch => text.push(ch),
+            ch => bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()),
         }
     }
-    Some(text)
+    String::from_utf8(bytes).ok()
 }
 
 /// Every option's value written and read back, for tests.
@@ -258,12 +292,16 @@ mod tests {
     #[test]
     fn options_are_written_in_order_and_read_back_as_the_same_values() {
         let mut model = Model::default();
-        model.set(info("sbr"), Some(Value::Text("↪ \"\\".into())));
-        model.set(info("nu"), Some(Value::Bool(false)));
-        model.set(info("cc"), Some(Value::List(vec![80, 120])));
-        model.set(info("fsz"), Some(Value::Decimal(Decimal::whole(12))));
-        model.set(info("icm"), Some(Value::Choice("none")));
-        model.set(info("nuw"), Some(Value::Number(6)));
+        for (name, value) in [
+            ("sbr", Value::Text("↪ \"\\".into())),
+            ("nu", Value::Bool(false)),
+            ("cc", Value::List(vec![80, 120])),
+            ("fsz", Value::Decimal(Decimal::whole(12))),
+            ("icm", Value::Choice("none")),
+            ("nuw", Value::Number(6)),
+        ] {
+            model.set(info(name), Some(value)).unwrap();
+        }
         let text = model.render();
         assert_eq!(
             text,
@@ -281,8 +319,8 @@ mod tests {
         assert_eq!(read.render(), text);
         // Set again, by its short name, it's written once, in its place.
         let mut read = read;
-        read.set(info("number"), Some(Value::Bool(true)));
-        read.set(info("cc"), None);
+        read.set(info("number"), Some(Value::Bool(true))).unwrap();
+        read.set(info("cc"), None).unwrap();
         assert!(read.render().contains("client.opt.number = true\n"));
         assert!(!read.render().contains("colorcolumn"));
         assert_eq!(read.render().matches("number =").count(), 1);
@@ -301,7 +339,7 @@ mod tests {
                 (Kind::Text, _) => Value::Text("a \"b\" \\c ↪".into()),
                 (_, value) => value,
             };
-            model.set(info, Some(value.clone()));
+            model.set(info, Some(value.clone())).unwrap();
             wanted.push((info.name.to_owned(), Saved::Value(value)));
         }
         let read = Model::parse(&model.render()).unwrap();
@@ -313,7 +351,7 @@ mod tests {
         let text = "-- mine\n\nclient.opt.newthing = { 1, 2 }\nclient.opt.nuw = 99\n\
                     client.opt.wrap=false\n";
         let mut model = Model::parse(text).unwrap();
-        model.set(info("nu"), Some(Value::Bool(false)));
+        model.set(info("nu"), Some(Value::Bool(false))).unwrap();
         assert_eq!(
             model.render(),
             format!(
@@ -337,5 +375,34 @@ mod tests {
                 "{line}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn nothing_set_can_write_a_line_of_its_own() {
+        let mut model = Model::default();
+        // What no option can hold is refused, whoever asks.
+        for (name, value) in [
+            (
+                "sbr",
+                Value::Text("x\"\nclient.keys.map('n', 'x', 'dd')\n--".into()),
+            ),
+            ("sbr", Value::Text("\0\r\u{1b}[31m".into())),
+            ("nu", Value::Number(1)),
+            ("nuw", Value::Number(99)),
+        ] {
+            assert!(model.set(info(name), Some(value)).is_err(), "{name}");
+        }
+        assert_eq!(model.render(), format!("{HEADER}\n"));
+        // Were one let through, it's still one line, read back as it was.
+        let text = "a\nb\r\0\u{1b}\u{85}\"\\9";
+        let quoted = quoted(text);
+        assert_eq!(quoted, "\"a\\010b\\013\\000\\027\\194\\133\\\"\\\\9\"");
+        assert!(!quoted.chars().any(char::is_control));
+        assert_eq!(
+            unquoted(&quoted[1..quoted.len() - 1]).as_deref(),
+            Some(text)
+        );
+        assert_eq!(unquoted("\\1234").as_deref(), Some("{4"));
+        assert_eq!(unquoted("\\256"), None);
     }
 }

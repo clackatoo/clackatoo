@@ -110,6 +110,10 @@ pub(crate) fn save(
 
 /// Saves `info`'s option in its file in `dir`, under a lock on the folder.
 fn write(dir: &Path, info: &'static Info, value: Option<Value>) -> anyhow::Result<()> {
+    // Whoever asked, nothing an option can't hold is written.
+    if let Some(value) = &value {
+        info.check(value).map_err(anyhow::Error::msg)?;
+    }
     let client = dir.join("client");
     std::fs::create_dir_all(&client)
         .with_context(|| format!("couldn't make {}", client.display()))?;
@@ -139,7 +143,7 @@ fn settings_lua(path: &Path, info: &Info, value: Option<Value>) -> anyhow::Resul
     }
     let mut model = Model::parse(text.as_deref().unwrap_or_default())
         .map_err(|why| anyhow::anyhow!("settings.lua's {why}, so it wasn't changed"))?;
-    model.set(info, value);
+    model.set(info, value).map_err(anyhow::Error::msg)?;
     let rendered = model.render();
     if text.as_deref() == Some(rendered.as_str()) {
         return Ok(());
@@ -237,6 +241,22 @@ mod tests {
             .result
             .is_ok()
         );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("client/startup.toml")).unwrap(),
+            "renderer = \"opengl\"\nfont-size = 14\n"
+        );
+        assert!(!dir.path().join("client/settings.lua").exists());
+        // What an option can't hold is never written, in either file.
+        for (name, value) in [
+            ("fsz", Value::Decimal(super::super::Decimal::whole(1))),
+            ("font", Value::Text("Mono\"\nrenderer = \"opengl".into())),
+            ("sbr", Value::Text("\n".into())),
+        ] {
+            assert!(
+                saved(dir.path(), name, Some(value)).result.is_err(),
+                "{name}"
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(dir.path().join("client/startup.toml")).unwrap(),
             "renderer = \"opengl\"\nfont-size = 14\n"
