@@ -290,6 +290,25 @@ impl Row {
         }
     }
 
+    /// Copies `len` cells of `src` from column `from` to this row's from
+    /// column `to`, which must be blank: graphemes, styles and all. Half a
+    /// wide character at either end of the span stays blank, as it can't
+    /// be shown in it.
+    pub(crate) fn copy_span(&mut self, to: usize, src: &Row, from: usize, len: usize) {
+        for offset in 0..len {
+            let cell = src.cells()[from + offset];
+            let cut =
+                (offset == 0 && cell.is_wide_spacer()) || (offset + 1 == len && cell.is_wide());
+            if cell.is_wide_spacer() || cut {
+                continue;
+            }
+            self.write(to + offset, cell.ch(), cell.is_wide(), src.style(cell));
+            for &ch in src.grapheme(from + offset).unwrap_or_default() {
+                self.append_to_grapheme(to + offset, ch);
+            }
+        }
+    }
+
     /// Makes the character at `col`, one column wide, two columns wide,
     /// as a character joining it can (see [`Widths`](crate::Widths)): the
     /// cell after it, which must be in the row, becomes its spacer.
@@ -301,6 +320,16 @@ impl Row {
         self.unlink_wide(col + 1);
         self.set_cell(col + 1, Cell::new(' ', style, CellFlags::WIDE_SPACER));
         self.cells[col].add_flags(CellFlags::WIDE);
+    }
+
+    /// Whether `ch`, joining the cell at `col`, would make it two columns
+    /// wide by `widths`, as only the first character joining a cell can.
+    pub(crate) fn would_widen(&self, col: usize, ch: char, widths: crate::Widths) -> bool {
+        let cell = self.cells()[col];
+        !cell.is_wide()
+            && !cell.is_wide_spacer()
+            && !cell.has_grapheme()
+            && widths.widens(cell.ch(), &[ch])
     }
 
     /// Whether the cell at `col`, one column wide, takes two by `widths`,

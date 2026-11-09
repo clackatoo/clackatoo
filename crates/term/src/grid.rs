@@ -388,6 +388,40 @@ impl Grid {
     /// Scrolls the screen lines in `region` down by `count`, discarding the
     /// lines that leave the bottom of the region and blanking those that enter
     /// at the top.
+    /// Scrolls the box of `lines` and `cols` up by `count` lines, as left
+    /// and right margins narrow it: what leaves its top is gone, never to
+    /// history, and blank lines in `blank` come in at its bottom. Down,
+    /// if not `up`, the other way round.
+    pub(crate) fn scroll_box(
+        &mut self,
+        lines: Range<usize>,
+        cols: Range<usize>,
+        count: usize,
+        up: bool,
+        blank: &Style,
+    ) {
+        let count = count.min(lines.len());
+        let width = cols.len();
+        let order: Vec<usize> = if up {
+            lines.clone().collect()
+        } else {
+            lines.clone().rev().collect()
+        };
+        for line in order {
+            let from = if up {
+                Some(line + count).filter(|&from| from < lines.end)
+            } else {
+                line.checked_sub(count).filter(|&from| from >= lines.start)
+            };
+            let source = from.map(|from| self.row(from).clone());
+            let row = self.edit_row(line);
+            row.fill(cols.clone(), blank);
+            if let Some(source) = source {
+                row.copy_span(cols.start, &source, cols.start, width);
+            }
+        }
+    }
+
     pub(crate) fn scroll_down(&mut self, region: Range<usize>, count: usize, blank: &Style) {
         let count = count.min(region.len());
         let rows = self.absolute(region);

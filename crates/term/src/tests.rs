@@ -87,15 +87,92 @@ mod printing {
         assert_eq!(cursor(&t), (0, 2));
     }
 
+    /// A 10×4 terminal with margins at columns 3 to 6, after `then`.
+    fn boxed(then: &str) -> Terminal {
+        after(
+            10,
+            4,
+            &format!(
+                "0123456789\r\n0123456789\r\n0123456789\r\n0123456789\x1b[?69h\x1b[3;6s{then}"
+            ),
+        )
+    }
+
     #[test]
-    fn with_no_room_an_emoji_stays_narrow_until_a_resize_gives_it_some() {
-        let mut t = after(3, 2, "ab\u{2764}\u{FE0F}");
-        assert_eq!(texts(&t, 0), ["a", "b", "\u{2764}\u{FE0F}"]);
-        assert!(!t.grid().row(0).cells()[2].is_wide());
-        // Rewrapped wider, it's laid out as if printed there.
-        t.resize(Size::new(5, 2).unwrap());
-        assert_eq!(texts(&t, 0), ["a", "b", "\u{2764}\u{FE0F}", "*", " "]);
-        t.assert_invariants();
+    fn text_wraps_between_the_left_and_right_margins() {
+        // Set, the margins put the cursor home.
+        let t = boxed("\x1b[1;3Habcdefg");
+        assert_eq!(
+            t.screen_text(),
+            "01abcd6789\n01efg56789\n0123456789\n0123456789"
+        );
+        assert_eq!(cursor(&t), (1, 5));
+        // A carriage return goes to the left margin, from within.
+        let t = boxed("\x1b[2;5H\rX");
+        assert_eq!(t.screen_text().lines().nth(1), Some("01X3456789"));
+        // Across the margins, the cursor stops at them.
+        let t = boxed("\x1b[1;4H\x1b[9CX\x1b[9DY");
+        assert_eq!(t.screen_text().lines().next(), Some("01Y34X6789"));
+        // Off the screen's DECSLRM: `CSI s` saves the cursor again.
+        let t = boxed("\x1b[?69l\x1b[1;3H\x1b[s\x1b[4;1H\x1b[uZ");
+        assert_eq!(t.screen_text().lines().next(), Some("01Z3456789"));
+    }
+
+    #[test]
+    fn scrolling_and_editing_keep_within_the_margins() {
+        // A line feed at the bottom scrolls the box alone, into nothing.
+        let t = boxed("\x1b[4;3H\n");
+        assert_eq!(
+            t.screen_text(),
+            "0123456789\n0123456789\n0123456789\n01    6789"
+        );
+        assert_eq!(t.grid().scrollback_len(), 0);
+        // Insert and delete lines, and characters, as far as the margins.
+        let t = boxed("\x1b[2;4H\x1b[L");
+        assert_eq!(
+            t.screen_text(),
+            "0123456789\n01    6789\n0123456789\n0123456789"
+        );
+        let t = boxed("\x1b[1;4H\x1b[2@");
+        assert_eq!(t.screen_text().lines().next(), Some("012  36789"));
+        let t = boxed("\x1b[1;4H\x1b[2P");
+        assert_eq!(t.screen_text().lines().next(), Some("0125  6789"));
+        // Outside them, a line feed moves on, and editing does nothing.
+        let t = boxed("\x1b[1;9H\x1b[2P\x1b[L");
+        assert_eq!(t.screen_text().lines().next(), Some("0123456789"));
+    }
+
+    #[test]
+    fn origin_mode_counts_columns_from_the_left_margin() {
+        let mut t = boxed("\x1b[?6h\x1b[1;2HA\x1b[6n");
+        assert_eq!(t.screen_text().lines().next(), Some("012A456789"));
+        assert_eq!(t.take_replies(), b"\x1b[1;3R");
+        let mut t = boxed("\x1b[?69$p\x1b[?69l\x1b[?69$p\x1bP$qs\x1b\\");
+        assert_eq!(
+            t.take_replies(),
+            b"\x1b[?69;1$y\x1b[?69;2$y\x1bP1$r1;10s\x1b\\"
+        );
+        // A resize puts them back at the screen's edges.
+        let mut t = boxed("");
+        t.resize(Size::new(8, 4).unwrap());
+        t.advance(b"\x1bP$qs\x1b\\");
+        assert_eq!(t.take_replies(), b"\x1bP1$r1;8s\x1b\\");
+        assert_eq!(t.margins(), None);
+    }
+
+    #[test]
+    fn with_no_room_the_selector_is_left_out() {
+        // In the last column, as nothing could show it.
+        let t = after(3, 2, "ab\u{2764}\u{FE0F}x");
+        assert_eq!(texts(&t, 0), ["a", "b", "\u{2764}"]);
+        assert_eq!(texts(&t, 1)[0], "x");
+        // Nor at the right margin.
+        let t = after(6, 2, "\x1b[?69h\x1b[1;3sab\u{2764}\u{FE0F}");
+        assert_eq!(texts(&t, 0)[..4], ["a", "b", "\u{2764}", " "]);
+        // A cluster's next character starts a cell of its own there.
+        let t = after(3, 2, "\x1b[?2027hab\u{1F1EC}\u{1F1E7}");
+        assert_eq!(texts(&t, 0), ["a", "b", "\u{1F1EC}"]);
+        assert_eq!(texts(&t, 1)[0], "\u{1F1E7}");
     }
 
     #[test]
@@ -750,7 +827,13 @@ mod queries {
         );
         assert_eq!(replies("\x1b[5 q\x1bP$q q\x1b\\"), "\x1bP1$r6 q\x1b\\");
         assert_eq!(replies("\x1b[2;4r\x1bP$qr\x1b\\"), "\x1bP1$r2;4r\x1b\\");
-        assert_eq!(replies("\x1bP$qs\x1b\\"), "\x1bP0$r\x1b\\");
+        // The margins, which are the screen's edges until set.
+        assert_eq!(replies("\x1bP$qs\x1b\\"), "\x1bP1$r1;10s\x1b\\");
+        assert_eq!(
+            replies("\x1b[?69h\x1b[3;7s\x1bP$qs\x1b\\"),
+            "\x1bP1$r3;7s\x1b\\"
+        );
+        assert_eq!(replies("\x1bP$qx\x1b\\"), "\x1bP0$r\x1b\\");
         // Other device control strings, such as sixels, ask nothing.
         assert_eq!(replies("\x1bPq#0;2;0;0;0\x1b\\"), "");
     }
@@ -1626,7 +1709,7 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
     let modes = (
         prop::sample::select(vec![
             4u16, 6, 7, 20, 25, 47, 1047, 1048, 1049, 1, 66, 9, 1000, 1002, 1003, 1004, 1005, 1006,
-            1015, 2004, 2026, 2027,
+            1015, 2004, 2026, 2027, 69, 69,
         ]),
         any::<bool>(),
     )
@@ -1655,6 +1738,10 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         b"\x1b]8;;\x1b\\".to_vec(),
         b"\x1b]9;4;1;50\x07".to_vec(),
         b"\x1b]9;4;0\x07".to_vec(),
+        // Left and right margins, while DECLRMM is set.
+        b"\x1b[3;6s".to_vec(),
+        b"\x1b[2s".to_vec(),
+        b"\x1b[?69h\x1b[2;5s".to_vec(),
     ]);
     prop_oneof![4 => printable, 2 => control, 3 => csi, 1 => modes, 1 => esc, 1 => any::<u8>().prop_map(|b| vec![b])]
 }
@@ -2305,6 +2392,10 @@ mod snapshots {
             let mut restored = Terminal::restore_with_links(&snapshot, &links, &config()).unwrap();
             restored.restore_blocks(&blocks);
             restored.restore_asked(&asked);
+            // As the daemon hands them over, beside the snapshot.
+            if let Some(margins) = original.margins() {
+                restored.restore_margins(margins);
+            }
             restored.assert_invariants();
             prop_assert_eq!(&restored.snapshot_with_links(), &(snapshot, links));
             prop_assert_eq!(&restored.blocks_snapshot(), &blocks);

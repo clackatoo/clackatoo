@@ -1290,6 +1290,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs on kitty's keyboard protocol can hear keys held and let go, and Super as a modifier",
     },
     News {
+        id: "lr-margins",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Left and right margins (DECLRMM, DECSLRM): programs can scroll and wrap within a box of the screen",
+    },
+    News {
         id: "tab-progress",
         date: "2026-11-09",
         lesson: "shell",

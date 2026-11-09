@@ -177,8 +177,8 @@ desktop; nothing about it passes between machines.
 - **Variation selector 16** (U+FE0F), after a character that has an emoji
   form one column wide, as ❤ or ✔ has, makes it two columns wide, as kitty
   and Ghostty draw it: the cursor moves on a column more, over what was
-  there. In the last column, with no room, it stays one column wide until a
-  resize gives it some. `vs16 = false` in `daemon/machine.toml`'s
+  there. In the last column, or at the right margin, with no room for it, the
+  selector is left out, and the character stays one column wide. `vs16 = false` in `daemon/machine.toml`'s
   [`[terminals]`](~clackatoo/reference/config#the-daemon-s-terminals) keeps
   it one column, for programs that count it so; each terminal keeps the rule
   it started with, through upgrades too, and one carried over from a build
@@ -192,12 +192,12 @@ desktop; nothing about it passes between machines.
 |---|---|
 | Control characters | BS, HT, LF, VT, FF, CR, SO, SI. BEL is accepted and ignored. |
 | `ESC` | `7` `8` (save/restore cursor), `D` (index), `E` (next line), `H` (set tab stop), `M` (reverse index), `c` (full reset), `#8` (screen alignment test), `(` and `)` with `B` (ASCII) or `0` (DEC line drawing) |
-| `CSI` cursor | `A` `B` `C` `D` `E` `F` `G` `H` `I` `Z` `` ` `` `a` `d` `e` `f`, and `s` `u` without parameters |
+| `CSI` cursor | `A` `B` `C` `D` `E` `F` `G` `H` `I` `Z` `` ` `` `a` `d` `e` `f`, and `s` `u` without parameters (but `s` while DECLRMM is set: see [margins](#left-and-right-margins)) |
 | `CSI` editing | `@` `J` (including `3J` to clear scrollback) `K` `L` `M` `P` `S` `T` `X` `b` (repeat) |
-| `CSI` other | `g` (clear tab stops), `r` (scroll region), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn), `t` (window operations: `22` and `23` push and pop the title, with a second parameter of 0 or 2, ten titles deep, each kept to 4096 bytes; see [queries](#queries-answered) for `18`), `>u` `<u` `=u` (the [kitty keyboard protocol](#keyboard)) |
+| `CSI` other | `g` (clear tab stops), `r` (scroll region), `s` with DECLRMM set (left and right margins), `m` (SGR), `!p` (soft reset), ` q` (cursor shape: 0 the user's default, 1 and 2 block, 3 and 4 underline, 5 and 6 bar; blinking isn't drawn), `t` (window operations: `22` and `23` push and pop the title, with a second parameter of 0 or 2, ten titles deep, each kept to 4096 bytes; see [queries](#queries-answered) for `18`), `>u` `<u` `=u` (the [kitty keyboard protocol](#keyboard)) |
 | `ESC` keypad | `=` and `>` (application and numeric keypad) |
 | ANSI modes (`CSI h`/`l`) | 4 (insert), 20 (line feed is newline) |
-| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1016 (the mouse in pixels, as 1006 but where the pointer is in pixels from the text area's top left; a drag is told at every pixel it moves, and the wheel at its cell's top left), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)), 2048 ([resize reports](#resize-reports)) |
+| DEC modes (`CSI ? h`/`l`) | 1 (application cursor keys), 6 (origin), 7 (autowrap), 25 (show cursor), 47, 1047 and 1049 (alternate screen), 66 (application keypad), 1048 (save cursor), 69 ([left and right margins](#left-and-right-margins)), 2004 (bracketed paste), 9, 1000, 1002 and 1003 (mouse tracking), 1005, 1006 and 1015 (mouse encodings), 1016 (the mouse in pixels, as 1006 but where the pointer is in pixels from the text area's top left; a drag is told at every pixel it moves, and the wheel at its cell's top left), 1004 (focus events), 2026 ([synchronized output](#synchronized-output)), 2027 ([grapheme clusters](#grapheme-clusters)), 2048 ([resize reports](#resize-reports)) |
 | SGR | Bold, dim, italic, blink, inverse, hidden, strikethrough, and their resets. Underlines: single, double (`21` or `4:2`), curly (`4:3`), dotted (`4:4`), dashed (`4:5`). 8, 16, 256 and 24-bit colors for text, background and underline (`58`), in both the `;` and `:` spellings. |
 | `OSC` | 0 and 2 (window title, which names the tab and the window without control characters or those that show nothing but change what's around them, as the marks that turn text round and the line separators do; in the window's title, only its first 256 characters, set apart from the machine's name and anything clackatoo adds), 7 (working directory, as a `file://` URL, which names a tab with no title; a path over 4096 bytes is ignored), 8 (hyperlinks, with `id=`; kept in history and through upgrades), 52 (clipboard: text a program copies goes to the window's clipboard or primary selection, as the window's `osc52` option allows; reading it is refused unless allowed, with an empty answer), 133 (shell integration: `A` prompt, `B` where typing starts, `C` output, with an optional `cmdline_url=` (a command over 1024 bytes isn't kept) and `clackatoo=`, the secret clackatoo's own shell integration adds, which is checked and dropped, and `D` exit status, which marks a failed command's prompt line; see [commands](~clackatoo/reference/normal-mode#commands); the marks also say whether a [background tab](~clackatoo/reference/workspaces#background-tabs) is running, and which signed command a terminal [kept running](~clackatoo/reference/workspaces#keeping-a-terminal-running) runs again), 9;4 ([progress](#progress)), 9, 777 and 99 ([notifications](#notifications)) |
 
@@ -217,7 +217,7 @@ desktop; nothing about it passes between machines.
 | `CSI ? u` (kitty keyboard flags) | `CSI ? <flags> u`, the [flags](#keyboard) in effect |
 | `CSI 18 t` (text area size) | `CSI 8 ; <lines> ; <columns> t`. The sizes in pixels, the text area's (`14t`, as `CSI 4 ; <height> ; <width> t`) and a cell's (`16t`, as `CSI 6 ; <height> ; <width> t`), are answered once a window has said how big it draws a cell, as it does when it sizes the terminal; until then, not at all. Nor is the title read back (`21t`), which would let a program type what it set. |
 | `DCS + q <names> ST` (XTGETTCAP) | For each name, in hex: `DCS 1 + r <name> = <value> ST`, the value in hex, or without `=` for a boolean; `DCS 0 + r <name> ST` for one clackatoo doesn't say, the name said back only if it's hex, and `DCS 0 + r ST` otherwise: no answer ever says back what a program printed, which could have it type anything into the shell. It says `xterm-256color`'s name (`TN`) and colors (`Co`), 24-bit color (`RGB`, `Tc`, `setrgbf`, `setrgbb`), styled and colored underlines (`Su`, `Smulx`, `Setulc`), the clipboard (`Ms`), the cursor's shape (`Ss`, `Se`), synchronized output (`Sync`), bracketed paste (`BE`, `BD`, `PS`, `PE`), focus events (`fe`, `fd`, `kxIN`, `kxOUT`) and `XT`. At most 64 names a request, and a request over 1024 bytes isn't answered. |
-| `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own) and the scroll region (`r`); `DCS 0 $ r ST` for any other. |
+| `DCS $ q <setting> ST` (DECRQSS) | `DCS 1 $ r <sequence> ST`, the sequence that sets the setting as it is, for the pen (`m`, as `0;1;38:5:1m`), the cursor's shape (` q`, steady, or 0 for your own), the scroll region (`r`) and the left and right margins (`s`); `DCS 0 $ r ST` for any other. |
 
 The colors are those the window draws terminals in, which it tells the daemon
 as it connects, so the daemon answers at once, as programs wait only a moment.
@@ -275,6 +275,28 @@ encodes keys this way; the web app on your phone sends xterm's encoding still.
 A window older than protocol 139 does too, which programs that ask still
 understand.
 
+## Left and right margins
+
+A program that sets DECLRMM (`CSI ? 69 h`), as some editors and multiplexers
+do to scroll part of a screen, can set left and right margins with DECSLRM,
+`CSI <left> ; <right> s`, columns counted from 1. While it's set, `CSI s`
+sets the margins rather than saving the cursor, as in xterm. Within them:
+
+- Text wraps at the right margin to the left one, and a carriage return goes
+  to the left one.
+- The cursor stops at a margin moving across it, as at the scroll region's
+  top and bottom.
+- Scrolling, a line feed at the bottom of the scroll region, and inserting or
+  deleting lines and characters move only what's between the margins, in the
+  scroll region's lines; never into history. Outside the margins, a line
+  feed moves the cursor on without scrolling, and editing does nothing.
+- In origin mode, columns count from the left margin, as lines count from the
+  scroll region's top.
+
+Setting margins puts the cursor home. Resetting DECLRMM, a soft or full
+reset, and a resize put them back at the screen's edges. They go on through
+an upgrade in place.
+
 ## Grapheme clusters
 
 By default, as in xterm, each character takes its own columns, and only a
@@ -293,8 +315,9 @@ What's printed either way stays as it was printed: rows are laid out again, in
 history, after a resize, through an upgrade and in every window, by the same
 rules, with what was printed side by side with the mode off kept apart.
 Selecting, searching and copying go by cells, so a cluster is one character to
-them. Text printed with the mode on in the last column that a cluster would
-widen stays one column, as variation selector 16 does there.
+them. A cluster that would widen in the last column, or at the right margin,
+with no room there, is cut where it would widen: its next character starts a
+cell of its own.
 
 ## Resize reports
 
@@ -389,4 +412,4 @@ These are ignored:
 - Setting colors: `OSC 4`, `10`, `11`, `12`, `104`, and the others. Asking
   about them is [answered](#queries-answered).
 - Hyper and Meta as modifiers.
-- Left and right margins (`CSI s` with parameters), and overlines (`SGR 53`).
+- Overlines (`SGR 53`).

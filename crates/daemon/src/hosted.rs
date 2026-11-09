@@ -637,6 +637,12 @@ impl HostedTerminal {
         }
     }
 
+    /// Puts back the left and right margins its program set, as the
+    /// terminal handed over had them (see [`Terminal::restore_margins`]).
+    pub(crate) fn restore_margins(&mut self, margins: (u16, u16)) {
+        self.emulator.restore_margins(margins);
+    }
+
     /// Whether its notifications reach the phone too.
     pub(crate) fn phone(&self) -> bool {
         self.phone

@@ -1450,6 +1450,9 @@ impl Daemon {
             let slot = daemon.terminals.get_mut(&TerminalId(marks.terminal));
             if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
                 pty.set_phone(marks.phone);
+                if let Some(margins) = marks.margins {
+                    pty.restore_margins(margins);
+                }
             }
         }
         daemon.restate_backgrounds();
@@ -1765,12 +1768,14 @@ impl Daemon {
                     histories.extend(self.hand_over_history(terminal.id(), terminal.emulator()));
                     let phone = terminal.phone();
                     let widths = terminal.emulator().widths();
+                    let margins = terminal.emulator().margins();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
                     marks.push(handover::Marks {
                         terminal: terminal.id,
                         phone,
                         vs16: widths.vs16,
                         graphemes: widths.graphemes,
+                        margins,
                     });
                     if programs_asked != clackatoo_term::AskedSnapshot::default() {
                         asked.push(handover::Asked {

@@ -11,7 +11,7 @@ use crate::keyboard;
 use crate::parser::{Params, Perform};
 use crate::requests::{Kind, Request};
 use crate::sgr;
-use crate::terminal::Emulator;
+use crate::terminal::{Emulator, Modes};
 
 /// The reply to DA1 (primary device attributes): a VT220 (62) with ANSI
 /// colour (22). fish 4 sends this query at startup and waits for the answer,
@@ -82,7 +82,7 @@ impl Perform for Emulator {
                 self.move_up(count(0));
                 self.carriage_return();
             }
-            ([], 'G' | '`') => self.set_col(position(0)),
+            ([], 'G' | '`') => self.set_col_origin(position(0)),
             ([], 'H' | 'f') => self.move_to_origin(position(0), position(1)),
             ([], 'I') => self.tab_forward(count(0)),
             ([], 'J') => self.erase_in_display(arg(0).unwrap_or(0)),
@@ -117,7 +117,12 @@ impl Perform for Emulator {
             }
             ([], 't') => self.window_op(arg(0).unwrap_or(0), arg(1)),
             // SCOSC and SCORC: the SCO spellings of save and restore cursor.
-            // With parameters, `CSI s` sets left and right margins instead.
+            // While DECLRMM is set, `CSI s` sets left and right margins
+            // instead (DECSLRM).
+            ([], 's') if self.modes.contains(Modes::LEFT_RIGHT_MARGINS) => {
+                let edge = |i: usize| arg(i).filter(|&n| n != 0).map(usize::from);
+                self.set_margins(edge(0), edge(1));
+            }
             ([], 's') if no_params(params) => self.save_cursor(),
             ([], 'u') if no_params(params) => self.restore_cursor(),
             ([b'?'], 'h' | 'l') => {

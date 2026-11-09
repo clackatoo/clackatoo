@@ -563,6 +563,30 @@ impl Terminal {
         emulator.cwd = snapshot.cwd.as_deref().map(Arc::from);
     }
 
+    /// The left and right margins a program set (DECSLRM), as the first
+    /// column and the one past the last, if they narrow the screen.
+    #[must_use]
+    pub fn margins(&self) -> Option<(u16, u16)> {
+        let emulator = &self.emulator;
+        emulator.margins_on().then(|| {
+            let column = |col: usize| u16::try_from(col).unwrap_or(u16::MAX);
+            (column(emulator.margins.start), column(emulator.margins.end))
+        })
+    }
+
+    /// Puts back margins [`margins`](Self::margins) gave, as a terminal
+    /// restored with DECLRMM set had them; none that don't fit.
+    pub fn restore_margins(&mut self, (start, end): (u16, u16)) {
+        let emulator = &mut self.emulator;
+        let (start, end) = (usize::from(start), usize::from(end));
+        if emulator.modes.contains(Modes::LEFT_RIGHT_MARGINS)
+            && start < end
+            && end <= emulator.width()
+        {
+            emulator.margins = start..end;
+        }
+    }
+
     /// What the program asked of the terminal that a
     /// [`snapshot`](Self::snapshot) doesn't keep, to carry into another
     /// process with it: the keyboard's flags, the titles it pushed and
@@ -697,6 +721,11 @@ impl Terminal {
             region.start < region.end && region.end <= emulator.height(),
             "bad scroll region {region:?}"
         );
+        let margins = &emulator.margins;
+        assert!(
+            margins.start < margins.end && margins.end <= emulator.width(),
+            "bad margins {margins:?}"
+        );
     }
 
     /// The visible screen as text: one line per row, trailing spaces trimmed,
@@ -745,6 +774,10 @@ bitflags! {
         /// Mode 2048: the program is told of each resize, in-band, as
         /// `CSI 48 ; rows ; cols ; height ; width t`.
         const RESIZE_REPORTS = 1 << 11;
+        /// DECLRMM (mode 69): left and right margins can be set (DECSLRM,
+        /// `CSI l ; r s`), and `CSI s` sets them rather than saving the
+        /// cursor.
+        const LEFT_RIGHT_MARGINS = 1 << 12;
     }
 }
 
@@ -933,6 +966,9 @@ pub(crate) struct Emulator {
     /// The lines that scroll, set by DECSTBM. The whole screen unless an app
     /// has narrowed it, as vim does to keep its status line still.
     scroll_region: Range<usize>,
+    /// The columns between the left and right margins, set by DECSLRM
+    /// while DECLRMM is: every column unless a program has narrowed them.
+    margins: Range<usize>,
     tabs: TabStops,
     pub(crate) title: String,
     /// Titles pushed to be popped again (XTWINOPS 22 and 23), oldest
@@ -1005,6 +1041,7 @@ impl Emulator {
             mouse_tracking: MouseTracking::Off,
             mouse_encoding: MouseEncoding::Default,
             scroll_region: 0..height,
+            margins: 0..width,
             tabs: TabStops::new(width),
             title: String::new(),
             titles: Vec::new(),
@@ -1092,12 +1129,38 @@ impl Emulator {
         simple
     }
 
+    /// Whether left and right margins narrow the screen: DECLRMM is set,
+    /// and they're narrower than it.
+    fn margins_on(&self) -> bool {
+        self.modes.contains(Modes::LEFT_RIGHT_MARGINS) && self.margins != (0..self.width())
+    }
+
+    /// Whether the cursor is within the left and right margins, if they
+    /// narrow the screen.
+    fn within_margins(&self) -> bool {
+        self.margins.contains(&self.cursor.col)
+    }
+
+    /// The column past the last that printing at the cursor fills before
+    /// it wraps, and the column it wraps to: the right and left margins
+    /// while the cursor is left of the right one, or else the screen's
+    /// edges.
+    fn print_span(&self) -> (usize, usize) {
+        if self.margins_on() && self.cursor.col < self.margins.end {
+            (self.margins.end, self.margins.start)
+        } else {
+            (self.width(), 0)
+        }
+    }
+
     /// Prints `text`, line by line.
     fn print_printable(&mut self, text: &impl Printable) {
         let mut at = 0;
+        let mut wrapped = false;
         while at < text.bytes().len() {
-            let (end, wrap) = self.print_on_line(text, at);
+            let (end, wrap) = self.print_on_line(text, at, wrapped);
             at = end;
+            wrapped = wrap;
             if wrap {
                 self.wrap();
             }
@@ -1110,10 +1173,18 @@ impl Emulator {
     /// and writes runs of ASCII straight from the bytes. Insert mode must be
     /// off.
     ///
-    /// Starts at byte `start` of `text`. Returns where it stopped, and
-    /// whether the line must wrap before the rest.
-    fn print_on_line<T: Printable>(&mut self, text: &T, start: usize) -> (usize, bool) {
+    /// Starts at byte `start` of `text`, just after a wrap if `wrapped`.
+    /// Returns where it stopped, and whether the line must wrap before the
+    /// rest.
+    fn print_on_line<T: Printable>(
+        &mut self,
+        text: &T,
+        start: usize,
+        wrapped: bool,
+    ) -> (usize, bool) {
         let width = self.width();
+        // Where text wraps, as the margins say.
+        let (edge, _) = self.print_span();
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let Self {
             primary,
@@ -1127,6 +1198,10 @@ impl Emulator {
         } = self;
         let widths = config.widths;
         let clusters = modes.contains(Modes::GRAPHEMES);
+        // Whether `ch` joining the cell at `col` would widen it with no
+        // room: then it doesn't join (see `widening_blocked`).
+        let blocked =
+            |row: &Row, col: usize, ch: char| col + 1 >= edge && row.would_widen(col, ch, widths);
         let grid = match screen {
             Screen::Primary => primary,
             Screen::Alternate => alternate.as_mut().expect(ALTERNATE_EXISTS),
@@ -1135,7 +1210,11 @@ impl Emulator {
         // Whether the next character may join the cell before it, as one
         // after a ZWJ does, or by clusters one after a character past
         // ASCII may: then even ASCII is looked at a character at a time.
-        let mut joins = previous_cell(row, cursor).is_some_and(|col| may_join(row, col, clusters));
+        // Just wrapped, the character was found to start a cell of its own
+        // before the wrap, as the simple way finds it: past a left margin,
+        // there's a cell before it that it mustn't join.
+        let mut joins =
+            !wrapped && previous_cell(row, cursor).is_some_and(|col| may_join(row, col, clusters));
         // Nothing below interns again, so the index stays valid.
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
@@ -1149,7 +1228,7 @@ impl Emulator {
                 if cursor.pending_wrap {
                     return (used, true);
                 }
-                let room = width - cursor.col;
+                let room = edge - cursor.col;
                 let run = if T::ASCII {
                     room.min(bytes.len() - used)
                 } else {
@@ -1160,7 +1239,7 @@ impl Emulator {
                         .count()
                 };
                 row.write_ascii(cursor.col, &bytes[used..used + run], style);
-                advance(cursor, run, width, autowrap);
+                advance(cursor, run, edge, autowrap);
                 used += run;
                 *last_printed = Some(char::from(bytes[used - 1]));
                 continue;
@@ -1174,17 +1253,21 @@ impl Emulator {
                 Some(cells)
                     if cells == 0
                         || (joins
-                            && previous_cell(row, cursor)
-                                .is_some_and(|col| joins_cell(row, col, ch, clusters))) =>
+                            && previous_cell(row, cursor).is_some_and(|col| {
+                                joins_cell(row, col, ch, clusters) && !blocked(row, col, ch)
+                            })) =>
                 {
                     joins = match previous_cell(row, cursor) {
+                        // A variation selector that can't widen its emoji
+                        // is left out.
+                        Some(col) if blocked(row, col, ch) => may_join(row, col, clusters),
                         Some(col) => {
                             row.append_to_grapheme(col, ch);
                             // What joined it may make it wide, if there's
                             // room: the cursor is then past both halves.
-                            if col + 1 < width && row.wants_wide(col, widths) {
+                            if col + 1 < edge && row.wants_wide(col, widths) {
                                 row.widen(col);
-                                advance(cursor, 1, width, autowrap);
+                                advance(cursor, 1, edge, autowrap);
                             }
                             // Not just `ch == ZWJ`: a full grapheme drops
                             // what's appended.
@@ -1197,14 +1280,14 @@ impl Emulator {
                 Some(cells) if cells > width => {}
                 Some(cells) => {
                     let wide = cells == 2;
-                    if cursor.pending_wrap || (wide && cursor.col + 1 == width && autowrap) {
+                    if cursor.pending_wrap || (wide && cursor.col + 1 == edge && autowrap) {
                         return (used, true);
                     }
                     // Without autowrap, a wide character that won't fit has
                     // no next line to go to, so it's dropped.
-                    if !(wide && cursor.col + 1 == width) {
+                    if !(wide && cursor.col + 1 == edge) {
                         row.write_cell(cursor.col, ch, wide, style);
-                        advance(cursor, cells, width, autowrap);
+                        advance(cursor, cells, edge, autowrap);
                         *last_printed = Some(ch);
                         joins = clusters && !ch.is_ascii();
                     }
@@ -1243,7 +1326,8 @@ impl Emulator {
         if self.cursor.pending_wrap {
             self.wrap();
         }
-        if wide && self.cursor.col + 1 == self.width() {
+        let (edge, _) = self.print_span();
+        if wide && self.cursor.col + 1 == edge {
             // Both halves won't fit on this line. Without autowrap there is
             // no next line to move to, so the character is dropped.
             if !self.modes.contains(Modes::AUTOWRAP) {
@@ -1252,21 +1336,54 @@ impl Emulator {
             self.wrap();
         }
 
+        let edge = self.print_span().0;
         let CursorState { line, col, pen, .. } = self.cursor;
-        let insert = self.modes.contains(Modes::INSERT);
-        let row = self.grid_mut().row_mut(line);
-        if insert {
-            row.insert_blanks(col, cells, &pen);
+        if self.modes.contains(Modes::INSERT) {
+            self.insert_cells(line, col, edge, cells, &pen);
         }
-        row.write(col, ch, wide, &pen);
+        self.grid_mut().row_mut(line).write(col, ch, wide, &pen);
 
-        if col + cells < self.width() {
+        if col + cells < edge {
             self.cursor.col = col + cells;
         } else {
-            self.cursor.col = self.width() - 1;
+            self.cursor.col = edge - 1;
             self.cursor.pending_wrap = self.modes.contains(Modes::AUTOWRAP);
         }
         self.last_printed = Some(ch);
+    }
+
+    /// Inserts `count` blank cells in `style` at column `col` of `line`,
+    /// moving what's there right as far as column `end`, past which it
+    /// goes: the right margin, or the screen's edge.
+    fn insert_cells(&mut self, line: usize, col: usize, end: usize, count: usize, style: &Style) {
+        let width = self.width();
+        let row = self.grid_mut().row_mut(line);
+        if end == width {
+            row.insert_blanks(col, count, style);
+            return;
+        }
+        let before = row.clone();
+        row.fill(col..end, style);
+        if count < end - col {
+            row.copy_span(col + count, &before, col, end - col - count);
+        }
+    }
+
+    /// Deletes `count` cells at column `col` of `line`, moving what's
+    /// right of them left, as far as column `end`, and blanks in `style`
+    /// in behind them.
+    fn delete_cells(&mut self, line: usize, col: usize, end: usize, count: usize, style: &Style) {
+        let width = self.width();
+        let row = self.grid_mut().row_mut(line);
+        if end == width {
+            row.delete_cells(col, count, style);
+            return;
+        }
+        let before = row.clone();
+        row.fill(col..end, style);
+        if count < end - col {
+            row.copy_span(col, &before, col + count, end - col - count);
+        }
     }
 
     /// Adds a zero-width codepoint to the character before the cursor,
@@ -1276,18 +1393,21 @@ impl Emulator {
         let Some(col) = self.previous_cell() else {
             return;
         };
-        let (width, widths) = (self.width(), self.config.widths);
+        if self.widening_blocked(col, ch) {
+            return;
+        }
+        let (edge, widths) = (self.print_span().0, self.config.widths);
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let insert = self.modes.contains(Modes::INSERT);
         let CursorState { line, pen, .. } = self.cursor;
         let row = self.grid_mut().row_mut(line);
         row.append_to_grapheme(col, ch);
-        if col + 1 < width && row.wants_wide(col, widths) {
+        if col + 1 < edge && row.wants_wide(col, widths) {
             if insert {
-                row.insert_blanks(col + 1, 1, &pen);
+                self.insert_cells(line, col + 1, edge, 1, &pen);
             }
-            row.widen(col);
-            advance(&mut self.cursor, 1, width, autowrap);
+            self.grid_mut().row_mut(line).widen(col);
+            advance(&mut self.cursor, 1, edge, autowrap);
         }
     }
 
@@ -1298,27 +1418,48 @@ impl Emulator {
     fn joins_previous_grapheme(&self, ch: char) -> bool {
         let row = self.grid().row(self.cursor.line);
         let clusters = self.modes.contains(Modes::GRAPHEMES);
-        previous_cell(row, &self.cursor).is_some_and(|col| joins_cell(row, col, ch, clusters))
+        previous_cell(row, &self.cursor).is_some_and(|col| {
+            joins_cell(row, col, ch, clusters) && !self.widening_blocked(col, ch)
+        })
+    }
+
+    /// Whether `ch` joining the cell at `col` would widen it with no room
+    /// for that, in the last column or at the right margin: then it
+    /// doesn't join, so that a cell its joiners widen is always wide, as
+    /// a row rebuilt from its text has it, wherever it's moved to. A
+    /// variation selector is left out, as nothing would show it; a
+    /// cluster's next character starts a cell of its own, as with mode
+    /// 2027 off.
+    fn widening_blocked(&self, col: usize, ch: char) -> bool {
+        let edge = self.print_span().0;
+        col + 1 >= edge
+            && (self.grid().row(self.cursor.line)).would_widen(col, ch, self.config.widths)
     }
 
     fn previous_cell(&self) -> Option<usize> {
         previous_cell(self.grid().row(self.cursor.line), &self.cursor)
     }
 
-    /// Continues on the next line after text reached the right edge.
+    /// Continues on the next line after text reached the right edge, or
+    /// the right margin: then at the left one.
     fn wrap(&mut self) {
         let line = self.cursor.line;
+        let (_, start) = self.print_span();
         // Without a pending wrap, this is a wide character that doesn't fit
-        // in the last column.
+        // in the last column. Between margins, a line goes on in a box,
+        // not across the screen: the row isn't one that continues.
         let early = !self.cursor.pending_wrap;
+        let margins = self.margins_on();
         let row = self.grid_mut().row_mut(line);
-        if early {
-            row.set_wrapped_early();
-        } else {
-            row.set_wrapped(true);
+        if !margins {
+            if early {
+                row.set_wrapped_early();
+            } else {
+                row.set_wrapped(true);
+            }
         }
         self.index();
-        self.cursor.col = 0;
+        self.cursor.col = start;
     }
 
     pub(crate) fn repeat_last(&mut self, count: usize) {
@@ -1338,20 +1479,31 @@ impl Emulator {
         }
     }
 
+    /// CR: to the line's start, or the left margin, from it or right of
+    /// it.
     pub(crate) fn carriage_return(&mut self) {
-        self.cursor.col = 0;
+        self.cursor.col = if self.margins_on() && self.cursor.col >= self.margins.start {
+            self.margins.start
+        } else {
+            0
+        };
         self.cursor.pending_wrap = false;
     }
 
     pub(crate) fn backspace(&mut self) {
-        self.cursor.col = self.cursor.col.saturating_sub(1);
-        self.cursor.pending_wrap = false;
+        self.move_left(1);
     }
 
     pub(crate) fn tab_forward(&mut self, count: usize) {
+        // Within the margins, no further than the right one.
+        let last = if self.margins_on() && self.within_margins() {
+            self.margins.end - 1
+        } else {
+            self.width() - 1
+        };
         let mut col = self.cursor.col;
         for _ in 0..count {
-            col = self.tabs.next(col).unwrap_or(self.width() - 1);
+            col = self.tabs.next(col).unwrap_or(last).min(last);
         }
         self.set_col(col);
     }
@@ -1383,7 +1535,10 @@ impl Emulator {
     pub(crate) fn index(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.line + 1 == self.scroll_region.end {
-            self.scroll_up(1);
+            // Outside the margins, nothing scrolls.
+            if !self.margins_on() || self.within_margins() {
+                self.scroll_up(1);
+            }
         } else if self.cursor.line + 1 < self.height() {
             self.cursor.line += 1;
         }
@@ -1394,7 +1549,9 @@ impl Emulator {
     pub(crate) fn reverse_index(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.line == self.scroll_region.start {
-            self.scroll_down(1);
+            if !self.margins_on() || self.within_margins() {
+                self.scroll_down(1);
+            }
         } else {
             self.cursor.line = self.cursor.line.saturating_sub(1);
         }
@@ -1406,7 +1563,12 @@ impl Emulator {
     pub(crate) fn scroll_up(&mut self, count: usize) {
         let blank = self.blank();
         let region = self.scroll_region.clone();
-        if region == (0..self.height()) {
+        if self.margins_on() {
+            // A box between the margins, which history isn't.
+            let margins = self.margins.clone();
+            self.grid_mut()
+                .scroll_box(region, margins, count, true, &blank);
+        } else if region == (0..self.height()) {
             self.grid_mut().scroll_up_into_scrollback(count, &blank);
         } else {
             self.grid_mut().scroll_up(region, count, &blank);
@@ -1416,7 +1578,13 @@ impl Emulator {
     pub(crate) fn scroll_down(&mut self, count: usize) {
         let blank = self.blank();
         let region = self.scroll_region.clone();
-        self.grid_mut().scroll_down(region, count, &blank);
+        if self.margins_on() {
+            let margins = self.margins.clone();
+            self.grid_mut()
+                .scroll_box(region, margins, count, false, &blank);
+        } else {
+            self.grid_mut().scroll_down(region, count, &blank);
+        }
     }
 
     /// IL: inserts blank lines at the cursor, pushing the lines below down
@@ -1425,7 +1593,17 @@ impl Emulator {
         if self.scroll_region.contains(&self.cursor.line) {
             let blank = self.blank();
             let lines = self.cursor.line..self.scroll_region.end;
-            self.grid_mut().scroll_down(lines, count, &blank);
+            if self.margins_on() {
+                // Only within the margins, between them.
+                if !self.within_margins() {
+                    return;
+                }
+                let margins = self.margins.clone();
+                self.grid_mut()
+                    .scroll_box(lines, margins, count, false, &blank);
+            } else {
+                self.grid_mut().scroll_down(lines, count, &blank);
+            }
             self.carriage_return();
         }
     }
@@ -1436,8 +1614,32 @@ impl Emulator {
         if self.scroll_region.contains(&self.cursor.line) {
             let blank = self.blank();
             let lines = self.cursor.line..self.scroll_region.end;
-            self.grid_mut().scroll_up(lines, count, &blank);
+            if self.margins_on() {
+                if !self.within_margins() {
+                    return;
+                }
+                let margins = self.margins.clone();
+                self.grid_mut()
+                    .scroll_box(lines, margins, count, true, &blank);
+            } else {
+                self.grid_mut().scroll_up(lines, count, &blank);
+            }
             self.carriage_return();
+        }
+    }
+
+    /// DECSLRM: sets the left and right margins to columns
+    /// `left..=right`, counting from 1, while DECLRMM is set. `None` means
+    /// the screen's edge. Margins that leave no room are ignored.
+    pub(crate) fn set_margins(&mut self, left: Option<usize>, right: Option<usize>) {
+        if !self.modes.contains(Modes::LEFT_RIGHT_MARGINS) {
+            return;
+        }
+        let left = left.unwrap_or(1).max(1) - 1;
+        let right = right.unwrap_or(self.width()).min(self.width());
+        if left + 1 < right {
+            self.margins = left..right;
+            self.move_to_origin(0, 0);
         }
     }
 
@@ -1465,12 +1667,30 @@ impl Emulator {
     /// origin mode, lines count from the top of the scroll region and the
     /// cursor can't leave it.
     pub(crate) fn move_to_origin(&mut self, line: usize, col: usize) {
-        let line = if self.modes.contains(Modes::ORIGIN) {
+        let origin = self.modes.contains(Modes::ORIGIN);
+        let line = if origin {
             (self.scroll_region.start + line).min(self.scroll_region.end - 1)
         } else {
             line
         };
+        // Columns count from the left margin, and stop at the right.
+        let col = if origin && self.margins_on() {
+            (self.margins.start + col).min(self.margins.end - 1)
+        } else {
+            col
+        };
         self.move_to(line, col);
+    }
+
+    /// HPA and CHA: to column `col` of the cursor's line, as an app
+    /// addresses it: in origin mode, from the left margin.
+    pub(crate) fn set_col_origin(&mut self, col: usize) {
+        let col = if self.modes.contains(Modes::ORIGIN) && self.margins_on() {
+            (self.margins.start + col).min(self.margins.end - 1)
+        } else {
+            col
+        };
+        self.set_col(col);
     }
 
     pub(crate) fn set_line_origin(&mut self, line: usize) {
@@ -1509,23 +1729,45 @@ impl Emulator {
         );
     }
 
+    /// CUF: right, stopping at the right margin if the cursor starts
+    /// within the margins.
     pub(crate) fn move_right(&mut self, count: usize) {
-        self.set_col(self.cursor.col.saturating_add(count));
+        let col = self.cursor.col.saturating_add(count);
+        let col = if self.margins_on() && self.within_margins() {
+            col.min(self.margins.end - 1)
+        } else {
+            col
+        };
+        self.set_col(col);
     }
 
+    /// CUB: left, stopping at the left margin if the cursor starts from
+    /// it or right of it.
     pub(crate) fn move_left(&mut self, count: usize) {
-        self.set_col(self.cursor.col.saturating_sub(count));
+        let col = self.cursor.col.saturating_sub(count);
+        let col = if self.margins_on() && self.cursor.col >= self.margins.start {
+            col.max(self.margins.start)
+        } else {
+            col
+        };
+        self.set_col(col);
     }
 
     /// The cursor position as reported to apps: 1-based, and relative to
     /// the scroll region in origin mode.
     pub(crate) fn reported_position(&self) -> (usize, usize) {
-        let line = if self.modes.contains(Modes::ORIGIN) {
+        let origin = self.modes.contains(Modes::ORIGIN);
+        let line = if origin {
             self.cursor.line.saturating_sub(self.scroll_region.start)
         } else {
             self.cursor.line
         };
-        (line + 1, self.cursor.col + 1)
+        let col = if origin && self.margins_on() {
+            self.cursor.col.saturating_sub(self.margins.start)
+        } else {
+            self.cursor.col
+        };
+        (line + 1, col + 1)
     }
 
     // --- Erasing and editing ----------------------------------------------
@@ -1599,24 +1841,40 @@ impl Emulator {
         self.grid_mut().edit_row(line).fill(col..end, &blank);
     }
 
-    /// ICH: inserts blanks at the cursor.
+    /// ICH: inserts blanks at the cursor, moving what's right of it
+    /// towards the right margin, or the screen's edge.
     pub(crate) fn insert_chars(&mut self, count: usize) {
         self.cursor.pending_wrap = false;
+        let Some(end) = self.edit_end() else { return };
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
-        self.grid_mut()
-            .edit_row(line)
-            .insert_blanks(col, count, &blank);
+        // Editing, not printing: the top row no longer goes on from history.
+        self.grid_mut().edit_row(line);
+        self.insert_cells(line, col, end, count.min(end - col), &blank);
     }
 
-    /// DCH: deletes characters at the cursor.
+    /// DCH: deletes characters at the cursor, as far as the right margin,
+    /// or the screen's edge.
     pub(crate) fn delete_chars(&mut self, count: usize) {
         self.cursor.pending_wrap = false;
+        let Some(end) = self.edit_end() else { return };
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
-        self.grid_mut()
-            .edit_row(line)
-            .delete_cells(col, count, &blank);
+        self.grid_mut().edit_row(line);
+        self.delete_cells(line, col, end, count.min(end - col), &blank);
+    }
+
+    /// The column past the last that inserting or deleting characters at
+    /// the cursor moves: the right margin's, or the screen's edge. `None`
+    /// outside the margins, where nothing moves.
+    fn edit_end(&self) -> Option<usize> {
+        if !self.margins_on() {
+            Some(self.width())
+        } else if self.within_margins() {
+            Some(self.margins.end)
+        } else {
+            None
+        }
     }
 
     /// DECALN: fills the screen with `E`s, a test pattern for alignment.
@@ -1668,6 +1926,13 @@ impl Emulator {
             2026 => self.modes.set(Modes::SYNCHRONIZED, on),
             // Only where the rows are rebuilt by clusters too.
             2027 if self.config.widths.graphemes => self.modes.set(Modes::GRAPHEMES, on),
+            // Turned off, the margins are the screen's edges again.
+            69 => {
+                self.modes.set(Modes::LEFT_RIGHT_MARGINS, on);
+                if !on {
+                    self.margins = 0..self.width();
+                }
+            }
             // Told at once, as it asks, and then at each resize.
             2048 => {
                 self.modes.set(Modes::RESIZE_REPORTS, on);
@@ -1765,6 +2030,7 @@ impl Emulator {
             2026 => Modes::SYNCHRONIZED,
             2027 if self.config.widths.graphemes => Modes::GRAPHEMES,
             2048 => Modes::RESIZE_REPORTS,
+            69 => Modes::LEFT_RIGHT_MARGINS,
             47 | 1047 | 1049 => return Some(self.screen == Screen::Alternate),
             _ => return None,
         };
@@ -1967,6 +2233,7 @@ impl Emulator {
                 self.scroll_region.start + 1,
                 self.scroll_region.end
             )),
+            b"s" => Some(format!("{};{}s", self.margins.start + 1, self.margins.end)),
             _ => None,
         };
         let reply = match value {
@@ -1987,6 +2254,7 @@ impl Emulator {
     pub(crate) fn soft_reset(&mut self) {
         self.modes = Modes::default();
         self.scroll_region = 0..self.height();
+        self.margins = 0..self.width();
         self.cursor.pen = Style::DEFAULT;
         self.cursor.charsets = Charsets::default();
         self.cursor.pending_wrap = false;
@@ -2068,6 +2336,7 @@ impl Emulator {
 
         self.size = size;
         self.scroll_region = 0..height;
+        self.margins = 0..width;
         self.tabs.resize(width);
         if !on_primary {
             self.cursor.pending_wrap = false;

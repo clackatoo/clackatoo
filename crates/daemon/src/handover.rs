@@ -378,6 +378,10 @@ pub(crate) struct Marks {
     /// Its rows are rebuilt by grapheme clusters, and it can print by
     /// them (mode 2027).
     pub(crate) graphemes: bool,
+    /// The left and right margins its program set, as the first column
+    /// and the one past the last, if they narrow it (see
+    /// `Terminal::margins`).
+    pub(crate) margins: Option<(u16, u16)>,
 }
 
 impl Marks {
@@ -4829,6 +4833,7 @@ mod tests {
                 phone: true,
                 vs16: true,
                 graphemes: true,
+                margins: Some((2, 7)),
             }],
             images: Some(images()),
             histories: vec![History {
@@ -6277,6 +6282,7 @@ mod tests {
         assert_eq!(read.marks.len(), 1);
         assert_eq!((read.marks[0].terminal, read.marks[0].phone), (1, true));
         assert!(read.marks[0].vs16 && read.marks[0].graphemes);
+        assert_eq!(read.marks[0].margins, Some((2, 7)));
         assert!(read.layout.is_some());
         // Version 50 had none.
         let mut file = tempfile::tempfile().unwrap();
