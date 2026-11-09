@@ -1240,6 +1240,16 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-11-09",
         lesson: "agents",
         what: "A chat's access to the window shows as a teal badge in the top bar: click to go to the chat, × to revoke",
+        id: "kitty-keys",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs that ask get kitty's keyboard protocol (Shift+Enter, Ctrl+I, Esc as themselves) and whole frames",
+    },
+    News {
+        id: "tab-progress",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "A program saying how far it has got (OSC 9;4), as systemd does, ends its tab's name: 42%, … busy, ✗ failed",
     },
     News {
         id: "one-window-process",

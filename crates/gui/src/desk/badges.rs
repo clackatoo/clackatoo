@@ -27,7 +27,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clackatoo_protocol::{ChatState, ChatSummary, Request, Response, Tab, TerminalId, WorkspaceId};
+use clackatoo_protocol::{
+    ChatState, ChatSummary, Request, Response, Tab, TaskProgress, TerminalId, WorkspaceId,
+};
 
 use super::{Asked, Desk};
 use crate::chat::ChatPane;
@@ -188,6 +190,20 @@ impl Desk {
             })
     }
 
+    /// How far a program in `tab` says its task has got (OSC 9;4): its
+    /// focused pane's, or else the first of its panes' to say.
+    pub(super) fn tab_progress(&self, tab: &Tab) -> Option<TaskProgress> {
+        let progress = |pane: &clackatoo_protocol::Pane| {
+            let terminal = pane.content.terminal()?;
+            self.panes.get(&terminal)?.progress()
+        };
+        let panes = tab.layout.panes();
+        let focused = panes.iter().find(|pane| pane.id == tab.focused);
+        focused
+            .and_then(progress)
+            .or_else(|| panes.iter().find_map(progress))
+    }
+
     /// What `tab`, of the workspace shown, says of its chats: by their
     /// views, and what this window hasn't seen.
     pub(super) fn tab_mark(&self, tab: &Tab) -> Option<Mark> {
@@ -253,5 +269,36 @@ impl Desk {
             .flat_map(|workspace| &workspace.tabs)
             .map(|tab| self.tab_mark(tab));
         workspaces.chain(tabs).collect()
+    }
+}
+
+/// What a tab's name ends with while a program in it says how far its
+/// task has got: ` 42%` under way, ` …` with no telling how far, ` ‖42%`
+/// paused and ` ✗42%` failed, each without the number if it gave none.
+pub(super) fn progress_mark(progress: TaskProgress) -> String {
+    let percent = progress
+        .percent()
+        .map(|percent| format!("{percent}%"))
+        .unwrap_or_default();
+    match progress {
+        TaskProgress::Running(_) => format!(" {percent}"),
+        TaskProgress::Busy => " …".to_owned(),
+        TaskProgress::Paused(_) => format!(" ‖{percent}"),
+        TaskProgress::Failed(_) => format!(" ✗{percent}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tab_says_how_far_its_program_has_got() {
+        assert_eq!(progress_mark(TaskProgress::Running(42)), " 42%");
+        assert_eq!(progress_mark(TaskProgress::Busy), " …");
+        assert_eq!(progress_mark(TaskProgress::Paused(Some(7))), " ‖7%");
+        assert_eq!(progress_mark(TaskProgress::Paused(None)), " ‖");
+        assert_eq!(progress_mark(TaskProgress::Failed(Some(100))), " ✗100%");
+        assert_eq!(progress_mark(TaskProgress::Failed(None)), " ✗");
     }
 }

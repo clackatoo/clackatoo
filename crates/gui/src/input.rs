@@ -3,9 +3,13 @@
 //! This is xterm's encoding, which nearly every program understands:
 //! printable keys send their text, control keys send C0 bytes, Alt adds an
 //! Escape before the key, and named keys (arrows, function keys…) send
-//! escape sequences, with modifiers as a parameter.
+//! escape sequences, with modifiers as a parameter. A program that asks
+//! for the kitty keyboard protocol gets that instead (see [`kitty`]).
+
+mod kitty;
 
 use clackatoo_protocol::InputModes;
+use clackatoo_term::keyboard::{ALL_KEYS, DISAMBIGUATE};
 use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
 /// The modifier keys held during a key press.
@@ -109,9 +113,14 @@ pub(crate) fn is_modifier(key: &Key) -> bool {
     )
 }
 
-/// Appends what `press` sends to the program to `out`. Keys that send
+/// Appends what `press` sends to the program to `out`, as `modes` and the
+/// kitty keyboard protocol's flags `keyboard` say. Keys that send
 /// nothing, such as a modifier pressed alone, append nothing.
-pub(crate) fn encode(press: &KeyPress<'_>, modes: InputModes, out: &mut Vec<u8>) {
+pub(crate) fn encode(press: &KeyPress<'_>, modes: InputModes, keyboard: u8, out: &mut Vec<u8>) {
+    if keyboard & (DISAMBIGUATE | ALL_KEYS) != 0 {
+        kitty::encode(press, keyboard, out);
+        return;
+    }
     let modifiers = press.modifiers;
     if press.location == KeyLocation::Numpad
         && modes.app_keypad
@@ -301,6 +310,7 @@ mod tests {
                 modifiers,
             },
             modes,
+            0,
             &mut out,
         );
         out
@@ -409,10 +419,50 @@ mod tests {
             code: None,
             modifiers: NONE,
         };
-        encode(&press, app, &mut out);
+        encode(&press, app, 0, &mut out);
         assert_eq!(out, b"\x1bOu");
         out.clear();
-        encode(&press, InputModes::default(), &mut out);
+        encode(&press, InputModes::default(), 0, &mut out);
         assert_eq!(out, b"5");
+    }
+
+    #[test]
+    fn a_program_that_asks_gets_the_kitty_keyboard_protocol() {
+        use clackatoo_term::keyboard::{ALTERNATE_KEYS, TEXT};
+
+        let press = |key: &Key, modifiers, keyboard| {
+            let mut out = Vec::new();
+            let press = KeyPress {
+                key,
+                text: None,
+                location: KeyLocation::Standard,
+                code: None,
+                modifiers,
+            };
+            encode(&press, InputModes::default(), keyboard, &mut out);
+            out
+        };
+        let enter = Key::Named(NamedKey::Enter);
+        assert_eq!(press(&enter, SHIFT, 0), b"\r");
+        assert_eq!(press(&enter, SHIFT, DISAMBIGUATE), b"\x1b[13;2u");
+        assert_eq!(press(&enter, NONE, ALL_KEYS), b"\x1b[13u");
+        // Flags that only change sequences change nothing alone.
+        assert_eq!(press(&enter, SHIFT, ALTERNATE_KEYS | TEXT), b"\r");
+        // Application cursor keys are xterm's alone.
+        let app = InputModes {
+            app_cursor_keys: true,
+            ..InputModes::default()
+        };
+        let up = Key::Named(NamedKey::ArrowUp);
+        let mut out = Vec::new();
+        let up_press = KeyPress {
+            key: &up,
+            text: None,
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: NONE,
+        };
+        encode(&up_press, app, DISAMBIGUATE, &mut out);
+        assert_eq!(out, b"\x1b[A");
     }
 }

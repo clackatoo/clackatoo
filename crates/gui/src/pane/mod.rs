@@ -316,6 +316,11 @@ impl Pane {
         }
     }
 
+    /// How far its program says its task has got (OSC 9;4), if it says.
+    pub(crate) fn progress(&self) -> Option<clackatoo_protocol::TaskProgress> {
+        self.screen.as_ref()?.state.progress
+    }
+
     /// Whether a search is being typed, which takes every key.
     pub(crate) fn prompting(&self) -> bool {
         self.search.typing()
@@ -756,7 +761,12 @@ impl Pane {
             };
             let mut bytes = Vec::new();
             for _ in 0..lines.unsigned_abs() {
-                input::encode(&press, screen.state.modes, &mut bytes);
+                input::encode(
+                    &press,
+                    screen.state.modes,
+                    screen.state.keyboard,
+                    &mut bytes,
+                );
             }
             self.send_input(bytes);
             return false;
@@ -1050,7 +1060,7 @@ impl Pane {
     fn type_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
         let screen = self.screen.as_ref()?;
         let mut bytes = Vec::new();
-        input::encode(press, screen.state.modes, &mut bytes);
+        input::encode(press, screen.state.modes, screen.state.keyboard, &mut bytes);
         if bytes.is_empty() {
             return None;
         }

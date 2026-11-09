@@ -58,6 +58,16 @@ Copy a screenshot or any image. In the terminal, in insert mode, type `ls -l ` (
 exited 0
 ```
 
+## A program's progress
+
+A program can say how far a long task has got, as systemd and winget do, and the tab it's in says so at the end of its name: ` 42%` under way, ` …` busy with no telling how far, ` ‖` paused and ` ✗` failed. It goes once the program says it's done, or once your shell's next prompt shows the program has ended.
+
+Run this, which says it failed 42% of the way, as a program might, and watch the tab's name while it sleeps: `printf '\e]9;4;2;42\e\\'; sleep 3; (exit 2)`
+
+```check
+exited 2
+```
+
 ## Marking every command
 
 `:set blockmarks=all` marks the commands that worked too, with a faint `✓`; `none` marks none, and `failed`, as it starts, marks only those that failed. The tab's name is the shell's folder, while the program sets no title.

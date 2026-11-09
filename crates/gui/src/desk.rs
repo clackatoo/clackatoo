@@ -821,6 +821,10 @@ impl Desk {
                 if let Some(mark) = self.kept_mark(&tab.layout) {
                     name.push_str(mark);
                 }
+                // How far a program in it says its task has got.
+                if let Some(progress) = self.tab_progress(tab) {
+                    name.push_str(&badges::progress_mark(progress));
+                }
                 (tab.id, name, tab.id == shown.tab)
             })
             .collect()
@@ -1590,10 +1594,15 @@ impl Desk {
             let Some(pane) = self.panes.get_mut(&terminal) else {
                 return false;
             };
-            if !pane.view_changed(update) {
+            let progress = pane.progress();
+            let changed = pane.view_changed(update);
+            // How far its program says it has got shows in its tab's
+            // name, shown or not.
+            let moved = pane.progress() != progress;
+            if !changed && !moved {
                 return false;
             }
-            false
+            moved
         };
         if self.has_agent_band(terminal) != band_before {
             self.fit_panes();
