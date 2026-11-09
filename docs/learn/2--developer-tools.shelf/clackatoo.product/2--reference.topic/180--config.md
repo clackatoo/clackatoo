@@ -491,13 +491,72 @@ coroutine's, as only its lines can be seen from there.
 
 ## The settings menu
 
-`:Settings` opens a menu of every option and every key bound, over the panes,
-as the finder is. `:Settings wrap` opens it searching for `wrap`. Down its
-left are its sections: the options' groups, as they're listed here, then
-**Keys**, then **Daemon**, where the daemon's own settings will go. Each row
-is an option and its value, its name in bold if it isn't as it starts; beside
-the list, the row picked is said in full: its value, its default, what it
-takes, where its value comes from, as [`:verbose set`](~clackatoo/reference/config#where-an-option-was-set)
+`:Settings` opens a menu of your settings over the panes, in one of two
+modes: **Easy**, pages of the settings most people change, each with a
+control, and **Advanced**, every option and every key bound, as a list to
+search. `:Settings wrap` opens it searching for `wrap`.
+
+### Easy and Advanced
+
+The header has the title, one search box, the switch between the two modes
+and a close button. The menu opens in the mode used last, in any window, and
+in Easy the first time. `m`, or a click on the switch, changes mode, keeping
+what's typed in the search.
+
+**Easy** has six pages down its left, each with an icon: Appearance, Editor,
+Terminals, Agents, Keys, and Phone & other machines. A page has rows in
+cards under small headings: what the setting does in words, a line of help,
+and its control at the right, drawn as such: a switch, buttons side by side,
+a slider, a number between − and +, a card for each agent, the font picker
+or a box to type in. Some controls set several options together: **Line
+numbers** is Off, On or Relative, which sets `number` and `relativenumber`.
+Appearance starts with a sample of a terminal's text and an editor's, drawn
+in your font and size, with line numbers and the cursor's line as set; while
+the size's slider is dragged, the sample is drawn at the size it's at, and
+the size is set when it's let go.
+
+Easy shows what's configured, what the menu saves. A setting changed since
+your config loaded, with `:set` or a key, says what it is currently under its
+help. One your `init.lua` sets as it loads is greyed out, with the place it's
+set, as `init.lua:12`, which a click or <kbd>Enter</kbd> opens. A change saves
+at once, and the foot of the menu says what was saved where, as "Saved
+norelativenumber in client/settings.lua". `u` undoes a row's last change,
+in either mode: a control that set several options undoes them together.
+
+The **Keys** page lists the keys for what's done most, such as a new tab or a
+split: **Record…** records more keys for one, as Advanced's keys section does.
+Every key, in every mode, is in Advanced.
+
+Easy leaves out what few change: `numberwidth`, `showbreak`, `shiftwidth`,
+`startofline`, `tildeop`, `inccommand`, `hintpattern`, `completedelay`,
+`completeaccept`, `carryover`, `explorerwidth`, `renderer` and `priority`.
+The daemon's own settings, such as what terminals keep across a restart, the
+notice when a long command ends and the limits on subagents, aren't in the
+menu yet: the pages that would have them say so.
+
+The search finds what Easy has, then what only Advanced has, which says **in
+Advanced**: <kbd>Enter</kbd> or a click on one switches to Advanced, with it
+picked. Everything works by the mouse, as it looks, and by the keys:
+
+| Key | Does in Easy |
+|---|---|
+| `j`, `k`; <kbd>Down</kbd>, <kbd>Up</kbd> | The next or previous row; on the pages down the side, the next or previous page |
+| <kbd>Tab</kbd>, <kbd>Shift</kbd>+<kbd>Tab</kbd> | The next control, on to the next page's first; or the one before, and from the first, the pages |
+| `}`, `{` | The next page, or the one before |
+| `l`, `h`; <kbd>Right</kbd>, <kbd>Left</kbd> | The next or previous value: on or off, a choice, a card, or a number by its step; from the pages, `l` goes into the page |
+| <kbd>Enter</kbd>, <kbd>Space</kbd> | Changes the row: turns it on or off, the next choice, opens the font picker, types a value, or records keys; or opens where a locked row is set |
+| `/` | Searches both modes |
+| `r`, `u`, `o` | As in Advanced, below |
+| `m` | Switches to Advanced, or back |
+| <kbd>Esc</kbd>, `q` | Clears the search or puts away the font picker, or else closes the menu |
+
+### Advanced
+
+Down Advanced's left are its sections: the options' groups, as they're listed
+here, then **Keys**, then **Daemon**, where the daemon's own settings will go.
+Each row is an option and its value, its name in bold if it isn't as it
+starts; beside the list, the row picked is said in full: its value, its
+default, what it takes, where its value comes from, as [`:verbose set`](~clackatoo/reference/config#where-an-option-was-set)
 says it, and the file it's saved in.
 
 | Key | Does |
@@ -513,6 +572,7 @@ says it, and the file it's saved in.
 | `x` | Takes away this window's own value, as `:setlocal nu<` does |
 | `d` | Takes keys the menu saved out of `settings.lua` |
 | `o` | Opens the line of config that set the row |
+| `m` | Switches to Easy |
 | <kbd>Esc</kbd>, `q` | Clears the search, or else closes the menu |
 
 A change applies at once, in every window, as `:set` does, and is saved where

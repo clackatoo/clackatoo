@@ -396,15 +396,17 @@ impl Desk {
             Change::Keys { mapping, bound } => {
                 let keys = crate::keymap::display(&mapping.keys);
                 return match result {
-                    Err(why) if !bound => self.warn(format!("{keys} wasn't taken out: {why}")),
-                    Err(why) => self.warn(format!("{keys} wasn't saved: {why}")),
-                    Ok(()) if bound => self.say(format!("saved {keys} in {file}")),
-                    Ok(()) => self.say(format!("{keys} is saved in {file} no more")),
+                    Err(why) if !bound => {
+                        self.warn_saved(format!("{keys} wasn't taken out: {why}"));
+                    }
+                    Err(why) => self.warn_saved(format!("{keys} wasn't saved: {why}")),
+                    Ok(()) if bound => self.say_saved(format!("saved {keys} in {file}")),
+                    Ok(()) => self.say_saved(format!("{keys} is saved in {file} no more")),
                 };
             }
         };
         if let Err(why) = result {
-            return self.warn(format!("{} wasn't saved: {why}", info.name));
+            return self.warn_saved(format!("{} wasn't saved: {why}", info.name));
         }
         // What it's configured to, now, as the menu says it.
         let ((), _) = self
@@ -415,13 +417,30 @@ impl Desk {
         } else {
             ""
         };
-        self.say(match value {
+        self.say_saved(match value {
             Some(value) => format!(
                 "saved {} in {file}{later}",
                 options::show_value(info, &value)
             ),
             None => format!("{} is saved in {file} no more{later}", info.name),
         });
+    }
+
+    /// Says what was saved, in the bar, and along the settings menu's foot
+    /// if it's open.
+    fn say_saved(&mut self, said: String) {
+        if let Some(menu) = &mut self.settings {
+            menu.saved(&said, false);
+        }
+        self.say(said);
+    }
+
+    /// Says what wasn't saved, and why, as [`Desk::say_saved`] does.
+    fn warn_saved(&mut self, said: String) {
+        if let Some(menu) = &mut self.settings {
+            menu.saved(&said, true);
+        }
+        self.warn(said);
     }
 
     /// Passes the options on to the panes, as they've changed.

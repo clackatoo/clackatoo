@@ -12,7 +12,8 @@ use crate::input::KeyPress;
 use crate::options::persist::Change;
 use crate::options::settings_lua::Mapping;
 use crate::options::{Case, SetBy};
-use crate::settings::{Facts, History, Outcome, SettingsMenu};
+use crate::settings::view::{EasyView, SettingsHit};
+use crate::settings::{Facts, History, Mode, Outcome, SettingsMenu};
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
@@ -52,6 +53,7 @@ impl Desk {
         let (client, _) = self.client();
         let dir = self.config_dir();
         let case = Case::of(&self.options);
+        let mode = self.settings_mode();
         let menu = {
             let keys = client.keys();
             let store = self.options.store();
@@ -62,9 +64,53 @@ impl Desk {
                 dir: dir.as_deref(),
                 automating: self.automating,
             };
-            SettingsMenu::new(query, case, &facts, client.keys_changes())
+            SettingsMenu::new(query, case, mode, &facts, client.keys_changes())
         };
         self.settings = Some(menu);
+        // The agents the daemon knows, for Easy's cards.
+        if self.connected {
+            let pane = self.shown.map(|shown| shown.pane);
+            self.request(
+                clackatoo_protocol::Request::ChatChoices { pane, on: None },
+                Asked::ChatChoices,
+            );
+        }
+    }
+
+    /// The mode the menu was used in last, as the file it's remembered in
+    /// says: Easy the first time.
+    fn settings_mode(&self) -> Mode {
+        (self.settings_mode_file.as_deref())
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| Mode::read(&text))
+            .unwrap_or(Mode::Easy)
+    }
+
+    /// Remembers `mode` as the one the menu opens in next, in any window.
+    fn remember_settings_mode(&self, mode: Mode) {
+        let Some(path) = self.settings_mode_file.as_deref() else {
+            return;
+        };
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                // Replaced whole, so a window reading it never sees half.
+                let partial = path.with_extension("partial");
+                std::fs::write(&partial, format!("{}\n", mode.word()))?;
+                std::fs::rename(&partial, path)
+            });
+        if let Err(err) = written {
+            log::warn!(
+                "couldn't remember the settings menu's mode in {}: {err}",
+                path.display()
+            );
+        }
+    }
+
+    /// The menu's mode, if it's open.
+    pub(crate) fn settings_mode_shown(&self) -> Option<Mode> {
+        self.settings.as_ref().map(|menu| menu.mode)
     }
 
     /// Handles a key while the settings menu is open.
@@ -74,6 +120,66 @@ impl Desk {
         {
             self.settings_did(outcome);
         }
+    }
+
+    /// A click on `hit`, a part of the menu.
+    pub(crate) fn settings_pointer(&mut self, hit: SettingsHit) {
+        if let Some(outcome) =
+            self.with_settings(|menu, facts, history| menu.pointer(hit, facts, history))
+        {
+            self.settings_did(outcome);
+        }
+    }
+
+    /// Whether a slider of the menu's is being dragged.
+    pub(crate) fn settings_sliding(&self) -> bool {
+        self.settings.as_ref().is_some_and(SettingsMenu::sliding)
+    }
+
+    /// The slider being dragged is dragged to `at` thousandths along.
+    pub(crate) fn settings_slide(&mut self, at: u16) {
+        if let Some(outcome) = self.with_settings(|menu, _, _| menu.slide(at)) {
+            self.settings_did(outcome);
+        }
+    }
+
+    /// The slider being dragged is let go.
+    pub(crate) fn settings_slid(&mut self) {
+        if let Some(outcome) = self.with_settings(SettingsMenu::easy_slid) {
+            self.settings_did(outcome);
+        }
+    }
+
+    /// Easy's page was drawn from its part `top`, as it scrolled.
+    pub(crate) fn settings_drawn(&mut self, top: usize) {
+        if let Some(menu) = &mut self.settings {
+            menu.easy_drawn(top);
+        }
+    }
+
+    /// What Easy shows, if the menu's open in Easy.
+    pub(crate) fn easy_view(&mut self) -> Option<EasyView> {
+        if self.settings_mode_shown() != Some(Mode::Easy) {
+            return None;
+        }
+        self.with_settings(|menu, facts, _| menu.easy_view(facts))
+    }
+
+    /// Takes in the agents the daemon knows, for Easy's cards.
+    pub(super) fn settings_agents(&mut self, choices: &clackatoo_protocol::ChatChoices) {
+        let Some(menu) = &mut self.settings else {
+            return;
+        };
+        let agents = (choices.agents.iter())
+            .map(|provider| {
+                let installed = !matches!(
+                    provider.models,
+                    clackatoo_protocol::ProviderModels::NotInstalled
+                );
+                (provider.agent.clone(), provider.title.clone(), installed)
+            })
+            .collect();
+        menu.set_agents(agents);
     }
 
     /// A click on row `row` of the menu, or a double click if `open`.
@@ -105,6 +211,9 @@ impl Desk {
         list: (usize, usize),
         preview: Option<(usize, usize)>,
     ) -> Option<FinderView> {
+        if self.settings_mode_shown() != Some(Mode::Advanced) {
+            return None;
+        }
         self.with_settings(|menu, facts, _| menu.view(facts, list, preview))
     }
 
@@ -135,14 +244,20 @@ impl Desk {
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Close => self.settings = None,
-            Outcome::Change { info, live, saved } => {
-                // One read only as a window opens is saved, for windows
-                // opened after.
-                if !info.restart {
-                    self.set_option(info, live, SetBy::RUNTIME);
+            Outcome::Set(sets) => {
+                for set in sets {
+                    // One read only as a window opens is saved, for windows
+                    // opened after.
+                    if !set.info.restart {
+                        self.set_option(set.info, set.live, SetBy::RUNTIME);
+                    }
+                    self.save_change(Change::Option {
+                        info: set.info,
+                        value: set.saved,
+                    });
                 }
-                self.save_change(Change::Option { info, value: saved });
             }
+            Outcome::Mode(mode) => self.remember_settings_mode(mode),
             Outcome::ClearLocal(info) => self.drop_local_option(info),
             Outcome::Keys(changes) => {
                 for (mapping, bound) in changes {

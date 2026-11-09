@@ -29,6 +29,7 @@ use crate::editor::PanelView;
 use crate::finder::{self, view::FinderView};
 use crate::layout::{Area, Placement, Rect, Tile};
 use crate::render::{Fill, Ink, Paint, Text, TextFont};
+use crate::settings::view::{EasyView, Laid, SettingsHit, Sizes};
 
 /// The sizes everything else is worked out from, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -487,6 +488,19 @@ pub(crate) struct Chrome {
     pub(crate) rounded: bool,
     /// The finder, if it's open: where its parts go, and what it shows.
     pub(crate) finder: Option<(finder::view::Layout, FinderView)>,
+    /// The settings menu laid out, if it's open: all of Easy, or Advanced's
+    /// switch and close button, over the finder's line (see
+    /// [`Chrome::place_settings`]).
+    pub(crate) settings: Option<Laid>,
+}
+
+/// The settings menu, as [`Chrome::place_settings`] lays it out.
+#[derive(Debug)]
+pub(crate) enum SettingsShown {
+    /// Easy, as it shows.
+    Easy(Box<EasyView>),
+    /// Advanced, which the finder draws, but for the header's switch.
+    Advanced,
 }
 
 /// What goes in the frame, besides where.
@@ -796,7 +810,61 @@ impl Chrome {
             bottom_shown: contents.bottom_shown,
             rounded: contents.rounded,
             finder: (contents.finder).map(|view| place_finder(&geometry, view, measure)),
+            settings: None,
         }
+    }
+
+    /// Lays out the settings menu, `shown`, with text measured by
+    /// `measure` and `sizes`: Easy whole, or for Advanced, which the finder
+    /// draws, the header's switch and close button at its line's right.
+    pub(crate) fn place_settings(
+        &mut self,
+        shown: SettingsShown,
+        sizes: Sizes,
+        measure: &mut dyn FnMut(&str, bool) -> f32,
+    ) {
+        self.settings = match shown {
+            SettingsShown::Easy(view) => Some(crate::settings::view::lay_out(
+                &view,
+                &self.geometry,
+                sizes,
+                measure,
+            )),
+            SettingsShown::Advanced => match &mut self.finder {
+                Some((layout, view)) if view.side.is_some() => {
+                    layout.header = true;
+                    let count = match &view.place {
+                        Some(place) => format!("{place} · {}", view.count),
+                        None => view.count.clone(),
+                    };
+                    let search = crate::settings::view::Search {
+                        shown: &view.query,
+                        mono: true,
+                        typing: view.query.ends_with(crate::cmdline::CARET),
+                        count: Some(&count),
+                    };
+                    Some(crate::settings::view::lay_out_header(
+                        layout.prompt(),
+                        &search,
+                        &self.geometry,
+                        sizes,
+                        measure,
+                    ))
+                }
+                _ => None,
+            },
+        };
+    }
+
+    /// The first part of Easy's page drawn, as it's scrolled, if Easy is.
+    pub(crate) fn settings_top(&self) -> Option<usize> {
+        let laid = self.settings.as_ref()?;
+        laid.modal().then_some(laid.top)
+    }
+
+    /// How far along the slider being dragged `point` is, in thousandths.
+    pub(crate) fn settings_slide(&self, point: [f32; 2]) -> Option<u16> {
+        self.settings.as_ref()?.sliding_at(point[0])
     }
 
     /// What `point` is over. `maximised` windows can't be resized from
@@ -809,6 +877,13 @@ impl Chrome {
                 .iter()
                 .position(|(_, item)| item.contains(point))
                 .map_or(Hit::Nothing, Hit::Menu);
+        }
+        // Easy takes every point; Advanced's switch only those over it.
+        if let Some(laid) = &self.settings
+            && let Some(hit) = laid.hit(point)
+            && (hit != SettingsHit::Panel || laid.modal())
+        {
+            return Hit::Settings(hit);
         }
         if let Some((layout, view)) = &self.finder
             && layout.panel.contains(point)
@@ -916,6 +991,7 @@ impl Chrome {
         let cut = self.cut.is_some() && (hover == Hit::Note || self.notice);
         self.palette.is_some()
             || self.finder.is_some()
+            || self.settings.is_some()
             || self.menu.is_some()
             || self.keys.is_some()
             || (self.bottom_shown && (messages || cut))
@@ -1049,6 +1125,13 @@ impl Chrome {
         self.paint_palette(&mut painted);
         if let Some((layout, view)) = &self.finder {
             layout.paint(view, &self.geometry, &mut painted);
+        }
+        if let Some(laid) = &self.settings {
+            let hover = match hover {
+                Hit::Settings(hit) => Some(hit),
+                _ => None,
+            };
+            laid.paint(hover, &mut painted);
         }
         self.paint_menu(hover, &mut painted);
         painted
@@ -2716,7 +2799,17 @@ pub(crate) enum Hit {
     /// The finder, and the row of its list, if it's over one. The panes
     /// under it get nothing.
     Finder(Option<usize>),
+    /// The settings menu, and what of it. The panes under it get nothing.
+    Settings(SettingsHit),
     Nothing,
+}
+
+impl Hit {
+    /// Whether it's over the finder or the settings menu, raised over the
+    /// panes, which get nothing of the mouse there.
+    pub(crate) fn raised(self) -> bool {
+        matches!(self, Self::Finder(_) | Self::Settings(_))
+    }
 }
 
 #[cfg(test)]

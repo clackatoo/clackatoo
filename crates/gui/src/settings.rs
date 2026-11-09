@@ -1,6 +1,10 @@
-//! The settings menu `:Settings` opens: every option, and every key bound,
-//! to look at and change, in sections down its side, as the docs list
-//! them.
+//! The settings menu `:Settings` opens, in two modes. Advanced has every
+//! option, and every key bound, to look at and change, in sections down
+//! its side, as the docs list them. Easy has most options, on pages of
+//! cards, each with a control drawn as such, in words for someone who
+//! doesn't know the options' names (see [`easy`] and
+//! [`crate::options::easy`]). One search finds settings in both, and the
+//! mode used last is the one it opens in.
 //!
 //! Each option says its value, its default, what it does, and where its
 //! value comes from, as `:verbose set` does. A change applies at once and
@@ -21,8 +25,9 @@
 //! binding's keys (see [`crate::options::settings_lua`]); keys the user's
 //! own config binds are locked, as options are.
 //!
-//! It's drawn as the finder is, over the panes (see
-//! [`crate::finder::view`]), and is the window's alone, as the finder is:
+//! Advanced is drawn as the finder is, over the panes (see
+//! [`crate::finder::view`]), Easy as [`view`] lays it out; the menu is the
+//! window's alone, as the finder is:
 //! the options are the window's process's, so a phone, which talks to the
 //! daemon, never sees them.
 //!
@@ -40,6 +45,10 @@
 //! | `d` | Takes out keys the menu saved |
 //! | `o` | Opens the line that set it |
 //! | Esc, `q` | Clears what's typed, or else closes the menu |
+//! | `m` | Switches to Easy, or back |
+
+mod easy;
+pub(crate) mod view;
 
 use crate::options::Window as _;
 use std::collections::HashMap;
@@ -146,14 +155,10 @@ pub(crate) enum Outcome {
     Changed,
     /// It's to close.
     Close,
-    /// `info`'s option is to be set to `live` for every window, if it can
-    /// be as the window runs, and `saved` in its file, or with none, taken
-    /// out of it.
-    Change {
-        info: &'static Info,
-        live: Value,
-        saved: Option<Value>,
-    },
+    /// Options are to be set, and saved, each as it says.
+    Set(Vec<Set>),
+    /// The menu changed to this mode, which it's to open in next time.
+    Mode(Mode),
     /// This window's own value of `info`'s option is to go.
     ClearLocal(&'static Info),
     /// Keys are to be bound, and saved, or with `bound` false, put back as
@@ -178,6 +183,43 @@ impl picker::Outcome for Outcome {
             _ => None,
         }
     }
+}
+
+/// Which of its two modes the menu shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Pages of cards, with controls, of the options most use.
+    Easy,
+    /// Every option and every key, as a list to search.
+    Advanced,
+}
+
+impl Mode {
+    /// How it's written in the file it's remembered in.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Advanced => "advanced",
+        }
+    }
+
+    /// The mode `text` names, as [`Mode::word`] writes it.
+    pub(crate) fn read(text: &str) -> Option<Self> {
+        match text.trim() {
+            "easy" => Some(Self::Easy),
+            "advanced" => Some(Self::Advanced),
+            _ => None,
+        }
+    }
+}
+
+/// An option to be set to `live` for every window, if it can be as the
+/// window runs, and `saved` in its file, or with none, taken out of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Set {
+    pub(crate) info: &'static Info,
+    pub(crate) live: Value,
+    pub(crate) saved: Option<Value>,
 }
 
 /// A section of the menu, down its side.
@@ -261,13 +303,9 @@ impl Entry {
 /// A change the menu made to a row, and what undoing it does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Undo {
-    /// Sets the option to `live` again, and saves `saved`, or takes it
-    /// out.
-    Option {
-        info: &'static Info,
-        live: Value,
-        saved: Option<Value>,
-    },
+    /// Sets the options as they were again, as Easy changes several
+    /// together.
+    Options(Vec<Set>),
     /// Binds keys again, or takes them out, as each says, in turn.
     Keys(Vec<(Mapping, bool)>),
 }
@@ -311,6 +349,14 @@ pub(crate) struct SettingsMenu {
     /// The bindings' changes counted when the rows were made, to make
     /// them again once they change.
     keys_seen: u64,
+    pub(crate) mode: Mode,
+    /// Where Easy is, and what it's searched by.
+    easy: easy::Easy,
+    /// What was saved last, or why not, for Easy's foot.
+    said_saved: Option<(String, bool)>,
+    /// The agents the daemon knows, for Easy's cards: each one's name,
+    /// what to show, and whether it's installed.
+    agents: Vec<(String, String, bool)>,
 }
 
 /// Why an agent's keys don't change keys, as the window says too.
@@ -322,7 +368,7 @@ const SYSTEM_FONT: &str = "the system's monospace font";
 impl SettingsMenu {
     /// The menu, its rows made from `facts`, with `query` typed, matching
     /// case as `case` says; the bindings' changes counted `keys_seen`.
-    pub(crate) fn new(query: &str, case: Case, facts: &Facts, keys_seen: u64) -> Self {
+    pub(crate) fn new(query: &str, case: Case, mode: Mode, facts: &Facts, keys_seen: u64) -> Self {
         let mut menu = Self {
             picker: Picker::new(String::new()),
             typing: false,
@@ -334,6 +380,10 @@ impl SettingsMenu {
             said: None,
             name_cols: ALL.iter().map(|info| info.name.len()).max().unwrap_or(0),
             keys_seen,
+            mode,
+            easy: easy::Easy::new(case),
+            said_saved: None,
+            agents: Vec::new(),
         };
         menu.fill(facts);
         if !query.is_empty() {
@@ -439,6 +489,7 @@ impl SettingsMenu {
             // A letter that acts, while nothing's typed or edited.
             let editing = self.editing.is_some();
             let letter = stroke.plain().filter(|_| !self.typing && !editing);
+            let easy = self.mode == Mode::Easy;
         }
         match (stroke, letter) => {
             (_, _) if editing =>
@@ -454,8 +505,51 @@ impl SettingsMenu {
                 Hint::Action("Stop typing, keeping the search"),
                 {
                     self.typing = false;
+                    self.easy.found();
                     Outcome::Changed
                 };
+            (_, Some('m')) =>
+                Hint::Action("Switch between Easy and Advanced"),
+                self.switch_mode();
+            (Stroke::Enter | Stroke::Char { ch: ' ', ctrl: false }, _) if !self.typing && easy =>
+                Hint::Action("Change the setting, or open where it's set"),
+                self.easy_act(facts, history);
+            (Stroke::Down, _) if easy =>
+                Hint::Action("Next setting"),
+                self.go(1);
+            (Stroke::Up, _) if easy =>
+                Hint::Action("Previous setting"),
+                self.go(-1);
+            (Stroke::Tab, _) if easy =>
+                Hint::Action("Next control, on to the next page"),
+                self.easy_tab(true);
+            (Stroke::BackTab, _) if easy =>
+                Hint::Action("Control before"),
+                self.easy_tab(false);
+            (_, Some('}')) if easy =>
+                Hint::Action("Next page"),
+                self.easy_page(1);
+            (_, Some('{')) if easy =>
+                Hint::Action("Page before"),
+                self.easy_page(-1);
+            (Stroke::Right, _) | (_, Some('l')) if easy =>
+                Hint::Action("Next value, or from the pages into the page"),
+                self.easy_step(1, facts, history);
+            (Stroke::Left, _) | (_, Some('h')) if easy =>
+                Hint::Action("Value before"),
+                self.easy_step(-1, facts, history);
+            (_, Some('r')) if easy =>
+                Hint::Action("Put the setting back as it starts"),
+                self.easy_reset(facts, history);
+            (_, Some('u')) if easy =>
+                Hint::Action("Undo the setting's last change"),
+                self.easy_undo(facts, history);
+            (_, Some('o')) if easy =>
+                Hint::Action("Open the line that set it"),
+                self.easy_open(facts);
+            (_, Some('x' | 'd')) if easy =>
+                Hint::None,
+                Outcome::Nothing;
             (Stroke::Enter | Stroke::Char { ch: ' ', ctrl: false }, _) if !self.typing =>
                 Hint::Action("Change the setting, or open where it's set"),
                 self.act(facts, history);
@@ -557,6 +651,7 @@ impl SettingsMenu {
     fn retyped(&mut self) -> Outcome {
         self.ranking.set_query(self.picker.query(), &self.items);
         self.picker.restart();
+        self.easy.retyped(self.picker.query());
         Outcome::Changed
     }
 
@@ -569,6 +664,7 @@ impl SettingsMenu {
         let keep = self.picked_name();
         self.picker.clear();
         self.ranking.set_query("", &self.items);
+        self.easy.retyped("");
         // The row picked stays picked, among them all.
         let rank = keep.and_then(|name| {
             (0..self.ranking.len()).find(|&rank| self.name_at(rank).as_deref() == Some(&name))
@@ -578,11 +674,17 @@ impl SettingsMenu {
     }
 
     fn go(&mut self, by: isize) -> Outcome {
+        if self.mode == Mode::Easy {
+            return self.easy_go(by);
+        }
         let keyed = self.picker.go(by, self.ranking.len());
         keyed.outcome(|| Outcome::Changed)
     }
 
     fn go_to(&mut self, rank: usize) -> Outcome {
+        if self.mode == Mode::Easy {
+            return self.easy_go_to(rank);
+        }
         let rank = rank.min(self.ranking.len().saturating_sub(1));
         self.picker.set_selected(rank);
         Outcome::Changed
@@ -594,6 +696,7 @@ impl SettingsMenu {
             Some(Editing::Font(fonts)) => (fonts.picker)
                 .go(by, fonts.ranking.len())
                 .outcome(|| Outcome::Changed),
+            _ if self.mode == Mode::Easy => self.easy.scroll(by),
             _ => self.go(by),
         }
     }
@@ -746,7 +849,23 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
-        if let Some(by) = facts.locked(info) {
+        let set = Set { info, live, saved };
+        self.change_all(info.name.to_owned(), vec![set], facts, history)
+    }
+
+    /// Changes options together, as `sets` say, unless one's locked,
+    /// noting how to undo them as one change, under `name`. Those already
+    /// as they're to be are left alone.
+    fn change_all(
+        &mut self,
+        name: String,
+        sets: Vec<Set>,
+        facts: &Facts,
+        history: &mut History,
+    ) -> Outcome {
+        if let Some((info, by)) =
+            (sets.iter()).find_map(|set| Some((set.info, facts.locked(set.info)?)))
+        {
             let said = format!(
                 "{} sets {}, which outdoes what the menu saves: Enter opens it",
                 by.place(facts.dir).unwrap_or_else(|| "your config".into()),
@@ -754,26 +873,28 @@ impl SettingsMenu {
             );
             return self.refuse(&said);
         }
-        let undo = Undo::Option {
-            info,
-            live: facts.store.get(info),
-            saved: facts.saved(info),
-        };
         // One read only as a window opens is only saved, so it's as it was
         // if what's saved is.
-        let unchanged = facts.saved(info) == saved
-            && (info.restart
-                || facts.store.get(info) == live
-                    && facts.store.local(facts.window, info).is_none());
-        if unchanged {
+        let changed: Vec<Set> = (sets.into_iter())
+            .filter(|Set { info, live, saved }| {
+                facts.saved(info) != *saved
+                    || !info.restart
+                        && (facts.store.get(info) != *live
+                            || facts.store.local(facts.window, info).is_some())
+            })
+            .collect();
+        if changed.is_empty() {
             return Outcome::Nothing;
         }
-        history
-            .0
-            .entry(info.name.to_owned())
-            .or_default()
-            .push(undo);
-        Outcome::Change { info, live, saved }
+        let undo = (changed.iter())
+            .map(|set| Set {
+                info: set.info,
+                live: facts.store.get(set.info),
+                saved: facts.saved(set.info),
+            })
+            .collect();
+        history.0.entry(name).or_default().push(Undo::Options(undo));
+        Outcome::Set(changed)
     }
 
     /// `l` or `h`: the next value, or the one before, of the option
@@ -843,15 +964,22 @@ impl SettingsMenu {
         let Some(name) = self.picked_name() else {
             return Outcome::Nothing;
         };
+        self.undo_named(name, facts, history)
+    }
+
+    /// Undoes the last change the menu made, in either mode, to what's
+    /// known in its history as `name`.
+    fn undo_named(&mut self, name: String, facts: &Facts, history: &mut History) -> Outcome {
         let Some(undo) = history.0.get_mut(&name).and_then(Vec::pop) else {
             return self.refuse(&format!("the menu hasn't changed {name}"));
         };
         // What the user's own config sets or binds as it loads outdoes what
         // undoing would save, so the change is kept, to undo once it's not.
         let locked = match &undo {
-            Undo::Option { info, .. } => facts
-                .locked(info)
-                .map(|by| (by.clone(), info.name.to_owned(), "sets")),
+            Undo::Options(sets) => (sets.iter()).find_map(|set| {
+                let by = facts.locked(set.info)?;
+                Some((by.clone(), set.info.name.to_owned(), "sets"))
+            }),
             Undo::Keys(changes) => (changes.iter()).find_map(|(mapping, _)| {
                 let by = facts.keys_locked(&mapping.modes, &mapping.keys)?;
                 Some((by, display(&mapping.keys), "binds"))
@@ -863,7 +991,7 @@ impl SettingsMenu {
             return self.refuse(&format!("{place} {does} {what} now, so it can't be undone"));
         }
         match undo {
-            Undo::Option { info, live, saved } => Outcome::Change { info, live, saved },
+            Undo::Options(sets) => Outcome::Set(sets),
             Undo::Keys(changes) if facts.automating => {
                 // Kept, for the user to undo.
                 history.0.entry(name).or_default().push(Undo::Keys(changes));
@@ -1304,26 +1432,18 @@ impl FontPicker {
         })
     }
 
-    /// What to draw, `font` being the one in use, with `side` beside it,
-    /// for a list `rows` rows tall and `cols` cells wide, and a preview so
-    /// big, if there's room for one.
-    fn view(
-        &mut self,
+    /// The families shown in a list `rows` long and `cols` cells wide,
+    /// `font` being the one in use.
+    fn shown(
+        families: &[String],
+        picker: &mut Picker,
+        items: &Items,
+        ranking: &mut Ranking,
         font: &str,
-        side: SideView,
         (rows, cols): (usize, usize),
-        preview: Option<(usize, usize)>,
-    ) -> FinderView {
-        let Self {
-            installed,
-            all,
-            families,
-            picker,
-            items,
-            ranking,
-        } = self;
+    ) -> Vec<Row> {
         let len = ranking.len();
-        let shown: Vec<Row> = (picker.shown(rows, len))
+        (picker.shown(rows, len))
             .filter_map(|rank| {
                 let index = ranking.get(rank)?;
                 let text = items.get(index);
@@ -1349,7 +1469,57 @@ impl FontPicker {
                     .collect();
                 Some(fit(text, &inks, cols, false))
             })
-            .collect();
+            .collect()
+    }
+
+    /// What Easy draws of it, below the button of row `row`, `font` being
+    /// the one in use.
+    fn easy_view(&mut self, font: &str, row: usize) -> view::FontsView {
+        let rows = Self::shown(
+            &self.families,
+            &mut self.picker,
+            &self.items,
+            &mut self.ranking,
+            font,
+            (view::FONT_ROWS, 60),
+        );
+        view::FontsView {
+            row,
+            query: self.picker.query().to_owned(),
+            count: match &self.installed {
+                None => "looking for fonts…".into(),
+                Some(_) => format!("{} / {}", self.ranking.len(), self.items.len()),
+            },
+            listing: if self.all {
+                "every font"
+            } else {
+                "monospace fonts"
+            },
+            rows,
+            selected: self.picker.shown_selected(self.ranking.len()),
+        }
+    }
+
+    /// What to draw, `font` being the one in use, with `side` beside it,
+    /// for a list `rows` rows tall and `cols` cells wide, and a preview so
+    /// big, if there's room for one.
+    fn view(
+        &mut self,
+        font: &str,
+        side: SideView,
+        (rows, cols): (usize, usize),
+        preview: Option<(usize, usize)>,
+    ) -> FinderView {
+        let Self {
+            installed,
+            all,
+            families,
+            picker,
+            items,
+            ranking,
+        } = self;
+        let len = ranking.len();
+        let shown = Self::shown(families, picker, items, ranking, font, (rows, cols));
         let waiting = installed.is_none();
         FinderView {
             title: "Font",
@@ -1843,7 +2013,13 @@ mod tests {
         let both = parse_modes("ni").unwrap();
         keys.bind(&both, &alt_t, Binding::Keys(parse_keys("x").unwrap()), None);
         keys.set_by(&both, &alt_t, &SetBy::SAVED);
-        let mut menu = SettingsMenu::new("<A-t>", Case::default(), &facts(&store, &keys), 0);
+        let mut menu = SettingsMenu::new(
+            "<A-t>",
+            Case::default(),
+            Mode::Advanced,
+            &facts(&store, &keys),
+            0,
+        );
         assert!(
             menu.picked()
                 .is_some_and(|entry| matches!(entry, Entry::Keys(bound) if bound.keys == alt_t))

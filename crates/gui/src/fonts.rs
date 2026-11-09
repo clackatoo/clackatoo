@@ -476,6 +476,17 @@ impl Fonts {
         })
     }
 
+    /// How wide a cell of the terminal's font is drawn at the interface
+    /// font's size, as [`crate::render::TextFont::MonoAt`] draws it.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn mono_em(&self) -> f32 {
+        if self.ppem > 0.0 {
+            self.cell.width as f32 * self.ui.ppem / self.ppem
+        } else {
+            self.cell.width as f32
+        }
+    }
+
     /// How wide `text` is in the interface font.
     pub(crate) fn ui_width(&mut self, text: &str, bold: bool) -> f32 {
         text.chars()

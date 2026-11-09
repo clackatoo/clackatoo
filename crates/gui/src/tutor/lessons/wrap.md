@@ -84,15 +84,31 @@ An option your `init.lua` sets as it loads isn't saved, as `init.lua` runs after
 
 ## The settings menu
 
-`:Settings` opens a menu of every option and every key bound: what each does, its value, and where it was set. A change there applies at once and is saved, as `:setp` saves it. `:Settings wrap` opens it searching for `wrap`: open it so.
+`:Settings` opens a menu of your settings, in one of two modes. **Easy**, where it opens the first time, has pages of the settings most people change, each with a switch, buttons, a slider or the like, to use with the mouse or the keys. **Advanced** has every option and every key bound: what each does, its value, and where it was set. A change in either applies at once and is saved, as `:setp` saves it. `:Settings wrap` opens it searching for `wrap`: open it so.
 
 ```check
 finder settings
 ```
 
+## Easy and Advanced
+
+The menu opens in the mode you used last. Its one search looks in both: Easy's rows first, then what only Advanced has, which Enter switches to. Press `m` to switch to Advanced, or click the switch at its top right.
+
+```check
+settings advanced
+```
+
+## Back to Easy
+
+`m` switches back to Easy. There, `j` and `k` move between rows, Tab from control to control, `}` and `{` between pages, and `h` and `l` step a value. A row your `init.lua` sets is greyed, with the line that sets it, which Enter opens.
+
+```check
+settings easy
+```
+
 ## Closing it
 
-`j` and `k` move between rows, Tab between sections, and `/` searches again. On a row, Enter changes it, `r` puts it back as it starts, and `u` undoes, but this lesson saves nothing, so press Esc twice: once to clear the search, and again to close the menu.
+In Advanced, `j` and `k` move between rows, Tab between sections. In either, `/` searches again; on a row, Enter changes it, `r` puts it back as it starts, and `u` undoes. This lesson saves nothing, so press Esc twice: once to clear the search, and again to close the menu.
 
 ```check
 not finder

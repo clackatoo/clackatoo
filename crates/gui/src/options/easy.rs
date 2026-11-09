@@ -1,0 +1,776 @@
+//! The settings menu's Easy mode, as the schema declares it: which options
+//! it shows, on which page and under which heading, in words a person who
+//! doesn't know the option's name reads, and with which control.
+//!
+//! An option is declared once, in [`super::options!`]; this table only
+//! says how Easy shows the ones it shows, in the order it shows them. An
+//! option it doesn't name is in Advanced only, as every option is. One
+//! entry can show several options as one control, as "Line numbers: Off,
+//! On, Relative" sets `number` and `relativenumber` together. A test
+//! checks every entry names options that exist, with a control that fits
+//! what they hold.
+//!
+//! The Keys page shows keys for some of the window's own actions, to
+//! record more for, rather than options.
+
+use clackatoo_protocol::Side;
+
+use crate::command::Kind as PaneKind;
+use crate::desk::Action;
+use crate::render::icons::Icon;
+
+/// A page of Easy, down its side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Page {
+    Appearance,
+    Editor,
+    Terminals,
+    Agents,
+    Keys,
+    Machines,
+}
+
+impl Page {
+    /// Every page, in the order the side lists them.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Appearance,
+        Self::Editor,
+        Self::Terminals,
+        Self::Agents,
+        Self::Keys,
+        Self::Machines,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance",
+            Self::Editor => "Editor",
+            Self::Terminals => "Terminals",
+            Self::Agents => "Agents",
+            Self::Keys => "Keys",
+            Self::Machines => "Phone & other machines",
+        }
+    }
+
+    /// The line under its title, saying what it's for.
+    pub(crate) fn subtitle(self) -> &'static str {
+        match self {
+            Self::Appearance => "How text looks in terminals and editors.",
+            Self::Editor => "Indenting, searching, and what language servers add.",
+            Self::Terminals => "Marks, pasting, and the clipboard.",
+            Self::Agents => "Which agent a new chat starts with, and what it may do.",
+            Self::Keys => "Keys for what you do most, recorded as you press them.",
+            Self::Machines => "Working on other machines, and how they show here.",
+        }
+    }
+
+    /// What it says at its foot, if anything: what's set elsewhere.
+    pub(crate) fn note(self) -> Option<&'static str> {
+        match self {
+            Self::Terminals => Some(
+                "What terminals keep across a restart, and the notice when a long command ends, \
+                 are the daemon's settings: the menu doesn't change them yet.",
+            ),
+            Self::Agents => Some(
+                "Add another agent, such as OpenCode, in the daemon's config, where the limits \
+                 on subagents are set too.",
+            ),
+            Self::Keys => Some("Every key, in every mode, and what set it, is in Advanced."),
+            Self::Machines => Some(
+                "The phone app and the web's password are the daemon's: clackatoo web sets them \
+                 up.",
+            ),
+            Self::Appearance | Self::Editor => None,
+        }
+    }
+
+    pub(crate) fn icon(self) -> Icon {
+        match self {
+            Self::Appearance => Icon::Appearance,
+            Self::Editor => Icon::Code,
+            Self::Terminals => Icon::Terminal,
+            Self::Agents => Icon::Star,
+            Self::Keys => Icon::Keyboard,
+            Self::Machines => Icon::Phone,
+        }
+    }
+
+    /// Whether it starts with a sample of text, drawn as the options
+    /// shown say.
+    pub(crate) fn previews(self) -> bool {
+        self == Self::Appearance
+    }
+}
+
+/// One of a control's labelled choices, and what it sets each of the
+/// control's options to, in order: a word as `:set` takes it after `=`,
+/// or `true` or `false` for an option that's on or off.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Choice {
+    pub(crate) label: &'static str,
+    pub(crate) values: &'static [&'static str],
+}
+
+/// How Easy shows and changes an entry's options.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Control {
+    /// A switch, for an option that's on or off.
+    Toggle(&'static str),
+    /// Buttons side by side, one lit: each a [`Choice`] of values for the
+    /// options, together.
+    Segmented {
+        options: &'static [&'static str],
+        choices: &'static [Choice],
+    },
+    /// A slider, from `min` to `max` in steps of `step`, each in
+    /// hundredths, with its value and `unit` beside it.
+    Slider {
+        option: &'static str,
+        min: u32,
+        max: u32,
+        step: u32,
+        unit: &'static str,
+    },
+    /// A number, with − and + either side, by `step`, and `unit` after.
+    Stepper {
+        option: &'static str,
+        step: u32,
+        unit: &'static str,
+    },
+    /// A card for each agent the daemon knows, the one picked lit.
+    Cards(&'static str),
+    /// The font picker.
+    Font(&'static str),
+    /// Text typed, as `:set` takes it after `=`.
+    Text(&'static str),
+    /// The keys bound to one of the window's own actions, to record more.
+    Keys(Action),
+}
+
+impl Control {
+    /// The options it shows, by name.
+    pub(crate) fn options(&self) -> &[&'static str] {
+        match self {
+            Self::Toggle(option)
+            | Self::Slider { option, .. }
+            | Self::Stepper { option, .. }
+            | Self::Cards(option)
+            | Self::Font(option)
+            | Self::Text(option) => std::slice::from_ref(option),
+            Self::Segmented { options, .. } => options,
+            Self::Keys(_) => &[],
+        }
+    }
+}
+
+/// An entry of Easy: one row, under a heading of a page.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub(crate) page: Page,
+    /// The heading it's under, as written; drawn in capitals.
+    pub(crate) section: &'static str,
+    pub(crate) label: &'static str,
+    /// A line more, quietly under the label, or nothing.
+    pub(crate) help: &'static str,
+    pub(crate) control: Control,
+}
+
+impl Entry {
+    /// What it's known by in the menu's history of changes: its option's
+    /// name, as Advanced knows it, or for several, their names.
+    pub(crate) fn name(&self) -> String {
+        match &self.control {
+            Control::Keys(action) => format!("keys {action:?}"),
+            control => control.options().join(" "),
+        }
+    }
+}
+
+const fn choice(label: &'static str, values: &'static [&'static str]) -> Choice {
+    Choice { label, values }
+}
+
+const fn toggle(
+    page: Page,
+    section: &'static str,
+    label: &'static str,
+    help: &'static str,
+    option: &'static str,
+) -> Entry {
+    Entry {
+        page,
+        section,
+        label,
+        help,
+        control: Control::Toggle(option),
+    }
+}
+
+const fn choices(
+    page: Page,
+    section: &'static str,
+    (label, help): (&'static str, &'static str),
+    options: &'static [&'static str],
+    choices: &'static [Choice],
+) -> Entry {
+    Entry {
+        page,
+        section,
+        label,
+        help,
+        control: Control::Segmented { options, choices },
+    }
+}
+
+const fn stepper(
+    page: Page,
+    section: &'static str,
+    (label, help): (&'static str, &'static str),
+    option: &'static str,
+    (step, unit): (u32, &'static str),
+) -> Entry {
+    Entry {
+        page,
+        section,
+        label,
+        help,
+        control: Control::Stepper { option, step, unit },
+    }
+}
+
+const fn keys(label: &'static str, action: Action) -> Entry {
+    Entry {
+        page: Page::Keys,
+        section: "Your keys",
+        label,
+        help: "",
+        control: Control::Keys(action),
+    }
+}
+
+use Page::{Agents, Appearance, Editor, Keys, Machines, Terminals};
+
+/// Every entry, page by page, in the order each page shows them.
+pub(crate) const ENTRIES: &[Entry] = &[
+    // Appearance.
+    Entry {
+        page: Appearance,
+        section: "Text",
+        label: "Font",
+        help: "Monospace fonts installed on this machine.",
+        control: Control::Font("font"),
+    },
+    Entry {
+        page: Appearance,
+        section: "Text",
+        label: "Size",
+        help: "Windows keep their size; panes fit as many cells as now fit.",
+        control: Control::Slider {
+            option: "fontsize",
+            min: 800,
+            max: 2400,
+            step: 50,
+            unit: "pt",
+        },
+    },
+    choices(
+        Appearance,
+        "In editors",
+        ("Line numbers", ""),
+        &["number", "relativenumber"],
+        &[
+            choice("Off", &["false", "false"]),
+            choice("On", &["true", "false"]),
+            choice("Relative", &["true", "true"]),
+        ],
+    ),
+    toggle(
+        Appearance,
+        "In editors",
+        "Highlight the cursor's line",
+        "",
+        "cursorline",
+    ),
+    toggle(
+        Appearance,
+        "In editors",
+        "Wrap long lines",
+        "A line too long goes on over more rows, not off the pane's edge.",
+        "wrap",
+    ),
+    Entry {
+        page: Appearance,
+        section: "In editors",
+        label: "Guide columns",
+        help: "Columns marked down an editor, as 80 or 80,120.",
+        control: Control::Text("colorcolumn"),
+    },
+    toggle(
+        Appearance,
+        "The window",
+        "Smooth scrolling",
+        "The mouse's wheel glides, rather than jumping a line at a time.",
+        "smoothscroll",
+    ),
+    // Editor.
+    stepper(
+        Editor,
+        "Indenting",
+        ("Tab width", "How wide a tab is drawn."),
+        "tabstop",
+        (1, ""),
+    ),
+    toggle(
+        Editor,
+        "Indenting",
+        "Indent with spaces",
+        "Where no line nearby is indented yet: a file keeps the indent it has.",
+        "expandtab",
+    ),
+    toggle(
+        Editor,
+        "Indenting",
+        "Indent as the language does",
+        "New lines are indented by the rules of the file's grammar.",
+        "smartindent",
+    ),
+    toggle(
+        Editor,
+        "Long lines",
+        "Break between words",
+        "A wrapped line breaks after a blank or punctuation.",
+        "linebreak",
+    ),
+    toggle(
+        Editor,
+        "Long lines",
+        "Keep the indent on wrapped rows",
+        "",
+        "breakindent",
+    ),
+    stepper(
+        Editor,
+        "Long lines",
+        (
+            "Lines kept round the cursor",
+            "The fewest lines in view above and below it.",
+        ),
+        "scrolloff",
+        (1, ""),
+    ),
+    choices(
+        Editor,
+        "Searching",
+        (
+            "Letter case",
+            "Smart ignores it, unless what you search for has a capital.",
+        ),
+        &["ignorecase", "smartcase"],
+        &[
+            choice("Smart", &["true", "true"]),
+            choice("Ignore", &["true", "false"]),
+            choice("Match", &["false", "false"]),
+        ],
+    ),
+    toggle(
+        Editor,
+        "Searching",
+        "Light up every match",
+        "Until Esc, or the next search.",
+        "hlsearch",
+    ),
+    toggle(
+        Editor,
+        "Searching",
+        "Go to matches as you type",
+        "Esc puts the view back; Enter keeps it.",
+        "incsearch",
+    ),
+    toggle(
+        Editor,
+        "Files",
+        "Reload files changed on disk",
+        "If you haven't changed them since: u undoes it.",
+        "autoread",
+    ),
+    toggle(
+        Editor,
+        "Files",
+        "Format before saving",
+        "As the file's language server formats it.",
+        "formatonsave",
+    ),
+    choices(
+        Editor,
+        "Files",
+        ("Markdown opens as", ""),
+        &["markdownview"],
+        &[choice("Text", &["raw"]), choice("Rendered", &["rendered"])],
+    ),
+    toggle(
+        Editor,
+        "Files",
+        "Show hidden files in explorers",
+        "In explorers opened from now on.",
+        "explorerhidden",
+    ),
+    toggle(Editor, "Code", "Suggest code as you type", "", "completion"),
+    toggle(
+        Editor,
+        "Code",
+        "Accept suggestions with Tab",
+        "Enter and Ctrl+Y accept them too.",
+        "completetab",
+    ),
+    toggle(
+        Editor,
+        "Code",
+        "Show a function's arguments as you type them",
+        "",
+        "signaturehelp",
+    ),
+    toggle(
+        Editor,
+        "Code",
+        "Light up uses of the name under the cursor",
+        "",
+        "highlightuses",
+    ),
+    toggle(
+        Editor,
+        "Code",
+        "Show types and argument names in the code",
+        "As the language server suggests them, dimmed.",
+        "inlayhints",
+    ),
+    toggle(
+        Editor,
+        "Code",
+        "Say what's wrong after a line's end",
+        "The worst of what the language server says of it.",
+        "virtualtext",
+    ),
+    toggle(
+        Editor,
+        "Code",
+        "Show changes since git's index",
+        "Signs in the gutter, as gitsigns.nvim shows them.",
+        "gitsigns",
+    ),
+    choices(
+        Editor,
+        "Code",
+        (
+            "Install language support",
+            "For a language opened that isn't installed.",
+        ),
+        &["languageinstall"],
+        &[
+            choice("Ask", &["ask"]),
+            choice("Always", &["always"]),
+            choice("Never", &["never"]),
+        ],
+    ),
+    choices(
+        Editor,
+        "The clipboard",
+        ("Yanks go to", "And p pastes from it."),
+        &["clipboard"],
+        &[
+            choice("The clipboard", &["unnamedplus"]),
+            choice("The selection", &["unnamed"]),
+            choice("Neither", &["none"]),
+        ],
+    ),
+    // Terminals.
+    choices(
+        Terminals,
+        "Commands",
+        (
+            "Mark finished commands",
+            "A ✗ by a failed one's prompt, with its exit status; or a ✓ by every one.",
+        ),
+        &["blockmarks"],
+        &[
+            choice("Failed", &["failed"]),
+            choice("All", &["all"]),
+            choice("None", &["none"]),
+        ],
+    ),
+    choices(
+        Terminals,
+        "Pasting",
+        (
+            "Paste an image (Ctrl+Shift+Alt+V) as",
+            "A file path works with Claude Code and Codex on any machine.",
+        ),
+        &["pasteimage"],
+        &[
+            choice("A file path", &["path"]),
+            choice("The clipboard", &["clipboard"]),
+        ],
+    ),
+    choices(
+        Terminals,
+        "Pasting",
+        (
+            "Programs may use the clipboard",
+            "Through OSC 52, as Neovim and tmux do, even over ssh.",
+        ),
+        &["osc52"],
+        &[
+            choice("Copy", &["copy"]),
+            choice("Paste", &["paste"]),
+            choice("Both", &["copy-paste"]),
+            choice("Neither", &["off"]),
+        ],
+    ),
+    // Agents.
+    Entry {
+        page: Agents,
+        section: "New chats start with",
+        label: "Agent",
+        help: "",
+        control: Control::Cards("agent"),
+    },
+    choices(
+        Agents,
+        "New chats",
+        (
+            "Tools",
+            "What the agent may do with clackatoo's own: the chat's Tools setting changes it later.",
+        ),
+        &["agenttools"],
+        &[
+            choice("Ask first", &["ask"]),
+            choice("Allow", &["allow"]),
+            choice("None", &["off"]),
+        ],
+    ),
+    toggle(
+        Agents,
+        "New chats",
+        "Browser tools",
+        "A headless browser of clackatoo's for the agent to drive, never yours.",
+        "chatbrowser",
+    ),
+    toggle(
+        Agents,
+        "New chats",
+        "Claude's own Task tool",
+        "Helpers inside one turn, folded under the Task's card.",
+        "claudetask",
+    ),
+    choices(
+        Agents,
+        "While they work",
+        ("Notify me about", "Only for chats you can't see."),
+        &["notify"],
+        &[
+            choice("Everything", &["all"]),
+            choice("Questions", &["questions"]),
+            choice("Nothing", &["off"]),
+        ],
+    ),
+    toggle(
+        Agents,
+        "While they work",
+        "Show what turns spend",
+        "",
+        "chatcost",
+    ),
+    toggle(
+        Agents,
+        "While they work",
+        "Show where agents changed files",
+        "Marks in an editor's gutter, in the agents' teal.",
+        "agentsigns",
+    ),
+    choices(
+        Agents,
+        "Rewinding",
+        ("Files a rewind takes out", ""),
+        &["rewindfiles"],
+        &[
+            choice("Ask", &["ask"]),
+            choice("Undo them", &["undo"]),
+            choice("Keep them", &["keep"]),
+        ],
+    ),
+    // Keys.
+    keys("New tab", Action::NewTab),
+    keys(
+        "Split, a terminal to the right",
+        Action::Split(Side::Right, PaneKind::Terminal),
+    ),
+    keys(
+        "Split, a terminal below",
+        Action::Split(Side::Below, PaneKind::Terminal),
+    ),
+    keys(
+        "A chat with an agent",
+        Action::Split(Side::Right, PaneKind::Agent),
+    ),
+    keys("Close the pane", Action::Close),
+    keys("Zoom the pane", Action::Zoom),
+    keys("Workspaces", Action::PickWorkspace),
+    stepper(
+        Keys,
+        "Hints",
+        (
+            "Show what keys do after",
+            "Once you've pressed the start of some, as Ctrl+B.",
+        ),
+        "whichkeydelay",
+        (100, "ms"),
+    ),
+    toggle(
+        Keys,
+        "Typing",
+        "Use the desktop's input method",
+        "For typing accents and other scripts.",
+        "ime",
+    ),
+    // Phone and other machines.
+    choices(
+        Machines,
+        "Workspaces",
+        (
+            "Name a workspace's machine",
+            "After its name, as notes@desk.",
+        ),
+        &["showhost"],
+        &[
+            choice("When names clash", &["ambiguous"]),
+            choice("Always", &["always"]),
+            choice("Never", &["never"]),
+        ],
+    ),
+    choices(
+        Machines,
+        "Over slow links",
+        (
+            "Show what you type before its echo",
+            "Underlined, until the other machine's screen shows it.",
+        ),
+        &["predictecho"],
+        &[
+            choice("When slow", &["auto"]),
+            choice("Always", &["always"]),
+            choice("Never", &["never"]),
+        ],
+    ),
+    toggle(
+        Machines,
+        "Over slow links",
+        "Keep typing quick while forwarding",
+        "Forwarded ports' traffic gives way to what you type.",
+        "forwardpace",
+    ),
+    toggle(
+        Machines,
+        "This machine",
+        "Check for new releases",
+        "At most once a day; nothing is installed until you ask.",
+        "updatecheck",
+    ),
+];
+
+/// The entries of `page`, in order.
+pub(crate) fn on(page: Page) -> impl Iterator<Item = &'static Entry> {
+    ENTRIES.iter().filter(move |entry| entry.page == page)
+}
+
+/// Whether Easy shows the option called `name`.
+pub(crate) fn shows(name: &str) -> bool {
+    ENTRIES
+        .iter()
+        .any(|entry| entry.control.options().contains(&name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::{Kind, find};
+
+    #[test]
+    fn every_entry_names_options_that_exist_with_a_control_that_fits_them() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in ENTRIES {
+            let label = entry.label;
+            for name in entry.control.options() {
+                let info = find(name).unwrap_or_else(|why| panic!("{label}: {why}"));
+                assert!(seen.insert(*name), "{name} is in Easy twice");
+                let kind = info.kind;
+                match &entry.control {
+                    Control::Toggle(_) => assert_eq!(kind, Kind::Bool, "{label}"),
+                    Control::Segmented { .. } => assert!(
+                        matches!(kind, Kind::Bool | Kind::Choice(_)),
+                        "{label}: {name} is {kind:?}"
+                    ),
+                    Control::Slider { min, max, step, .. } => {
+                        let (low, high) = match kind {
+                            Kind::Decimal { min, max } | Kind::Number { min, max, .. } => {
+                                (min * 100, max * 100)
+                            }
+                            _ => panic!("{label}: a slider for {kind:?}"),
+                        };
+                        assert!(low <= *min && min < max && *max <= high, "{label}");
+                        assert!(*step > 0 && (max - min) % step == 0, "{label}");
+                    }
+                    Control::Stepper { step, .. } => {
+                        let Kind::Number { min, max, .. } = kind else {
+                            panic!("{label}: a stepper for {kind:?}");
+                        };
+                        assert!(*step > 0 && *step <= max - min, "{label}");
+                    }
+                    Control::Cards(_) | Control::Text(_) => assert!(
+                        matches!(kind, Kind::Text | Kind::List { .. }),
+                        "{label}: {kind:?}"
+                    ),
+                    Control::Font(_) => assert_eq!(*name, "font", "{label}"),
+                    Control::Keys(_) => unreachable!("keys name no option"),
+                }
+            }
+            if let Control::Segmented { options, choices } = &entry.control {
+                assert!(choices.len() >= 2, "{label}");
+                for choice in *choices {
+                    assert_eq!(choice.values.len(), options.len(), "{label}");
+                    for (name, value) in options.iter().zip(choice.values) {
+                        let info = find(name).unwrap();
+                        match info.kind {
+                            Kind::Bool => assert!(["true", "false"].contains(value), "{label}"),
+                            _ => assert!(info.parse(value).is_ok(), "{label}: {value}"),
+                        }
+                    }
+                }
+                let distinct: std::collections::HashSet<_> =
+                    choices.iter().map(|choice| choice.values).collect();
+                assert_eq!(distinct.len(), choices.len(), "{label}: two alike");
+                // A single option's choices are all it can be.
+                if let [name] = options
+                    && let Kind::Choice(words) = find(name).unwrap().kind
+                {
+                    assert_eq!(choices.len(), words.len(), "{label}: a word left out");
+                }
+            }
+        }
+        for page in Page::ALL {
+            assert!(on(page).next().is_some(), "{page:?} shows nothing");
+        }
+    }
+
+    #[test]
+    fn the_keys_page_names_actions_the_window_binds_as_it_starts() {
+        let keys = crate::desk::Keys::default();
+        for entry in on(Page::Keys) {
+            let Control::Keys(action) = entry.control else {
+                continue;
+            };
+            let binding = crate::desk::Binding::Window(action);
+            let bound =
+                (keys.bound(crate::keymap::KeyMode::Normal)).any(|(_, bound, _)| *bound == binding);
+            assert!(bound, "{}: nothing binds {action:?}", entry.label);
+        }
+    }
+}

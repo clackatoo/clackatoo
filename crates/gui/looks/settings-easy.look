@@ -1,0 +1,43 @@
+# The settings menu's Easy mode, page by page, then Advanced: one option
+# set in init.lua, locked, and one changed since it loaded, "currently".
+# Its design is CLACKA-237's phase 2b mockup, at this size.
+size 1280x800
+config <<END
+client.opt.wrap = false
+END
+keys <C-;>:set nocursorline<CR>
+keys :Settings<CR>
+wait-for Appearance
+shot appearance
+keys }
+shot editor
+keys G
+shot editor-end
+keys }
+shot terminals
+keys }
+shot agents
+keys }
+shot keys
+keys }
+shot machines
+# The pages down the side, by the mouse: Appearance again.
+click 180 151
+shot appearance-clicked
+# Hovering over a choice, then the font picker, by the keys: from the
+# pages down the side into the page, and Enter on the font.
+move 1031 613
+shot hover
+keys l<CR>
+sleep 300
+shot font-picker
+keys <Esc>
+# One search, across both modes.
+keys /wrap
+shot search
+keys <Esc><Esc>
+keys :Settings<CR>
+keys m
+shot advanced
+keys m
+shot easy-again

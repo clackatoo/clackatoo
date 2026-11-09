@@ -473,7 +473,7 @@ impl Theme {
             Paint::Clear => [0.0; 4],
             Paint::Bar => self.bar,
             Paint::WindowEdge | Paint::ChatChosen => white(0.08),
-            Paint::ChatHover => white(0.035),
+            Paint::ChatHover | Paint::CursorLine => white(0.035),
             Paint::ImageBackdrop => [0.0, 0.0, 0.0, 0.8],
             Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
             Paint::Tile => self.background,
@@ -518,6 +518,14 @@ impl Theme {
             Paint::Full => self.warning,
             Paint::Subagent => faint(self.subagent, SUBAGENT_BAND),
             Paint::SubagentEdge => faint(self.subagent, SUBAGENT_EDGE),
+            Paint::Agents => self.subagent,
+            Paint::Dim => [0.0, 0.0, 0.0, 0.45],
+            Paint::Card => white(0.025),
+            Paint::CardEdge => white(0.06),
+            Paint::Well => [0.0, 0.0, 0.0, 0.22],
+            Paint::Track => white(0.12),
+            Paint::AccentFaint => faint(self.accent, 0.1),
+            Paint::AccentEdge => faint(self.accent, 0.28),
         }
     }
 

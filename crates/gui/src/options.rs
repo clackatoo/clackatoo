@@ -10,6 +10,7 @@
 //! change it makes, whoever asked for it, so the copy ends up the same
 //! whatever order changes cross in.
 
+pub(crate) mod easy;
 pub(crate) mod persist;
 pub(crate) use clackatoo_daemon::schema::provenance;
 pub(crate) mod settings_lua;

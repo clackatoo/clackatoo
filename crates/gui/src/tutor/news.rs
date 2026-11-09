@@ -1487,6 +1487,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: "The daemon's config is Luau, daemon/init.lua: agents.toml, machine.toml and web.toml move into it once",
     },
+    News {
+        id: "settings-easy",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: ":Settings opens in Easy: pages of the usual settings with switches, sliders and buttons; m goes to Advanced",
+    },
 ];
 
 impl News {

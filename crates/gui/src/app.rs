@@ -635,6 +635,8 @@ impl App {
     ) -> Self {
         let proxy = session.proxy();
         let mut desk = Desk::default();
+        desk.settings_mode_file =
+            crate::tutor::state_dir().map(|dir| dir.join("clackatoo/settings-mode"));
         // A window on the desktop tells the desktop of chats it can't see;
         // one drawn offscreen, to look at (see `look`), doesn't.
         if matches!(proxy, crate::session::Proxy::EventLoop { .. }) {
@@ -801,6 +803,7 @@ impl App {
     }
 
     /// Where everything in the window's frame goes, now.
+    #[allow(clippy::too_many_lines, reason = "each part of the frame in turn")]
     fn chrome(&mut self) -> Option<Chrome> {
         let geometry = self.geometry()?;
         let rounded = self.rounded();
@@ -810,6 +813,15 @@ impl App {
         // The picker of a machine, over the panes or a notice, as the
         // finder is.
         let picker = (self.picker.as_mut()).map(|picker| picker.view((finder.rows, finder.cols)));
+        // The settings menu, unless the keys' help is over it.
+        let settings = match self.desk.settings_mode_shown() {
+            _ if self.shortcut_help.is_some() || self.notice.is_some() => None,
+            Some(crate::settings::Mode::Easy) => {
+                (self.desk.easy_view()).map(|view| chrome::SettingsShown::Easy(Box::new(view)))
+            }
+            Some(crate::settings::Mode::Advanced) => Some(chrome::SettingsShown::Advanced),
+            None => None,
+        };
         let mut contents = if self.notice.is_some() {
             Contents {
                 workspaces: Vec::new(),
@@ -884,9 +896,20 @@ impl App {
             };
         }
         let fonts = &mut self.frame.as_mut()?.fonts;
-        let chrome = Chrome::new(geometry, contents, &mut |text, bold| {
+        let mut chrome = Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
         });
+        if let Some(settings) = settings {
+            let sizes = crate::settings::view::Sizes {
+                mono_em: fonts.mono_em(),
+            };
+            chrome.place_settings(settings, sizes, &mut |text, bold| {
+                fonts.ui_width(text, bold)
+            });
+        }
+        if let Some(top) = chrome.settings_top() {
+            self.desk.settings_drawn(top);
+        }
         // The strips scroll only as far as they must, from where they were.
         self.scrolls = chrome.scrolls;
         self.noticing = chrome.cut.is_some();
@@ -998,6 +1021,9 @@ impl App {
             | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
+            Hit::Settings(hit) if hit != crate::settings::view::SettingsHit::Panel => {
+                CursorIcon::Pointer
+            }
             Hit::Panes if let Some(axis) = self.desk.divider_at(point) => match axis {
                 Axis::LeftToRight => CursorIcon::ColResize,
                 Axis::TopToBottom => CursorIcon::RowResize,
@@ -1026,7 +1052,9 @@ impl App {
                 }
             }
             Hit::Panes => CursorIcon::Text,
-            Hit::TopBar | Hit::Note | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
+            Hit::TopBar | Hit::Note | Hit::Finder(None) | Hit::Settings(_) | Hit::Nothing => {
+                CursorIcon::Default
+            }
         };
         if let Some(window) = self.frame.as_ref().and_then(Frame::window)
             && icon != self.cursor_icon
@@ -1048,19 +1076,31 @@ impl App {
                     | Hit::Hidden(..)
                     | Hit::Note
                     | Hit::Menu(_)
+                    | Hit::Settings(_)
             )
         };
         if hit != self.hover && (lit(hit) || lit(self.hover)) {
             self.request_redraw();
         }
         self.hover = hit;
+        // A slider of the settings menu's follows the mouse while it's held.
+        if self.desk.settings_sliding() {
+            if let Some(at) = self
+                .chrome()
+                .and_then(|chrome| chrome.settings_slide(point))
+            {
+                self.desk.settings_slide(at);
+                self.request_redraw();
+            }
+            return;
+        }
         if self.desk.drag_divider(point) {
             self.send_outbox();
             self.request_redraw();
             return;
         }
         // Over a pane, or dragging out of one: not over the finder.
-        if self.notice.is_none() && !matches!(hit, Hit::Finder(_)) {
+        if self.notice.is_none() && !hit.raised() {
             let outcome = self
                 .desk
                 .mouse(point, MouseAction::Motion(None), 1, self.modifiers);
@@ -1105,8 +1145,14 @@ impl App {
         if button == MouseButton::Left && self.desk.drop_divider() {
             return;
         }
+        if button == MouseButton::Left && self.desk.settings_sliding() {
+            self.desk.settings_slid();
+            self.send_outbox();
+            self.request_redraw();
+            return;
+        }
         let over_panes = match self.pointer {
-            Some(point) => self.notice.is_none() && !matches!(self.hit(point), Hit::Finder(_)),
+            Some(point) => self.notice.is_none() && !self.hit(point).raised(),
             None => false,
         };
         let (true, Some(point), Some(button)) = (over_panes, self.pointer, mouse_button(button))
@@ -1245,10 +1291,7 @@ impl App {
         if self.shortcut_help.is_none() {
             return false;
         }
-        if self
-            .pointer
-            .is_some_and(|point| !matches!(self.hit(point), Hit::Finder(_)))
-        {
+        if self.pointer.is_some_and(|point| !self.hit(point).raised()) {
             self.shortcut_help = None;
             self.sync_ime();
             self.request_redraw();
@@ -1301,6 +1344,15 @@ impl App {
         }
         if let Hit::Finder(row) = hit {
             return self.clicked_in_finder(row, button, double);
+        }
+        if let Hit::Settings(hit) = hit {
+            if button == MouseButton::Left {
+                self.desk.settings_pointer(hit);
+                self.send_outbox();
+            }
+            self.update_title();
+            self.request_redraw();
+            return;
         }
         // Clicks in a pane are the pane's: selecting, or for its program.
         if hit == Hit::Panes {
@@ -1366,7 +1418,12 @@ impl App {
                 }
                 Ok(())
             }
-            Hit::Panes | Hit::Note | Hit::Menu(_) | Hit::Finder(_) | Hit::Nothing => Ok(()),
+            Hit::Panes
+            | Hit::Note
+            | Hit::Menu(_)
+            | Hit::Finder(_)
+            | Hit::Settings(_)
+            | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
@@ -2298,7 +2355,7 @@ impl App {
         let Some(point) = self.pointer else {
             return;
         };
-        let over_finder = matches!(self.hit(point), Hit::Finder(_));
+        let over_finder = self.hit(point).raised();
         if self.picker.is_none()
             && !over_finder
             && let Some(redraw) = self.desk.smooth_wheel(
@@ -2702,6 +2759,7 @@ impl App {
         // is open, as their text would mix.
         if chrome.palette.is_none()
             && chrome.finder.is_none()
+            && chrome.settings.is_none()
             && let Some(editor) = desk.editor(shown.pane)
             && let Some(&(_, tile)) = (placement.panes.iter()).find(|(id, _)| *id == shown.pane)
         {
@@ -3158,6 +3216,7 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::Note
         | Hit::Menu(_)
         | Hit::Finder(_)
+        | Hit::Settings(_)
         | Hit::Nothing => Ok(()),
     }
 }

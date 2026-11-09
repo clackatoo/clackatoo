@@ -26,11 +26,11 @@ impl Rect {
         [self.x, self.y, self.width, self.height]
     }
 
-    fn right(self) -> f32 {
+    pub(crate) fn right(self) -> f32 {
         self.x + self.width
     }
 
-    fn bottom(self) -> f32 {
+    pub(crate) fn bottom(self) -> f32 {
         self.y + self.height
     }
 }

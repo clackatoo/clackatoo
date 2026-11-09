@@ -17,6 +17,7 @@
 //! | `exited N` | The practice terminal's last command exited with status N. |
 //! | `option SETTING` | An option is as `:set` writes it: `option nowrap`, `option tabstop=8`. |
 //! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places`, `boards` or `background`; or `agent`, the start page `:Agent` opens, or `settings`, the menu `:Settings` opens. |
+//! | `settings MODE` | The settings menu is open in `easy` or `advanced` mode. |
 //! | `listed "PATH"` | A file explorer in the lesson's tab lists PATH, from its root. |
 //! | `rooted "PATH"` | A file explorer in the lesson's tab is rooted at PATH, from the lesson's folder: `.` for the folder itself. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
@@ -53,6 +54,8 @@ pub(crate) enum Check {
     /// The option's name, and how `:set` writes it as it must be.
     Option(&'static str, String),
     Finder(Option<String>),
+    /// The settings menu is open in this mode, as `easy` or `advanced`.
+    Settings(String),
     Listed(String),
     Rooted(String),
     File(String),
@@ -154,6 +157,10 @@ pub(crate) trait Facts {
     fn option(&self, name: &str) -> String;
     /// The open finder's kind, as checks name it.
     fn finder(&self) -> Option<&'static str>;
+    /// The settings menu's mode, if it's open: `easy` or `advanced`.
+    fn settings(&self) -> Option<&'static str> {
+        None
+    }
     /// Whether an explorer in the lesson's tab lists `path`, from its
     /// root.
     fn listed(&self, path: &str) -> bool;
@@ -239,6 +246,7 @@ impl Check {
             }
             ["finder"] => Self::Finder(None),
             ["finder", kind] if FINDERS.contains(kind) => Self::Finder(Some((*kind).to_owned())),
+            ["settings", mode @ ("easy" | "advanced")] => Self::Settings((*mode).to_owned()),
             ["listed", path] => Self::Listed((*path).to_owned()),
             ["rooted", path] => Self::Rooted((*path).to_owned()),
             ["file", name] => Self::File((*name).to_owned()),
@@ -291,6 +299,7 @@ impl Check {
                 (Some(open), Some(kind)) => open == kind,
                 (None, _) => false,
             },
+            Self::Settings(mode) => facts.settings() == Some(mode.as_str()),
             Self::Listed(path) => facts.listed(path),
             Self::Rooted(path) => facts.rooted(path),
             Self::File(name) => facts.file().is_some_and(|file| file == *name),

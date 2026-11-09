@@ -29,6 +29,18 @@ pub(crate) enum Icon {
     Ring,
     Hatch,
     Progress(u8),
+    /// A letter A and a plus: how things look.
+    Appearance,
+    /// Angle brackets: code.
+    Code,
+    /// A screen with a prompt: a terminal.
+    Terminal,
+    /// A keyboard.
+    Keyboard,
+    /// A phone.
+    Phone,
+    /// A padlock: what's locked.
+    Lock,
 }
 
 impl Icon {
@@ -81,6 +93,28 @@ impl Icon {
             Self::Edit => "M4 20L5 15L15.5 4.5L19.5 8.5L9 19Z M13 7L17 11".into(),
             Self::Hatch => "M-16 24L8 0 M-8 24L16 0 M0 24L24 0 M8 24L32 0 M16 24L40 0".into(),
             Self::Close => "M6 6L18 18 M18 6L6 18".into(),
+            Self::Appearance => "M4 20L10 4L16 20 M6.5 14H13.5 M18 12H21 M19.5 10.5V13.5".into(),
+            Self::Code => "M8 7L3 12L8 17 M16 7L21 12L16 17".into(),
+            Self::Terminal => concat!(
+                "M5 4H19A2 2 0 0 1 21 6V18A2 2 0 0 1 19 20H5A2 2 0 0 1 3 18V6A2 2 0 0 1 5 4Z ",
+                "M7 9L10 12L7 15 M13 15H17"
+            )
+            .into(),
+            Self::Keyboard => concat!(
+                "M4 6H20A2 2 0 0 1 22 8V16A2 2 0 0 1 20 18H4A2 2 0 0 1 2 16V8A2 2 0 0 1 4 6Z ",
+                "M6 10H6.01 M10 10H10.01 M14 10H14.01 M18 10H18.01 M7 14H17"
+            )
+            .into(),
+            Self::Phone => concat!(
+                "M9 2H15A2 2 0 0 1 17 4V20A2 2 0 0 1 15 22H9A2 2 0 0 1 7 20V4A2 2 0 0 1 9 2Z ",
+                "M11 18H13"
+            )
+            .into(),
+            Self::Lock => concat!(
+                "M7 11H17A2 2 0 0 1 19 13V19A2 2 0 0 1 17 21H7A2 2 0 0 1 5 19V13A2 2 0 0 1 7 11Z ",
+                "M8 11V8A4 4 0 0 1 16 8V11"
+            )
+            .into(),
             Self::Send => "M12 20V4 M5 11L12 4L19 11".into(),
             Self::Shield => {
                 "M12 3L20 6V11C20 16 17 19 12 22C7 19 4 16 4 11V6Z M8 12L11 15L16 10".into()
@@ -170,6 +204,12 @@ mod tests {
                 Icon::BoltFilled,
                 Icon::Progress(42),
                 Icon::Hatch,
+                Icon::Appearance,
+                Icon::Code,
+                Icon::Terminal,
+                Icon::Keyboard,
+                Icon::Phone,
+                Icon::Lock,
             ] {
                 assert_eq!(swash::zeno::validate_svg(&icon.path()), Ok(()), "{icon:?}");
                 let mask = icon.rasterize(size);

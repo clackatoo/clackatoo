@@ -61,6 +61,13 @@ impl Desk {
     /// start page, if it's still open: of the chats in no pane, those of
     /// the workspace shown, or of none. Returns whether to draw.
     pub(super) fn chat_choices(&mut self, response: Response) -> bool {
+        if self.start.is_none()
+            && self.settings.is_some()
+            && let Response::ChatChoices(choices) = &response
+        {
+            self.settings_agents(choices);
+            return true;
+        }
         let Some(page) = &mut self.start else {
             return false;
         };

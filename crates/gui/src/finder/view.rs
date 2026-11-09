@@ -287,6 +287,9 @@ pub(crate) struct Layout {
     pub(crate) cols: usize,
     /// How many lines the preview shows, and how many cells wide.
     pub(crate) preview_size: Option<(usize, usize)>,
+    /// The line along its top is drawn by the settings menu, as its
+    /// header, not with the title, what's typed and the count.
+    pub(crate) header: bool,
 }
 
 /// The narrowest list, in cells, that leaves room for a preview beside it.
@@ -322,13 +325,22 @@ impl Layout {
             x: 0.0,
             y: 0.0,
         };
-        let panel = Rect {
-            x: ((width - panel.width) / 2.0).round(),
-            y: ((height - panel.height) / 2.0).round(),
-            ..panel
+        // The settings menu's panel is as big in either of its modes.
+        let panel = if side {
+            crate::settings::view::panel(geometry)
+        } else {
+            Rect {
+                x: ((width - panel.width) / 2.0).round(),
+                y: ((height - panel.height) / 2.0).round(),
+                ..panel
+            }
         };
-        // As tall as the palette's line.
-        let line_height = (cell_height + 4.0 * padding).round();
+        // As tall as the palette's line, or the settings menu's header.
+        let line_height = if side {
+            crate::settings::view::header_height(geometry)
+        } else {
+            (cell_height + 4.0 * padding).round()
+        };
         let prompt = Rect {
             height: line_height,
             ..panel
@@ -368,7 +380,13 @@ impl Layout {
             rows,
             cols: cols_of(list.width),
             preview_size: preview.map(|preview| (rows, cols_of(preview.width))),
+            header: false,
         }
+    }
+
+    /// The line what's typed goes on.
+    pub(crate) fn prompt(&self) -> Rect {
+        self.prompt
     }
 
     /// The row of a list of `rows` that `point` is over, if it's over one.
@@ -413,45 +431,48 @@ impl Layout {
                 .bordered(geometry.edge, Paint::PaletteEdge),
         );
         // What it lists, quietly, then what's typed; and at the right, how
-        // many match and where it looks.
-        let ui_y = (self.prompt.y + (self.prompt.height - metrics.ui_line) / 2.0).round();
-        let mono_y = (self.prompt.y + (self.prompt.height - cell_height) / 2.0).round();
-        let mut x = self.prompt.x + 2.0 * padding;
-        painted.over_texts.push(Text {
-            origin: [x, ui_y],
-            content: view.title,
-            ink: Ink::Muted,
-            font: TextFont::Ui,
-        });
-        x += self.title_width + 2.0 * padding;
-        painted.over_texts.push(Text {
-            origin: [x.round(), mono_y],
-            content: &view.query,
-            ink: Ink::Plain,
-            font: TextFont::Mono,
-        });
-        let mut right = self.prompt.x + self.prompt.width - 2.0 * padding;
-        for (text, gap) in [(&view.count, 0.0)]
-            .into_iter()
-            .chain((view.place.as_ref()).map(|place| (place, 3.0 * cell_width)))
-        {
-            right -= gap + text.chars().count() as f32 * cell_width;
+        // many match and where it looks: unless the settings menu's header
+        // says them.
+        if !self.header {
+            let ui_y = (self.prompt.y + (self.prompt.height - metrics.ui_line) / 2.0).round();
+            let mono_y = (self.prompt.y + (self.prompt.height - cell_height) / 2.0).round();
+            let mut x = self.prompt.x + 2.0 * padding;
             painted.over_texts.push(Text {
-                origin: [right.round(), mono_y],
-                content: text,
+                origin: [x, ui_y],
+                content: view.title,
                 ink: Ink::Muted,
+                font: TextFont::Ui,
+            });
+            x += self.title_width + 2.0 * padding;
+            painted.over_texts.push(Text {
+                origin: [x.round(), mono_y],
+                content: &view.query,
+                ink: Ink::Plain,
                 font: TextFont::Mono,
             });
+            let mut right = self.prompt.x + self.prompt.width - 2.0 * padding;
+            for (text, gap) in [(&view.count, 0.0)]
+                .into_iter()
+                .chain((view.place.as_ref()).map(|place| (place, 3.0 * cell_width)))
+            {
+                right -= gap + text.chars().count() as f32 * cell_width;
+                painted.over_texts.push(Text {
+                    origin: [right.round(), mono_y],
+                    content: text,
+                    ink: Ink::Muted,
+                    font: TextFont::Mono,
+                });
+            }
+            painted.over.push(Fill::solid(
+                [
+                    self.panel.x,
+                    self.prompt.y + self.prompt.height,
+                    self.panel.width,
+                    geometry.edge,
+                ],
+                Paint::PaletteEdge,
+            ));
         }
-        painted.over.push(Fill::solid(
-            [
-                self.panel.x,
-                self.prompt.y + self.prompt.height,
-                self.panel.width,
-                geometry.edge,
-            ],
-            Paint::PaletteEdge,
-        ));
 
         // The side, then the list beside it.
         let list = match &view.side {

@@ -310,6 +310,26 @@ pub(crate) enum Paint {
     Subagent,
     /// ...and the line under it.
     SubagentEdge,
+    /// The subagents' colour, whole, as the agent picked in the settings
+    /// menu is outlined.
+    Agents,
+    /// Dims the panes behind the settings menu.
+    Dim,
+    /// Behind a card of rows, raised a little off the settings menu...
+    Card,
+    /// ...and its edge, and the lines between its rows.
+    CardEdge,
+    /// Sunk into the panel, as a box to type in or a group of buttons is.
+    Well,
+    /// A switch that's off, and a slider's track.
+    Track,
+    /// Faintly in clackatoo's own colour, behind what links somewhere, as
+    /// the place a locked setting is set...
+    AccentFaint,
+    /// ...and its edge.
+    AccentEdge,
+    /// Across the cursor's line, as an editor lights it.
+    CursorLine,
 }
 
 /// A line of text of the window's own.
@@ -366,6 +386,24 @@ pub(crate) enum TextFont {
     Mono,
     /// The interface font, as for names in the bars.
     Ui,
+    /// The interface font at `percent` of its size, as the settings
+    /// menu's titles and headings are.
+    UiAt(u16),
+    /// The terminal's font at `percent` of the interface font's size, its
+    /// cells as much narrower or wider, as values in the settings menu
+    /// are: monospace, but never the size of the terminal's text.
+    MonoAt(u16),
+}
+
+impl TextFont {
+    /// How much bigger than the interface font, or the terminal's, it is
+    /// drawn, as a factor: 1 for both of those.
+    pub(crate) fn scale(self) -> f32 {
+        match self {
+            Self::Mono | Self::Ui => 1.0,
+            Self::UiAt(percent) | Self::MonoAt(percent) => f32::from(percent) / 100.0,
+        }
+    }
 }
 
 /// How many cells `ch` takes in text drawn in [`TextFont::Mono`].
@@ -1530,6 +1568,54 @@ impl Renderer {
                     pen_x += glyph.advance.round();
                 }
             }
+            TextFont::UiAt(_) | TextFont::MonoAt(_) => {
+                self.push_sized_text(text, fonts, bold, color);
+            }
+        }
+    }
+
+    /// Adds a line of text in [`TextFont::UiAt`] or [`TextFont::MonoAt`]:
+    /// each glyph as far on as the interface font's, or the terminal's,
+    /// whole-pixel advance at its own size goes, scaled, so it's as wide as
+    /// [`Fonts::ui_width`] or [`Fonts::mono_em`] say, scaled.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_sized_text(&mut self, text: &Text<'_>, fonts: &mut Fonts, bold: bool, color: Rgba) {
+        let scale = text.font.scale();
+        let ui = fonts.ui;
+        let height = ui.height * scale;
+        let baseline = ui.baseline * scale;
+        let [mut pen_x, top] = text.origin;
+        let variant = if bold {
+            Variant::Bold
+        } else {
+            Variant::Regular
+        };
+        let mono = matches!(text.font, TextFont::MonoAt(_));
+        for ch in text.content.chars() {
+            let (face, glyph, ppem, advance) = if mono {
+                let advance = mono_cells(ch) as f32 * fonts.mono_em() * scale;
+                let Some((face, glyph)) = fonts.glyph(ch, variant) else {
+                    pen_x += advance;
+                    continue;
+                };
+                (face, glyph, ui.ppem * scale, advance)
+            } else {
+                let Some(glyph) = fonts.ui_glyph(ch, bold) else {
+                    continue;
+                };
+                let advance = glyph.advance.round() * scale;
+                (glyph.face, glyph.glyph, glyph.ppem * scale, advance)
+            };
+            if let Some(atlas) = self.glyphs.get_sized(fonts, face, glyph, ppem) {
+                self.text_glyphs.push(place(
+                    &atlas,
+                    [pen_x.round(), (top + baseline).round()],
+                    [advance, height],
+                    color,
+                    baseline,
+                ));
+            }
+            pen_x += advance;
         }
     }
 

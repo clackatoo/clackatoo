@@ -219,7 +219,7 @@ mod trust;
 mod typing;
 mod updating;
 
-pub(crate) use bindings::{Binding, Bindings, Keys};
+pub(crate) use bindings::{Action, Binding, Bindings, Keys};
 pub(crate) use mode::WindowMode;
 pub(crate) use pasting::PasteTo;
 
@@ -492,6 +492,9 @@ pub(crate) struct Desk {
     /// What the settings menu has changed, to undo, kept while it's
     /// closed.
     settings_history: crate::settings::History,
+    /// The file the mode the settings menu was used in last is kept in,
+    /// for it to open in next, if there's one: none in tests.
+    pub(crate) settings_mode_file: Option<std::path::PathBuf>,
     /// What the last new chat started from the start page had, for the
     /// next to start with.
     last_chat: crate::start::LastChat,

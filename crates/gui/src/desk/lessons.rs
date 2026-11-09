@@ -1410,6 +1410,12 @@ impl Facts for DeskFacts<'_> {
             .map_or_else(|_| String::new(), |info| self.desk.options.show(info))
     }
 
+    fn settings(&self) -> Option<&'static str> {
+        self.desk
+            .settings_mode_shown()
+            .map(crate::settings::Mode::word)
+    }
+
     fn finder(&self) -> Option<&'static str> {
         if self.desk.start.is_some() {
             return Some("agent");
