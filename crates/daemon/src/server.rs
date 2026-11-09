@@ -166,6 +166,12 @@ const MOST_WEB_UNSENT: usize = frame::MAX_FRAME_LEN + MOST_UNSENT;
 /// that the memory comes back soon after.
 const COMPACT_AFTER: Duration = Duration::from_millis(100);
 
+/// The longest a program drawing a frame (mode 2026, synchronized output)
+/// holds back what its terminal's viewers are sent, as Alacritty waits:
+/// long enough for a frame drawn in pieces, short enough that a program
+/// that never says it's done only looks slow.
+const LONGEST_FRAME: Duration = Duration::from_millis(150);
+
 /// The longest an upgrade waits for the boards' last changes to be
 /// written, before it's refused.
 const UPGRADE_BOARDS_WAIT: Duration = Duration::from_secs(10);
@@ -1031,6 +1037,10 @@ pub struct Daemon {
     typed: Option<(TerminalId, Instant)>,
     /// When each terminal with uncompacted scrollback should compact it.
     compactions: BTreeMap<TerminalId, Instant>,
+    /// The terminals whose programs are drawing a frame (mode 2026), and
+    /// until when their views are held back for it: `None` once that's
+    /// passed, until the program starts another.
+    frames: BTreeMap<TerminalId, Option<Instant>>,
     /// Some view may have an update to send.
     views_pending: bool,
     /// Where a terminal's damage is collected before it goes to each viewer.
@@ -1220,6 +1230,7 @@ impl Daemon {
             waiting: Events::with_capacity(EVENTS),
             typed: None,
             compactions: BTreeMap::new(),
+            frames: BTreeMap::new(),
             views_pending: false,
             damage: Damage::new(),
             config,
@@ -1878,6 +1889,7 @@ impl Daemon {
                 && !web_unread
             {
                 let compaction = self.compactions.values().min().copied();
+                let frame = self.frames.values().flatten().min().copied();
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
                 let idle = self.next_idle_stop();
                 let retry = self.next_retry();
@@ -1889,7 +1901,7 @@ impl Daemon {
                     .into_iter()
                     .chain(self.next_watch_retry());
                 let reviews = self.next_review_due();
-                let next = (compaction.into_iter().chain(quic).chain(idle))
+                let next = (compaction.into_iter().chain(frame).chain(quic).chain(idle))
                     .chain(retry)
                     .chain(clipboard)
                     .chain(explore)
@@ -1978,6 +1990,7 @@ impl Daemon {
             self.groups.push();
             self.tell_file_changes();
             self.compact_scrollbacks();
+            self.show_frames_too_long();
             self.time_out_clipboard_asks();
             self.lapse_fits();
             self.time_out_tools();
@@ -2389,6 +2402,7 @@ impl Daemon {
         }
         self.serve_clipboard(id);
         self.schedule_compaction(id);
+        self.note_frame(id);
         self.collect_damage(id);
         self.terminal_moved_on(id);
         self.background_moved_on(id);
@@ -2441,6 +2455,7 @@ impl Daemon {
         if !std::mem::take(&mut self.views_pending) {
             return;
         }
+        let now = Instant::now();
         let mut ready = Vec::new();
         for (key, source) in &mut self.sources {
             let Source::Client(client) = source else {
@@ -2455,6 +2470,11 @@ impl Daemon {
             }
             for (&id, subscription) in &mut client.views {
                 if subscription.awaiting_ack {
+                    continue;
+                }
+                // A frame part drawn waits to be whole: what it changes
+                // stays in the subscription's damage until then.
+                if matches!(self.frames.get(&id), Some(Some(until)) if *until > now) {
                     continue;
                 }
                 let Some(slot) = self.terminals.get(&id) else {
@@ -2491,6 +2511,35 @@ impl Daemon {
         ready.dedup();
         for token in ready {
             self.flush_client(token);
+        }
+    }
+
+    /// Starts holding back the terminal's views while its program draws a
+    /// frame (mode 2026), for [`LONGEST_FRAME`] at most, or stops once the
+    /// program says the frame is drawn, which its views then show whole.
+    fn note_frame(&mut self, id: TerminalId) {
+        let drawing = (self.terminals.get(&id))
+            .and_then(|slot| slot.terminal.grid())
+            .is_some_and(Terminal::is_synchronized);
+        if drawing {
+            (self.frames)
+                .entry(id)
+                .or_insert_with(|| Some(Instant::now() + LONGEST_FRAME));
+        } else {
+            self.frames.remove(&id);
+        }
+    }
+
+    /// Shows what the frames that took longer than [`LONGEST_FRAME`] to
+    /// draw have drawn so far, and holds those terminals' views back no
+    /// more until their programs start another.
+    fn show_frames_too_long(&mut self) {
+        let now = Instant::now();
+        for until in self.frames.values_mut() {
+            if until.is_some_and(|until| until <= now) {
+                *until = None;
+                self.views_pending = true;
+            }
         }
     }
 
@@ -2687,6 +2736,7 @@ impl Daemon {
         self.tools_closed(id);
         self.unread.retain(|&unread| unread != Flood::Terminal(id));
         self.compactions.remove(&id);
+        self.frames.remove(&id);
         for token in &slot.viewers {
             if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
                 client.views.remove(&id);
