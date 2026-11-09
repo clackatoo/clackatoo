@@ -163,7 +163,7 @@ clackatoo agent login antigravity
 It prints a Google link to open. On the same machine, the browser hands back
 to the runtime once you've signed in, and that's all. From a laptop showing
 the desktop's workspaces (see
-[Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)),
+[Another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar)),
 run the command in a terminal in one of the desktop's workspaces, and open the
 link on the laptop. If the browser ends on a `127.0.0.1` page it can't reach,
 copy the whole address from its address bar, paste it into that terminal, and

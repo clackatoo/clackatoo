@@ -249,7 +249,7 @@ itself, outside the window.
 A window is granted to one chat at a time, for inspect and control alike, and
 a chat holds a grant on one window: granting it another moves the grant, and
 the old window says so. A chat mirrored from another machine (see
-[Another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar))
+[Another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar))
 can't be granted one: open a window on that machine's daemon with `--remote`
 instead. The web app can't grant native access. The agent's tools are
 `native_snapshot`, and with control, `native_click`, `native_type`, and

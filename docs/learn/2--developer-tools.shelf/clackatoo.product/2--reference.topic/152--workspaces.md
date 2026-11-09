@@ -20,7 +20,7 @@ The window shows your work at three levels:
   named after the title of their focused pane's program, or, for a terminal
   whose program set none, the folder its shell is in (`~` for your home, or
   for a terminal on
-  [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar),
+  [another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar),
   yours there), unless you've named them. A program's title, or a folder's
   name, shows without control characters or anything that shows nothing
   itself, as a mark that turns text round, so it can't hide or move what's
@@ -97,7 +97,7 @@ offer for the second. A terminal started with a command of its own, or a shell
 started any other way, comes back without an offer. An offer not yet taken or
 dismissed stays through an upgrade, which makes no new ones, and shows in a
 workspace on
-[another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+[another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar)
 too. An upgrade from a release before this one, which can't hand its offers
 over, takes those still open from the workspaces it kept, once, unless what's
 kept differs from the panes it hands over, as when its last write failed.
@@ -227,7 +227,7 @@ its shell's session, as a daemon does, isn't seen. Typing narrows them.
 |---|---|
 | <kbd>Enter</kbd> | Brings it back as a tab of its workspace, after the others, going there. A terminal of it whose shell has exited starts again as a new shell in its folder, offering `R` to put what it ran at the prompt. |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> | Dismisses it, closing its terminals. One still running asks first, in the list's top right: a second <kbd>Ctrl</kbd>+<kbd>D</kbd> within three seconds ends it. |
-| <kbd>Ctrl</kbd>+<kbd>F</kbd> | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, or for a background tab of another machine's workspace, forwards the ports it listens on here, each to the same port, as `:portforward 8080` does. |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | In a window on [another machine](~clackatoo/reference/connecting#forwarding-ports) than the daemon, or for a background tab of another machine's workspace, forwards the ports it listens on here, each to the same port, as `:portforward 8080` does. |
 | <kbd>Esc</kbd> | Closes the list. |
 
 A background tab whose terminals have ended stays, its last screen readable,
@@ -237,7 +237,7 @@ workspace closes its background tabs with it; a window from before protocol
 tabs at most, and chats don't go to the background, only terminals.
 
 A workspace on
-[another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+[another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar)
 shows its background tabs here as your own do: in its icon, in the list, with
 the ports they listen on and their ` ↻` marks, and everything above works on
 them, on that machine: `:bg`, `:bgpane`, `:bg CMD` (in its focused pane's
@@ -306,13 +306,13 @@ other pane, `5:` opens the command line as `:` does. From a selection it's
 
 | Command | Does |
 |---|---|
-| `:portforward 8080`, `:portforward 3000:host:8080`, `:portforward`, `:portforward! 8080` | In a window on another machine, forwards a port here to one there, lists the forwards, or stops one: see [Forwarding ports](~clackatoo/reference/remote#forwarding-ports). |
+| `:portforward 8080`, `:portforward 3000:host:8080`, `:portforward`, `:portforward! 8080` | In a window on another machine, forwards a port here to one there, lists the forwards, or stops one: see [Forwarding ports](~clackatoo/reference/connecting#forwarding-ports). |
 | `:Terminal` | Opens a terminal in a new tab. |
 | `:\|Terminal` | Splits the focused pane, with a new terminal to its right. |
 | `:\|<Terminal` | The same, to its left. |
 | `:-Terminal` | The same, below it. |
 | `:-^Terminal` | The same, above it. |
-| `:Terminal@desk`, `:\|Terminal@desk`… | The same, on the machine named after `@`: one the daemon is [connected to](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar), by its connection's name, or `local` for the daemon's own. Any kind of pane takes one: `:Editor@desk PATH`, `:Explore@desk`, `:Agent@desk codex`. |
+| `:Terminal@desk`, `:\|Terminal@desk`… | The same, on the machine named after `@`: one the daemon is [connected to](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar), by its connection's name, or `local` for the daemon's own. Any kind of pane takes one: `:Editor@desk PATH`, `:Explore@desk`, `:Agent@desk codex`. |
 | `:Agent`, `:\|Agent`… | Opens a [chat with an agent](~clackatoo/reference/agents), the one named after it (`:Agent codex`) or the `agent` option's, in a new tab or beside the focused pane. |
 | `:Board NAME`, `:Boards` | Opens a [board](~clackatoo/reference/boards) shared with agents, making it if there's none; `:Boards` picks one in the finder. |
 | `:update`, `:update HOST` | Installs the latest release here, as [`clackatoo update`](~clackatoo/reference/cli#update) does, and says in the bar how it went; with `HOST`, on the remote daemon's machine, in a tab of its own. Once a day the window looks for a new release and says so quietly in the bar; it never installs one by itself. |
@@ -361,7 +361,7 @@ A new pane goes on the machine of the pane it's made from: the one split, or
 the focused one for a new tab or explorer, so `:Terminal`, `:e`, `:Explore`
 and the finder in a pane on desk are desk's. `@host` after a kind of pane
 picks the machine instead (see
-[a pane on another machine](~clackatoo/reference/remote#a-pane-on-another-machine)).
+[a pane on another machine](~clackatoo/reference/connecting#a-pane-on-another-machine)).
 
 A new terminal starts in the directory that the pane it splits is in. A new
 tab's terminal starts in the directory of the workspace's focused pane. That's
@@ -486,7 +486,7 @@ program, are bindings like any you make, so
 | `x` | Closes the pane; a subagent's goes back to the background. |
 | `u` | From a [subagent's](~clackatoo/reference/chats-together#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
-| `r` | Opens the [machine picker](~clackatoo/reference/remote#picking-a-machine), to open a window on another machine, as `:connect` does. |
+| `r` | Opens the [machine picker](~clackatoo/reference/connecting#picking-a-machine), to open a window on another machine, as `:connect` does. |
 | `o` `i` | Back and forward through the tab's places, as <kbd>Ctrl</kbd>+<kbd>O</kbd> and <kbd>Ctrl</kbd>+<kbd>I</kbd> do in normal mode. |
 | `b`, then `t` `p` `l` | Sends the tab or the pane to the [background](#background-tabs), or lists the background tabs. |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Sends <kbd>Ctrl</kbd>+<kbd>B</kbd> to the program. |
@@ -538,7 +538,7 @@ looking.
 
 A click picks one, a double click opens it, and the wheel moves through them.
 A paste is typed on one line, its line breaks as spaces. The
-[machine picker](~clackatoo/reference/remote#picking-a-machine) and the
+[machine picker](~clackatoo/reference/connecting#picking-a-machine) and the
 [start page](~clackatoo/reference/chatting#the-start-page) take the same keys
 for what's typed, for moving, and for the mouse. Beside the list, if the
 window is wide enough, is the file round the line picked, colored as an editor

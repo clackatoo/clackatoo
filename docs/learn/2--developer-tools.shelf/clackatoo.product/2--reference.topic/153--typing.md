@@ -55,7 +55,7 @@ on the clipboard, such as a screenshot, into the program, in insert, normal or
 visual mode; in a [chat](~clackatoo/reference/agents) it attaches the image to
 the message, as <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> does there. In a
 terminal, the daemon whose terminal it is, on this machine or
-[another](~clackatoo/reference/remote#an-image-from-this-machine-s-clipboard),
+[another](~clackatoo/reference/connections#an-image-from-this-machine-s-clipboard),
 keeps the image in a file of its own, `~/.cache/clackatoo/pastes/` then the
 time it was pasted, as `20261108-224501-1.png`, and pastes the file's path, as
 dropping a file on the terminal does. Claude Code, Codex, and other programs

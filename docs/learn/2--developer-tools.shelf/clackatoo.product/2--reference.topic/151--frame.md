@@ -42,7 +42,7 @@ terminal, so closing the terminal you ran `clackatoo` in,
 window. `ps` shows it as `clackatoo-win`, with the command line of the
 `clackatoo` it was forked from. The launcher's token goes with the window, so
 it takes focus. A window opened from another, as the
-[machine picker](~clackatoo/reference/remote#picking-a-machine) opens one,
+[machine picker](~clackatoo/reference/connecting#picking-a-machine) opens one,
 opens in the same process too.
 
 Each window is its own: its own view, mode and focus, its own connection to
@@ -82,8 +82,8 @@ over (more than a megabyte), or with `CLACKATOO_WINDOW_HOST=off`, which also
 keeps the windows it opens out of it.
 
 Every window logs to `window.log` in clackatoo's state directory (see
-[logs](~clackatoo/reference/remote#logs)), each line with its process's ID,
-which windows in one process share. A font installed while the process of
+[logs](~clackatoo/reference/connections#logs)), each line with its process's
+ID, which windows in one process share. A font installed while the process of
 windows runs is used once it has ended and started again, after its last
 window closes.
 
@@ -125,7 +125,7 @@ The window draws its own frame, in place of the desktop's:
   number, as unnamed workspaces' are), the one shown picked out, and a `+`
   after them that makes a new one, asking which machine once the daemon is
   connected to another. A workspace from another machine (see
-  [`:connect`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar))
+  [`:connect`](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar))
   has a ring in place of its dot: in its color while connected, in the warning
   color while its connection is down, and filled amber while it needs a
   password. Hold the mouse over it to see which machine it's on, and how its

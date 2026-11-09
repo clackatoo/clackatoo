@@ -31,7 +31,7 @@ pane's. Under it are chats to go on with instead: this workspace's chats in no
 pane, such as those agents started in the background, then the sessions the
 agent keeps for the folder, its own and clackatoo's, newest first. For a pane
 on
-[another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar),
+[another machine](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar),
 or a page opened with `@host`, they're the sessions that machine's agent keeps
 in its folder, and going on with one makes the chat there; this needs a daemon
 here of protocol 107 or later, and says so otherwise. `:Agent@desk` from a

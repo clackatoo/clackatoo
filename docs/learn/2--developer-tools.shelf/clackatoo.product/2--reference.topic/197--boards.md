@@ -18,7 +18,7 @@ leave what it found for the next.
 | `:Board NAME` | Opens the board called `NAME` in a new tab, making it if there's none. |
 | `:\|Board NAME`, `:-Board NAME`… | The same, beside the focused pane. |
 | `:Board`, `:Boards` | Picks a board in the finder: the workspace's and every workspace's, archived ones last. |
-| `:Board@desk` | Picks one of [desk's](~clackatoo/reference/remote#a-pane-on-another-machine) boards in the finder, and opens it on desk, beside the focused pane. |
+| `:Board@desk` | Picks one of [desk's](~clackatoo/reference/connecting#a-pane-on-another-machine) boards in the finder, and opens it on desk, beside the focused pane. |
 
 A board you make belongs to the workspace shown. One an agent makes belongs to
 its chat's workspace, or to every workspace if it asks.

@@ -171,14 +171,14 @@ client.keys.map("n", "<Space>ff", function() client.cmd("Files") end)
 `client.cmd("reload")` is refused: the config can't run itself again.
 
 `client.forward(spec)` forwards a port as
-[`:portforward`](~clackatoo/reference/remote#forwarding-ports) does,
+[`:portforward`](~clackatoo/reference/connecting#forwarding-ports) does,
 `client.forward(8080)` or `client.forward("3000:8080")`, each time a window
 opens on another machine. A window on this machine passes it over silently; a
 spec it can't read is an error.
 
 `client.connect(host)` has the daemon bring another machine's workspaces in,
 as
-[`:connect HOST`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar)
+[`:connect HOST`](~clackatoo/reference/connecting#another-machine-s-workspaces-in-your-bar)
 does, asking again whenever the window connects to the daemon and saying
 nothing unless it fails. `client.disconnect(host)` ends that connection.
 `client.connect("server", {share = false})` keeps that machine from the
@@ -278,7 +278,7 @@ short name, as in Vim, which works everywhere the long one does.
 | `agentsigns` | `as` | A column right of git's signs marking the lines an [agent changed](~clackatoo/reference/editor-view#agents-changes) that you haven't reviewed, in the chat's color. It shows only while a file has such lines, or `:blame` is on. | on |
 | `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/typing#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `languageinstall` | `li` | What happens when a file is opened in a language, or with a language server, that isn't installed but [can be](~clackatoo/reference/languages#languages): `ask` in the bottom bar, install it `always` without asking, or `never` offer. | `ask` |
-| `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/remote#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
+| `forwardpace` | `fp` | [Forwarded ports](~clackatoo/reference/connecting#forwarding-ports) hold themselves back on a slow link so keys don't wait behind them. Off, they take the whole link. What the daemon sends changes for connections made after it's changed; what the window sends changes at once. | on |
 
 Setting an option that doesn't exist, or to a value it can't hold, such as
 `client.opt.number = 1`, is a mistake.
