@@ -346,6 +346,10 @@ impl Runtime {
         let core = core(&lua, state)?;
         let prelude: Table = lua.load(PRELUDE).set_name("=prelude").call(core)?;
         let globals = lua.globals();
+        // Nothing loads code but `require`, as in the daemon's config.
+        for name in ["loadstring", "getfenv", "setfenv"] {
+            globals.raw_set(name, Value::Nil)?;
+        }
         globals.set("client", prelude.get::<Table>("client")?)?;
         globals.set("require", require(&lua, source)?)?;
         globals.set(

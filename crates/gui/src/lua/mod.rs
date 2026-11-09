@@ -79,9 +79,11 @@ impl Source {
             .into_iter()
             .filter_map(|(file, from)| {
                 let path = dir.join(file);
-                let text = match std::fs::read_to_string(&path) {
-                    Ok(text) => Ok(text),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+                // Never from a FIFO or a device, which would hold Lua up,
+                // nor more than 1 MiB, as the daemon reads its config.
+                let text = match clackatoo_daemon::settings::read_text(&path) {
+                    Ok(Some(text)) => Ok(text),
+                    Ok(None) => return None,
                     Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
                         Err("it isn't UTF-8 text".into())
                     }
@@ -1283,6 +1285,36 @@ mod tests {
             std::fs::write(path, text).unwrap();
         }
         dir
+    }
+
+    /// Nothing loads code but `require`, and a config file too big to be
+    /// one is refused.
+    #[test]
+    fn nothing_loads_code_and_a_huge_config_is_refused() {
+        let dir = config_dir(&[(
+            "client/init.lua",
+            "assert(loadstring == nil and getfenv == nil and setfenv == nil and load == nil)\n\
+             client.opt.nuw = 7\n",
+        )]);
+        let start = || {
+            Lua::start(
+                Source::Dir(dir.path().into()),
+                Options::default(),
+                vec![WINDOW],
+                Box::new(|| {}),
+            )
+            .expect("Lua started")
+            .ready()
+        };
+        let said = start();
+        assert!(matches!(&said[..], [FromLua::Set { .. }]), "{said:?}");
+        let huge = format!("client.opt.nuw = 7\n{}", "-- x\n".repeat(300_000));
+        std::fs::write(dir.path().join("client/init.lua"), huge).unwrap();
+        let said = start();
+        assert!(
+            matches!(&said[..], [FromLua::Error(err)] if err.contains("over 1 MiB")),
+            "{said:?}"
+        );
     }
 
     /// `require` takes only a module's name, never a path, so nothing out
