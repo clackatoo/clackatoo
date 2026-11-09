@@ -20,7 +20,7 @@ A board is a list of entries that you and your agents share. An agent working on
 
 A board you make belongs to the workspace shown. One an agent makes belongs to its chat's workspace, or to every workspace if it asks.
 
-Click an entry to select it; double-click to edit its text, as `e` does. Escape cancels the draft. While a draft or search is open, clicks leave it alone. The wheel moves by visible rows, including within entries taller than the pane.
+Select an entry with the mouse; double-click it to edit its text, as `e` does. Escape cancels the draft. While a draft or search is open, the mouse leaves it alone. The wheel moves by visible rows, including within entries taller than the pane.
 
 ## Entries
 
