@@ -228,7 +228,7 @@ impl Info {
     /// Its place in [`ALL`], which provenance is kept by.
     pub(crate) fn index(&self) -> usize {
         (ALL.iter())
-            .position(|info| std::ptr::eq(info, self))
+            .position(|info| info.name == self.name)
             .expect("every option is in ALL")
     }
 

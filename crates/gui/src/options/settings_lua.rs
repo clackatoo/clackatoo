@@ -10,29 +10,49 @@
 //! client.opt.colorcolumn = { 80, 120 }
 //! ```
 //!
-//! Saving reads the file again, changes the one option, and writes it
-//! whole, from what it read: so a window saving never undoes what another
-//! saved. Options are written in the order they're declared, then any the
-//! file names that this build doesn't know, as they were, for a newer
-//! build's sake. A line clackatoo didn't write is never thrown away: the
-//! file isn't written, and the line is named.
+//! Saving reads the file again and changes only the lines of the one
+//! option, so a window saving never undoes what another saved, and the rest
+//! of the file stays as it was, line for line: blank lines, comments, a
+//! comment after an option's value, and options this build doesn't know,
+//! saved by a newer one. A line for an option not saved before goes after
+//! the options that end the file, among them in the order options are
+//! declared. A block comment, `--[[ … ]]`, is kept whole, so an option
+//! commented out in one stays so. A line clackatoo didn't write, or a
+//! block comment it can't follow, is never thrown away: the file isn't
+//! written, and the line is named.
 
 use std::fmt::Write as _;
 
 use super::{Info, Kind, Value, lookup};
 
-/// What the file starts with.
+/// What a new file starts with.
 pub(crate) const HEADER: &str = "\
--- Written by clackatoo, whose :setpersist and settings menu rewrite it whole.
+-- Written by clackatoo, whose :setpersist and settings menu change it.
 -- Your own config goes in init.lua, which runs after this and outdoes it.
 ";
 
-/// What the file sets.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What the file says, line by line.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Model {
-    /// Each option it sets, by name as written, in the order they're
-    /// written.
-    options: Vec<(String, Saved)>,
+    lines: Vec<Line>,
+}
+
+/// One line of the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Line {
+    /// One kept as it is: blank, a comment, or in a block comment.
+    Kept(String),
+    /// One that sets an option.
+    Sets {
+        /// The option's name, as written.
+        name: String,
+        saved: Saved,
+        /// What follows the value: nothing, or a comment, with the blanks
+        /// before it.
+        comment: String,
+        /// The line as it was read, while it's unchanged.
+        read: Option<String>,
+    },
 }
 
 /// An option's value, as the file has it.
@@ -45,81 +65,223 @@ enum Saved {
     Written(String),
 }
 
+impl Default for Model {
+    /// A new file: the header, and a blank line.
+    fn default() -> Self {
+        let lines = HEADER.lines().chain([""]);
+        Self {
+            lines: lines.map(|line| Line::Kept(line.to_owned())).collect(),
+        }
+    }
+}
+
 impl Model {
-    /// Reads the file's `text`, or says which line clackatoo didn't write.
+    /// Reads the file's `text`, or says which line clackatoo didn't write,
+    /// or which block comment it can't follow. A file with nothing in it is
+    /// a new one.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        let mut model = Self::default();
-        for (number, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("--") {
+        if text.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        let mut lines = Vec::new();
+        // The block comment the line is in: where it began, and how it ends.
+        let mut block: Option<(usize, String)> = None;
+        for (number, line) in (1..).zip(text.lines()) {
+            if let Some((_, end)) = &block {
+                if let Some(at) = line.find(end.as_str()) {
+                    if !line[at + end.len()..].trim().is_empty() {
+                        return Err(format!(
+                            "line {number} ends a block comment and goes on after it, which clackatoo can't follow"
+                        ));
+                    }
+                    block = None;
+                }
+                lines.push(Line::Kept(line.to_owned()));
                 continue;
             }
-            let not_ours = || format!("line {} isn't one clackatoo wrote: {line}", number + 1);
-            let (name, literal) = (line.strip_prefix("client.opt."))
-                .and_then(|rest| rest.split_once('='))
-                .map(|(name, literal)| (name.trim(), literal.trim()))
-                .filter(|(name, _)| is_name(name))
-                .ok_or_else(not_ours)?;
-            let read = Literal::read(literal).ok_or_else(not_ours)?;
-            let saved = lookup(name)
-                .and_then(|info| read.value_for(info))
-                .map_or_else(|| Saved::Written(literal.to_owned()), Saved::Value);
-            model.forget(name);
-            model.options.push((name.to_owned(), saved));
+            let trimmed = line.trim();
+            if let Some(comment) = trimmed.strip_prefix("--") {
+                if let Some((opening, end)) = long_bracket(comment) {
+                    match comment[opening..].find(end.as_str()) {
+                        Some(at) if comment[opening + at + end.len()..].trim().is_empty() => {}
+                        Some(_) => {
+                            return Err(format!(
+                                "line {number} ends a block comment and goes on after it, which clackatoo can't follow"
+                            ));
+                        }
+                        None => block = Some((number, end)),
+                    }
+                }
+                lines.push(Line::Kept(line.to_owned()));
+                continue;
+            }
+            if trimmed.is_empty() {
+                lines.push(Line::Kept(line.to_owned()));
+                continue;
+            }
+            lines
+                .push(sets(trimmed).ok_or_else(|| {
+                    format!("line {number} isn't one clackatoo wrote: {trimmed}")
+                })?);
+            if let Some(Line::Sets { read, .. }) = lines.last_mut() {
+                *read = Some(line.to_owned());
+            }
         }
-        Ok(model)
+        if let Some((number, _)) = block {
+            return Err(format!(
+                "block comment from line {number} never ends, which clackatoo can't follow"
+            ));
+        }
+        Ok(Self { lines })
     }
 
     /// Saves `info`'s option as `value`, or with none, saves it no more;
-    /// or says why `value` isn't one it can hold.
+    /// or says why `value` isn't one it can hold. Only the option's own
+    /// lines change.
     pub(crate) fn set(&mut self, info: &Info, value: Option<Value>) -> Result<(), String> {
         if let Some(value) = &value {
             info.check(value)?;
         }
-        self.forget(info.name);
-        if !info.short.is_empty() {
-            self.forget(info.short);
+        let its = |name: &str| lookup(name).is_some_and(|other| other.name == info.name);
+        let mut found: Vec<usize> = (self.lines.iter().enumerate())
+            .filter(|(_, line)| matches!(line, Line::Sets { name, .. } if its(name)))
+            .map(|(index, _)| index)
+            .collect();
+        let Some(value) = value else {
+            for index in found.into_iter().rev() {
+                self.lines.remove(index);
+            }
+            return Ok(());
+        };
+        // Lua sets them in turn, so the last is what counts; those before
+        // it set nothing, and go.
+        if let Some(last) = found.pop() {
+            for &index in found.iter().rev() {
+                self.lines.remove(index);
+            }
+            if let Some(Line::Sets {
+                name, saved, read, ..
+            }) = self.lines.get_mut(last - found.len())
+                && *saved != Saved::Value(value.clone())
+            {
+                *name = info.name.to_owned();
+                *saved = Saved::Value(value);
+                *read = None;
+            }
+            return Ok(());
         }
-        if let Some(value) = value {
-            self.options
-                .push((info.name.to_owned(), Saved::Value(value)));
-        }
+        let line = Line::Sets {
+            name: info.name.to_owned(),
+            saved: Saved::Value(value),
+            comment: String::new(),
+            read: None,
+        };
+        // Among the options that end the file, in the order they're
+        // declared; those this build doesn't know count as after them all.
+        let run = (self.lines.iter())
+            .rposition(|line| !matches!(line, Line::Sets { .. }))
+            .map_or(0, |kept| kept + 1);
+        let at = (run..self.lines.len())
+            .find(|&index| match &self.lines[index] {
+                Line::Sets { name, .. } => {
+                    lookup(name).is_none_or(|other| other.index() > info.index())
+                }
+                Line::Kept(_) => false,
+            })
+            .unwrap_or(self.lines.len());
+        self.lines.insert(at, line);
         Ok(())
     }
 
-    fn forget(&mut self, name: &str) {
-        let info = lookup(name);
-        self.options.retain(|(written, _)| match info {
-            Some(info) => lookup(written).is_none_or(|other| !std::ptr::eq(other, info)),
-            None => written != name,
-        });
-    }
-
-    /// The file's text: the header, then the options this build knows, in
-    /// the order they're declared, then those it doesn't.
+    /// The file's text: its lines, those of options not changed as they
+    /// were read.
     pub(crate) fn render(&self) -> String {
-        let mut known: Vec<(usize, &Info, &Saved)> = (self.options.iter())
-            .filter_map(|(name, saved)| lookup(name).map(|info| (info.index(), info, saved)))
-            .collect();
-        known.sort_by_key(|&(index, ..)| index);
-        let mut text = HEADER.to_owned();
-        text.push('\n');
-        let lines = (known.iter())
-            .map(|&(_, info, saved)| (info.name, saved))
-            .chain(
-                (self.options.iter())
-                    .filter(|(name, _)| lookup(name).is_none())
-                    .map(|(name, saved)| (name.as_str(), saved)),
-            );
-        for (name, saved) in lines {
-            let literal = match saved {
-                Saved::Value(value) => literal(value),
-                Saved::Written(written) => written.clone(),
-            };
-            writeln!(text, "client.opt.{name} = {literal}").expect("writing to a String");
+        let mut text = String::new();
+        for line in &self.lines {
+            match line {
+                Line::Kept(line)
+                | Line::Sets {
+                    read: Some(line), ..
+                } => text.push_str(line),
+                Line::Sets {
+                    name,
+                    saved,
+                    comment,
+                    read: None,
+                } => {
+                    let literal = match saved {
+                        Saved::Value(value) => literal(value),
+                        Saved::Written(written) => written.clone(),
+                    };
+                    write!(text, "client.opt.{name} = {literal}{comment}")
+                        .expect("writing to a String");
+                }
+            }
+            text.push('\n');
         }
         text
     }
+}
+
+/// The line `client.opt.NAME = VALUE`, perhaps with a comment after, as
+/// `trimmed` is, if it is one.
+fn sets(trimmed: &str) -> Option<Line> {
+    let (name, rest) = trimmed.strip_prefix("client.opt.")?.split_once('=')?;
+    let name = name.trim();
+    if !is_name(name) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let end = literal_end(rest)?;
+    let (literal, comment) = rest.split_at(end);
+    let after = comment.trim_start();
+    // A comment, but not a block comment, which might go on to other lines.
+    let commented =
+        after.is_empty() || (after.starts_with("--") && long_bracket(&after[2..]).is_none());
+    if !commented {
+        return None;
+    }
+    let read = Literal::read(literal)?;
+    let saved = lookup(name)
+        .and_then(|info| read.value_for(info))
+        .map_or_else(|| Saved::Written(literal.to_owned()), Saved::Value);
+    Some(Line::Sets {
+        name: name.to_owned(),
+        saved,
+        comment: comment.trim_end().to_owned(),
+        read: None,
+    })
+}
+
+/// Where the value at the start of `text` ends: after a string's closing
+/// quote, a table's `}`, or a word.
+fn literal_end(text: &str) -> Option<usize> {
+    if let Some(inside) = text.strip_prefix('"') {
+        let mut escaped = false;
+        for (at, ch) in inside.char_indices() {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => return Some(at + 2),
+                _ => {}
+            }
+        }
+        return None;
+    }
+    if text.starts_with('{') {
+        return text.find('}').map(|at| at + 1);
+    }
+    Some(text.find(char::is_whitespace).unwrap_or(text.len()))
+}
+
+/// If `after`, what follows a comment's `--`, opens a block comment, as
+/// `[[` or `[==[` does: how long its opening is, and what ends it.
+fn long_bracket(after: &str) -> Option<(usize, String)> {
+    let rest = after.strip_prefix('[')?;
+    let level = rest.bytes().take_while(|&byte| byte == b'=').count();
+    rest[level..]
+        .starts_with('[')
+        .then(|| (level + 2, format!("]{}]", "=".repeat(level))))
 }
 
 /// Whether `name` could be an option's: a Lua name, as Luau reads
@@ -274,23 +436,29 @@ fn unquoted(inside: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// Every option's value written and read back, for tests.
-#[cfg(test)]
-pub(crate) fn every_option() -> impl Iterator<Item = (&'static Info, Value)> {
-    super::ALL.iter().map(|info| (info, info.default_value()))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::{Decimal, find};
+    use super::super::{ALL, Decimal, find};
     use super::*;
 
     fn info(name: &str) -> &'static Info {
         find(name).unwrap()
     }
 
+    impl Model {
+        /// What it sets, in the order it sets them.
+        fn options(&self) -> Vec<(&str, &Saved)> {
+            (self.lines.iter())
+                .filter_map(|line| match line {
+                    Line::Sets { name, saved, .. } => Some((name.as_str(), saved)),
+                    Line::Kept(_) => None,
+                })
+                .collect()
+        }
+    }
+
     #[test]
-    fn options_are_written_in_order_and_read_back_as_the_same_values() {
+    fn a_new_file_has_its_options_in_order_and_reads_back_as_the_same_values() {
         let mut model = Model::default();
         for (name, value) in [
             ("sbr", Value::Text("↪ \"\\".into())),
@@ -315,58 +483,144 @@ mod tests {
                  client.opt.inccommand = \"none\"\n"
             )
         );
-        let read = Model::parse(&text).unwrap();
+        let mut read = Model::parse(&text).unwrap();
         assert_eq!(read.render(), text);
         // Set again, by its short name, it's written once, in its place.
-        let mut read = read;
         read.set(info("number"), Some(Value::Bool(true))).unwrap();
         read.set(info("cc"), None).unwrap();
-        assert!(read.render().contains("client.opt.number = true\n"));
-        assert!(!read.render().contains("colorcolumn"));
-        assert_eq!(read.render().matches("number =").count(), 1);
+        let text = read.render();
+        assert!(text.contains("client.opt.fontsize = 12\nclient.opt.number = true\n"));
+        assert!(!text.contains("colorcolumn"));
+        assert_eq!(text.matches("number =").count(), 1);
     }
 
     #[test]
     fn every_kind_of_value_reads_back_as_itself() {
         let mut model = Model::default();
         let mut wanted = Vec::new();
-        for (info, value) in every_option() {
+        for info in ALL {
             // Something other than the default, where there's one.
-            let value = match (info.kind, value) {
+            let value = match (info.kind, info.default_value()) {
                 (Kind::Bool, Value::Bool(on)) => Value::Bool(!on),
                 (Kind::List { .. }, _) => Value::List(vec![1, 72]),
                 (Kind::Decimal { .. }, _) => Value::Decimal(Decimal::exact(10.25).unwrap()),
-                (Kind::Text, _) => Value::Text("a \"b\" \\c ↪".into()),
+                (Kind::Text, _) => Value::Text("a \"b\" \\c ↪ -- d".into()),
                 (_, value) => value,
             };
             model.set(info, Some(value.clone())).unwrap();
-            wanted.push((info.name.to_owned(), Saved::Value(value)));
+            wanted.push((info.name, Saved::Value(value)));
         }
         let read = Model::parse(&model.render()).unwrap();
-        assert_eq!(read.options, wanted);
+        let read = read.options();
+        let wanted: Vec<(&str, &Saved)> =
+            wanted.iter().map(|(name, saved)| (*name, saved)).collect();
+        assert_eq!(read, wanted);
+    }
+
+    #[test]
+    fn only_the_options_own_lines_change_and_the_rest_is_kept() {
+        let text = "-- Mine, below the header.\n\
+                    \n\
+                    client.opt.nu = false  -- I like it bare\n\
+                    client.opt.wrap=false\n\
+                    client.opt.newthing = { 1, 2 }\n\
+                    -- client.opt.cul = false\n\
+                    client.opt.nuw = 99\n\
+                    \n\
+                    client.opt.sbr = \"a -- b\" -- not the value\n\
+                    client.opt.ts = 2\n\
+                    client.opt.ic = false\n";
+        let mut model = Model::parse(text).unwrap();
+        assert_eq!(model.render(), text, "read as it was");
+        model.set(info("number"), Some(Value::Bool(true))).unwrap();
+        model
+            .set(info("sbr"), Some(Value::Text("↪".into())))
+            .unwrap();
+        // Not saved before: among the options ending the file, in order.
+        model.set(info("so"), Some(Value::Number(3))).unwrap();
+        model.set(info("is"), Some(Value::Bool(false))).unwrap();
+        model.set(info("nuw"), None).unwrap();
+        assert_eq!(
+            model.render(),
+            "-- Mine, below the header.\n\
+             \n\
+             client.opt.number = true  -- I like it bare\n\
+             client.opt.wrap=false\n\
+             client.opt.newthing = { 1, 2 }\n\
+             -- client.opt.cul = false\n\
+             \n\
+             client.opt.showbreak = \"↪\" -- not the value\n\
+             client.opt.scrolloff = 3\n\
+             client.opt.ts = 2\n\
+             client.opt.ic = false\n\
+             client.opt.incsearch = false\n"
+        );
+        // An option set twice: the last counts, and the first goes.
+        let mut model =
+            Model::parse("client.opt.nu = true\n-- x\nclient.opt.number = false\n").unwrap();
+        model.set(info("nu"), Some(Value::Bool(true))).unwrap();
+        assert_eq!(model.render(), "-- x\nclient.opt.number = true\n");
+        // Saved as it is, nothing's rewritten.
+        let mut model = Model::parse("client.opt.wrap=false\n").unwrap();
+        model.set(info("wrap"), Some(Value::Bool(false))).unwrap();
+        assert_eq!(model.render(), "client.opt.wrap=false\n");
+    }
+
+    #[test]
+    fn an_option_in_a_block_comment_stays_commented_out() {
+        let text = "--[[\nclient.opt.nu = false\nanything at all ]]\n\
+                    --[==[ one line ]] still ]==]\n\
+                    --[=[\nclient.opt.wrap = false ]]\n]=]\n\
+                    --[not a block\n";
+        let mut model = Model::parse(text).unwrap();
+        model.set(info("nu"), Some(Value::Bool(false))).unwrap();
+        model.set(info("wrap"), Some(Value::Bool(true))).unwrap();
+        assert_eq!(
+            model.render(),
+            format!("{text}client.opt.number = false\nclient.opt.wrap = true\n")
+        );
+        for (text, why) in [
+            (
+                "--[[\nclient.opt.nu = false\n",
+                "block comment from line 1 never ends",
+            ),
+            (
+                "client.opt.wrap = true\n--[[ a ]] client.opt.nu = false\n",
+                "line 2 ends a block comment",
+            ),
+            (
+                "--[[\n]] client.opt.nu = false\n",
+                "line 2 ends a block comment",
+            ),
+            (
+                "client.opt.nu = false --[[ a ]]\n",
+                "line 1 isn't one clackatoo wrote",
+            ),
+            (
+                "client.opt.nu = false --[[\n]]\n",
+                "line 1 isn't one clackatoo wrote",
+            ),
+        ] {
+            let err = Model::parse(text).unwrap_err();
+            assert!(err.starts_with(why), "{text:?}: {err}");
+        }
     }
 
     #[test]
     fn what_this_build_cant_read_is_kept_and_what_clackatoo_didnt_write_refused() {
-        let text = "-- mine\n\nclient.opt.newthing = { 1, 2 }\nclient.opt.nuw = 99\n\
-                    client.opt.wrap=false\n";
+        let text = "client.opt.newthing = { 1, 2 }\nclient.opt.nuw = 99\n";
         let mut model = Model::parse(text).unwrap();
         model.set(info("nu"), Some(Value::Bool(false))).unwrap();
-        assert_eq!(
-            model.render(),
-            format!(
-                "{HEADER}\nclient.opt.number = false\nclient.opt.numberwidth = 99\n\
-                 client.opt.wrap = false\nclient.opt.newthing = {{ 1, 2 }}\n"
-            )
-        );
+        // Before those that follow it, and those this build doesn't know.
+        assert_eq!(model.render(), format!("client.opt.number = false\n{text}"));
         for line in [
             "print(1)",
-            "client.opt.nu = false -- off",
             "client.opt.nu = os.time()",
-            "client.opt.sbr = \"a\\nb\"",
+            "client.opt.sbr = \"a\nb\"",
             "client.opt.sbr = 'a'",
             "client.opt['nu'] = false",
             "client.opt.nu = false; client.opt.rnu = false",
+            "client.opt.nu = false client.opt.rnu = false",
             "client.keys.map('n', 'x', 'dd')",
         ] {
             let err = Model::parse(&format!("client.opt.wrap = true\n{line}\n")).unwrap_err();
@@ -376,7 +630,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn nothing_set_can_write_a_line_of_its_own() {
         let mut model = Model::default();

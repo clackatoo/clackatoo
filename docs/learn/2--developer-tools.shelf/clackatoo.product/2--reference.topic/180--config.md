@@ -359,7 +359,7 @@ clackatoo writes `settings.lua`, and says so at its top. It holds a line for
 each option saved, set as your config would set it:
 
 ```lua
--- Written by clackatoo, whose :setpersist and settings menu rewrite it whole.
+-- Written by clackatoo, whose :setpersist and settings menu change it.
 -- Your own config goes in init.lua, which runs after this and outdoes it.
 
 client.opt.wrap = false
@@ -372,14 +372,21 @@ sets it for now, and the bottom bar says which line of yours sets it, such as
 `client/init.lua:12 sets wrap, so it's set for now and not saved`. Change that
 line instead, or take it out.
 
-Each save reads the file again, changes the one option, and writes the file
-whole, in place of the old one all at once, so saving from one window never
-undoes what another saved. The writing happens off the window's thread. Options
-are written in the order they're listed here; one this build doesn't know,
-saved by a newer one, is kept as it was. If the file has a line clackatoo
-didn't write, nothing is saved, and the bottom bar names the line: move it to
-`init.lua`. A line `settings.lua` can't set, such as an option a newer build
-saved, is said in the bottom bar, and the rest are set all the same.
+Each save reads the file again and changes only the saved option's line, so
+saving from one window never undoes what another saved, and everything else
+stays as it was: blank lines, comments, a comment after a value
+(`client.opt.wrap = false -- too narrow here`), and options this build doesn't
+know, saved by a newer one. An option saved for the first time goes among the
+options at the end of the file, in the order they're listed here. A block
+comment, `--[[ … ]]`, is kept whole, so an option commented out in one stays
+commented out, and saving it adds a line of its own. The file is replaced all
+at once, never left half written, off the window's thread.
+
+If the file has a line clackatoo didn't write, such as code, or a block comment
+it can't follow, as one that doesn't end, nothing is saved, and the bottom bar
+names the line: move it to `init.lua`. A line `settings.lua` can't set, such as
+an option a newer build saved, is said in the bottom bar, and the rest are set
+all the same.
 
 ### Where an option was set
 
