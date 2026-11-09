@@ -29,7 +29,10 @@
 //! as another chat's write, opening it, or undoing or reviewing a turn,
 //! first waits on the loop for the change to be worked out and takes it
 //! in: a rare stall, as long as the worker's work, that keeps the edit
-//! log and the review in the order the changes were made.
+//! log and the review in the order the changes were made. A change that
+//! spans turns, as one read only after the chat's next turn wrote the
+//! file in place, is given the worker as one change for each turn,
+//! together, so each turn's is undone on its own.
 //!
 //! A change the worker fails to work out, as if it panicked, is noted as
 //! unknown, as one whose text before wasn't seen; a worker that's gone
@@ -110,8 +113,9 @@ impl Diffing {
 /// A change given the worker.
 #[derive(Debug)]
 pub(super) enum Job {
-    /// To a file not open: the edit to work out.
-    Closed(Settled),
+    /// To a file not open: the edit to work out, for each of the turns
+    /// that made it, in order, one at least.
+    Closed(Vec<Settled>),
     /// To a file open in a buffer: to check against the file, and merge
     /// into the buffer.
     Open(Checking),
@@ -123,7 +127,7 @@ pub(super) enum Job {
 /// couldn't be; or read.
 #[derive(Debug)]
 pub(super) enum Worked {
-    Closed(Settled, Option<Diffed>),
+    Closed(Vec<(Settled, Option<Diffed>)>),
     Open(Checking, Option<Checked>),
     Read(Reading, std::io::Result<(String, DiskStamp)>),
 }
@@ -132,7 +136,7 @@ impl Job {
     /// The text it holds, or will, in bytes.
     fn bytes(&self) -> usize {
         match self {
-            Self::Closed(settled) => bytes(settled),
+            Self::Closed(turns) => turns.iter().map(bytes).sum(),
             Self::Open(checking) => checking.bytes(),
             Self::Read(reading) => reading.size,
         }
@@ -142,19 +146,25 @@ impl Job {
     /// same guard against a panic.
     fn work(self, first: &dyn Fn()) -> Worked {
         match self {
-            Self::Closed(settled) => {
-                let diffed = catch_unwind(AssertUnwindSafe(|| {
-                    first();
-                    Diffed::between(
-                        settled.before.as_deref().unwrap_or_default(),
-                        settled.disk.as_deref().unwrap_or_default(),
-                    )
-                }));
-                if let Err(panic) = &diffed {
-                    log::warn!("settling: working out a change panicked: {panic:?}");
-                }
-                Worked::Closed(settled, diffed.ok())
-            }
+            // Each turn's on its own: one that fails is noted unknown, and
+            // the rest are still known.
+            Self::Closed(turns) => Worked::Closed(
+                (turns.into_iter())
+                    .map(|settled| {
+                        let diffed = catch_unwind(AssertUnwindSafe(|| {
+                            first();
+                            Diffed::between(
+                                settled.before.as_deref().unwrap_or_default(),
+                                settled.disk.as_deref().unwrap_or_default(),
+                            )
+                        }));
+                        if let Err(panic) = &diffed {
+                            log::warn!("settling: working out a change panicked: {panic:?}");
+                        }
+                        (settled, diffed.ok())
+                    })
+                    .collect(),
+            ),
             Self::Open(checking) => {
                 let checked = catch_unwind(AssertUnwindSafe(|| {
                     first();
@@ -182,7 +192,7 @@ impl Worked {
     /// The text the change given the worker held, in bytes.
     fn bytes(&self) -> usize {
         match self {
-            Self::Closed(settled, _) => bytes(settled),
+            Self::Closed(turns) => turns.iter().map(|(settled, _)| bytes(settled)).sum(),
             Self::Open(checking, _) => checking.bytes(),
             Self::Read(reading, _) => reading.size,
         }
@@ -206,6 +216,10 @@ pub(super) struct Settler {
     /// or [`GONE`], outside it, so the worker is lost.
     #[cfg(test)]
     pub(super) panic: Arc<std::sync::atomic::AtomicU8>,
+    /// Held by a test, keeps the worker from working out anything until
+    /// let go: its way of having it read a file late.
+    #[cfg(test)]
+    pub(super) held: Arc<std::sync::Mutex<()>>,
 }
 
 /// What the worker has given back since last asked.
@@ -242,10 +256,14 @@ impl Settler {
             let waker = Arc::clone(waker);
             #[cfg(test)]
             let panic = Arc::clone(&self.panic);
+            #[cfg(test)]
+            let held = Arc::clone(&self.held);
             let spawned = std::thread::Builder::new()
                 .name("settling".into())
                 .spawn(move || {
                     while let Ok(job) = jobs.recv() {
+                        #[cfg(test)]
+                        drop(held.lock());
                         #[cfg(test)]
                         if panic.load(std::sync::atomic::Ordering::SeqCst) == GONE {
                             panic.store(0, std::sync::atomic::Ordering::SeqCst);

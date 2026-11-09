@@ -1324,20 +1324,20 @@ pub(in crate::server) mod tests {
         tool: (&str, u32),
         before: &str,
     ) -> String {
-        change_big(world, "big.txt", tool, before)
+        let uid = world.first();
+        change_big(world, ("big.txt", uid), tool, before)
     }
 
-    /// As [`change_big_file`], to the file `name`.
+    /// As [`change_big_file`], to the file `name`, in the turn `uid`.
     fn change_big(
         world: &mut World,
-        name: &str,
+        (name, uid): (&str, TurnUid),
         (tool, line): (&str, u32),
         before: &str,
     ) -> String {
         let chat = world.chat;
         let path = world.path(name).display().to_string();
         start_tool(&mut world.daemon, chat, tool);
-        let uid = world.first();
         let said = |done, diffs| Wrote {
             done,
             turn: uid,
@@ -1501,6 +1501,107 @@ pub(in crate::server) mod tests {
         assert_eq!(world.disk("big.txt"), Some(first));
     }
 
+    /// Has the chat's agent change line 1 of `big.txt` in its first turn,
+    /// and line 5 in its next, writing the file in place each time, the
+    /// file `open` in a buffer or not, with the worker held until both
+    /// have, then left as `meanwhile` leaves it: the
+    /// first turn's change is read or checked off the loop only after the
+    /// second's write, so the file holds the second's text, which both
+    /// turns' changes together make. Returns the file's text before, after
+    /// the first turn, and after the second.
+    fn two_turns_in_place(
+        world: &mut World,
+        open: bool,
+        meanwhile: impl FnOnce(&mut World),
+    ) -> (String, String, String) {
+        let first = big_file(world);
+        if open {
+            world.open("big.txt");
+        }
+        let worker = world.daemon.agent_files.held();
+        let hold = worker.lock().unwrap();
+        let second = change_big_file(world, ("t1", 1), &first);
+        world.end_turn();
+        world.next_turn();
+        let uid = world
+            .daemon
+            .chat_ref(world.chat)
+            .unwrap()
+            .turn_uid(1)
+            .unwrap();
+        let third = change_big(world, ("big.txt", uid), ("t2", 5), &second);
+        drop(hold);
+        meanwhile(world);
+        world.daemon.settle_all_pending();
+        world.end_turn();
+        (first, second, third)
+    }
+
+    /// Each of two turns that changed `big.txt`, as [`two_turns_in_place`]
+    /// has them, with `open` and `meanwhile`, is undone and redone on its own, the
+    /// other's change kept, whichever is undone first (CLACKA-235).
+    fn each_turn_undone_alone(open: bool, meanwhile: impl Fn(&mut World)) {
+        for later_first in [true, false] {
+            let mut world = World::new();
+            let (first, second, third) = two_turns_in_place(&mut world, open, &meanwhile);
+            assert_eq!(world.state(0), Some(TurnFilesState::Made));
+            assert_eq!(world.state(1), Some(TurnFilesState::Made));
+            let without_first = third.replacen("line #1\n", "line 1\n", 1);
+            let order = if later_first { [1, 0] } else { [0, 1] };
+            for turn in order {
+                let kept = if turn == 0 { &without_first } else { &second };
+                let n = turn + 1;
+                let undid = world.undo(turn, false, false);
+                assert_eq!(undid, format!("Undid turn {n}: big.txt."), "{later_first}");
+                assert_eq!(world.disk("big.txt").as_ref(), Some(kept));
+                let redid = world.undo(turn, true, false);
+                assert_eq!(redid, format!("Redid turn {n}: big.txt."), "{later_first}");
+                assert_eq!(world.disk("big.txt").as_ref(), Some(&third));
+            }
+            // Both, the later first, back to as it was.
+            world.undo(1, false, false);
+            world.undo(0, false, false);
+            assert_eq!(world.disk("big.txt"), Some(first));
+        }
+    }
+
+    /// The first turn's change to a big file not open is read off the
+    /// loop after the second turn's: what each turn made is worked out
+    /// from its own changes.
+    #[test]
+    fn two_turns_rewriting_a_big_file_in_place_read_late_are_each_undone_alone() {
+        each_turn_undone_alone(false, |_| {});
+    }
+
+    /// The first turn's change to a big file open in a buffer is checked
+    /// off the loop after the second turn's, the buffer closing before
+    /// it's taken in: both turns' changes are checked as to a file not
+    /// open, from the text the buffer had saved, each its own.
+    #[test]
+    fn two_turns_checked_late_in_a_buffer_closed_meanwhile_are_each_undone_alone() {
+        each_turn_undone_alone(true, |world| {
+            let id = world.daemon.buffer_of(&world.path("big.txt")).unwrap();
+            world.daemon.close_if_unwanted(id);
+            assert!(!world.daemon.buffers.contains_key(&id));
+        });
+    }
+
+    /// The first turn's change to a big file open in a buffer is checked
+    /// off the loop after the second turn's, and merged with it, the
+    /// buffer closing before it's taken in: what each turn made is still
+    /// its own, as a file not open.
+    #[test]
+    fn two_turns_merged_into_a_buffer_closed_meanwhile_are_each_undone_alone() {
+        each_turn_undone_alone(true, |world| {
+            // The check of the first turn's change alone fails, and both
+            // turns' are checked and merged together.
+            world.daemon.take_one_settled();
+            assert!(world.daemon.agent_files.diffing(world.chat));
+            let id = world.daemon.buffer_of(&world.path("big.txt")).unwrap();
+            world.daemon.close_if_unwanted(id);
+            assert!(!world.daemon.buffers.contains_key(&id));
+        });
+    }
     #[test]
     fn a_big_change_the_worker_fails_at_is_noted_unknown() {
         use crate::server::settling::{CAUGHT, GONE};
