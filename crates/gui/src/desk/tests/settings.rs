@@ -118,7 +118,7 @@ fn startup_options_are_saved_in_startup_toml() {
     assert_eq!(desk.options.fontsize, Decimal::whole(14));
     assert_eq!(
         desk.message.as_deref(),
-        Some("saved fontsize=14 in client/startup.toml")
+        Some("saved fontsize=14 in client/startup.toml, for windows opened after too")
     );
     // Read only as a window opens: saved for the next, never set now.
     command(&mut desk, "set renderer=opengl");

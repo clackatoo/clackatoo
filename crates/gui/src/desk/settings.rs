@@ -414,10 +414,12 @@ impl Desk {
         let ((), _) = self
             .options
             .change(|store, _| store.saved(info, value.clone()));
-        let later = if info.restart {
-            ", for windows opened after"
-        } else {
-            ""
+        // startup.toml's are what windows open with: the font and its size
+        // change in those open now too.
+        let later = match info.scope {
+            _ if info.restart => ", for windows opened after",
+            options::Scope::Startup(_) => ", for windows opened after too",
+            options::Scope::Window | options::Scope::Daemon => "",
         };
         self.say_saved(match value {
             Some(value) => format!(

@@ -178,6 +178,27 @@ impl Daemon {
             value: asked.value.as_ref().map(Value::text),
             refused: answer.as_ref().err().cloned(),
         });
+        // A run as the files changed that comes to what the daemon has, as
+        // the one after a window's change does, is told no one.
+        let unchanged = asked.is_none()
+            && self.config.own_config.as_ref().is_some_and(|own| {
+                let (configured, failure) = if self.configuring.ran {
+                    let configured = self.configuring.configured.as_ref();
+                    (
+                        configured.unwrap_or(&own.settings),
+                        &self.configuring.failure,
+                    )
+                } else {
+                    (&own.settings, &own.failure)
+                };
+                match &answer {
+                    Ok((settings, _)) => failure.is_none() && settings == configured,
+                    Err(said) => failure.as_ref() == Some(said),
+                }
+            });
+        if unchanged {
+            return;
+        }
         match answer {
             Ok((settings, fresh)) => {
                 self.take_live_config(&fresh);
