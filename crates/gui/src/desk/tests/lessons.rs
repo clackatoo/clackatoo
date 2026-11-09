@@ -1972,6 +1972,20 @@ fn pump(desk: &mut Desk, client: &mut clackatoo_daemon::client::Client) {
     panic!("the desk never stopped asking");
 }
 
+/// Waits for the daemon's thread to remove `folder`, a lesson's that's
+/// ended.
+fn wait_until_gone(folder: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while folder.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} never removed",
+            folder.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// The text of buffer `buffer`, as the desk has it.
 fn copy_text(desk: &Desk, buffer: Option<BufferId>) -> String {
     let copy = buffer.and_then(|buffer| desk.buffer_copy(buffer));
@@ -2044,7 +2058,7 @@ fn lessons_open_heal_and_end_on_a_daemon_whose_files_the_window_cant_see() {
     command(&mut desk, "q");
     pump(&mut desk, &mut client);
     assert!(desk.tutor.open.is_none());
-    assert!(!folder.exists(), "removed as it ends");
+    wait_until_gone(&folder);
 
     // An editor lesson: its practice file is there, and a change to the
     // lesson is put back there.
@@ -2082,7 +2096,7 @@ fn lessons_open_heal_and_end_on_a_daemon_whose_files_the_window_cant_see() {
     command(&mut desk, "q");
     pump(&mut desk, &mut client);
     assert!(desk.tutor.open.is_none());
-    assert!(!folder.exists(), "removed as it ends");
+    wait_until_gone(&folder);
     // Nothing was written where the window is.
     assert!(
         !(desk.take_tutor_io().iter())

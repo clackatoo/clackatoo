@@ -13,8 +13,8 @@
 //!
 //! Each folder is the client's that made it, for as long as it's
 //! connected: only it may write the lesson's text again, or remove the
-//! folder. One whose client has gone, as by a reconnection, is left to be
-//! pruned.
+//! folder, and it's never pruned. One whose client has gone, as by a
+//! reconnection, is left to be pruned.
 //!
 //! A client only ever names a folder made there, and plain file names, with
 //! no `/` and not starting with `.`: nothing is written outside it, and
@@ -29,10 +29,12 @@
 //! behind, as by a window that stopped without doing so, goes once it's
 //! [`KEPT_FOR`] old, or as more than [`MOST_KEPT`] are kept, the oldest
 //! first, as a new one is made; the runtime folder is emptied as the user
-//! logs out.
+//! logs out. A folder's age is from the newest change to it or what's in
+//! it, so a lesson practised in isn't old.
 //!
-//! It's all done on the loop: a few small files, at most [`MOST_BYTES`]
-//! in all, as a buffer's save is.
+//! Its files are written on the loop: a few small files, at most
+//! [`MOST_BYTES`] in all, as a buffer's save is. Folders are removed by a
+//! thread of its own, as a practice shell may have filled one.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -40,6 +42,7 @@ use std::fs::File;
 use std::io::{self, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, SystemTime};
 
 use clackatoo_protocol::{Error, Response, TutorFiles};
@@ -66,17 +69,81 @@ const MOST_BYTES: usize = 1024 * 1024;
 /// practice shell could make, is left, and the folders it's in.
 const DEEPEST: usize = 64;
 
-/// The lessons' folders made, by name, each with the client that made it,
-/// for as long as it's connected.
+/// The most of a lesson's folder looked at for when it last changed: its
+/// own time, and as many of what's in it.
+const MOST_LOOKED_AT: usize = 4096;
+
+/// The lessons' folders made, and the thread removing them.
 #[derive(Debug, Default)]
 pub(super) struct Tutor {
-    makers: HashMap<String, Token>,
+    /// The lessons' folders made, by name, each with the client that made
+    /// it, for as long as it's connected: shared with the thread, which
+    /// never removes one of these.
+    makers: Arc<Mutex<HashMap<String, Token>>>,
+    /// The thread's queue, once it has started.
+    removing: Option<mpsc::Sender<Removal>>,
+}
+
+/// What the thread removes, in the folder of lessons' folders, open.
+struct Removal {
+    folder: OwnedFd,
+    what: Removing,
+}
+
+/// What [`Removal`] removes.
+enum Removing {
+    /// A lesson's folder, by name.
+    Folder(String),
+    /// Those left behind, as [`prune`] says, at this time.
+    Pruned(SystemTime),
 }
 
 impl Tutor {
     /// The client at `token` has gone: the folders it made are no one's.
     pub(super) fn forget(&mut self, token: Token) {
-        self.makers.retain(|_, maker| *maker != token);
+        self.makers().retain(|_, maker| *maker != token);
+    }
+
+    fn makers(&self) -> MutexGuard<'_, HashMap<String, Token>> {
+        self.makers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Has `what` in `folder` removed by the thread, starting it if it
+    /// hasn't started; or here and now, if it can't start.
+    fn remove(&mut self, folder: &OwnedFd, what: Removing) {
+        let folder = match folder.try_clone() {
+            Ok(folder) => folder,
+            Err(err) => return log::warn!("lessons' folders can't be removed: {err}"),
+        };
+        let removal = Removal { folder, what };
+        let removal = match &self.removing {
+            Some(removing) => match removing.send(removal) {
+                Ok(()) => return,
+                Err(mpsc::SendError(removal)) => removal,
+            },
+            None => removal,
+        };
+        let (removing, removals) = mpsc::channel::<Removal>();
+        let makers = Arc::clone(&self.makers);
+        let started = std::thread::Builder::new()
+            .name("lessons-removed".into())
+            .spawn(move || {
+                for removal in removals {
+                    removal.run(&makers);
+                }
+            });
+        match started {
+            Ok(_) => {
+                self.removing = Some(removing);
+                if let Some(removing) = &self.removing {
+                    let _ = removing.send(removal);
+                }
+            }
+            Err(err) => {
+                log::warn!("no thread to remove lessons' folders: {err}");
+                removal.run(&self.makers);
+            }
+        }
     }
 
     /// The name of `dir`, if it's a lesson's folder in `lessons` the
@@ -88,7 +155,7 @@ impl Tutor {
         token: Token,
     ) -> Result<&'d str, String> {
         let name = lessons.made(dir)?;
-        if self.makers.get(name) == Some(&token) {
+        if self.makers().get(name) == Some(&token) {
             Ok(name)
         } else {
             Err(format!("{dir} isn't a folder this window made"))
@@ -126,10 +193,16 @@ impl Daemon {
                 lesson,
                 text,
                 files,
-            } => lessons.make(&lesson, &text, &files).map(|(name, path)| {
-                self.tutor.makers.insert(name, token);
-                Response::Text(path)
-            }),
+            } => {
+                self.tutor
+                    .remove(&lessons.folder, Removing::Pruned(SystemTime::now()));
+                // Its maker's from the first, so it's never pruned.
+                let mut makers = self.tutor.makers();
+                lessons.make(&lesson, &text, &files).map(|(name, path)| {
+                    makers.insert(name, token);
+                    Response::Text(path)
+                })
+            }
             TutorFiles::Rewrite { dir, lesson, text } => {
                 (self.tutor.made_by(&lessons, &dir, token))
                     .and_then(|name| lessons.rewrite(name, &lesson, &text))
@@ -137,11 +210,11 @@ impl Daemon {
             }
             TutorFiles::Remove { dir } => (self.tutor.made_by(&lessons, &dir, token))
                 .map(str::to_owned)
-                .and_then(|name| {
-                    self.tutor.makers.remove(&name);
-                    lessons.remove(&name)
-                })
-                .map(|()| Response::Done),
+                .map(|name| {
+                    self.tutor.makers().remove(&name);
+                    self.tutor.remove(&lessons.folder, Removing::Folder(name));
+                    Response::Done
+                }),
         };
         done.map_err(|why| Error::Other(format!("the lesson's files: {why}")))
     }
@@ -166,9 +239,8 @@ struct Lessons {
 
 impl Lessons {
     /// Makes a new folder for the lesson `lesson`, with its text and its
-    /// practice files, and returns its name and path, first letting go of
-    /// those left behind. Nothing's made if anything's refused, or can't
-    /// be.
+    /// practice files, and returns its name and path. Nothing's made if
+    /// anything's refused, or can't be.
     fn make(
         &self,
         lesson: &str,
@@ -186,7 +258,6 @@ impl Lessons {
         if bytes > MOST_BYTES {
             return Err("more than a MiB of text".into());
         }
-        self.prune(SystemTime::now());
         let (name, made) = self.new_folder()?;
         let path = self.path.join(&name);
         let written = (|| -> io::Result<()> {
@@ -237,12 +308,6 @@ impl Lessons {
         })
     }
 
-    /// Removes the lesson's folder `name`, and everything in it, if it's
-    /// there.
-    fn remove(&self, name: &str) -> Result<(), String> {
-        remove_named(self.folder.as_fd(), name).map_err(|err| err.to_string())
-    }
-
     /// The name of `dir`, if it's a folder of this one's, as made for a
     /// lesson: refused if it's anything else.
     fn made<'d>(&self, dir: &'d str) -> Result<&'d str, String> {
@@ -270,45 +335,94 @@ impl Lessons {
         }
         Err("a thousand lessons were opened this second".into())
     }
+}
 
-    /// Removes the lessons' folders older than [`KEPT_FOR`] at `now`, and
-    /// the oldest, leaving room for one more within [`MOST_KEPT`]. Only
-    /// names made for lessons are looked at.
-    fn prune(&self, now: SystemTime) {
-        let Ok(mut dir) = Dir::read_from(&self.folder) else {
-            return;
+impl Removal {
+    /// Removes what it says, never a folder one of `makers` made.
+    fn run(self, makers: &Mutex<HashMap<String, Token>>) {
+        let made = |name: &str| {
+            let makers = makers.lock().unwrap_or_else(PoisonError::into_inner);
+            makers.contains_key(name)
         };
-        // The folder may have been read before: its offset is shared.
-        dir.rewind();
-        let mut kept: Vec<(SystemTime, String)> = Vec::new();
-        for entry in dir {
-            let Ok(entry) = entry else {
-                break;
-            };
-            let name = entry.file_name();
-            let Some(name) = (name.to_str().ok()).filter(|name| is_stamped(name.as_bytes())) else {
-                continue;
-            };
-            let Ok(stat) = rustix::fs::statat(&self.folder, name, AtFlags::SYMLINK_NOFOLLOW) else {
-                continue;
-            };
-            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-                continue;
+        match self.what {
+            // Made again since, once removed: not this one.
+            Removing::Folder(name) if made(&name) => {}
+            Removing::Folder(name) => {
+                if let Err(err) = remove_named(self.folder.as_fd(), &name) {
+                    log::warn!("the lesson's folder {name} couldn't be removed: {err}");
+                }
             }
-            let modified = SystemTime::UNIX_EPOCH
-                + Duration::from_secs(u64::try_from(stat.st_mtime).unwrap_or_default());
-            if now.duration_since(modified).is_ok_and(|age| age > KEPT_FOR) {
-                let _ = remove_named(self.folder.as_fd(), name);
-            } else {
-                kept.push((modified, name.to_owned()));
-            }
-        }
-        kept.sort();
-        let over = (kept.len() + 1).saturating_sub(MOST_KEPT);
-        for (_, name) in kept.into_iter().take(over) {
-            let _ = remove_named(self.folder.as_fd(), &name);
+            Removing::Pruned(now) => prune(&self.folder, now, made),
         }
     }
+}
+
+/// Removes the lessons' folders in `folder` older than [`KEPT_FOR`] at
+/// `now`, and the oldest, leaving room for one more within [`MOST_KEPT`],
+/// but never one `made` says a client connected made: asked just before
+/// each is removed, as one may be made meanwhile. Only names made for
+/// lessons are looked at.
+fn prune(folder: &OwnedFd, now: SystemTime, made: impl Fn(&str) -> bool) {
+    let Ok(mut dir) = Dir::read_from(folder) else {
+        return;
+    };
+    // The folder may have been read before: its offset is shared.
+    dir.rewind();
+    let mut kept: Vec<(SystemTime, String)> = Vec::new();
+    for entry in dir {
+        let Ok(entry) = entry else {
+            break;
+        };
+        let name = entry.file_name();
+        let Some(name) = (name.to_str().ok()).filter(|name| is_stamped(name.as_bytes())) else {
+            continue;
+        };
+        let Some(changed) = changed(folder, name) else {
+            continue;
+        };
+        if now.duration_since(changed).is_ok_and(|age| age > KEPT_FOR) && !made(name) {
+            let _ = remove_named(folder.as_fd(), name);
+        } else {
+            kept.push((changed, name.to_owned()));
+        }
+    }
+    kept.sort();
+    let mut over = (kept.len() + 1).saturating_sub(MOST_KEPT);
+    for (_, name) in kept {
+        if over == 0 {
+            break;
+        }
+        if !made(&name) && remove_named(folder.as_fd(), &name).is_ok() {
+            over -= 1;
+        }
+    }
+}
+
+/// When the lesson's folder `name` in `folder` last changed: the newest of
+/// its own modification time and those of what's in it, of the first
+/// [`MOST_LOOKED_AT`]. `None` if it's no folder, or a link.
+fn changed(folder: &OwnedFd, name: &str) -> Option<SystemTime> {
+    let inner = open_dir(folder, name).ok()?;
+    let time = |stat: rustix::fs::Stat| {
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(u64::try_from(stat.st_mtime).unwrap_or_default())
+    };
+    let mut newest = time(rustix::fs::fstat(&inner).ok()?);
+    let mut listing = Dir::read_from(&inner).ok()?;
+    listing.rewind();
+    for entry in listing.take(MOST_LOOKED_AT) {
+        let Ok(entry) = entry else {
+            break;
+        };
+        let name = entry.file_name();
+        if name == c"." || name == c".." {
+            continue;
+        }
+        if let Ok(stat) = rustix::fs::statat(&inner, name, AtFlags::SYMLINK_NOFOLLOW) {
+            newest = newest.max(time(stat));
+        }
+    }
+    Some(newest)
 }
 
 /// `name`, if it's a plain file name: not empty, with no `/`, and not
@@ -505,7 +619,12 @@ mod tests {
             daemon.tutor_files(maker, TutorFiles::Remove { dir: again.clone() }),
             Ok(Response::Done)
         );
-        assert!(!Path::new(&again).exists());
+        // Removed by a thread of its own.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while Path::new(&again).exists() {
+            assert!(std::time::Instant::now() < deadline, "never removed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -572,10 +691,10 @@ mod tests {
         assert!(lessons.made(&traversal).is_err());
         assert!(lessons.rewrite(&name, "../basics", "x").is_err());
         assert!(outside.is_dir() && other.is_dir());
-        lessons.remove(&name).unwrap();
+        remove_named(lessons.folder.as_fd(), &name).unwrap();
         assert!(!Path::new(&made).exists());
         // Gone already: nothing to do.
-        lessons.remove(&name).unwrap();
+        remove_named(lessons.folder.as_fd(), &name).unwrap();
     }
 
     #[test]
@@ -619,14 +738,14 @@ mod tests {
         std::os::unix::fs::symlink(&precious, practice.join("link")).unwrap();
         std::fs::create_dir_all(practice.join("a/b/c")).unwrap();
         std::fs::write(practice.join("a/b/c/d"), "").unwrap();
-        lessons.remove(&name).unwrap();
+        remove_named(lessons.folder.as_fd(), &name).unwrap();
         assert!(!Path::new(&made).exists());
         assert!(precious.join("mine").is_file());
         // The folder swapped for a link to another: only the link goes.
         let (name, made) = lessons.make("basics", "", &[]).unwrap();
         std::fs::rename(&made, dir.path().join("moved")).unwrap();
         std::os::unix::fs::symlink(&precious, &made).unwrap();
-        lessons.remove(&name).unwrap();
+        remove_named(lessons.folder.as_fd(), &name).unwrap();
         assert!(!Path::new(&made).exists() && !Path::new(&made).is_symlink());
         assert!(precious.join("mine").is_file());
         // The folder they're all in swapped for a link, once open: what's
@@ -637,7 +756,7 @@ mod tests {
         std::fs::write(victim.join(&name).join("mine"), "mine\n").unwrap();
         std::fs::rename(&lessons.path, dir.path().join("away")).unwrap();
         std::os::unix::fs::symlink(&victim, &lessons.path).unwrap();
-        lessons.remove(&name).unwrap();
+        remove_named(lessons.folder.as_fd(), &name).unwrap();
         assert!(victim.join(&name).join("mine").is_file());
         assert!(!dir.path().join("away").join(&name).exists());
         // Too deep to remove: left, and said.
@@ -645,11 +764,11 @@ mod tests {
         std::fs::rename(dir.path().join("away"), &lessons.path).unwrap();
         let (name, made) = lessons.make("basics", "", &[]).unwrap();
         let mut deep = Path::new(&made).join("basics");
-        for _ in 0..DEEPEST + 1 {
+        for _ in 0..=DEEPEST {
             deep.push("d");
         }
         std::fs::create_dir_all(&deep).unwrap();
-        assert!(lessons.remove(&name).is_err());
+        assert!(remove_named(lessons.folder.as_fd(), &name).is_err());
         assert!(Path::new(&made).is_dir());
     }
 
@@ -688,38 +807,128 @@ mod tests {
         assert!(open_folder(&link).is_err());
     }
 
+    /// Makes the lesson's folder at `path`, and what's in it at its top,
+    /// look last changed `ago`.
+    fn changed_ago(path: &str, ago: Duration) {
+        let when = SystemTime::now() - ago;
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap().path();
+            File::open(&entry).unwrap().set_modified(when).unwrap();
+        }
+        File::open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    /// Whether the lesson's folder at `path` is still there: not one made
+    /// again since, of the same name, as it's known by a file in it.
+    fn still(path: &str) -> bool {
+        Path::new(path).join("basics.txt").exists()
+    }
+
     #[test]
     fn old_lessons_go_and_the_oldest_past_the_most_kept() {
         let dir = tempfile::tempdir().unwrap();
         let lessons = lessons(dir.path());
-        let mut made: Vec<String> = (0..MOST_KEPT)
+        let made: Vec<String> = (0..MOST_KEPT)
             .map(|_| lessons.make("basics", "", &[]).unwrap().1)
             .collect();
-        // The first is the oldest. Its name may be taken again, made in
-        // the same second, so it's known by a file in it.
-        let marked = Path::new(&made[0]).join("old");
-        std::fs::write(&marked, "").unwrap();
-        let first = File::open(&made[0]).unwrap();
-        let old = SystemTime::now() - Duration::from_mins(1);
-        first.set_modified(old).unwrap();
-        made.push(lessons.make("basics", "", &[]).unwrap().1);
-        assert!(!marked.exists());
-        assert!(made.iter().all(|dir| Path::new(dir).is_dir()));
+        // Room for one more: the oldest goes.
+        changed_ago(&made[3], Duration::from_mins(1));
+        prune(&lessons.folder, SystemTime::now(), |_| false);
+        assert!(!still(&made[3]));
+        assert_eq!(
+            made.iter().filter(|made| still(made)).count(),
+            MOST_KEPT - 1
+        );
         // One past its time goes, whatever else there is.
-        let marked = Path::new(&made[1]).join("old");
-        std::fs::write(&marked, "").unwrap();
-        File::open(&made[1])
-            .unwrap()
-            .set_modified(SystemTime::now() - KEPT_FOR - Duration::from_mins(1))
-            .unwrap();
-        lessons.prune(SystemTime::now());
-        assert!(!marked.exists());
+        changed_ago(&made[5], KEPT_FOR + Duration::from_mins(1));
+        prune(&lessons.folder, SystemTime::now(), |_| false);
+        assert!(!still(&made[5]));
+        assert_eq!(
+            made.iter().filter(|made| still(made)).count(),
+            MOST_KEPT - 2
+        );
         // Nothing not named as a lesson's is touched.
         let mine = lessons.path.join("mine");
         std::fs::create_dir(&mine).unwrap();
+        changed_ago(mine.to_str().unwrap(), KEPT_FOR * 2);
         for _ in 0..MOST_KEPT {
             lessons.make("basics", "", &[]).unwrap();
+            prune(&lessons.folder, SystemTime::now(), |_| false);
         }
         assert!(mine.is_dir());
+    }
+
+    #[test]
+    fn a_lesson_practised_in_lately_isnt_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let lessons = lessons(dir.path());
+        let (_, made) = lessons.make("basics", "", &[]).unwrap();
+        changed_ago(&made, KEPT_FOR + Duration::from_mins(1));
+        // A file made in its practice folder, as by its shell.
+        let practice = Path::new(&made).join("basics");
+        std::fs::write(practice.join("new.txt"), "").unwrap();
+        prune(&lessons.folder, SystemTime::now(), |_| false);
+        assert!(still(&made));
+        changed_ago(&made, KEPT_FOR + Duration::from_mins(1));
+        prune(&lessons.folder, SystemTime::now(), |_| false);
+        assert!(!still(&made));
+    }
+
+    #[test]
+    fn a_lesson_whose_window_is_connected_is_never_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let lessons = lessons(dir.path());
+        let made: Vec<(String, String)> = (0..MOST_KEPT + 2)
+            .map(|_| lessons.make("basics", "", &[]).unwrap())
+            .collect();
+        for (_, path) in &made {
+            changed_ago(path, KEPT_FOR + Duration::from_mins(1));
+        }
+        let (kept, _) = &made[0];
+        prune(&lessons.folder, SystemTime::now(), |name| name == kept);
+        assert!(still(&made[0].1));
+        assert!(made[1..].iter().all(|(_, path)| !still(path)));
+        // However many there are.
+        let made: Vec<(String, String)> = (0..MOST_KEPT + 2)
+            .map(|_| lessons.make("basics", "", &[]).unwrap())
+            .collect();
+        prune(&lessons.folder, SystemTime::now(), |_| true);
+        assert!(made.iter().all(|(_, path)| still(path)));
+    }
+
+    #[test]
+    fn a_window_connected_keeps_its_lessons_from_pruning_and_its_removal_is_on_a_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = daemon(dir.path());
+        let (window, _window) = client(&mut daemon);
+        let (gone, _gone) = client(&mut daemon);
+        let Ok(Response::Text(theirs)) = make(&mut daemon, gone) else {
+            panic!("no folder made");
+        };
+        let Ok(Response::Text(mine)) = make(&mut daemon, window) else {
+            panic!("no folder made");
+        };
+        daemon.tutor.forget(gone);
+        for path in [&theirs, &mine] {
+            changed_ago(path, KEPT_FOR + Duration::from_mins(1));
+        }
+        // Pruned, by the thread, as another is made: but never the
+        // folder of a window still connected.
+        let Ok(Response::Text(another)) = make(&mut daemon, window) else {
+            panic!("no folder made");
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while still(&theirs) {
+            assert!(std::time::Instant::now() < deadline, "never pruned");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(still(&mine) && still(&another));
+        let remove = TutorFiles::Remove { dir: mine.clone() };
+        assert_eq!(daemon.tutor_files(window, remove), Ok(Response::Done));
+        while still(&mine) {
+            assert!(std::time::Instant::now() < deadline, "never removed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(still(&another));
     }
 }
