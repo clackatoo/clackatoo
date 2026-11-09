@@ -241,6 +241,8 @@ enum Job {
         bytes: Arc<[u8]>,
         side: u32,
     },
+    /// Write `bytes` in base64, for `asker`.
+    Encode { asker: u64, bytes: Arc<[u8]> },
 }
 
 /// What the store's thread, or a reader, did.
@@ -260,6 +262,10 @@ enum Done {
         image: ImageId,
         side: u32,
         copy: Option<(ImageInfo, Arc<[u8]>)>,
+    },
+    Encoded {
+        asker: u64,
+        text: String,
     },
 }
 
@@ -334,6 +340,8 @@ pub(crate) struct Images<T> {
     on_the_way: u64,
     /// Jobs sent to the thread and not done yet.
     pending: usize,
+    /// Images written in base64, for who asked, to be taken.
+    encoded: Vec<(u64, String)>,
     /// The store's thread, started when it's first needed.
     jobs: Option<mpsc::Sender<Job>>,
     /// What the thread and the readers have done.
@@ -391,6 +399,7 @@ impl<T: Clone + PartialEq> Images<T> {
             scaling: HashMap::new(),
             on_the_way: 0,
             pending: 0,
+            encoded: Vec::new(),
             jobs: None,
             done: mpsc::channel(),
             to_read: VecDeque::new(),
@@ -594,10 +603,38 @@ impl<T: Clone + PartialEq> Images<T> {
                         ready.push(Ready { image, waiting });
                     }
                 }
+                Done::Encoded { asker, text } => self.encoded.push((asker, text)),
             }
         }
         self.give_up_reading(wait.is_some(), &mut kept);
         (kept, ready)
+    }
+
+    /// Starts writing the image `id`, which `owner` holds, in base64 on
+    /// the store's thread, for `asker`, who's given it by
+    /// [`take_encoded`](Self::take_encoded) once it's done: a big image
+    /// would hold up the loop. Fails if `owner` holds no such image.
+    pub(crate) fn encode(
+        &mut self,
+        owner: ImageFrom,
+        id: ImageId,
+        asker: u64,
+    ) -> Result<(), String> {
+        self.tick += 1;
+        let bytes = match self.entries.get_mut(&id) {
+            Some(entry) if entry.owners.contains(&owner) => {
+                entry.used = self.tick;
+                Arc::clone(&entry.bytes)
+            }
+            _ => return Err("the image is no longer kept".into()),
+        };
+        self.send(Job::Encode { asker, bytes })
+    }
+
+    /// The images written in base64 since this was last asked, each with
+    /// who asked (see [`encode`](Self::encode)).
+    pub(crate) fn take_encoded(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.encoded)
     }
 
     /// What the thread or a reader has done next, if anything: waiting
@@ -1119,6 +1156,10 @@ fn work(job: Job) -> Done {
             image: info.id,
             side,
             copy: scaled(info, &bytes, side),
+        },
+        Job::Encode { asker, bytes } => Done::Encoded {
+            asker,
+            text: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
         },
     }
 }

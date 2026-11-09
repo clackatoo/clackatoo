@@ -28,6 +28,9 @@ pub(super) struct Pictures {
     /// The images buffers' Markdown asked for, by buffer and path as
     /// asked.
     markdown: HashMap<(BufferId, String), Markdown>,
+    /// The clients waiting for chats' originals, written in base64 on the
+    /// store's thread, by their places among their answers.
+    originals: HashMap<u64, Token>,
 }
 
 /// A picture pane's file, and what's shown of it.
@@ -374,6 +377,7 @@ impl Daemon {
     /// handover.
     pub(super) fn take_images(&mut self, wait: Option<std::time::Duration>) {
         let (kept, ready) = self.images.take(wait);
+        self.send_chat_originals();
         for kept in kept {
             match kept.why {
                 Why::Picture(picture) => self.picture_read(picture, kept.kept),
@@ -464,14 +468,39 @@ impl Daemon {
 
     /// The original of chat `chat`'s thumbnail `original`, as standard
     /// base64, as a client before the image layer asks for it.
-    pub(super) fn chat_original(&mut self, chat: TerminalId, original: u64) -> Option<String> {
-        let image = self.chat_ref(chat)?.originals.get(original)?;
-        match self.images.get(ImageFrom::Terminal(chat), image) {
-            crate::images::Found::Kept { bytes, .. } => Some(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                bytes,
-            )),
-            _ => None,
+    pub(super) fn send_chat_original(
+        &mut self,
+        token: Token,
+        chat: TerminalId,
+        original: u64,
+    ) -> Result<(), Error> {
+        let gone = || Error::Other("Original image is no longer available".into());
+        let image = (self.chat_ref(chat))
+            .and_then(|chat| chat.originals.get(original))
+            .ok_or_else(gone)?;
+        // Its client has gone, if there's no place for its answer.
+        let Some(ticket) = self.take_place(token) else {
+            return Ok(());
+        };
+        match self.images.encode(ImageFrom::Terminal(chat), image, ticket) {
+            Ok(()) => {
+                self.pictures.originals.insert(ticket, token);
+            }
+            Err(why) => {
+                log::debug!("chat {chat}: original {original}: {why}");
+                self.hand_answer_with(token, ticket, Response::Error(gone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands the clients that asked for chats' originals those written in
+    /// base64 meanwhile.
+    fn send_chat_originals(&mut self) {
+        for (ticket, text) in self.images.take_encoded() {
+            if let Some(token) = self.pictures.originals.remove(&ticket) {
+                self.hand_answer_with(token, ticket, Response::Text(text));
+            }
         }
     }
 }
@@ -1022,6 +1051,10 @@ mod tests {
         );
         // An older client's fetch of the original still answers.
         let old = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sent);
-        assert_eq!(resumed.chat_original(chat, original), Some(old));
+        (resumed.images.encode(from, kept, 7)).unwrap();
+        resumed
+            .images
+            .take(Some(std::time::Duration::from_secs(10)));
+        assert_eq!(resumed.images.take_encoded(), [(7, old)]);
     }
 }

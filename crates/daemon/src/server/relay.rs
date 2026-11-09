@@ -886,6 +886,18 @@ impl Daemon {
                 };
                 self.wait_for(token, at, paste, Then::Pass)
             }
+            // A chat's original here, written in base64 on the images'
+            // thread, which a big one would hold the loop up for.
+            Request::ChatOriginal { terminal, original }
+                if self.relayed_terminal(terminal).is_none() =>
+            {
+                let sent = (self.refuse_lent(token, &request))
+                    .and_then(|()| self.send_chat_original(token, terminal, original));
+                match sent {
+                    Ok(()) => Routed::Waiting,
+                    Err(err) => Routed::Answered(Response::Error(err)),
+                }
+            }
             Request::SendInput { terminal, bytes } => {
                 let Some((at, remote)) = self.relayed_terminal(terminal) else {
                     // Behind an image this client is pasting there, it

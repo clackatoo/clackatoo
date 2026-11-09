@@ -3734,10 +3734,11 @@ impl Daemon {
             } => self
                 .grid(terminal)
                 .map(|grid| Response::Block(grid.block(line, which))),
-            Request::ChatOriginal { terminal, original } => (self
-                .chat_original(terminal, original))
-            .map(Response::Text)
-            .ok_or_else(|| Error::Other("Original image is no longer available".into())),
+            // Routed to the images' thread, or another machine, before
+            // this (see `route_request`).
+            Request::ChatOriginal { .. } => {
+                Err(Error::Other("Original image is no longer available".into()))
+            }
             Request::Image {
                 from,
                 image,
