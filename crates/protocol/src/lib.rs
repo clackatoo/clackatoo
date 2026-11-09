@@ -148,7 +148,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 133;
+pub const PROTOCOL_VERSION: u32 = 134;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -662,6 +662,18 @@ pub enum Event {
         /// Whether to come to the front: not if the window was told to a
         /// moment ago, so nothing can keep taking the focus.
         raise: bool,
+    },
+    /// A device paired with the web app, for the window's bar to say, as
+    /// `said`: to every client that said it's a window
+    /// ([`Request::Window`]), as it paired or as the window said so, until
+    /// one says it has shown it, with [`Request::SeenPaired`]. Nothing else
+    /// that connects is told. Only to a client of protocol 133 or later
+    /// ([`wire::PAIRED`]).
+    Paired {
+        /// The device's number, as [`Request::RevokeDevice`] takes it.
+        device: u64,
+        /// What the bar is to say.
+        said: String,
     },
 }
 
@@ -1578,6 +1590,13 @@ pub enum Request {
         image: ChatImage,
         /// How it reaches the program.
         how: ImagePaste,
+    },
+    /// Says the window has shown [`Event::Paired`] for `device`: no window
+    /// is told of it again. Answered with [`Response::Done`]. Only to a
+    /// daemon of protocol 134 or later ([`wire::PAIRED`]).
+    SeenPaired {
+        /// The device's number.
+        device: u64,
     },
 }
 

@@ -63,6 +63,13 @@ impl Desk {
         })
     }
 
+    /// Device `device` paired with the web app, which the bar says as
+    /// `said`: the daemon hears it's been said, so no window says it again.
+    pub(crate) fn device_paired(&mut self, device: u64, said: &str) {
+        self.daemon_said(said);
+        self.request(Request::SeenPaired { device }, Asked::Quiet);
+    }
+
     /// Does what `:devices` says.
     pub(super) fn devices_command(&mut self, command: DevicesCommand) {
         let request = match command {

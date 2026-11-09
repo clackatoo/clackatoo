@@ -356,6 +356,11 @@ gates! {
     /// (`ImagePaste`), answered with `Response::Text`. An older daemon is
     /// never asked: it would read nothing it could act on.
     PASTE_IMAGE = 133,
+    /// Each device paired with the web app said in windows' bars until one
+    /// says it has shown it (CLACKA-218): `Event::Paired`, sent only to a
+    /// client that said it's a window (`Request::Window`), and
+    /// `Request::SeenPaired`, which only such a window sends.
+    PAIRED = 134,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -679,6 +684,7 @@ impl Since for Event {
             Self::Said(_) => LEND,
             Self::Listening(_) => BACKGROUND,
             Self::NativeRequest { .. } | Self::NativeGrantAck { .. } => HARNESS,
+            Self::Paired { .. } => PAIRED,
         }
     }
 }
@@ -1090,6 +1096,10 @@ impl Downgrade for ClientMessage {
                 )
             )
         {
+            return Downgraded::Refused;
+        }
+        // Only a window of a daemon that has them says it showed one.
+        if wire < PAIRED && matches!(self, Self::Request(crate::Request::SeenPaired { .. })) {
             return Downgraded::Refused;
         }
         if wire < HARNESS
@@ -1581,6 +1591,7 @@ impl Downgrade for ServerMessage {
                 | Event::Forwarded(_)
                 | Event::Said(_)
                 | Event::Listening(_)
+                | Event::Paired { .. }
                 | Event::Files {
                     update: FilesUpdate::Changed { .. },
                     ..
@@ -2421,7 +2432,8 @@ mod tests {
                 Event::Files {
                     update: FilesUpdate::Changed { .. },
                     ..
-                } | Event::NativeRequest { .. }
+                } | Event::Paired { .. }
+                    | Event::NativeRequest { .. }
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }
                     | Event::Coloured { .. }

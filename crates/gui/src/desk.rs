@@ -3977,6 +3977,27 @@ mod tests {
     }
 
     #[test]
+    fn a_device_paired_is_said_and_the_daemon_told_it_was() {
+        let mut desk = Desk::default();
+        desk.connected(
+            workspaces(vec![workspace(1, "work", vec![tab(1, pane(1))])]),
+            false,
+        );
+        answer_all(&mut desk);
+        // The daemon tells a window, which said it is one as it connected.
+        desk.device_paired(3, "phone (100.64.0.7) paired with the password");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("phone (100.64.0.7) paired with the password")
+        );
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::SeenPaired { device: 3 }],
+            "the daemon hears it was shown"
+        );
+    }
+
+    #[test]
     fn a_chat_that_finishes_in_a_tab_not_shown_is_unseen_until_its_tab_is() {
         use ChatState::{Answering, Ready};
         let mut desk = chats_desk();

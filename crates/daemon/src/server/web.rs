@@ -591,27 +591,98 @@ impl Daemon {
             self.web_timers(now);
         }
         self.send_pairing();
-        // Kept until a window can be told.
-        let waiting = (self.web.as_ref()).is_some_and(|web| !web.said.is_empty());
-        if waiting && self.window_hears_said() {
-            let said = (self.web.as_mut()).map(|web| std::mem::take(&mut web.said));
-            for said in said.into_iter().flatten() {
-                self.say_to_windows(said);
+        self.send_paired();
+    }
+
+    /// Tells every window watching for them of the devices paired since
+    /// they were last told.
+    fn send_paired(&mut self) {
+        let Some(web) = self.web.as_mut() else {
+            return;
+        };
+        if web.paired_now.is_empty() {
+            return;
+        }
+        let paired: Vec<(u64, String)> = (std::mem::take(&mut web.paired_now).into_iter())
+            .filter_map(|id| {
+                Some((
+                    id,
+                    (web.devices.list.iter())
+                        .find(|device| device.id == id)?
+                        .unseen
+                        .clone()?,
+                ))
+            })
+            .collect();
+        let mut told = Vec::new();
+        for (key, source) in &mut self.sources {
+            if let Source::Client(client) = source
+                && client.is_window
+                && !client.finished
+                && !matches!(client.link, Link::Web(_))
+                && client.wire >= wire::PAIRED
+            {
+                for (device, said) in &paired {
+                    let event = Event::Paired {
+                        device: *device,
+                        said: said.clone(),
+                    };
+                    match frame::encode(client.wire, &ServerMessage::Event(event)) {
+                        Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+                        Err(err) => log::error!("encoding a device paired failed: {err}"),
+                    }
+                }
+                told.push(Token(key));
+            }
+        }
+        for token in told {
+            self.flush_client(token);
+        }
+    }
+
+    /// Queues for the client at `token`, which has just said it's a window
+    /// ([`Request::Window`]), each device paired that no window has shown:
+    /// it's told of those paired from now on too. A device on the web app
+    /// that says it's a window isn't told of others.
+    ///
+    /// [`Request::Window`]: clackatoo_protocol::Request::Window
+    pub(super) fn tell_of_paired(&mut self, token: Token) {
+        if self.is_web_device(token) {
+            return;
+        }
+        let unseen: Vec<(u64, String)> = (self.web.as_ref())
+            .map(|web| {
+                (web.devices.list.iter())
+                    .filter_map(|device| Some((device.id, device.unseen.clone()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
+            && client.wire >= wire::PAIRED
+        {
+            for (device, said) in unseen {
+                let event = ServerMessage::Event(Event::Paired { device, said });
+                match frame::encode(client.wire, &event) {
+                    Ok(bytes) => client.later.extend_from_slice(&bytes),
+                    Err(err) => log::error!("encoding a device paired failed: {err}"),
+                }
             }
         }
     }
 
-    /// Whether a window watching the workspaces would show what the bar is
-    /// to say.
-    fn window_hears_said(&self) -> bool {
-        (self.sources.iter()).any(|(_, source)| {
-            matches!(source, Source::Client(client)
-                if client.watching_workspaces
-                    && !client.finished
-                    && !matches!(client.link, Link::Web(_))
-                    && client.machine.is_none()
-                    && client.wire >= wire::LEND)
-        })
+    /// Answers [`Request::SeenPaired`] from the client at `token`: no window
+    /// is told again that `device` paired.
+    ///
+    /// [`Request::SeenPaired`]: clackatoo_protocol::Request::SeenPaired
+    pub(super) fn seen_paired(&mut self, token: Token, device: u64) -> Result<Response, Error> {
+        self.devices_from_a_window(token, None)?;
+        if let Some(web) = self.web.as_mut()
+            && let Some(paired) = web.devices.get_mut(device)
+            && paired.unseen.take().is_some()
+        {
+            web.devices.save();
+        }
+        Ok(Response::Done)
     }
 
     /// Acts on the web app's timers due by `now`.
@@ -820,10 +891,8 @@ impl Daemon {
     }
 
     /// Queues the devices asking for the client at `token`, if any are and
-    /// it's a window, and the devices paired while no window was open: it
-    /// has just started watching the workspaces.
+    /// it's a window: it has just started watching the workspaces.
     pub(super) fn tell_of_asks(&mut self, token: Token) {
-        self.tell_of_paired(token);
         let Some(pairing) = (self.web.as_ref()).map(Web::pairing) else {
             return;
         };
@@ -836,30 +905,6 @@ impl Daemon {
                 frame::encode(client.wire, &ServerMessage::Event(Event::Pairing(pairing)))
         {
             client.later.extend_from_slice(&bytes);
-        }
-    }
-
-    /// Queues for the client at `token`, if it's a window that shows what
-    /// the bar is to say, the devices paired while no window was, once.
-    fn tell_of_paired(&mut self, token: Token) {
-        let Some(web) = self.web.as_mut() else {
-            return;
-        };
-        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
-            return;
-        };
-        if web.said.is_empty()
-            || matches!(client.link, Link::Web(_))
-            || client.machine.is_some()
-            || client.wire < wire::LEND
-        {
-            return;
-        }
-        for said in std::mem::take(&mut web.said) {
-            match frame::encode(client.wire, &ServerMessage::Event(Event::Said(said))) {
-                Ok(bytes) => client.later.extend_from_slice(&bytes),
-                Err(err) => log::error!("encoding what's said failed: {err}"),
-            }
         }
     }
 

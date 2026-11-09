@@ -82,10 +82,6 @@ const LATELY: Duration = Duration::from_hours(1);
 /// as having come lately: past it, the least lately goes.
 const MOST_LATELY: usize = 64;
 
-/// The most lines kept to tell the next window of devices paired while
-/// none was open: past it, the last says more did.
-const MOST_SAID: usize = 16;
-
 /// The most a device's name may be, in characters.
 const MOST_NAME: usize = 40;
 
@@ -310,9 +306,8 @@ pub(crate) struct Web {
     /// Whom a request carrying a device's token came from lately, and
     /// when: their new connections may take the slots kept for them.
     lately: HashMap<Who, Instant>,
-    /// What every window's bar is to say: each device paired since a
-    /// window was last told, kept until one is, at most [`MOST_SAID`].
-    pub(crate) said: Vec<String>,
+    /// The devices paired since the windows watching for them were told.
+    pub(crate) paired_now: Vec<u64>,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
 }
@@ -378,7 +373,7 @@ impl Web {
             put_off: VecDeque::new(),
             refusals: Refusals::default(),
             lately: HashMap::new(),
-            said: Vec::new(),
+            paired_now: Vec::new(),
             next_due: None,
         })
     }
@@ -961,16 +956,9 @@ impl Web {
             "allowed with its code"
         };
         let said = format!("{name} ({from}) paired {how}");
-        let id = self
-            .devices
-            .add(name, hash, login, password, epoch_millis());
-        let said = format!("{said}: :devices revoke {id} unpairs it");
-        if self.said.len() < MOST_SAID {
-            self.said.push(said);
-        } else {
-            "More devices paired while no window was open: :devices lists them"
-                .clone_into(&mut self.said[MOST_SAID - 1]);
-        }
+        let unseen = |id| format!("{said}: :devices revoke {id} unpairs it");
+        let id = (self.devices).add(name, hash, login, password, epoch_millis(), unseen);
+        self.paired_now.push(id);
         Response::json(200, &json!({ "paired": true, "device": id }))
             .with("set-cookie", auth::set_cookie(&token))
     }
@@ -1668,6 +1656,7 @@ mod tests {
                 p256dh: vec![4; 65],
                 auth: vec![9; 16],
             }),
+            unseen: None,
         };
         let devices = [
             device(1, now - millis(day), "jack@github", true),

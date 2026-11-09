@@ -3571,6 +3571,7 @@ impl Daemon {
             Request::RevokeDevice { device } => self.revoke_device(token, device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
+            Request::SeenPaired { device } => self.seen_paired(token, device),
             Request::Connect {
                 host,
                 command,
@@ -3619,6 +3620,7 @@ impl Daemon {
             } => self.reveal(token, pane, launch),
             Request::Window => {
                 self.is_window(token);
+                self.tell_of_paired(token);
                 Ok(Response::Done)
             }
             // Answered once it's done, by `route_request`, never here.

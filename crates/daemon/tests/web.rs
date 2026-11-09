@@ -665,73 +665,101 @@ fn a_revoked_device_is_cut_off_and_refused() {
     assert_eq!(session["state"], "unpaired");
 }
 
-/// What the window's bar is told next, waiting for it.
-fn said_next(window: &mut Client) -> String {
+/// The next device paired the window is told of, waiting for it.
+fn paired_next(window: &mut Client) -> (u64, String) {
     window
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     loop {
         match window.next_event() {
-            Ok(Event::Said(said)) => return said,
+            Ok(Event::Paired { device, said }) => return (device, said),
             Ok(_) => {}
             Err(err) => panic!("the window wasn't told: {err}"),
         }
     }
 }
 
+/// A window, watching the workspaces, that says it's one.
+fn watching_window(daemon: &TestDaemon) -> Client {
+    let mut window = daemon.window();
+    window.watch_workspaces().unwrap();
+    window.say_window().unwrap();
+    window
+}
+
+/// Whether `client` is told of a device paired within half a second.
+fn told_of_paired(client: &mut Client) -> bool {
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut told =
+        (client.take_events().into_iter()).any(|event| matches!(event, Event::Paired { .. }));
+    while let Ok(event) = client.next_event() {
+        told |= matches!(event, Event::Paired { .. });
+    }
+    told
+}
+
 #[test]
 fn every_window_is_told_of_each_device_paired() {
     let daemon = TestDaemon::start();
-    let mut window = daemon.window();
-    window.watch_workspaces().unwrap();
+    let mut window = watching_window(&daemon);
+    // What the CLI's one-shot commands are: they watch no pairing.
+    let mut command = daemon.window();
+    command.watch_workspaces().unwrap();
     let cookie = daemon.pair();
-    let said = said_next(&mut window);
+    let (device, said) = paired_next(&mut window);
+    assert_eq!(device, 1);
     assert!(
         said.contains(&format!("phone ({LOGIN}) paired with the password")),
         "{said}"
     );
     assert!(said.contains(":devices revoke 1"), "{said}");
-    // A device isn't told: devices are a window's to manage.
+    // A device isn't told, even saying it's a window: devices are a
+    // window's to manage.
     let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(phone.request(Request::Window), Response::Done);
     assert!(matches!(
-        phone.request(Request::WatchWorkspaces),
-        Response::Workspaces(_)
+        phone.request(Request::SeenPaired { device: 1 }),
+        Response::Error(Error::Pairing(_))
     ));
     daemon.pair_from_a_window();
-    let said = said_next(&mut window);
+    let (device, said) = paired_next(&mut window);
+    assert_eq!(device, 2);
     assert!(said.contains(&format!("phone ({LOGIN}) paired")), "{said}");
     assert!(said.contains("allowed with its code"), "{said}");
     assert!(said.contains(":devices revoke 2"), "{said}");
     assert!(matches!(phone.request(Request::Version), Response::Text(_)));
     assert!(
-        !(phone.events.iter()).any(|event| matches!(event, Event::Said(_))),
+        !(phone.events.iter()).any(|event| matches!(event, Event::Paired { .. })),
         "{:?}",
         phone.events
     );
+    assert!(!told_of_paired(&mut command));
 }
 
 #[test]
-fn a_device_paired_while_no_window_is_open_is_told_to_the_next() {
+fn a_pairing_is_told_until_a_window_says_it_has_shown_it() {
     let daemon = TestDaemon::start();
     daemon.pair();
     // Paired before any window watched: the first to is told.
-    std::thread::sleep(Duration::from_millis(200));
-    let mut window = daemon.window();
-    window.watch_workspaces().unwrap();
-    let said = said_next(&mut window);
+    let mut window = watching_window(&daemon);
+    let (device, said) = paired_next(&mut window);
     assert!(
         said.contains(&format!("phone ({LOGIN}) paired with the password")),
         "{said}"
     );
-    // Told once: the next window isn't told again.
-    let mut another = daemon.window();
-    another.watch_workspaces().unwrap();
-    another
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    while let Ok(event) = another.next_event() {
-        assert!(!matches!(event, Event::Said(_)), "{event:?}");
-    }
+    // That window went before it said it had shown it: the next is told.
+    drop(window);
+    let mut another = watching_window(&daemon);
+    assert_eq!(paired_next(&mut another).0, device);
+    assert_eq!(
+        another.request(&Request::SeenPaired { device }).unwrap(),
+        Response::Done
+    );
+    // Shown once: no window is told again.
+    let mut third = watching_window(&daemon);
+    assert!(!told_of_paired(&mut third));
 }
 
 #[test]

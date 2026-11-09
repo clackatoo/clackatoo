@@ -1516,6 +1516,17 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::ELSEWHERE, sample)),
     );
+    // A device paired, said in windows' bars until one has shown it.
+    samples.extend(
+        [
+            Server(ServerMessage::Event(Event::Paired {
+                device: 3,
+                said: "phone (you@github) paired with the password".into(),
+            })),
+            Client(ClientMessage::Request(Request::SeenPaired { device: 3 })),
+        ]
+        .map(|sample| (crate::wire::PAIRED, sample)),
+    );
     // A terminal's search for the match a count says (CLACKA-171).
     samples.extend(
         [

@@ -62,6 +62,9 @@ pub(crate) struct Device {
     pub(crate) login: Option<String>,
     /// Where its notifications go, if it asked for them.
     pub(crate) push: Option<Subscription>,
+    /// What a window's bar is to say of its pairing, until a window says
+    /// it has: kept here, so a restart doesn't lose it.
+    pub(crate) unseen: Option<String>,
 }
 
 /// Where a device's notifications go: its browser's push service, and
@@ -126,6 +129,7 @@ impl Devices {
         login: Option<String>,
         password: bool,
         now: u64,
+        unseen: impl FnOnce(u64) -> String,
     ) -> u64 {
         let id = self.next;
         self.next += 1;
@@ -138,6 +142,7 @@ impl Devices {
             password: password.then_some(now),
             login,
             push: None,
+            unseen: Some(unseen(id)),
         });
         self.written_used.push((id, now));
         self.save();
@@ -279,6 +284,10 @@ struct FileDevice {
     login: Option<String>,
     #[serde(default)]
     push: Option<FilePush>,
+    /// Added later, and left out when there's none, so a build before it
+    /// reads the file as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unseen: Option<String>,
 }
 
 /// Where a device's notifications go, as the file keeps it: the keys in
@@ -317,6 +326,7 @@ fn encode(next: u64, locked: bool, devices: &[Device]) -> Vec<u8> {
                     p256dh: b64.encode(&push.p256dh),
                     auth: b64.encode(&push.auth),
                 }),
+                unseen: device.unseen.clone(),
             })
             .collect(),
     };
@@ -372,6 +382,7 @@ fn decode(text: &[u8]) -> Result<Kept, String> {
             password: device.password,
             login: device.login,
             push,
+            unseen: device.unseen,
         });
     }
     let next = (devices.iter().map(|device| device.id + 1))
@@ -538,6 +549,7 @@ mod tests {
                 p256dh: vec![4; 65],
                 auth: vec![9; 16],
             }),
+            unseen: Some(format!("phone {id} paired")),
         }
     }
 
@@ -567,6 +579,14 @@ mod tests {
         assert_eq!(devices[0].name, "iPhone");
         assert_eq!(devices[0].token[31], 1);
         assert_eq!(devices[0].push, None);
+        assert_eq!(devices[0].unseen, None);
+        // One seen is written as a build before it would write it.
+        let seen = Device {
+            unseen: None,
+            ..device(1)
+        };
+        let text = String::from_utf8(encode(2, false, &[seen])).unwrap();
+        assert!(!text.contains("unseen"), "{text}");
         let newer = br#"{"clackatoo_devices":2,"devices":"elsewhere"}"#;
         assert!(decode(newer).unwrap_err().contains("version 2"));
         assert!(decode(b"[]").is_err());
@@ -582,8 +602,12 @@ mod tests {
                 .contains("another daemon"),
             "the first holds the lock"
         );
-        let id = devices.add("iPhone".into(), [1; 32], None, true, 100);
-        devices.add("iPad".into(), [2; 32], None, false, 100);
+        let id = devices.add("iPhone".into(), [1; 32], None, true, 100, |id| {
+            format!("{id} paired")
+        });
+        devices.add("iPad".into(), [2; 32], None, false, 100, |id| {
+            format!("{id} paired")
+        });
         assert!(devices.remove(id + 1));
         devices.flush(Duration::from_secs(5)).unwrap();
         let mode = std::os::unix::fs::PermissionsExt::mode(
@@ -614,8 +638,12 @@ mod tests {
     fn devices_unused_too_long_expire() {
         let dir = tempfile::tempdir().unwrap();
         let mut devices = Devices::open(dir.path()).unwrap();
-        let old = devices.add("old".into(), [1; 32], None, false, 100);
-        let new = devices.add("new".into(), [2; 32], None, false, 100);
+        let old = devices.add("old".into(), [1; 32], None, false, 100, |id| {
+            format!("{id} paired")
+        });
+        let new = devices.add("new".into(), [2; 32], None, false, 100, |id| {
+            format!("{id} paired")
+        });
         devices.used(new, 5000);
         assert_eq!(devices.expire(1000), [old]);
         assert_eq!(devices.list.len(), 1);
