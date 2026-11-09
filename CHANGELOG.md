@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026.11.14 (2026-11-09)
+
+### Fixes
+
+- **agents:** know clackatoo's own tools only by what the adapter says (65d35ac0)
+- **agents:** show what could hide in an agent's question (98ad2c44)
+- **agents:** Always allow commands only where Tools says so (0ade9bbf)
+- **window:** native Control can't run commands or finish macros later (b58a62da)
+- **agents:** Plan and Read-only modes hold for clackatoo's command tools (fc3a2977)
+- **agents:** a tool question goes once Tools are off or the mode rules it out (1a636b93)
+- **agents:** cap the agent's questions and their answers (1a34eabc)
+- **agents:** quote a chat's words when another agent reads them (8d4e80d9)
+- **agents:** show where a command would run as code, and check it's there (19b9c958)
+- **agents:** make fence tags random, not the clock's (a10d788a)
+- **agents:** say an answer was cut off in a finished notice again (4420ce5e)
+- **agents:** a server named clackatoo is ours only if clackatoo serves it (f8004ed9)
+- **window:** Control says it acts as you, and refuses more of what's yours (c125177a)
+- **agents:** tighten questions and quoted answers after review (3e0fcb64)
+- **window:** refuse :update from automation, and Lua's queue under Control (899f509e)
+- **agents:** a chat's MCP server shows a secret per session (7459b121)
+- **agents:** joiners stay only between what shows, three at most (7a216749)
+- **agents:** sign MCP secrets with the machine's key, so upgrades keep them (3fe9c923)
+- **agents:** MCP secrets end with the daemon's run, and keep their sessions (090d8737)
+
 ## 2026.11.13 (2026-11-09)
 
 ### Fixes
