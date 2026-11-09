@@ -1012,6 +1012,17 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    // What an explorer's bar is told, as when changes in its folders won't
+    // be seen.
+    samples.push((
+        crate::wire::FILES_NOTICE,
+        Server(ServerMessage::Event(Event::Files {
+            files,
+            update: FilesUpdate::Notice(
+                "changes in folders won't be seen: raise fs.inotify.max_user_instances".into(),
+            ),
+        })),
+    ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,

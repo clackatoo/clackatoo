@@ -151,6 +151,12 @@ pub enum FilesUpdate {
         /// ordered.
         changes: MarksChanges,
     },
+    /// What the explorer's bar is to say, as that what changes in its
+    /// folders won't be seen, the user's inotify instances or watches
+    /// being all in use, and which limit to raise. Said once to each
+    /// client as it attaches while it's so. New in protocol 138: an older
+    /// peer isn't sent it.
+    Notice(String),
 }
 
 /// What changed from one listing of a directory to the next: the entries

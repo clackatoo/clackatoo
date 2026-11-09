@@ -657,6 +657,16 @@ fn git_that_cant_be_run_says_why() {
     assert_eq!(explorer.label(), why);
 }
 
+#[test]
+fn what_the_daemon_says_of_the_explorer_shows_in_its_bar() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, project());
+    let said = "changes in these folders won't be seen, as all 128 of the user's inotify \
+                instances are in use (raise fs.inotify.max_user_instances)";
+    explorer.update(FilesUpdate::Notice(said.into()));
+    assert_eq!(explorer.label(), said);
+}
+
 /// Ten thousand files in a directory: the time to take them in, flatten
 /// them and draw what's in view, and then to move the cursor and draw
 /// again. Run with `--release --nocapture` for numbers worth reading.

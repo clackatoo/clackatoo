@@ -375,6 +375,10 @@ gates! {
     /// `git_changes`, and `FilesUpdate::GitChanged`, which nothing older
     /// asks for or is sent.
     GIT_CHANGES = 137,
+    /// What an explorer's bar is told, as when what changes in its folders
+    /// won't be seen (CLACKA-222): `FilesUpdate::Notice`, which an older
+    /// peer isn't sent.
+    FILES_NOTICE = 138,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -642,6 +646,7 @@ impl Since for FilesUpdate {
             | Self::NoGit(_) => EARLIER,
             Self::Changed { .. } => FILES_CHANGES,
             Self::GitChanged { .. } => GIT_CHANGES,
+            Self::Notice(_) => FILES_NOTICE,
         }
     }
 }
@@ -1502,7 +1507,8 @@ impl Downgrade for ServerMessage {
     /// which goes only to a window that reads it; and
     /// `FilesUpdate::Changed` and `FilesUpdate::GitChanged`, likewise, as a daemon passing another's
     /// explorer on asks for changes only while every client it passes
-    /// them to reads them.
+    /// them to reads them; and `FilesUpdate::Notice`, which only says in
+    /// the bar what a newer window would, and an older one does without.
     /// `BufferUpdate::Trust` is dropped too, as the daemon asks only a
     /// client that can answer it: an older one's files go without their
     /// folder's language servers, as an unanswered question leaves them.
@@ -1608,7 +1614,10 @@ impl Downgrade for ServerMessage {
                 | Event::Listening(_)
                 | Event::Paired { .. }
                 | Event::Files {
-                    update: FilesUpdate::Changed { .. } | FilesUpdate::GitChanged { .. },
+                    update:
+                        FilesUpdate::Changed { .. }
+                        | FilesUpdate::GitChanged { .. }
+                        | FilesUpdate::Notice(_),
                     ..
                 }
                 | Event::Buffer {
@@ -2439,14 +2448,17 @@ mod tests {
         // sent; and what changed in a folder, or in what git says of an
         // explorer's files, which only a client that asked for changes is
         // sent; and a pane to switch to, which only
-        // a window that reads it is sent;
+        // a window that reads it is sent; and what an explorer's bar is
+        // told, which an older window does without;
         // and the question whether to trust a
         // folder, which only a client that can answer it is asked.
         matches!(
             message,
             ServerMessage::Event(
                 Event::Files {
-                    update: FilesUpdate::Changed { .. } | FilesUpdate::GitChanged { .. },
+                    update: FilesUpdate::Changed { .. }
+                        | FilesUpdate::GitChanged { .. }
+                        | FilesUpdate::Notice(_),
                     ..
                 } | Event::Paired { .. }
                     | Event::NativeRequest { .. }
@@ -2571,6 +2583,7 @@ mod tests {
             changes: crate::MarksChanges::default(),
         };
         assert_eq!(git_changed.since(), GIT_CHANGES);
+        assert_eq!(FilesUpdate::Notice(String::new()).since(), FILES_NOTICE);
         assert_eq!(SettingKind::Browser.since(), EARLIER);
         assert_eq!(SettingKind::Subagents.since(), SUBAGENTS);
         let exited = Event::Exited {

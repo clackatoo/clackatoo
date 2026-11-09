@@ -406,6 +406,12 @@ pub(super) fn needs_inotify() {
     }
 }
 
+/// What an explorer's bar says, as changes in its folders won't be seen,
+/// as `why` says.
+fn not_seen(why: &str) -> String {
+    format!("changes in these folders won't be seen, as {why}")
+}
+
 /// That the user's inotify `what` are all in use, and the sysctl,
 /// `fs.inotify.SYSCTL`, that says how many there may be.
 fn out_of(what: &str, sysctl: &str) -> String {
@@ -564,7 +570,27 @@ impl Daemon {
         if let Some(reason) = self.explorers.no_git {
             self.tell_files(token, files, FilesUpdate::NoGit(reason.to_owned()));
         }
+        if let Some(notice) = self.out_of_inotify().map(not_seen) {
+            self.tell_files(token, files, FilesUpdate::Notice(notice));
+        }
         Ok(Response::Done)
+    }
+
+    /// Tells every client following an explorer that changes in its
+    /// folders won't be seen, and why, as the user's inotify instances or
+    /// watches have just run out.
+    fn tell_explorers_out_of_inotify(&mut self) {
+        let Some(notice) = self.out_of_inotify().map(not_seen) else {
+            return;
+        };
+        let viewers: Vec<(Token, FilesId)> = (self.explorers.list.iter())
+            .flat_map(|(&files, explorer)| {
+                explorer.viewers.iter().map(move |&token| (token, files))
+            })
+            .collect();
+        for (token, files) in viewers {
+            self.tell_files(token, files, FilesUpdate::Notice(notice.clone()));
+        }
     }
 
     /// Answers [`Request::DetachFiles`](clackatoo_protocol::Request::DetachFiles):
@@ -1076,6 +1102,7 @@ impl Daemon {
                     );
                     explorers.out_of_instances = Some(why);
                     explorers.instance_retry = Some((Instant::now() + RETRY_LEAST, RETRY_LEAST));
+                    self.tell_explorers_out_of_inotify();
                 } else if let Some((due, wait)) = &mut explorers.instance_retry
                     && *due <= Instant::now()
                 {
@@ -1165,6 +1192,7 @@ impl Daemon {
                         dir.display()
                     );
                     self.explorers.out_of_watches = Some(why);
+                    self.tell_explorers_out_of_inotify();
                 }
                 Err(Unwatched::Full)
             }

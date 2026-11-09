@@ -695,7 +695,9 @@ impl Explorer {
                 self.marks = marks.iter().cloned().collect();
                 self.git = Some(marks);
             }
-            FilesUpdate::NoGit(reason) => self.message = Some(reason),
+            FilesUpdate::NoGit(reason) | FilesUpdate::Notice(reason) => {
+                self.message = Some(reason);
+            }
         }
     }
 
