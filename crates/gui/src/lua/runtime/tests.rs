@@ -180,27 +180,57 @@ fn the_flag_that_ends_a_slice_cant_stall_a_handler() {
 
 /// The watchdog's limit is on a handler's running, slice by slice, so one
 /// run a slice at a time forever is still stopped; so is one that calls
-/// `coroutine.yield()` forever.
+/// `coroutine.yield()` forever. Each slice adds to what it's run, so
+/// either comes to its limit, however quickly slices run.
 #[test]
 fn a_handler_run_a_slice_at_a_time_forever_is_still_stopped() {
     for body in ["while true do end", "while true do coroutine.yield() end"] {
         let (mut runtime, said) = runtime();
+        runtime.budget = Duration::from_millis(20);
         load(
             &mut runtime,
             &format!("client.on('turnend', function() {body} end)"),
         );
         runtime.handle(turn_ended());
-        let started = Instant::now();
         drain(&mut runtime, |_| {});
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{body}: {:?}",
-            started.elapsed()
-        );
         let said = commands(&said);
         assert!(
             matches!(&said[..], [err] if err.starts_with("error: ") && err.contains("ran too long")),
             "{body}: {said:?}"
         );
     }
+}
+
+/// A handler that's had its time isn't resumed at all.
+#[test]
+fn a_handler_that_has_had_its_time_isnt_resumed() {
+    let (mut runtime, said) = runtime();
+    load(
+        &mut runtime,
+        "client.on('turnend', function() client.cmd('ran') end)",
+    );
+    runtime.handle(turn_ended());
+    let mut job = runtime.background.pop_front().unwrap();
+    job.ran = runtime.budget;
+    runtime.run_slice(job);
+    assert_eq!(commands(&said), ["error: ran too long, so it was stopped"]);
+}
+
+/// The watchdog asking to stop a run as it ends is taken back, so the next
+/// run isn't stopped for it.
+#[test]
+fn a_stop_asked_for_as_a_run_ends_stops_nothing_after() {
+    let (mut runtime, said) = runtime();
+    load(
+        &mut runtime,
+        "client.on('turnend', function() client.cmd('ran') end)",
+    );
+    runtime.watchdog.watch(Duration::from_secs(1), false);
+    // As if its deadline came just as it ended.
+    runtime.watchdog.stop.store(true, Ordering::Relaxed);
+    runtime.watchdog.done();
+    assert!(!runtime.watchdog.stop.load(Ordering::Relaxed));
+    runtime.handle(turn_ended());
+    drain(&mut runtime, |_| {});
+    assert_eq!(commands(&said), ["ran"]);
 }

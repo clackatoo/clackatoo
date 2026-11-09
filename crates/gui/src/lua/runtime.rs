@@ -267,6 +267,8 @@ struct Runtime {
     sliced: Rc<Cell<*mut mlua::lua_State>>,
     /// Set to end the slice running.
     slice: Arc<AtomicBool>,
+    /// How long a handler may run: [`HANDLER_TIME`], but in tests.
+    budget: Duration,
 }
 
 impl Runtime {
@@ -330,6 +332,7 @@ impl Runtime {
             watchdog,
             sliced,
             slice,
+            budget: HANDLER_TIME,
         })
     }
 
@@ -500,7 +503,7 @@ impl Runtime {
             match self.lua.create_thread(handler.clone()) {
                 Ok(thread) => {
                     let job = Job::new(thread, self.args(&event), Some(key.window));
-                    self.run(job, HANDLER_TIME, false);
+                    self.run(job, self.budget, false);
                 }
                 Err(err) => self.report(&err),
             }
@@ -551,6 +554,14 @@ impl Runtime {
     /// `sliced`, then keeps it as what it's come to: finished, waiting on
     /// a request, or to go on as background work.
     fn run(&mut self, mut job: Job, limit: Duration, sliced: bool) {
+        // Not resumed at all once it's had its time, which a slice that
+        // ran to the end of it, or a run of yields, can come to.
+        if job.ran >= limit {
+            self.state.window.set(job.window);
+            self.report(&mlua::Error::runtime("ran too long, so it was stopped"));
+            self.state.window.set(None);
+            return;
+        }
         self.state.loading.set(job.loading);
         self.state.window.set(job.window);
         if sliced {
@@ -572,7 +583,7 @@ impl Runtime {
 
     /// Runs a slice of background work.
     fn run_slice(&mut self, job: Job) {
-        self.run(job, HANDLER_TIME, true);
+        self.run(job, self.budget, true);
     }
 
     /// After `job` was resumed: keeps it to resume again if it waits on a
@@ -1298,10 +1309,15 @@ impl Watchdog {
         });
     }
 
+    /// The run being watched has ended. A stop it asked for too late to
+    /// stop it is taken back, under the lock the watchdog asks it under,
+    /// so it never stops what runs next unwatched, as the prelude's calls
+    /// do, nor the next handler.
     fn done(&self) {
         self.set(|watch| {
             watch.deadline = None;
             watch.slice = None;
+            self.stop.store(false, Ordering::Relaxed);
         });
     }
 }
