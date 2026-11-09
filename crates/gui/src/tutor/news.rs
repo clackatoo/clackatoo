@@ -1229,6 +1229,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Subagents finishing show as a card with each one's answer folded, and other agents' messages as quotes",
     },
+    News {
+        id: "subagents-budget",
+        date: "2026-11-08",
+        lesson: "agents",
+        what: "Agents are told how many more subagents your Subagents setting lets them start, each time they start or list chats",
+    },
 ];
 
 impl News {

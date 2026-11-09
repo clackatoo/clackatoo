@@ -15521,6 +15521,92 @@ fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_fir
     assert_eq!(card_of(&mut client, a).len(), 2, "none started");
 }
 
+/// `start_chats` answers as soon as each chat is added and has its
+/// message, never waiting for its agent's session to open: six whose
+/// sessions take seconds to open are started at once, and the agent is
+/// told how many more it may start (CLACKA-228). The margin is wide, for
+/// a loaded machine: waiting for the sessions would take 3 seconds.
+#[test]
+fn start_chats_answers_before_the_sessions_open_and_says_how_many_more_may_start() {
+    let daemon = TestDaemon::with_tools_and_agent(vec![
+        fake_agent().into(),
+        "--slow-new".into(),
+        "3000".into(),
+    ]);
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kids: Vec<TerminalId> = (1..=6).map(|n| TerminalId(a.0 + n)).collect();
+    let wait = serde_json::json!({ "prompt": "wait" });
+    let six = serde_json::json!({ "chats": vec![wait; 6] });
+    let asked = Instant::now();
+    let node = ask_for(
+        &mut client,
+        a,
+        &format!("mcp start_chats {six}\nmcp list_chats"),
+        Duration::from_secs(10),
+    );
+    let took = asked.elapsed();
+    let words = last_words(&node);
+    assert!(took < Duration::from_secs(2), "took {took:?}: {words}");
+    for kid in &kids {
+        assert!(
+            words.contains(&format!("Started chat {kid} (claude, as general)")),
+            "{words}"
+        );
+    }
+    // None has its session yet; all six count as working, as the
+    // Subagents setting, 6 by default, counts them.
+    let starting = (kids.iter())
+        .filter(|&&kid| chat_now(&mut client, kid).state == ChatState::Starting)
+        .count();
+    assert!(starting > 0, "the sessions opened already: {took:?}");
+    let full = "Subagents: 6 working of the 6 the user lets work at once under this chat; 0 \
+                more may start now.";
+    assert_eq!(
+        words.matches(full).count(),
+        2,
+        "start_chats and list_chats: {words}"
+    );
+    assert_eq!(card_of(&mut client, a).len(), 6);
+    // Each gets its message once its session opens.
+    for &kid in &kids {
+        wait_for_chat_for(&mut client, kid, Duration::from_secs(15), |node| {
+            node.state == ChatState::Ready
+        });
+    }
+}
+
+/// An agent that can't start, for a chat another agent started, fails
+/// that chat after `start_chat` has answered, and the agent waiting for
+/// it hears why (CLACKA-228).
+#[test]
+fn a_chat_whose_agent_cannot_start_tells_the_agent_that_started_it() {
+    let fake = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        std::iter::once(fake_agent().into_os_string())
+            .chain(flags.iter().map(Into::into))
+            .collect()
+    };
+    let daemon = TestDaemon::with_tools_and_agents(vec![
+        custom_agent("claude", fake(&[])),
+        custom_agent("codex", fake(&["--codex", "--broken"])),
+    ]);
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    let start = format!(
+        "mcp start_chat {{\"prompt\":\"hi\",\"agent\":\"codex\"}}\n\
+         mcp wait_for_chat {{\"chat\":{kid},\"timeout\":10}}"
+    );
+    let words = last_words(&ask_for(&mut client, a, &start, Duration::from_secs(15)));
+    assert!(
+        words.contains(&format!("Started chat {kid} (codex")),
+        "{words}"
+    );
+    assert!(words.contains("notarget"), "{words}");
+    let node = chat_now(&mut client, kid);
+    assert!(matches!(node.state, ChatState::Failed(_)), "{node:#?}");
+}
+
 /// A chat that started another and didn't wait for it is told when it
 /// finishes, as a turn of its own a notice from clackatoo starts, and
 /// closes it once it's done with it (CLACKA-186).
@@ -16284,6 +16370,12 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
     ] {
         assert!(told.contains(profile), "{profile}: {told}");
     }
+    // Never how many may work at once, which the user changes: where to
+    // look for it (CLACKA-228).
+    let budget = "The user sets how many may work at once, and may change it: start_chat, \
+                  start_chats, list_chats and the waits say how many are working and how many \
+                  more may start now";
+    assert!(told.contains(budget), "{told}");
     // Without the Task tool, it isn't told of it.
     let without = start_new_chat(
         &mut client,
@@ -16304,6 +16396,7 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
         told.contains("For all subagent work, use start_chat, or start_chats"),
         "{told}"
     );
+    assert!(told.contains(budget), "{told}");
 }
 
 #[test]

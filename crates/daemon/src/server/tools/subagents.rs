@@ -332,6 +332,10 @@ impl Daemon {
     /// `chat`'s agent, as its profile says, and sends it its first
     /// message. Each is checked before any starts, so none starts if one
     /// is refused; one that fails as it starts leaves the others going.
+    /// It answers once each is added and has its message, never waiting
+    /// for its agent's session to open: the message goes as it does, and
+    /// an agent that can't start fails the chat, which a wait for it, or
+    /// the notice that it finished, tells.
     pub(super) fn start_chats(
         &mut self,
         chat: TerminalId,
@@ -392,6 +396,10 @@ impl Daemon {
                 "wait_for_chats waits for their answers, all of them or the first, in one summary."
             }
         });
+        if let Some(budget) = self.budget(chat) {
+            text.push('\n');
+            text.push_str(&budget);
+        }
         Ok(text)
     }
 
@@ -540,7 +548,8 @@ impl Daemon {
     }
 
     /// One summary of the chats `chats`, for the chat `chat`'s agent: how
-    /// each is going, its final answer, and the files it changed.
+    /// each is going, its final answer, and the files it changed, and how
+    /// many more chats it may start now.
     pub(super) fn summary(&self, chat: TerminalId, chats: &[TerminalId]) -> String {
         let finished = (chats.iter()).filter(|&&other| self.settled(other)).count();
         let mut text = match chats.len() {
@@ -561,7 +570,13 @@ impl Daemon {
                  far one has got.",
             );
         }
-        text.trim_end().to_owned()
+        let mut text = text.trim_end().to_owned();
+        // Those that finished may let more start.
+        if let Some(budget) = self.budget(chat) {
+            text.push_str("\n\n");
+            text.push_str(&budget);
+        }
+        text
     }
 
     /// The chat `to`, as a summary tells the chat `chat`'s agent of it:

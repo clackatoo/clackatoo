@@ -124,7 +124,10 @@ pub(crate) const DELEGATING: &str = "For all subagent work, use start_chat, \
     sees each as a card in this chat, opens and steers it, and reviews and \
     undoes what it changes. Use explore for quick research, plan for a \
     plan, and general for work that changes things. Then wait_for_chat or \
-    wait_for_chats gives back the answers in one summary.";
+    wait_for_chats gives back the answers in one summary. The user sets how \
+    many may work at once, and may change it: start_chat, start_chats, \
+    list_chats and the waits say how many are working and how many more \
+    may start now, so go by what they last said.";
 
 /// What the agent is told instead of [`DELEGATING`] when the user has
 /// taken Claude Code's Task tool away.
@@ -134,7 +137,10 @@ pub(crate) const DELEGATING_WITHOUT_TASK: &str = "For all subagent work, use \
     reviews and undoes what it changes. Use explore for quick research, \
     plan for a plan, and general for work that changes things. Then \
     wait_for_chat or wait_for_chats gives back the answers in one \
-    summary.";
+    summary. The user sets how many may work at once, and may change it: \
+    start_chat, start_chats, list_chats and the waits say how many are \
+    working and how many more may start now, so go by what they last \
+    said.";
 
 /// What the agent is told about the browser's tools, when the daemon
 /// supports browsing. The chat's live setting still gates every call.

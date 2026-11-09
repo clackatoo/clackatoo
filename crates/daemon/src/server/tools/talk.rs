@@ -488,9 +488,8 @@ impl Daemon {
         root: TerminalId,
         more: usize,
     ) -> Option<String> {
-        let busy = |other: &&HostedChat| !idle(other);
         let cap = usize::from(cap);
-        let here = (self.started_under(root)).filter(busy).count();
+        let (here, working) = self.working_counts(root);
         if cap == 0 {
             return Some(format!(
                 "the user turned Subagents off for chat {chat}, so no chat it started may work: \
@@ -512,7 +511,6 @@ impl Daemon {
             ));
         }
         let most = usize::from(self.tools.talk.limits.working);
-        let working = (self.started_chats()).filter(busy).count();
         if working >= most {
             return Some(format!(
                 "{most} chats started by agents are working already: wait for one with \
@@ -526,6 +524,87 @@ impl Daemon {
             ));
         }
         None
+    }
+
+    /// How many chats agents started are working under the user's chat
+    /// `root`, and under all the user's chats.
+    fn working_counts(&self, root: TerminalId) -> (usize, usize) {
+        let busy = |other: &&HostedChat| !idle(other);
+        let here = (self.started_under(root)).filter(busy).count();
+        (here, (self.started_chats()).filter(busy).count())
+    }
+
+    /// What the chat `chat`'s agent is told, as `start_chat`, `list_chats`
+    /// and the waits for chats answer, of how many chats it may start
+    /// now, counted as [`Self::talk_refused`] counts them, so that what
+    /// it's told and what it's refused agree. Its limits are the user's
+    /// to set, and change, so the agent is told them as they are, not
+    /// once in its instructions.
+    pub(super) fn budget(&self, chat: TerminalId) -> Option<String> {
+        let own = self.chat_ref(chat)?;
+        let limits = &self.tools.talk.limits;
+        let cap = usize::from(self.subagents_cap(chat));
+        if cap == 0 {
+            return Some(
+                "Subagents: the user turned them off for this chat, so it can start none."
+                    .to_owned(),
+            );
+        }
+        if own.relations().depth >= limits.depth {
+            return Some(
+                "Subagents: this chat is as deep as chats go, so it can start none.".to_owned(),
+            );
+        }
+        let root = own.relations().root.unwrap_or(chat);
+        let (here, working) = self.working_counts(root);
+        let most = usize::from(limits.working);
+        let live = (self.started_under(root)).count();
+        let ever = usize::try_from(self.starts_since_user(root)).unwrap_or(usize::MAX);
+        let started = usize::try_from(limits.started).unwrap_or(usize::MAX);
+        // Each with why it holds, if it holds more than the setting.
+        let held = [
+            (
+                most.saturating_sub(working),
+                format!("{working} of the {most} that may work at once in all are working"),
+            ),
+            (
+                limits.open.saturating_sub(live),
+                format!(
+                    "{live} of the {} that may be open under it are open: close_chat closes \
+                     those you're done with",
+                    limits.open
+                ),
+            ),
+            (
+                started.saturating_sub(ever),
+                format!(
+                    "{ever} of the {started} that may start before the user writes there \
+                     again have started"
+                ),
+            ),
+        ];
+        let free = cap.saturating_sub(here);
+        let whose = if root == chat {
+            "this chat".to_owned()
+        } else {
+            format!("the user's chat {root}")
+        };
+        let mut text = format!(
+            "Subagents: {here} working of the {cap} the user lets work at once under {whose}"
+        );
+        match held
+            .into_iter()
+            .filter(|(left, _)| *left < free)
+            .min_by_key(|(left, _)| *left)
+        {
+            Some((left, why)) => {
+                let _ = write!(text, "; {left} more may start now, as {why}.");
+            }
+            None => {
+                let _ = write!(text, "; {free} more may start now.");
+            }
+        }
+        Some(text)
     }
 
     /// How many chats agents started under the chat `chat` may work at
@@ -849,7 +928,7 @@ impl Daemon {
     }
 
     /// `list_chats`: every chat in this one's workspace or family, with
-    /// where it is and what it's doing.
+    /// where it is and what it's doing, and how many more it may start.
     pub(super) fn list_chats(&self, chat: TerminalId) -> String {
         let workspaces = self.workspaces.get();
         let mut text = format!("This chat is chat {chat}.\n");
@@ -884,6 +963,10 @@ impl Daemon {
                 }
                 None => text.push_str(" (the user's)"),
             }
+            text.push('\n');
+        }
+        if let Some(budget) = self.budget(chat) {
+            text.push_str(&budget);
             text.push('\n');
         }
         text
@@ -1007,7 +1090,7 @@ impl Daemon {
             )));
         }
         if self.settled(to) || timeout.is_zero() {
-            return Some(Ok(self.answer_of(chat, to, false)));
+            return Some(Ok(self.waited_for(chat, to, false)));
         }
         if self.waits_on(to, chat) {
             return Some(Err(format!(
@@ -1074,6 +1157,18 @@ impl Daemon {
     /// its own chats' answers wait for the user, if they do.
     fn answer_of(&self, chat: TerminalId, to: TerminalId, late: bool) -> String {
         self.answer_within(chat, to, late, MAX_READ)
+    }
+
+    /// What `wait_for_chat` answers the chat `chat`'s agent: the chat
+    /// `to`'s answers, as [`Self::answer_of`] gives them, and how many
+    /// more chats it may start now, which one finishing may have changed.
+    fn waited_for(&self, chat: TerminalId, to: TerminalId, late: bool) -> String {
+        let mut text = self.answer_of(chat, to, late);
+        if let Some(budget) = self.budget(chat) {
+            text.push_str("\n\n");
+            text.push_str(&budget);
+        }
+        text
     }
 
     /// [`Self::answer_of`], giving at most `max` bytes of what it said.
@@ -1255,7 +1350,7 @@ impl Daemon {
         self.tools.waiting = kept;
         for waiting in done {
             let answer = match &waiting.what {
-                Wait::Turn { chat, .. } => self.answer_of(waiting.chat, *chat, false),
+                Wait::Turn { chat, .. } => self.waited_for(waiting.chat, *chat, false),
                 Wait::Chats { chats, .. } => self.summary(waiting.chat, chats),
                 _ => continue,
             };
@@ -1599,7 +1694,7 @@ impl Daemon {
 
     /// Answers a call that waited for the chat `to` until it timed out.
     pub(super) fn chat_wait_timed_out(&mut self, waiting: &Waiting, to: TerminalId) {
-        let answer = self.answer_of(waiting.chat, to, true);
+        let answer = self.waited_for(waiting.chat, to, true);
         self.answer_tool(waiting.token, &waiting.id, Ok(answer));
     }
 }
@@ -2120,6 +2215,65 @@ mod tests {
             prompt: "x".to_owned(),
             ..NewChat::default()
         }))
+    }
+
+    /// An agent is told how many more chats it may start now, counted as
+    /// what it starts is refused, and what holds it, if more than its
+    /// Subagents setting does (CLACKA-228).
+    #[test]
+    fn an_agent_is_told_how_many_more_chats_it_may_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let told = |daemon: &Daemon, chat| daemon.budget(chat).unwrap();
+        assert_eq!(
+            told(&daemon, a),
+            "Subagents: 0 working of the 6 the user lets work at once under this chat; 6 more \
+             may start now."
+        );
+        daemon.set_subagents(a, "2");
+        let b = working_chat(&mut daemon, 2, (a, a, 1));
+        assert_eq!(
+            told(&daemon, b),
+            "Subagents: 1 working of the 2 the user lets work at once under the user's chat 1; \
+             1 more may start now."
+        );
+        working_chat(&mut daemon, 3, (a, a, 1));
+        let full = told(&daemon, a);
+        assert!(full.ends_with("; 0 more may start now."), "{full}");
+        assert!(daemon.talk_refused(a, &start()).is_some(), "as refused");
+        // Another of the user's chats is held by how many work in all.
+        let other = idle_chat(&mut daemon, 9);
+        daemon.tools.talk.limits.working = 3;
+        assert_eq!(
+            told(&daemon, other),
+            "Subagents: 0 working of the 3 the user lets work at once under this chat; 1 more \
+             may start now, as 2 of the 3 that may work at once in all are working."
+        );
+        assert_eq!(daemon.talk_refused(other, &start()), None, "as it may");
+        // And by how many may be open under it.
+        daemon.tools.talk.limits.working = 16;
+        daemon.set_subagents(other, "4");
+        daemon.tools.talk.limits.open = 1;
+        let open = told(&daemon, other);
+        assert!(
+            open.ends_with(
+                "; 1 more may start now, as 0 of the 1 that may be open under it are open: \
+                 close_chat closes those you're done with."
+            ),
+            "{open}"
+        );
+        daemon.tools.talk.limits.open = 32;
+        // Off, or as deep as chats go, none.
+        daemon.set_subagents(other, "off");
+        assert_eq!(
+            told(&daemon, other),
+            "Subagents: the user turned them off for this chat, so it can start none."
+        );
+        daemon.tools.talk.limits.depth = 1;
+        assert_eq!(
+            told(&daemon, b),
+            "Subagents: this chat is as deep as chats go, so it can start none."
+        );
     }
 
     /// Under one of the user's chats, as many chats agents started work at
@@ -2864,7 +3018,9 @@ mod tests {
         assert!(
             answer.ends_with(
                 "[finished]\n[Still running in its background: `Run the gate`. When one ends, it \
-                 may go on by itself: wait_for_chat again later to hear what it does.]"
+                 may go on by itself: wait_for_chat again later to hear what it does.]\n\n\
+                 Subagents: 0 working of the 6 the user lets work at once under this chat; 6 \
+                 more may start now."
             ),
             "{answer}"
         );
