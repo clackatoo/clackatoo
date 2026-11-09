@@ -373,6 +373,9 @@ pub(crate) struct Listed {
     /// The session it was forked from, if the agent says: both adapters
     /// put it in `_meta.jetbrains.air.forkedFrom`.
     pub(crate) forked_from: Option<String>,
+    /// It's a branch of the conversation of a chat that has gone, as the
+    /// daemon kept it (see `crate::unlisted`), never as the agent says.
+    pub(crate) branch: bool,
 }
 
 /// The most sessions a listing keeps, newest first, of the many an agent
@@ -1772,6 +1775,7 @@ fn listed_page(result: &Value) -> Vec<Listed> {
                 title: one_line(text("title").unwrap_or_default(), MOST_TITLE),
                 updated: updated.map(str::to_owned),
                 forked_from: forked_from.map(str::to_owned),
+                branch: false,
             })
         })
         .collect()

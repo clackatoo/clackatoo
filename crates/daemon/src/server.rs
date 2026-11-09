@@ -1061,6 +1061,10 @@ pub struct Daemon {
     links: links::Links,
     /// The desktop's display the programs it starts follow, if they do.
     display: Option<crate::display::Display>,
+    /// The agents' sessions the start page leaves out, as branches of
+    /// chats' conversations, kept from one run to the next in a file of
+    /// their own (see [`crate::unlisted`]).
+    unlisted: crate::unlisted::Unlisted,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -1145,6 +1149,9 @@ impl Daemon {
         let mut workspaces = WorkspaceState::with_home(&config.home);
         workspaces.set_machine(machine.clone());
         let links = links::Links::knowing(config.machine.as_deref());
+        let unlisted = crate::unlisted::Unlisted::load(
+            (config.machine.as_deref()).map(crate::unlisted::Unlisted::beside),
+        );
         let display = config.display.clone().map(crate::display::Display::start);
         Ok(Self {
             poll,
@@ -1217,6 +1224,7 @@ impl Daemon {
             runtime,
             links,
             display,
+            unlisted,
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -2671,6 +2679,8 @@ impl Daemon {
         let terminal = match slot.terminal {
             Hosted::Pty(terminal) => terminal,
             Hosted::Chat(chat) => {
+                // Its branches stay off the start page once it's gone.
+                self.note_branches_of(&chat);
                 self.close_chat(id, &chat);
                 self.forget_glance(id);
                 self.hand_back_forked(id);

@@ -548,6 +548,15 @@ pub(crate) struct HostedChat {
     /// The session the chat's tasks were started in: a stop goes to that
     /// session only.
     tasks_session: Option<String>,
+    /// The tool calls of the turn being answered that the agent said run
+    /// in a terminal of their own, the latest few (see `tasks.rs`): one
+    /// still running as the turn ends well was left running in the
+    /// background.
+    terminals: VecDeque<String>,
+    /// Where the row of each command left running in the background was
+    /// last found, by its tool call's ID: the turn it's in. Not handed
+    /// over: it's looked for again.
+    background_rows: Vec<(String, TurnUid)>,
     /// The tool calls the adapter said were of clackatoo's own tools as
     /// they began, the latest few (see [`own_call`]): a question about one
     /// is about our own tool, unless the question says otherwise.
@@ -809,6 +818,8 @@ impl HostedChat {
             wake_held: None,
             idle_taken: None,
             tasks_session: None,
+            terminals: VecDeque::new(),
+            background_rows: Vec::new(),
             own_tools: VecDeque::new(),
             own_server_lost: false,
             mcp_tokens: VecDeque::new(),
@@ -2832,6 +2843,7 @@ impl HostedChat {
                     call.raw_input.as_ref(),
                     call.meta.as_ref(),
                 );
+                self.note_terminal(&call.tool_call_id.0, call.meta.as_ref(), &call.content);
                 let mut tool = Tool {
                     id: call.tool_call_id.0.to_string(),
                     title: clean(&call.title),
@@ -2873,6 +2885,16 @@ impl HostedChat {
                 return wrote;
             }
             SessionUpdate::ToolCallUpdate(update) => {
+                let id = update.tool_call_id.0.to_string();
+                // A command the agent left running in the background, after
+                // the turn it ran in: its row stays where it is, never one
+                // in the turn answering now. Nothing told again is one.
+                if !self.told_again()
+                    && self.tool(&id).is_none()
+                    && self.background_said(&id, &update)
+                {
+                    return None;
+                }
                 self.progressed();
                 // More of a compaction shown as a line already.
                 if self.compacted(&update.tool_call_id.0) {
@@ -2890,7 +2912,8 @@ impl HostedChat {
                     update.fields.raw_input.as_ref(),
                     update.meta.as_ref(),
                 );
-                let id = update.tool_call_id.0.to_string();
+                let shows = update.fields.content.as_deref().unwrap_or_default();
+                self.note_terminal(&id, update.meta.as_ref(), shows);
                 let known = self.tool(&id).cloned();
                 let mut tool = known.clone().unwrap_or(Tool {
                     id: id.clone(),
@@ -3260,19 +3283,22 @@ impl HostedChat {
     /// append. Past twice what a tool keeps, it's cut back to the end of
     /// it, which goes as the tool again.
     fn add_output(&mut self, id: &str, meta: Option<&serde_json::Map<String, Value>>) {
-        let Some(meta) = meta else { return };
-        let data = ["terminal_output_delta", "terminal_output"]
-            .iter()
-            .find_map(|key| meta.get(*key)?.get("data")?.as_str());
-        let (Some(data), Some(turn)) = (data, self.answering_turn()) else {
+        let (Some(data), Some(turn)) = (streamed_output(meta), self.answering_turn()) else {
             return;
         };
-        let items = &mut self.node.turns[turn].items;
+        let items = &self.node.turns[turn].items;
         let Some(at) =
             (items.iter()).position(|item| item.tool().is_some_and(|tool| tool.id == id))
         else {
             return;
         };
+        self.append_output(turn, at, data);
+    }
+
+    /// Adds `data` to the end of the output of the tool at item `at` of
+    /// turn `turn`, as [`add_output`](Self::add_output) does.
+    fn append_output(&mut self, turn: usize, at: usize, data: &str) {
+        let items = &mut self.node.turns[turn].items;
         let tool = items[at].tool_mut().expect("a tool");
         let text = clean_text(data);
         tool.append_output(&text);
@@ -3387,10 +3413,15 @@ impl HostedChat {
                 self.forget_plan();
             }
         }
+        // A command the agent left running in the background goes on, on
+        // the shelf (see `tasks.rs`); every other tool still running never
+        // finished.
+        let left = self.left_running(index, &outcome);
         let turn = &mut self.node.turns[index];
         for item in &mut turn.items {
             if let Some(tool) = item.tool_mut()
                 && tool.status == ToolStatus::Running
+                && !left.iter().any(|left| left.id == tool.id)
             {
                 tool.status = ToolStatus::Failed;
             }
@@ -3402,6 +3433,7 @@ impl HostedChat {
             spent,
         });
         self.patch_turn(index);
+        self.left_in_background(index, left);
         // The agent's questions went with the turn. Those of clackatoo's
         // tools wait for their calls to be answered or cancelled, and an
         // offer to install stays until it's answered.
@@ -3726,6 +3758,7 @@ impl HostedChat {
     fn push_turn(&mut self, turn: Turn) {
         self.before_push();
         self.diffs.clear();
+        self.terminals.clear();
         self.woken_stopping = false;
         self.facts_begin();
         // The user's, for Up to recall: as each viewer's copy keeps it,
@@ -4393,6 +4426,15 @@ fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
             _ => None,
         })
         .collect()
+}
+
+/// What `meta` streams of a command's output, as Codex's adapter streams
+/// it (and Zed's convention, `terminal_output`).
+fn streamed_output(meta: Option<&serde_json::Map<String, Value>>) -> Option<&str> {
+    let meta = meta?;
+    ["terminal_output_delta", "terminal_output"]
+        .iter()
+        .find_map(|key| meta.get(*key)?.get("data")?.as_str())
 }
 
 fn tool_locations(locations: &[ToolCallLocation]) -> Vec<Location> {
@@ -8521,6 +8563,104 @@ mod tests {
         // it had by then; the second; then the output since.
         assert_eq!(items, [(0, false), (1, false), (0, true)]);
         assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+    }
+
+    /// A command Codex leaves running as its turn ends goes on, on the
+    /// shelf, its row still running; what's said of it later goes to that
+    /// row, wherever the conversation has got to, and its end ends both
+    /// (CLACKA-232).
+    #[test]
+    fn a_command_left_running_as_a_turn_ends_goes_on_on_the_shelf() {
+        use clackatoo_protocol::AgentTaskState;
+
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "serve it");
+        start_command(&mut chat);
+        output(&mut chat, "listening\n");
+        // A tool running with no terminal of its own isn't one.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"f","title":"Read x","kind":"read",
+                "status":"in_progress"}"#,
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+        let row =
+            |chat: &HostedChat, at: usize| chat.node.turns[0].items[at].tool().cloned().unwrap();
+        assert_eq!(row(&chat, 0).status, ToolStatus::Running);
+        assert_eq!(row(&chat, 1).status, ToolStatus::Failed);
+        let [task] = chat.node.tasks.as_slice() else {
+            panic!("{:?}", chat.node.tasks)
+        };
+        assert_eq!(
+            (
+                task.id.as_str(),
+                task.title.as_str(),
+                task.state,
+                task.can_stop
+            ),
+            ("tool:e", "cat x", AgentTaskState::Running, false)
+        );
+        assert_eq!(task.output, None, "nothing to follow");
+        assert!(chat.has_tasks_going());
+        // What it prints with no turn open goes to its row.
+        output(&mut chat, "GET /\n");
+        let printed = |text: &str| vec![ToolContent::Output(text.into())];
+        assert_eq!(row(&chat, 0).content, printed("listening\nGET /\n"));
+        // And during a later turn, never as a row of that turn.
+        send(&mut chat, "and now");
+        output(&mut chat, "GET /x\n");
+        assert!(
+            chat.node.turns[1].items.is_empty(),
+            "{:?}",
+            chat.node.turns[1]
+        );
+        assert_eq!(row(&chat, 0).content, printed("listening\nGET /\nGET /x\n"));
+        // It ends, with all it printed, as Codex's adapter sends it once a
+        // later message has gone.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed",
+                "kind":"execute","title":"cat x",
+                "_meta":{"terminal_output_delta":{"data":"listening\nGET /\nGET /x\nbye\n","terminal_id":"e"},
+                         "terminal_exit":{"exit_code":0,"signal":null,"terminal_id":"e"}}}"#,
+        );
+        let ended = row(&chat, 0);
+        assert_eq!((ended.status, ended.exit), (ToolStatus::Done, Some(0)));
+        assert_eq!(ended.content, printed("listening\nGET /\nGET /x\nbye\n"));
+        assert!(chat.node.turns[1].items.is_empty());
+        let task = &chat.node.tasks[0];
+        assert_eq!(task.state, AgentTaskState::Done);
+        assert_eq!(task.summary.as_deref(), Some("exit code 0"));
+        assert!(!chat.has_tasks_going());
+    }
+
+    /// A command running as a turn is stopped is taken to end with it; one
+    /// left running in the background is lost with its agent, its row
+    /// failed (CLACKA-232).
+    #[test]
+    fn a_command_of_a_turn_stopped_or_an_agent_gone_ends_with_it() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "serve it");
+        start_command(&mut chat);
+        chat.answered(Ok(StopReason::Cancelled));
+        let status = |chat: &HostedChat| chat.node.turns[0].items[0].tool().unwrap().status;
+        assert_eq!(status(&chat), ToolStatus::Failed);
+        assert!(chat.node.tasks.is_empty());
+
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "serve it");
+        start_command(&mut chat);
+        chat.answered(Ok(StopReason::EndTurn));
+        assert_eq!(status(&chat), ToolStatus::Running);
+        chat.disconnected(None);
+        assert_eq!(
+            chat.node.tasks[0].state,
+            clackatoo_protocol::AgentTaskState::Lost
+        );
+        assert_eq!(status(&chat), ToolStatus::Failed);
     }
 
     #[test]

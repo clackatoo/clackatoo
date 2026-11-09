@@ -1951,6 +1951,16 @@ pub struct AgentSession {
     /// The chat that has it open now, if one does: showing that chat is
     /// resuming it.
     pub chat: Option<crate::TerminalId>,
+    /// It's a branch of the conversation of a chat that has gone, which
+    /// clackatoo forked or left as the chat was rewound or switched
+    /// branches: the start page lists it only when asked. A daemon sends a
+    /// client older than protocol 135 none of these.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::BRANCH_SESSIONS }, _>",
+        deserialize_with = "wire::since::<{ wire::BRANCH_SESSIONS }, _, _>"
+    )]
+    pub branch: bool,
 }
 
 /// A session an agent kept, for a new chat to go on with instead of

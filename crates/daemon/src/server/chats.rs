@@ -333,15 +333,22 @@ impl Daemon {
         else {
             return;
         };
+        // A window from before branches were marked would list them as
+        // conversations of their own.
+        let branches = self
+            .client_wire(client)
+            .is_some_and(|wire| wire >= clackatoo_protocol::wire::BRANCH_SESSIONS);
         let sessions = result.map(|listed| {
             (listed.into_iter())
                 .filter(|listed| Path::new(&listed.cwd) == Path::new(&cwd))
+                .filter(|listed| branches || !listed.branch)
                 .map(|listed| AgentSession {
                     chat: self.holder_of(name, &listed.session),
                     session: listed.session,
                     title: listed.title,
                     cwd: listed.cwd,
                     updated: listed.updated,
+                    branch: listed.branch,
                 })
                 .collect()
         });
@@ -363,7 +370,7 @@ impl Daemon {
         if unlisting {
             self.agents.unlisting.insert(name.to_owned());
         }
-        let result = result.map(|listed| self.without_branches(listed));
+        let result = result.map(|listed| self.without_branches(name, listed));
         self.sessions_listed(listing, name, result);
         self.stop_if_unneeded(agent);
     }
@@ -1552,7 +1559,10 @@ impl Daemon {
                 let actions = chat.connected(opened);
                 self.act(terminal, actions);
                 self.note_settings(terminal);
-                // Its session may be a new one.
+                // Its session may be a new one, leaving the one before a
+                // branch: the start page leaves out that one, and lists
+                // this, a branch once, gone on with.
+                self.note_branches(terminal);
                 self.keep_soon();
             }
             // The session is open in another of the agent's clients: it's

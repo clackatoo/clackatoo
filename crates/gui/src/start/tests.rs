@@ -91,6 +91,7 @@ fn session(id: &str, title: &str, chat: Option<u32>) -> AgentSession {
         cwd: "/home/me/project".to_owned(),
         updated: Some("2026-10-12T09:00:00Z".to_owned()),
         chat: chat.map(TerminalId),
+        branch: false,
     }
 }
 
@@ -394,5 +395,37 @@ fn esc_after_slash_with_nothing_typed_picks_the_new_chat_again() {
     assert!(matches!(
         named(&mut page, NamedKey::Enter),
         Outcome::Start(_)
+    ));
+}
+
+/// Sessions that are branches of chats that have gone are left out, the
+/// count saying how many, until `b` lists them too (CLACKA-232).
+#[test]
+fn branches_of_chats_gone_are_listed_only_when_asked() {
+    let mut branch = session("s2", "Try it another way", None);
+    branch.branch = true;
+    let sessions = vec![session("s1", "Fix the parser", None), branch];
+    let mut page = page(LastChat::default(), Vec::new(), sessions);
+    let rows = shown(&mut page);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[1].starts_with("Fix the parser"), "{rows:?}");
+    assert_eq!(page.view((10, 80), None).count, "1 / 1 · b lists 1 branch");
+    assert_eq!(type_text(&mut page, "b"), Outcome::Changed);
+    let rows = shown(&mut page);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        rows[2].starts_with("Try it another way") && rows[2].ends_with(", branch"),
+        "{rows:?}"
+    );
+    assert_eq!(page.view((10, 80), None).count, "2 / 2");
+    // `b` again leaves them out again.
+    type_text(&mut page, "b");
+    assert_eq!(shown(&mut page).len(), 2);
+    // Listed, one is gone on with as any session is.
+    type_text(&mut page, "b");
+    named(&mut page, NamedKey::End);
+    assert!(matches!(
+        named(&mut page, NamedKey::Enter),
+        Outcome::Resume { session, .. } if session.session == "s2"
     ));
 }

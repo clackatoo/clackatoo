@@ -130,6 +130,11 @@ impl Daemon {
         let Some(cwd) = listings.cwds.remove(&number) else {
             return;
         };
+        // A window from before branches were marked would list them as
+        // conversations of their own.
+        let branches = (self.client_wire(token))
+            .is_some_and(|wire| wire >= clackatoo_protocol::wire::BRANCH_SESSIONS);
+        let linked = &self.links.list[at];
         let mirror = &linked.relayed.mirror;
         let host = &linked.remote.host;
         let sessions = match sessions {
@@ -138,7 +143,8 @@ impl Daemon {
                     let shown = !session.session.is_empty()
                         && session.session.len() <= MOST_ID
                         && !session.session.contains(char::is_control)
-                        && Path::new(&session.cwd) == Path::new(&cwd);
+                        && Path::new(&session.cwd) == Path::new(&cwd)
+                        && (branches || !session.branch);
                     shown.then(|| AgentSession {
                         title: shown_name(&session.title)
                             .chars()
@@ -152,6 +158,7 @@ impl Daemon {
                             .map(TerminalId),
                         session: session.session,
                         cwd: cwd.clone(),
+                        branch: session.branch,
                     })
                 })
                 .take(MOST_LISTED)
@@ -212,6 +219,71 @@ mod tests {
             .collect()
     }
 
+    /// A window from before branches of chats' conversations were marked
+    /// is sent none of another machine's, as it would list them as
+    /// conversations of their own (CLACKA-232).
+    #[test]
+    fn a_window_from_before_branches_were_marked_is_sent_none() {
+        use std::io::Read as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let (window, mut from_daemon) = client(&mut daemon);
+        let old = clackatoo_protocol::wire::BRANCH_SESSIONS - 1;
+        let Some(crate::server::Source::Client(older)) = daemon.sources.get_mut(window.0) else {
+            panic!("no window");
+        };
+        older.wire = old;
+        let ask = ClientMessage::ListSessions {
+            id: 8,
+            agent: "claude".into(),
+            cwd: "/src".into(),
+            on: Some(desk().id),
+        };
+        assert!(daemon.route_message(window, ask).is_none());
+        let [ClientMessage::ListSessions { id: number, .. }] = &heard(&mut there)[..] else {
+            panic!("not asked there");
+        };
+        let session = |id: &str, branch: bool| AgentSession {
+            session: id.into(),
+            title: String::new(),
+            cwd: "/src".into(),
+            updated: None,
+            chat: None,
+            branch,
+        };
+        let answer = Event::Sessions {
+            id: *number,
+            sessions: Ok(vec![session("s1", false), session("s2", true)]),
+        };
+        say(&mut there, &ServerMessage::Event(answer));
+        daemon.read_reached(link, Reading::Last);
+        // Read as the older window reads it.
+        let mut decoder = clackatoo_protocol::frame::FrameDecoder::new();
+        let mut buffer = vec![0; 65536];
+        loop {
+            match from_daemon.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => decoder.push(&buffer[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => panic!("{err}"),
+            }
+        }
+        let listed: Vec<String> =
+            std::iter::from_fn(|| decoder.decode::<ServerMessage>(old).unwrap())
+                .filter_map(|message| match message {
+                    ServerMessage::Event(Event::Sessions {
+                        id: 8,
+                        sessions: Ok(sessions),
+                    }) => Some(sessions),
+                    _ => None,
+                })
+                .flatten()
+                .map(|session| session.session)
+                .collect();
+        assert_eq!(listed, ["s1"]);
+    }
+
     /// A listing too big to take in is still answered, with an error: the
     /// start page never waits for ever.
     #[test]
@@ -235,6 +307,7 @@ mod tests {
             cwd: "/src".into(),
             updated: None,
             chat: None,
+            branch: false,
         };
         let answer = ServerMessage::Event(Event::Sessions {
             id: *number,
@@ -336,6 +409,7 @@ mod tests {
             cwd: cwd.into(),
             updated: Some("2026-10-13T20:54:20Z".into()),
             chat: None,
+            branch: false,
         };
         let mut sessions = vec![
             AgentSession {
@@ -346,6 +420,11 @@ mod tests {
                 chat: Some(TerminalId(99)),
                 updated: Some("x".repeat(100)),
                 ..session("s2", "/src/", &"t".repeat(500))
+            },
+            // A branch of a chat gone there stays one (CLACKA-232).
+            AgentSession {
+                branch: true,
+                ..session("s4", "/src", "Try another way")
             },
             // Elsewhere, and IDs no agent gives, are left out.
             session("s3", "/etc", ""),
@@ -379,11 +458,13 @@ mod tests {
         assert_eq!(listed[1].title.chars().count(), MOST_TITLE);
         assert_eq!(listed[1].updated, None);
         assert_eq!(listed[1].cwd, "/src");
+        assert!(!listed[1].branch);
+        assert_eq!((listed[2].session.as_str(), listed[2].branch), ("s4", true));
         assert!(
             listed
                 .iter()
                 .all(|session| !session.session.starts_with('s')
-                    || ["s1", "s2"].contains(&session.session.as_str()))
+                    || ["s1", "s2", "s4"].contains(&session.session.as_str()))
         );
 
         // Answered once: a second answer goes nowhere. And why there are

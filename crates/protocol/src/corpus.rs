@@ -535,6 +535,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     cwd: "/src".into(),
                     updated: Some("2026-10-13".into()),
                     chat: Some(terminal),
+                    branch: false,
                 }]),
             })),
         ),
@@ -969,6 +970,22 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ))),
         ),
     ]);
+    // A branch of the conversation of a chat that has gone, which the start
+    // page lists only when asked (CLACKA-232).
+    samples.push((
+        crate::wire::BRANCH_SESSIONS,
+        Server(ServerMessage::Event(Event::Sessions {
+            id: 3,
+            sessions: Ok(vec![AgentSession {
+                session: "s-2".into(),
+                title: "Earlier, another way".into(),
+                cwd: "/src".into(),
+                updated: Some("2026-11-09".into()),
+                chat: Some(TerminalId(3)),
+                branch: true,
+            }]),
+        })),
+    ));
     // A preview of an open file, coloured as its buffer is.
     samples.push((
         PREVIEW_COLOURS,

@@ -1283,6 +1283,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "The bar says whenever a phone pairs, with how to unpair it; phones can't list or unpair others",
     },
+    News {
+        id: "codex-background",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "Commands Codex leaves running after its turn show on the background shelf, their rows still running",
+    },
+    News {
+        id: "branch-sessions",
+        date: "2026-11-09",
+        lesson: "agents",
+        what: "The start page leaves out branches of chats you've closed; b lists them",
+    },
 ];
 
 impl News {

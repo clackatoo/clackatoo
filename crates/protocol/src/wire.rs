@@ -361,6 +361,10 @@ gates! {
     /// client that said it's a window (`Request::Window`), and
     /// `Request::SeenPaired`, which only such a window sends.
     PAIRED = 134,
+    /// Sessions that are branches of the conversations of chats that have
+    /// gone, which the start page lists only when asked (CLACKA-232):
+    /// `AgentSession`'s `branch`. An older client is sent none of them.
+    BRANCH_SESSIONS = 135,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

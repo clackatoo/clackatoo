@@ -275,6 +275,9 @@ impl Daemon {
         }
         // Another build may keep them from here on: an upgrade's.
         self.keeping.lock = None;
+        // And the sessions the start page leaves out, read again by the
+        // next run, or the build an upgrade starts.
+        self.unlisted.kept();
     }
 
     /// Takes in where a window says editor `pane` is, to keep. Anything

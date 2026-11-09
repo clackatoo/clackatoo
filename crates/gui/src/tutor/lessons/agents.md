@@ -165,6 +165,8 @@ Under each turn that changed files, a compact summary shows how many, with Undo 
 
 Nothing is lost: what you rewound from stays in the chat as another branch. Where branches part, `‹ 2/3 ›` shows over the turn; click an arrow, or press `[b` and `]b`, to switch, and `:branches` lists them all. The agent goes on with each branch's own session. To keep a conversation and go on from it separately too, `:fork` copies it into a new chat, and `:|fork` puts the copy beside.
 
+Each branch is a session of the agent's of its own, but the start page lists a chat once, as the branch it last showed, even once you've closed it. The count at the top says how many branches of closed chats it leaves out, as `b lists 2 branches`: press `b` there, with nothing typed, to list them too, each saying `branch`, and Enter goes on with one in a new chat.
+
 ## Subagents
 
 An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working · 12s ›`. Click it, or press Enter or `za` on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going; `zR` opens every card in the chat. Click one, or press Enter on its line, to open it as a pane.
@@ -246,6 +248,12 @@ If you have a chat open, ask it to run `sleep 30` in the background, watch the s
 Click a line on that shelf, or type `:taskoutput`, to read what its command printed: a terminal opens below the chat, showing the last 256 KiB of the output and following it as it grows, colours and all, with scrollback, `/` search and yanks as any terminal has. `:taskoutput 2` opens the second line's. `:q` in it closes it; the command goes on. Claude Code writes each background command's output to a file on the daemon's machine and its adapter says where, which is all the agent shares: it never sends the output itself. So an agent that doesn't say, or a task from before an upgrade, has nothing to follow, and the bar says so; ask the agent to show you the output instead.
 
 If you have a chat open, ask it to run `for i in 1 2 3 4 5; do echo $i; sleep 2; done` in the background, then click its line on the shelf and watch the numbers come.
+
+## Codex's background commands
+
+Codex can leave a command running when its turn ends, such as a dev server it started. Its adapter doesn't list those to clackatoo, but its command's row stays open until the command ends, so clackatoo lists it on the same shelf, as `● npm run dev — running 2m 4s`. Its row in the turn stays `○` and goes on showing what it prints; when the command ends, the row says how, with its exit code, and so does the shelf. There's no stop button and nothing for `:taskoutput` to follow: ask Codex to stop it, and read its output in the row.
+
+If you have a Codex chat open, ask it to start `sleep 60` and leave it running in the background, then watch its line on the shelf.
 
 ## Slash commands
 

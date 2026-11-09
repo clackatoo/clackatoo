@@ -8,9 +8,30 @@
 //! message. Nothing is told of one again once its agent has gone, so a
 //! task still going then is marked lost, never left running for ever: its
 //! process went with the agent's.
+//!
+//! # Commands left running in the background
+//!
+//! Codex's adapter says nothing of what Codex runs in the background (its
+//! `/ps`) but to a client that asks as JetBrains' AIR does, which it then
+//! sends no command's output (CLACKA-232). It shows anyway: a command
+//! still running as Codex ends its turn is one Codex left running, as the
+//! tool call that ran it stays open until the command ends, saying so
+//! then, and its output goes on coming as it runs. So a command the
+//! agent said runs in a terminal of its own (`_meta.terminal_info`, or a
+//! `terminal` block in what it shows), still running as a turn ends well,
+//! is listed as a task, `tool:` and its tool call's ID, which can't be
+//! stopped from here, and its row goes on running where it is, rather
+//! than failing with the turn: what the agent says of it later goes to
+//! that row, wherever the conversation has got to, and ends the task as
+//! the command ends. Claude Code's adapter finishes the row of a command
+//! it moves to the background, so it never takes this path.
 
-use agent_client_protocol_schema::v1::StopReason;
-use clackatoo_protocol::{AgentTask, AgentTaskKind, AgentTaskState, ChatPatch};
+use agent_client_protocol_schema::v1::{StopReason, ToolCallContent, ToolCallUpdate};
+use clackatoo_protocol::{
+    AgentTask, AgentTaskKind, AgentTaskState, ChatPatch, Item, Outcome, Tool, ToolContent,
+    ToolKind, ToolStatus,
+};
+use serde_json::Value;
 
 use super::{Action, HostedChat, now};
 use crate::agent::Task;
@@ -19,6 +40,14 @@ use crate::handover;
 /// The most tasks a chat keeps: the oldest that ended go first, then the
 /// oldest going.
 const MOST_TASKS: usize = 16;
+
+/// What the ID of a task that stands for a command the agent left running
+/// in the background starts with, before its tool call's ID.
+const FROM_TOOL: &str = "tool:";
+
+/// The most tool calls of a turn the chat remembers run in a terminal of
+/// their own: far more than a turn leaves running.
+const MOST_TERMINALS: usize = 256;
 
 impl HostedChat {
     /// Takes what the agent said of a task it runs in the background.
@@ -229,16 +258,38 @@ impl HostedChat {
     /// The process that ran the chat's tasks has gone: those still going
     /// are lost, as nothing more will be told of them.
     pub(super) fn tasks_lost(&mut self) {
-        if !self.node.tasks.iter().any(AgentTask::going) {
+        self.lose_tasks(|_| true);
+    }
+
+    /// The branch shown is left, and its session with it: what it runs
+    /// in the background that the agent can't be asked to stop is lost to
+    /// the chat, as nothing more of it comes here. Those it can be asked
+    /// to stop are, as the branch is left (see `branches.rs`).
+    pub(super) fn tasks_left_behind(&mut self) {
+        self.lose_tasks(|task| !task.can_stop);
+    }
+
+    /// Marks the tasks going that `which` picks lost, and the rows of the
+    /// commands among them failed.
+    fn lose_tasks(&mut self, which: impl Fn(&AgentTask) -> bool) {
+        if !self
+            .node
+            .tasks
+            .iter()
+            .any(|task| task.going() && which(task))
+        {
             return;
         }
         let mut tasks = self.node.tasks.clone();
         let ended = now();
-        for task in tasks.iter_mut().filter(|task| task.going()) {
+        let mut lost = Vec::new();
+        for task in (tasks.iter_mut()).filter(|task| task.going() && which(&**task)) {
             task.state = AgentTaskState::Lost;
             task.ended = Some(ended);
+            lost.push(task.id.clone());
         }
         self.set_tasks(tasks);
+        self.background_rows_ended(&lost);
     }
 
     /// Lets go of the tasks that have ended, as the user sends a message.
@@ -274,6 +325,220 @@ impl HostedChat {
     }
 }
 
+/// Commands the agent left running in the background (see the module
+/// docs).
+impl HostedChat {
+    /// Notes that tool call `id` of the turn being answered runs in a
+    /// terminal of its own, if the agent says so: in `meta`'s
+    /// `terminal_info`, as Codex's adapter does (and Zed's convention), or
+    /// with a `terminal` block in `content`, what it shows. One told again
+    /// ran long ago: the last turn a load tells, ending, leaves nothing
+    /// running.
+    pub(super) fn note_terminal(
+        &mut self,
+        id: &str,
+        meta: Option<&serde_json::Map<String, Value>>,
+        content: &[ToolCallContent],
+    ) {
+        if self.told_again() {
+            return;
+        }
+        let says = meta.is_some_and(|meta| meta.contains_key("terminal_info"))
+            || (content.iter()).any(|content| matches!(content, ToolCallContent::Terminal(_)));
+        if !says || self.terminals.iter().any(|known| known == id) {
+            return;
+        }
+        if self.terminals.len() >= MOST_TERMINALS {
+            self.terminals.pop_front();
+        }
+        self.terminals.push_back(id.to_owned());
+    }
+
+    /// The commands of turn `index`, ending as `outcome` says, that the
+    /// agent left running in the background: those still running in a
+    /// terminal of their own as it ends well. None of a turn stopped or
+    /// failed, whose commands may be ending with it, or of one told again,
+    /// which ran long ago. A subagent's are its own, under its card.
+    pub(super) fn left_running(&self, index: usize, outcome: &Outcome) -> Vec<Tool> {
+        if *outcome != Outcome::Done || self.told_again() || self.terminals.is_empty() {
+            return Vec::new();
+        }
+        (self.node.turns[index].items.iter())
+            .filter_map(|item| match item {
+                Item::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .filter(|tool| {
+                tool.status == ToolStatus::Running
+                    && tool.kind == ToolKind::Execute
+                    && self.terminals.contains(&tool.id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Lists `left`, the commands the agent left running in the background
+    /// as turn `index` ended, as tasks of the chat's: each going until the
+    /// agent says its command has ended (see
+    /// [`background_said`](Self::background_said)).
+    pub(super) fn left_in_background(&mut self, index: usize, left: Vec<Tool>) {
+        if left.is_empty() {
+            return;
+        }
+        let turn = self.turn_uid(index);
+        let mut tasks = self.node.tasks.clone();
+        for tool in left {
+            log::info!(
+                "chat {}: {} left `{}` running in the background",
+                self.id,
+                self.agent,
+                tool.title
+            );
+            if let Some(turn) = turn {
+                self.remember_row(&tool.id, turn);
+            }
+            let task = AgentTask {
+                id: format!("{FROM_TOOL}{}", tool.id),
+                kind: AgentTaskKind::Shell,
+                title: tool.title.clone(),
+                command: Some(tool.title),
+                state: AgentTaskState::Running,
+                summary: None,
+                started: now(),
+                ended: None,
+                can_stop: false,
+                output: None,
+            };
+            if let Some(known) = tasks.iter_mut().find(|known| known.id == task.id) {
+                *known = task;
+            } else {
+                tasks.push(task);
+                bound(&mut tasks);
+            }
+        }
+        self.tasks_session.clone_from(&self.session);
+        self.set_tasks(tasks);
+    }
+
+    /// Takes `update`, of tool call `id`, which isn't the turn answering's,
+    /// if it's of a command the agent left running in the background:
+    /// what it printed goes on its row, wherever that is now, and once the
+    /// agent says the command ended, so does the row, with its exit code,
+    /// and the task. Returns whether it took it. An end that brings output
+    /// brings all of it: Codex's adapter sends again what the command
+    /// printed as it ends, once a later message has been sent, as it no
+    /// longer knows what it streamed; so it takes the place of what the row
+    /// shows.
+    pub(super) fn background_said(&mut self, id: &str, update: &ToolCallUpdate) -> bool {
+        let task = format!("{FROM_TOOL}{id}");
+        let Some(at_task) = self.node.tasks.iter().position(|known| known.id == task) else {
+            return false;
+        };
+        let status = update.fields.status.map(super::tool_status);
+        let ended = status.filter(|status| *status != ToolStatus::Running);
+        let raw = update.fields.raw_output.as_ref();
+        let exit = super::facts::exit_code(update.meta.as_ref(), raw, ToolKind::Execute);
+        let output = super::streamed_output(update.meta.as_ref());
+        if let Some((turn, at)) = self.background_row(id) {
+            let item = &mut self.node.turns[turn].items[at];
+            if let Item::Tool(tool) = item {
+                let mut changed = false;
+                if let Some(status) = ended.filter(|status| *status != tool.status) {
+                    tool.status = status;
+                    changed = true;
+                }
+                if let Some(code) = exit.filter(|code| tool.exit != Some(*code)) {
+                    tool.exit = Some(code);
+                    changed = true;
+                }
+                if let (Some(data), Some(_)) = (output, ended) {
+                    tool.content
+                        .retain(|content| !matches!(content, ToolContent::Output(_)));
+                    let text = super::clean_text(data);
+                    tool.content
+                        .push(ToolContent::Output(super::tail(&text, super::TOOL_TEXT)));
+                    changed = true;
+                }
+                if changed {
+                    let item = item.clone();
+                    self.patch_item(turn, at, item);
+                } else if let Some(data) = output {
+                    self.append_output(turn, at, data);
+                }
+            }
+        }
+        if let Some(status) = ended
+            && self.node.tasks[at_task].going()
+        {
+            let mut tasks = self.node.tasks.clone();
+            let task = &mut tasks[at_task];
+            task.state = if status == ToolStatus::Done {
+                AgentTaskState::Done
+            } else {
+                AgentTaskState::Failed
+            };
+            task.ended = Some(now());
+            task.summary = exit.map(|code| format!("exit code {code}"));
+            self.set_tasks(tasks);
+        }
+        true
+    }
+
+    /// Where the row of tool call `id`, a command left running in the
+    /// background, is now: its turn and item, if the conversation shown
+    /// still has it.
+    fn background_row(&mut self, id: &str) -> Option<(usize, usize)> {
+        let in_turn = |items: &[Item]| {
+            (items.iter()).position(|item| matches!(item, Item::Tool(tool) if tool.id == id))
+        };
+        let kept = (self.background_rows.iter())
+            .find(|(row, _)| row == id)
+            .and_then(|&(_, uid)| self.turn_index(uid))
+            .and_then(|turn| Some((turn, in_turn(&self.node.turns[turn].items[..])?)));
+        if kept.is_some() {
+            return kept;
+        }
+        let (turn, at) = (self.node.turns.iter().enumerate().rev())
+            .find_map(|(turn, shown)| Some((turn, in_turn(&shown.items[..])?)))?;
+        if let Some(uid) = self.turn_uid(turn) {
+            self.remember_row(id, uid);
+        }
+        Some((turn, at))
+    }
+
+    /// Remembers that the row of tool call `id` is in turn `uid`.
+    fn remember_row(&mut self, id: &str, uid: super::TurnUid) {
+        self.background_rows.retain(|(row, _)| row != id);
+        if self.background_rows.len() >= MOST_TASKS {
+            self.background_rows.remove(0);
+        }
+        self.background_rows.push((id.to_owned(), uid));
+    }
+
+    /// The rows of the commands left running in the background that the
+    /// tasks `ids` stand for, which have gone: one still running failed.
+    fn background_rows_ended(&mut self, ids: &[String]) {
+        for id in ids {
+            let Some(row) = id.strip_prefix(FROM_TOOL) else {
+                continue;
+            };
+            let Some((turn, at)) = self.background_row(row) else {
+                continue;
+            };
+            let item = &mut self.node.turns[turn].items[at];
+            let Item::Tool(tool) = item else {
+                continue;
+            };
+            if tool.status != ToolStatus::Running {
+                continue;
+            }
+            tool.status = ToolStatus::Failed;
+            let item = item.clone();
+            self.patch_item(turn, at, item);
+        }
+    }
+}
+
 /// What a task ended by the daemon's upgrade says, as its agent went with
 /// it.
 pub(crate) const ENDED_BY_UPGRADE: &str = "ended by the daemon's upgrade";
@@ -299,11 +564,13 @@ impl HostedChat {
         self.tasks_session = kept.session;
         let ended = now();
         let mut lost = Vec::new();
+        let mut ids = Vec::new();
         let mut tasks: Vec<AgentTask> = kept.tasks.into_iter().filter_map(task_in).collect();
         for task in (tasks.iter_mut()).filter(|task| !live && task.going()) {
             task.state = AgentTaskState::Lost;
             task.summary = Some(ENDED_BY_UPGRADE.to_owned());
             task.ended = Some(ended);
+            ids.push(task.id.clone());
             lost.push(match &task.command {
                 Some(command) if *command != task.title => {
                     format!("{} ({})", task.title, command)
@@ -313,6 +580,7 @@ impl HostedChat {
         }
         bound(&mut tasks);
         self.set_tasks(tasks);
+        self.background_rows_ended(&ids);
         lost
     }
 }

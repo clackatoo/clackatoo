@@ -3389,6 +3389,7 @@ mod tests {
             cwd: "/home/me/x".to_owned(),
             updated: None,
             chat: None,
+            branch: false,
         };
         let mut desk = desk(workspaces(vec![workspace(
             1,

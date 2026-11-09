@@ -387,10 +387,17 @@ fn read(file: &Path) -> Keys {
     keys
 }
 
-/// Writes `keys` as the file at `path`: in full beside it, in a file made
+/// Writes `keys` as the file at `path`, as [`write_private`] writes.
+fn write(path: &Path, keys: &[(MachineId, Pin)]) -> io::Result<()> {
+    let mut bytes = written(keys)?;
+    bytes.push(b'\n');
+    write_private(path, &bytes)
+}
+
+/// Writes `bytes` as the file at `path`: in full beside it, in a file made
 /// afresh for the user alone, never through a link, and synced; then
 /// renamed over it, and the directory synced.
-fn write(path: &Path, keys: &[(MachineId, Pin)]) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     fs::DirBuilder::new()
         .recursive(true)
@@ -403,8 +410,6 @@ fn write(path: &Path, keys: &[(MachineId, Pin)]) -> io::Result<()> {
         Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
         _ => {}
     }
-    let mut bytes = written(keys)?;
-    bytes.push(b'\n');
     let written = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -412,7 +417,7 @@ fn write(path: &Path, keys: &[(MachineId, Pin)]) -> io::Result<()> {
             .mode(0o600)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
             .open(&temporary)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)

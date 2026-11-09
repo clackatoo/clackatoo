@@ -438,14 +438,42 @@ impl Daemon {
             .collect();
         self.recheck_finished(children);
         self.keep_branches_within(crate::chat::branches::MOST_ALL_BRANCH_BYTES);
+        self.note_branches(id);
         self.collect_damage(id);
         self.keep_soon();
     }
 
-    /// `listed`, the sessions an agent kept, without those that are
-    /// branches of chats' conversations, not shown, or forked from them:
-    /// the start page lists a chat once, with its branches inside it.
-    pub(super) fn without_branches(&self, mut listed: Vec<Listed>) -> Vec<Listed> {
+    /// Keeps chat `id`'s branches' sessions off the start page from now
+    /// on, even once the chat has gone, and lets its own be listed (see
+    /// [`crate::unlisted`]).
+    pub(super) fn note_branches(&self, id: TerminalId) {
+        if let Some(chat) = self.chat_ref(id) {
+            self.note_branches_of(chat);
+        }
+    }
+
+    /// As [`note_branches`](Self::note_branches), for `chat`, which may
+    /// have gone already.
+    pub(super) fn note_branches_of(&self, chat: &crate::chat::HostedChat) {
+        let own = chat.session().map(|session| (chat.agent(), session));
+        self.unlisted.note(chat.branch_sessions_by_agent(), own);
+    }
+
+    /// `listed`, the sessions the agent called `agent` kept, without those
+    /// that are branches of open chats' conversations, not shown, or
+    /// forked from them: the start page lists a chat once, with its
+    /// branches inside it. Those of chats that have gone, which the daemon
+    /// kept (see [`crate::unlisted`]), stay, marked as branches, for the
+    /// start page to show only when asked.
+    pub(super) fn without_branches(&self, agent: &str, mut listed: Vec<Listed>) -> Vec<Listed> {
+        // A chat's own session is listed as ever, forked or not.
+        let own: HashSet<&str> = (self.terminals.values())
+            .filter_map(|slot| slot.terminal.chat_ref()?.session())
+            .collect();
+        let gone = self.unlisted.of(agent);
+        for row in &mut listed {
+            row.branch = gone.contains(&row.session) && !own.contains(row.session.as_str());
+        }
         let mut hidden: HashSet<String> = (self.terminals.values())
             .filter_map(|slot| slot.terminal.chat_ref())
             .flat_map(crate::chat::HostedChat::branch_sessions)
@@ -470,12 +498,7 @@ impl Daemon {
             }
             hidden.extend(more);
         }
-        // A chat's own session is listed as ever, forked or not.
-        for slot in self.terminals.values() {
-            if let Some(session) = slot.terminal.chat_ref().and_then(|chat| chat.session()) {
-                hidden.remove(session);
-            }
-        }
+        hidden.retain(|session| !own.contains(session.as_str()));
         listed.retain(|row| !hidden.contains(&row.session));
         listed
     }
@@ -601,6 +624,7 @@ mod tests {
             title: String::new(),
             updated: None,
             forked_from: from.map(str::to_owned),
+            branch: false,
         };
         let listed = vec![
             row("s1", None),
@@ -608,10 +632,67 @@ mod tests {
             row("s2", Some("s1")),
             row("other", None),
         ];
-        let shown: Vec<String> = (world.daemon.without_branches(listed).into_iter())
+        let shown: Vec<String> = (world.daemon.without_branches("claude", listed).into_iter())
             .map(|row| row.session)
             .collect();
         assert_eq!(shown, ["s2", "other"]);
+    }
+
+    /// A chat's branches stay off the start page once it has gone, marked
+    /// for the page to list only when asked; its own session is listed as
+    /// ever, and one gone on with is a conversation of its own again
+    /// (CLACKA-232).
+    #[test]
+    fn a_closed_chats_branches_are_marked_for_the_start_page() {
+        let mut world = World::new();
+        world.end_turn();
+        let chat = world.chat;
+        world.daemon.chat_act(chat, rewind(0)).unwrap();
+        let hosted = world.daemon.chat(chat).unwrap();
+        hosted.act(ChatAction::Send("again".into()));
+        let hosted = world.daemon.chat(chat).unwrap();
+        hosted.session_closed();
+        hosted.connected(crate::agent::Opened {
+            session: "s2".into(),
+            settings: None,
+        });
+        // As the server does when the forked session opens.
+        world.daemon.note_branches(chat);
+        world.daemon.close_terminal(chat).unwrap();
+        let row = |session: &str| Listed {
+            session: session.to_owned(),
+            cwd: "/".to_owned(),
+            title: String::new(),
+            updated: None,
+            forked_from: None,
+            branch: false,
+        };
+        let marked = |daemon: &Daemon, sessions: &[&str]| -> Vec<(String, bool)> {
+            let listed = sessions.iter().map(|&session| row(session)).collect();
+            (daemon.without_branches("claude", listed).into_iter())
+                .map(|row| (row.session, row.branch))
+                .collect()
+        };
+        assert_eq!(
+            marked(&world.daemon, &["s1", "s2", "other"]),
+            [
+                ("s1".to_owned(), true),
+                ("s2".to_owned(), false),
+                ("other".to_owned(), false)
+            ]
+        );
+        // Another agent's sessions aren't these.
+        let codex: Vec<bool> = (world.daemon.without_branches("codex", vec![row("s1")]))
+            .into_iter()
+            .map(|row| row.branch)
+            .collect();
+        assert_eq!(codex, [false]);
+        // Gone on with, it's a chat's own.
+        world
+            .daemon
+            .unlisted
+            .note(Vec::new(), Some(("claude", "s1")));
+        assert_eq!(marked(&world.daemon, &["s1"]), [("s1".to_owned(), false)]);
     }
 
     fn rewind_undoing(at: u32, files: ForkFiles) -> ChatAction {

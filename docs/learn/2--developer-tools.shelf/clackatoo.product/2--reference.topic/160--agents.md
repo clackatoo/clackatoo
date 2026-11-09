@@ -26,6 +26,8 @@ Until its first message, a chat says which agent it has and the folder it works 
 
 Its first row is a new chat, with its agent, model and folder. They start as the last chat started from the page had them; before that, the agent is the `agent` option's, the model the agent's own choice, and the folder the focused pane's. Under it are chats to go on with instead: this workspace's chats in no pane, such as those agents started in the background, then the sessions the agent keeps for the folder, its own and clackatoo's, newest first. For a pane on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar), or a page opened with `@host`, they're the sessions that machine's agent keeps in its folder, and going on with one makes the chat there; this needs a daemon here of protocol 107 or later, and says so otherwise.
 
+A chat is listed once, as the branch it shows: the sessions of its other [branches](#rewinding-and-branches) aren't listed while it's open, and once it has gone, closed or not brought back after a restart, the page still leaves them out. The count at the top says how many it leaves out, as `12 / 12 · b lists 2 branches`, and `b` lists them too, each saying `branch` after its title, or leaves them out again. Going on with one makes it a conversation of its own from then on, listed as any other. The daemon keeps which sessions are branches in `unlisted_sessions`, beside the `machine` file in its state directory, the latest 1024; a session forked as an upgrade cut its rewind off can't be told apart, as neither agent says what a session was forked from, and is listed. A window older than protocol 135 is sent none of these.
+
 | Key | Does |
 |---|---|
 | Enter | Starts the new chat, shows the chat picked, or goes on with the session picked in a new chat. |
@@ -35,10 +37,11 @@ Its first row is a new chat, with its agent, model and folder. They start as the
 | Home, End | The new chat, or the last row. |
 | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder. |
 | `l`, `h`, Right, Left | The picker's next or previous choice. |
+| `b` | Lists the branches of chats that have gone too, or leaves them out again. |
 | `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
 | Esc, Ctrl+C | Clears what's typed, or closes the page. |
 
-`j`, `k`, `n`, `h` and `l` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
+`j`, `k`, `n`, `h`, `l` and `b` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
 
 Going on with a session shows its conversation so far as the chat's turns, where the agent can tell it, as Claude Code and Codex can. Nothing in those turns changes your files again, asks you anything, or runs anything: they're only shown. An agent that can't goes on from where it was, and the chat says the turns before aren't shown. A message sent while the turns are coming waits until they've all come. A session another chat has open goes to that chat; one open in another workspace's chat is refused, saying where it is.
 
@@ -369,7 +372,7 @@ A line that has ended says how: `✓ done`, `✗ failed`, or `■ stopped`, with
 
 A subagent's card says how many things its chats run in the background, and when open, has a line under each chat for what it runs. A chat with something running in the background is never let go while it's idle in the background, as that would end it.
 
-Only Claude Code says what it runs in the background. Codex's adapter lists what Codex runs in the background (its `/ps` in a terminal) only to a client that asks as AIR does, and then leaves every command's output out of its row, so clackatoo doesn't ask, and those commands aren't listed. The phone lists the same lines, without the buttons that stop them.
+Codex's adapter lists what Codex runs in the background (its `/ps` in a terminal) only to a client that asks as AIR does, and then leaves every command's output out of its row, so clackatoo doesn't ask. It shows anyway: a command Codex leaves running as its turn ends keeps its row open until the command ends, so a command that ran in a terminal of its own, still running as a turn ends well, is listed on the shelf too, with its command and for how long, as `● npm run dev — running 2m 4s`. Its row in the turn stays `○` rather than failing with the turn, and goes on showing what the command prints, wherever the conversation has got to; when it ends, the row says how, with its exit code, and so does its line, as `✓ npm run dev — done in 5m: exit code 0`. Such a line has no stop button, as Codex's adapter takes no stop from a client that doesn't ask as AIR does, and nothing for `:taskoutput` to follow, as there's no file: the row is where its output is. Ask Codex to stop it. A command Codex ends without saying so stays on the shelf until the agent stops; one of a turn you stopped, or that failed, is taken to have ended with it. Leaving the branch it ran in, or the agent, lets it go, as `ended with its agent`. The phone lists the same lines, without the buttons that stop them.
 
 Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it reports some things differently:
 

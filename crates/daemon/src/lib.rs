@@ -61,6 +61,7 @@ mod shell;
 mod signals;
 mod tool_images;
 mod trust;
+mod unlisted;
 pub mod upgrade;
 pub mod web;
 mod workspaces;

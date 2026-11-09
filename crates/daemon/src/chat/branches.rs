@@ -549,6 +549,7 @@ impl HostedChat {
         let turn = &self.node.turns[at];
         let edited = edit.then(|| clackatoo_protocol::without_image_labels(&turn.prompt));
         let actions = self.stop_tasks_left();
+        self.tasks_left_behind();
         self.root_tree();
         if self.tree.pending.is_none() {
             let leaf = self.tree.current;
@@ -618,6 +619,7 @@ impl HostedChat {
             return Ok(Vec::new());
         };
         let mut actions = self.stop_tasks_left();
+        self.tasks_left_behind();
         actions.extend(self.show_branch(at, target));
         Ok(actions)
     }
@@ -954,9 +956,11 @@ impl HostedChat {
     }
 
     /// Stops what the branch being left runs in the background, which its
-    /// session going would end anyway.
+    /// session going would end anyway: what the agent can be asked to
+    /// stop. The rest is lost to the chat (see `tasks_left_behind`).
     fn stop_tasks_left(&self) -> Vec<super::Action> {
         (self.tasks_going().into_iter())
+            .filter(|task| task.can_stop)
             .map(|task| super::Action::StopTask(task.id))
             .collect()
     }
@@ -1431,14 +1435,27 @@ impl HostedChat {
     /// The agent sessions of the branches not shown, so the start page
     /// doesn't list them as conversations of their own.
     pub(crate) fn branch_sessions(&self) -> Vec<String> {
+        (self.branch_sessions_by_agent().into_iter())
+            .map(|(_, session)| session)
+            .collect()
+    }
+
+    /// [`branch_sessions`](Self::branch_sessions), each with the agent
+    /// whose session it is, by its name: a branch let go is taken to be
+    /// the chat's agent's.
+    pub(crate) fn branch_sessions_by_agent(&self) -> Vec<(String, String)> {
+        let agent = &self.agent;
         let trees = std::iter::once(&self.tree).chain(self.tree.saved.as_deref());
         trees
             .flat_map(|tree| {
                 (tree.live())
-                    .filter_map(|(_, seg)| seg.session.as_ref()?.session.clone())
-                    .chain(tree.gone.iter().cloned())
+                    .filter_map(|(_, seg)| {
+                        let kept = seg.session.as_ref()?;
+                        Some((kept.agent.clone(), kept.session.clone()?))
+                    })
+                    .chain((tree.gone.iter()).map(move |session| (agent.clone(), session.clone())))
             })
-            .filter(|session| self.session.as_ref() != Some(session))
+            .filter(|(_, session)| self.session.as_ref() != Some(session))
             .collect()
     }
 

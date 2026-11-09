@@ -11,7 +11,9 @@
 //!   or clackatoo's, newest first, which Enter goes on with in a new chat
 //!   (see [`clackatoo_protocol::NewAgent::resume`]). The daemon asks the
 //!   agent for them, which may take it a moment to start; changing the
-//!   agent or the folder asks again.
+//!   agent or the folder asks again. Those that are branches of the
+//!   conversations of chats that have gone (`AgentSession::branch`) are
+//!   left out, the count saying how many, until `b` lists them too.
 //!
 //! What's typed filters these as the finder does, and the page is drawn
 //! as the finder is (see [`crate::finder::view`]), over the panes. It's
@@ -28,14 +30,17 @@
 //! | Home, End | The new chat, or the last row |
 //! | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder |
 //! | `l`, `h`; Right, Left | The picker's next or previous choice |
+//! | `b` | Lists the branches of chats that have gone too, or leaves them out again |
 //! | `/` | Starts typing, to filter |
 //! | Typing, Backspace, Ctrl+U, Ctrl+W | Changes what's typed |
 //! | Esc, Ctrl+C | Clears what's typed, or else closes the page |
 //!
-//! `j`, `k`, `n`, `h` and `l` are keys only while nothing's typed; any
+//! `j`, `k`, `n`, `h`, `l` and `b` are keys only while nothing's typed; any
 //! other letter starts typing, and once typing, every letter types.
 //! The keys every picker has, the wheel, clicks and pastes are
 //! [`crate::picker`]'s, and its rows are the new chat's, then the list's.
+
+use std::fmt::Write as _;
 
 use clackatoo_protocol::{
     AgentSession, ChatChoices, ChatState, ChatSummary, Provider, ProviderModels, TerminalId,
@@ -157,6 +162,9 @@ pub(crate) struct StartPage {
     listing: Option<u64>,
     /// Why the agent's sessions aren't listed, if they couldn't be.
     unlisted: Option<String>,
+    /// The sessions that are branches of chats that have gone are listed
+    /// too, as `b` asked.
+    branches: bool,
     /// What's typed, the row picked and the first shown: row 0 is the new
     /// chat, and the rest the ranked list (see [`len`](Self::len)).
     picker: Picker,
@@ -191,6 +199,7 @@ impl StartPage {
             sessions: Vec::new(),
             listing: None,
             unlisted: None,
+            branches: false,
             picker: Picker::default(),
             typing: false,
             items: Items::default(),
@@ -321,7 +330,7 @@ impl StartPage {
             self.items.push(&chat_text(chat));
             self.entries.push(Entry::Chat(chat.clone()));
         }
-        for session in &self.sessions {
+        for session in (self.sessions.iter()).filter(|session| self.branches || !session.branch) {
             self.items
                 .push(&session_text(session, jiff::Timestamp::now()));
             self.entries.push(Entry::Session(session.clone()));
@@ -376,6 +385,9 @@ impl StartPage {
             (Stroke::Left, _) | (_, Some('h')) =>
                 Hint::Action("Previous choice for the field"),
                 self.change(-1);
+            (_, Some('b')) =>
+                Hint::Action("List the branches of chats that have gone, or not"),
+                self.show_branches();
             (_, Some('/')) =>
                 Hint::Action("Filter chats and sessions"),
                 {
@@ -418,6 +430,25 @@ impl StartPage {
         let typed = !self.picker.query().is_empty() && self.ranking.len() > 0;
         self.picker.set_selected(usize::from(typed));
         Outcome::Changed
+    }
+
+    /// Lists the sessions that are branches of chats that have gone too,
+    /// or leaves them out again, as `b` does.
+    fn show_branches(&mut self) -> Outcome {
+        self.branches = !self.branches;
+        self.fill();
+        Outcome::Changed
+    }
+
+    /// How many sessions that are branches of chats that have gone are
+    /// left out.
+    fn branches_left_out(&self) -> usize {
+        if self.branches {
+            return 0;
+        }
+        (self.sessions.iter())
+            .filter(|session| session.branch)
+            .count()
     }
 
     /// Esc: what's typed goes, and the new chat is picked again, or else
@@ -584,12 +615,17 @@ impl StartPage {
         } else {
             String::new()
         };
-        let count = match (&self.unlisted, self.listing) {
+        let mut count = match (&self.unlisted, self.listing) {
             _ if self.said.is_some() => self.said.clone().unwrap_or_default(),
             (Some(why), _) => why.clone(),
             (None, Some(_)) => format!("{} / {}…", self.ranking.len(), self.items.len()),
             (None, None) => format!("{} / {}", self.ranking.len(), self.items.len()),
         };
+        let left_out = self.branches_left_out();
+        if self.said.is_none() && left_out > 0 {
+            let branches = if left_out == 1 { "branch" } else { "branches" };
+            let _ = write!(count, " · b lists {left_out} {branches}");
+        }
         FinderView {
             title: "Agent",
             place: self
@@ -724,6 +760,13 @@ impl StartPage {
                     Some(chat) => format!("Open in chat {chat}: Enter goes to it."),
                     None => "Enter goes on with it in a new chat.".to_owned(),
                 };
+                if session.branch {
+                    lines.push((
+                        "A branch of a chat that has gone, left as it was rewound or switched."
+                            .to_owned(),
+                        Ink::Muted,
+                    ));
+                }
                 lines.push((what, Ink::Muted));
             }
         }
@@ -780,6 +823,9 @@ fn session_text(session: &AgentSession, now: jiff::Timestamp) -> String {
     }
     if session.chat.is_some() {
         text.push_str(", open");
+    }
+    if session.branch {
+        text.push_str(", branch");
     }
     text
 }
