@@ -1261,19 +1261,19 @@ pub(crate) const NEWS: &[News] = &[
     },
     News {
         id: "vim-visual-lines",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "basics",
         what: "As Vim's: visual D X C S R take whole lines, visual A types after the selection, r Enter breaks a line",
     },
     News {
         id: "y-to-end",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "text-objects",
         what: "Y copies to the line's end, as Neovim's, in every pane; map Y to yy for Vim's whole line",
     },
     News {
         id: "explorer-drag-up",
-        date: "2026-11-08",
+        date: "2026-11-09",
         lesson: "explorer",
         what: "A file dragged onto an explorer's .. row, out of what it shows, is moved only once you say y",
     },
