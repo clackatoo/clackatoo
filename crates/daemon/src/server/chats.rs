@@ -2805,10 +2805,16 @@ mod tests {
         )
         .unwrap();
         let group = crate::group::Group::new(pidfd);
-        daemon
-            .groups
-            .end(group, &agent_group("claude"), End::Gently(Duration::from_secs(60)));
-        let id = daemon.next_terminal();
+        daemon.groups.end(
+            group,
+            &agent_group("claude"),
+            End::Gently(Duration::from_secs(60)),
+        );
+        // Past the chat made with the daemon, numbered by hand.
+        let mut id = daemon.next_terminal();
+        while daemon.chat_ref(id).is_some() {
+            id = daemon.next_terminal();
+        }
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let mut chat = HostedChat::new(
             id,
@@ -2827,7 +2833,10 @@ mod tests {
         daemon.connect(id);
         assert!(daemon.agents.held.iter().any(|(held, _)| *held == id));
         assert!(daemon.agents.named("claude").is_none(), "none started yet");
-        assert!(daemon.next_gone_agent_due().is_some(), "it looks again soon");
+        assert!(
+            daemon.next_gone_agent_due().is_some(),
+            "it looks again soon"
+        );
         // Ended firmly at once, it goes.
         let status = left.wait().unwrap();
         assert!(!status.success(), "it was stopped: {status:?}");

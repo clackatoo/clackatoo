@@ -3878,10 +3878,14 @@ impl Daemon {
             };
             return Err(buffers::blank_kept(wire));
         }
-        // What the user closes is kept, to open again.
-        if let Some(closed) = self.closing(&request, token) {
+        // What the user closes is kept, to open again: as it was before
+        // it closed, but for the subagents that went back to their
+        // parents, and so are still open.
+        if let Some(closed) = self.closing(&request) {
             let answer = self.answer_about_workspaces(request, token);
-            if answer.is_ok() {
+            if answer.is_ok()
+                && let Some(closed) = self.closed_as(closed)
+            {
                 self.note_closed(closed);
             }
             return answer;

@@ -12,7 +12,11 @@
 //! Only what the user closes is kept: a pane or tab a window, the
 //! `clackatoo` command or the web app asked to close, never a terminal
 //! whose program ended, nor a subagent's chat sent back to its parent,
-//! which is still there. A terminal kept running (`:keep`) comes back
+//! which is still there. What's kept is taken before it closes, and the
+//! chats still open once it has, as those sent back, are left out of it
+//! then: a subagent whose parent closed in the same tab first, which
+//! closes with it, is kept with the tab, and comes back as its parent's
+//! subagent again, so none is lost. A terminal kept running (`:keep`) comes back
 //! offering its command, never running it. The last [`MOST_CLOSED`] are
 //! kept, the newest last, and handed over through upgrades, but not kept
 //! from one run of the daemon to the next.
@@ -25,10 +29,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use clackatoo_protocol::{
-    Content, Error, Layout, PaneId, Request, Response, Restored, Side, TabId, TerminalId,
-    WorkspaceId,
+    Error, Layout, PaneId, Request, Response, Restored, Side, TabId, TerminalId, WorkspaceId,
 };
-use mio::Token;
 
 use super::Daemon;
 use crate::saved::{self, Beside, Closed};
@@ -62,23 +64,23 @@ impl ClosedList {
 }
 
 impl Daemon {
-    /// What's to keep of what `request` closes, asked by the client at
-    /// `token`, to open again: taken before it closes. `None` for a
-    /// request that closes nothing to keep.
-    pub(super) fn closing(&self, request: &Request, token: Token) -> Option<Closed> {
-        let back = self.sends_subagents_back(token);
+    /// What's to keep of what `request` closes, to open again: taken
+    /// before it closes, and settled once it has (see
+    /// [`closed_as`](Self::closed_as)). `None` for a request that closes
+    /// nothing to keep.
+    pub(super) fn closing(&self, request: &Request) -> Option<Closed> {
         match *request {
             Request::ClosePane { pane } => {
                 let (workspace, tab, place) = self.workspaces.place_of(pane)?;
                 let Some((beside, side, share)) = place else {
                     // A tab's only pane closes the tab.
-                    return self.closing_tab(tab, back);
+                    return self.closing_tab(tab);
                 };
-                if self.workspaces.is_lent(workspace) || self.not_kept(pane, back) {
+                if self.workspaces.is_lent(workspace) || self.not_kept(pane) {
                     return None;
                 }
                 let content = self.workspaces.check_pane(pane).ok()?;
-                let kept = reopened(self.kept_pane(pane, content)?);
+                let kept = reopened(self.kept_pane(pane, content)?, false);
                 Some(Closed::Pane {
                     workspace: workspace.0,
                     tab: tab.0,
@@ -90,14 +92,14 @@ impl Daemon {
                     pane: kept,
                 })
             }
-            Request::CloseTab { tab } => self.closing_tab(tab, back),
+            Request::CloseTab { tab } => self.closing_tab(tab),
             _ => None,
         }
     }
 
-    /// What's to keep of tab `tab` as it closes, if anything: a
-    /// subagent's chat sent `back` to its parent is left out.
-    fn closing_tab(&self, tab: TabId, back: bool) -> Option<Closed> {
+    /// What's to keep of tab `tab` as it closes, if anything: each chat
+    /// with where it stood among the chats agents started.
+    fn closing_tab(&self, tab: TabId) -> Option<Closed> {
         let (workspace, found) = self.workspaces.get().find_tab(tab)?;
         if workspace.lent.is_some() {
             return None;
@@ -105,7 +107,7 @@ impl Daemon {
         let index = (workspace.tabs.iter()).position(|t| t.id == tab)?;
         let skipped: Vec<PaneId> = (found.layout.panes().iter())
             .map(|pane| pane.id)
-            .filter(|&pane| self.not_kept(pane, back))
+            .filter(|&pane| self.not_kept(pane))
             .collect();
         let mut kept = self.kept_tab_but(found, &skipped)?;
         reopened_layout(&mut kept.layout);
@@ -117,18 +119,32 @@ impl Daemon {
     }
 
     /// Whether `pane` is left out of what's kept as it closes: a pane
-    /// showing what's on another machine, which is that machine's, or a
-    /// subagent's chat going `back` to its parent, which stays.
-    fn not_kept(&self, pane: PaneId, back: bool) -> bool {
-        if self.workspaces.borrowed().contains_key(&pane) {
-            return true;
+    /// showing what's on another machine, which is that machine's.
+    fn not_kept(&self, pane: PaneId) -> bool {
+        self.workspaces.borrowed().contains_key(&pane)
+    }
+
+    /// `closed`, taken as it closed, as it's kept now it has: without the
+    /// chats still open, as a subagent's sent back to its parent is.
+    /// `None` if nothing's left of it.
+    pub(super) fn closed_as(&self, closed: Closed) -> Option<Closed> {
+        let open = |id: u32| self.chat_ref(TerminalId(id)).is_some();
+        match closed {
+            Closed::Pane {
+                pane: saved::Pane::Chat { id, .. },
+                ..
+            } if open(id) => None,
+            Closed::Pane { .. } => Some(closed),
+            Closed::Tab {
+                workspace,
+                index,
+                tab,
+            } => Some(Closed::Tab {
+                workspace,
+                index,
+                tab: without_chats(tab, &open)?,
+            }),
         }
-        let Ok(Content::Terminal(terminal)) = self.workspaces.check_pane(pane) else {
-            return false;
-        };
-        back && (self.chat_ref(terminal))
-            .and_then(|chat| chat.relations().parent)
-            .is_some_and(|parent| self.chat_ref(parent).is_some())
     }
 
     /// Keeps `closed`, which closed, to open again.
@@ -228,6 +244,20 @@ impl Daemon {
         let made = self.restore_tab(&tab, &mut chats, &mut room, &mut restored)?;
         let focused = self.add_reopened_tab(workspace, index, made, beside);
         self.offer_restored(restored);
+        // Subagents stand under their parents again, closed with them, as
+        // they would after a restart.
+        let kept = saved::State {
+            workspaces: vec![saved::Workspace {
+                name: String::new(),
+                tabs: vec![tab],
+                active_tab: 0,
+                lent: None,
+                background: Vec::new(),
+            }],
+            ..saved::State::default()
+        };
+        let alone = self.restore_standing(&kept, &chats);
+        self.hold_alone(&alone);
         Some(focused)
     }
 
@@ -239,7 +269,8 @@ impl Daemon {
         let mut restored = Vec::new();
         let mut panes = Vec::new();
         let mut chats = self.chats_again(&mut layout, &mut room);
-        let made = self.restore_layout(&layout, &mut chats, &mut room, &mut panes, &mut restored)?;
+        let made =
+            self.restore_layout(&layout, &mut chats, &mut room, &mut panes, &mut restored)?;
         Some((made, restored))
     }
 
@@ -359,9 +390,65 @@ impl Daemon {
     }
 }
 
+/// `tab` without the chats `open` says are open, its focused and zoomed
+/// panes followed: `None` if they were all it had.
+fn without_chats(mut tab: saved::Tab, open: &dyn Fn(u32) -> bool) -> Option<saved::Tab> {
+    /// `layout` without them, each pane's place in the tab, from the top
+    /// left, added to `kept` for each kept, as `at` counts them all.
+    fn walk(
+        layout: saved::Layout,
+        open: &dyn Fn(u32) -> bool,
+        at: &mut usize,
+        kept: &mut Vec<usize>,
+    ) -> Option<saved::Layout> {
+        match layout {
+            saved::Layout::Pane(pane) => {
+                *at += 1;
+                if let saved::Pane::Chat { id, .. } = &pane
+                    && open(*id)
+                {
+                    return None;
+                }
+                kept.push(*at - 1);
+                Some(saved::Layout::Pane(pane))
+            }
+            saved::Layout::Split {
+                left_to_right,
+                parts,
+                shares,
+            } => {
+                let shares_fit = shares.len() == parts.len();
+                let (mut parts, mut shares): (Vec<_>, Vec<_>) = (parts.into_iter().enumerate())
+                    .filter_map(|(index, part)| {
+                        let share = if shares_fit { shares[index] } else { 1 };
+                        Some((walk(part, open, at, kept)?, share))
+                    })
+                    .unzip();
+                match parts.len() {
+                    0 => None,
+                    1 => parts.pop(),
+                    _ => Some(saved::Layout::Split {
+                        left_to_right,
+                        parts: std::mem::take(&mut parts),
+                        shares: std::mem::take(&mut shares),
+                    }),
+                }
+            }
+        }
+    }
+    let mut kept = Vec::new();
+    tab.layout = walk(tab.layout, open, &mut 0, &mut kept)?;
+    let place = |old: usize| kept.iter().position(|&at| at == old);
+    tab.focused = place(tab.focused).unwrap_or(0);
+    tab.zoomed = tab.zoomed.and_then(place);
+    Some(tab)
+}
+
 /// `pane`, as it's kept to open again: a terminal kept running offers its
-/// command instead of running it, and a chat comes back as the user's.
-fn reopened(pane: saved::Pane) -> saved::Pane {
+/// command instead of running it, and a chat comes back as the user's,
+/// unless `standing`, as in a tab, where one an agent started comes back
+/// under its parent if that comes back too.
+fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
     match pane {
         saved::Pane::Terminal {
             cwd,
@@ -384,7 +471,7 @@ fn reopened(pane: saved::Pane) -> saved::Pane {
             tools,
             task,
             browser,
-            started: _,
+            started,
             branches,
             subagents,
         } => saved::Pane::Chat {
@@ -397,7 +484,7 @@ fn reopened(pane: saved::Pane) -> saved::Pane {
             tools,
             task,
             browser,
-            started: None,
+            started: started.filter(|_| standing),
             branches,
             subagents,
         },
@@ -408,7 +495,7 @@ fn reopened(pane: saved::Pane) -> saved::Pane {
 /// Each pane of `layout` as [`reopened`] keeps it.
 fn reopened_layout(layout: &mut saved::Layout) {
     match layout {
-        saved::Layout::Pane(pane) => *pane = reopened(pane.clone()),
+        saved::Layout::Pane(pane) => *pane = reopened(pane.clone(), true),
         saved::Layout::Split { parts, .. } => parts.iter_mut().for_each(reopened_layout),
     }
 }
@@ -435,7 +522,8 @@ fn side_of(name: &str) -> Side {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{NewReview, PaneTerminal, ReviewScope};
+    use clackatoo_protocol::{Content, NewReview, PaneTerminal, ReviewScope};
+    use mio::Token;
 
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
@@ -457,6 +545,99 @@ mod tests {
         };
         let (chat, scope, _) = daemon.review_of(review).expect("the review");
         (chat, scope)
+    }
+
+    /// A subagent's chat, under `parent`, started by that chat's agent.
+    fn subagent(daemon: &mut Daemon, parent: TerminalId, dir: &std::path::Path) -> TerminalId {
+        // Past the chat made with the daemon, numbered by hand.
+        let mut id = daemon.next_terminal();
+        while daemon.chat_ref(id).is_some() {
+            id = daemon.next_terminal();
+        }
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let mut chat = crate::chat::HostedChat::new(
+            id,
+            clackatoo_protocol::Size::new(40, 10).unwrap(),
+            dir.display().to_string(),
+            &agent,
+            clackatoo_protocol::AgentTools::Ask,
+            true,
+            false,
+        );
+        chat.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "s2".into(),
+            title: String::new(),
+        });
+        chat.stand_again(crate::chat::Standing {
+            parent: Some(parent),
+            root: Some(parent),
+            depth: 1,
+            profile: None,
+            limits: crate::profiles::Limits::None,
+            kept: false,
+            mode: None,
+            cap: None,
+        });
+        daemon.add_chat(chat);
+        id
+    }
+
+    #[test]
+    fn a_subagent_closed_with_its_parents_tab_comes_back_under_it_and_one_sent_back_isnt_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, parent) = daemon_with_chat(dir.path());
+        let kid = subagent(&mut daemon, parent, dir.path());
+        let new = Request::NewWorkspace {
+            name: None,
+            terminal: PaneTerminal::Existing(parent),
+            on: None,
+        };
+        let first = made(daemon.respond(new, ASKER));
+        let split = Request::Split {
+            pane: first,
+            side: Side::Right,
+            terminal: PaneTerminal::Existing(kid),
+            on: None,
+        };
+        made(daemon.respond(split, ASKER));
+        // Its parent closes first, so it can't go back to it: it closes
+        // too, and is kept with the tab.
+        let tab = daemon.workspaces.get().list[0].tabs[0].id;
+        assert_eq!(
+            daemon.respond(Request::CloseTab { tab }, ASKER),
+            Response::Done
+        );
+        assert!(daemon.chat_ref(kid).is_none());
+        let focused = made(daemon.respond(Request::Reopen { beside: None }, ASKER));
+        let tab = &daemon.workspaces.get().list[0].tabs[0];
+        assert_eq!(tab.focused, focused);
+        let chats: Vec<TerminalId> = tab.terminals();
+        assert_eq!(chats.len(), 2);
+        let (again, kid_again) = (chats[0], chats[1]);
+        let relations = daemon.chat_ref(kid_again).unwrap().relations();
+        assert_eq!(relations.parent, Some(again), "under its parent again");
+        assert_eq!(daemon.chat_ref(again).unwrap().relations().parent, None);
+
+        // One that goes back to its parent, still open, isn't kept: it's
+        // still there.
+        let kid = subagent(&mut daemon, again, dir.path());
+        let workspace = daemon.workspaces.get().list[0].id;
+        let tab = Request::NewTab {
+            workspace,
+            terminal: PaneTerminal::Existing(kid),
+            on: None,
+        };
+        made(daemon.respond(tab, ASKER));
+        let tab = daemon.workspaces.get().list[0].tabs[1].id;
+        assert_eq!(
+            daemon.respond(Request::CloseTab { tab }, ASKER),
+            Response::Done
+        );
+        assert!(daemon.chat_ref(kid).is_some(), "sent back");
+        assert!(matches!(
+            daemon.respond(Request::Reopen { beside: None }, ASKER),
+            Response::Error(_)
+        ));
     }
 
     #[test]
@@ -517,7 +698,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            reopened(kept),
+            reopened(kept, false),
             saved::Pane::Terminal {
                 cwd: Some("/src".into()),
                 ran: Some("trail serve".into()),

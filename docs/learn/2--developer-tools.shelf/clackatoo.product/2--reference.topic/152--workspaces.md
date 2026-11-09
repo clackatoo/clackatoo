@@ -105,7 +105,9 @@ Only what you close is kept: a pane or tab closed with
 <kbd>Ctrl</kbd>+<kbd>B</kbd> `x`, `:close`, `:q` and the like, in any window
 or with the `clackatoo` command. A terminal whose program ends isn't, nor is a
 [subagent](~clackatoo/reference/chats-together#subagents) sent back to its
-parent, which is still there. A terminal you [kept running](#keeping-a-terminal-running)
+parent, which is still there. One that closes with its parent's tab, as
+its parent closed first, is kept with the tab, and comes back under its
+parent. A terminal you [kept running](#keeping-a-terminal-running)
 comes back offering its command, not running it. The list is the daemon's:
 any window can open again what another closed. It's kept through an upgrade,
 but not through a restart.

@@ -1102,7 +1102,7 @@ impl Daemon {
     /// elsewhere, with that parent: its Subagents setting is held to that
     /// one's once every chat's is held (see [`Self::hold_alone`]).
     #[allow(clippy::too_many_lines, reason = "each part of where a chat stood")]
-    fn restore_standing(
+    pub(super) fn restore_standing(
         &mut self,
         state: &State,
         chats: &HashMap<u32, (TerminalId, bool)>,
@@ -1228,7 +1228,7 @@ impl Daemon {
     /// Holds the Subagents setting of each chat of `alone`, made again on
     /// its own, to what the chat that started it, made again elsewhere,
     /// may have, once that one's is held, and then those under it.
-    fn hold_alone(&mut self, alone: &[(TerminalId, TerminalId)]) {
+    pub(super) fn hold_alone(&mut self, alone: &[(TerminalId, TerminalId)]) {
         for &(chat, of) in alone {
             let above = self.subagents_cap(of);
             if let Some(hosted) = self.chat(chat)
