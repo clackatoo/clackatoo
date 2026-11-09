@@ -1993,7 +1993,12 @@ impl Desk {
             return false;
         }
         // A link asked about takes the next key, whatever else is open.
-        if self.link_key(press, !self.script.typing && self.key_pressed_now()) {
+        let pressed = !self.script.typing && self.key_pressed_now();
+        if self.link_key(press, pressed) {
+            return true;
+        }
+        // So does a drop's, whose answer must be pressed now too.
+        if self.drop_question_key(pressed) {
             return true;
         }
         if self.chat_modal_key(press) {

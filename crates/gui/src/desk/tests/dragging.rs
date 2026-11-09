@@ -89,6 +89,14 @@ fn a_file_dragged_onto_a_folder_moves_there_or_with_ctrl_is_copied() {
     assert_eq!(file_ops(&mut desk), []);
     drag(&mut desk, 3, up, CTRL);
     assert_eq!(asked(&desk), "copy a.txt out of ~/p, into /? (y/n)");
+    // Only a key pressed now answers it, as a link's question: one a
+    // macro types, or held while something was waited for, gives up.
+    assert!(!desk.drop_question_key(true), "left for the explorer");
+    assert!(desk.drop_question_key(false));
+    assert_eq!(file_ops(&mut desk), []);
+    assert!(!asked(&desk).contains("(y/n)"), "{}", asked(&desk));
+    assert!(!desk.drop_question_key(false), "nothing asked");
+    drag(&mut desk, 3, up, CTRL);
     type_keys(&mut desk, "y");
     let copied = FileOp::Copy {
         from: "/p/a.txt".into(),

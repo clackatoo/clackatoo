@@ -61,7 +61,7 @@ Press on a file or folder and move the mouse half a line away, holding the butto
 |---|---|
 | A folder, in this explorer or another | Moves it into that folder. Hold Ctrl as you let go to copy it instead. |
 | A file | Moves it into the folder that file is in. |
-| `..` | Moves it into the folder above the root, out of what the explorer shows: the bar asks first, `move a.txt out of ~/p, into ~? (y/n)`, and only `y` does it. |
+| `..` | Moves it into the folder above the root, out of what the explorer shows: the bar asks first, `move a.txt out of ~/p, into ~? (y/n)`, and only `y`, pressed then, does it: not one a macro types, as for a link. |
 | The explorer's heading, or below the tree | Moves it into the root. |
 | An editor | Opens it there, as `:e` would. |
 | A terminal | Types its path for the program there, quoted so bash, zsh and fish each read it as one word, with a space after. Nothing runs. |

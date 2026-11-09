@@ -10,8 +10,8 @@
 //!   then `p` would, so nothing is written over without asking: on a
 //!   folder, into it; on a file, into the folder it's in; on `..`, into
 //!   the folder above, out of the explorer's root, which the bar asks
-//!   about first, `y` doing it; on the heading or below the tree, into
-//!   the root;
+//!   about first, `y` pressed just now doing it, as for a link; on the
+//!   heading or below the tree, into the root;
 //! - on an editor, opens it there, as `:e` would;
 //! - on a terminal, types its path at the cursor, quoted so bash, zsh
 //!   and fish each read it as one word, with a space after, as file
@@ -274,6 +274,22 @@ impl Desk {
         typed
     }
 
+    /// Gives up a drop's question in the focused explorer, if it asks one,
+    /// for a key not `pressed` just now, as a link's question is (see
+    /// [`Desk::link_key`]). Returns whether it took the key.
+    pub(super) fn drop_question_key(&mut self, pressed: bool) -> bool {
+        let Some(pane) = self.shown.map(|shown| shown.pane) else {
+            return false;
+        };
+        match self.explorers.panes.get_mut(&pane) {
+            Some(explorer) if !pressed && explorer.asks_a_key_now() => {
+                explorer.give_up_asking();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Does what letting go of `path`, dragged from the explorer `from`,
     /// does as `drop` says: copying it, not moving it, if `copy`.
     fn drop_file(&mut self, from: PaneId, path: String, drop: Drop, copy: bool) {
@@ -308,7 +324,10 @@ impl Desk {
                 {
                     let how = if copy { "copy" } else { "move" };
                     let (root, dir) = (explorer.shown(&root), explorer.shown(&dir));
-                    explorer.ask_to(format!("{how} {name} out of {root}, into {dir}? (y/n)"), op);
+                    explorer.ask_of_a_drop(
+                        format!("{how} {name} out of {root}, into {dir}? (y/n)"),
+                        op,
+                    );
                     return;
                 }
                 self.file_op(pane, op);
