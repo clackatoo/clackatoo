@@ -446,6 +446,11 @@ pub(crate) struct HostedChat {
     /// A Stop may still be waiting for the adapter's cancellation reply.
     /// Such a turn must not be continued by an upgrade.
     stop_requested: bool,
+    /// How many turns the chat had as the user last stopped it, while it
+    /// holds for them: stopping it again, with none begun since, drops
+    /// what waits. Not handed over: after an upgrade, nothing is dropped
+    /// until the user stops it twice again.
+    stopped_at: Option<usize>,
     /// Whether the notice says the agent is slow to open the session: it
     /// goes once the session opens, or isn't waited for.
     slow: bool,
@@ -775,6 +780,7 @@ impl HostedChat {
             link: Link::Opening,
             queued: None,
             stop_requested: false,
+            stopped_at: None,
             slow: false,
             told: resume::Told::default(),
             node: ChatNode {
@@ -1694,9 +1700,19 @@ impl HostedChat {
     /// message: one that comes after all is closed unseen, and the next
     /// message asks again. What other agents send waits for the user to
     /// write from then on (see [`Self::held_by_stop`]); stopping a chat
-    /// held so drops it.
+    /// held so, with no turn begun since, drops it.
     fn stop(&mut self, actions: &mut Vec<Action>) {
-        let again = self.held_by_stop();
+        self.stop_for(actions, true);
+    }
+
+    /// Stops the chat, as [`Self::stop`] does, for the user if `by_user`,
+    /// or else to send their message at once, which drops nothing.
+    fn stop_for(&mut self, actions: &mut Vec<Action>, by_user: bool) {
+        let turns = self.node.turns.len();
+        let again = by_user && self.held_by_stop() && self.stopped_at == Some(turns);
+        if by_user {
+            self.stopped_at = Some(turns);
+        }
         self.stop_requested = true;
         if let Some((id, _, _)) = self.user_queue.native {
             self.steered(id, Err("Stopped before acknowledgment".into()));
@@ -8353,6 +8369,32 @@ mod tests {
         send(&mut chat, "mine");
         assert_eq!(chat.relations().hops, 0);
         assert_eq!(chat.node.turns.last().unwrap().from, None);
+    }
+
+    /// Only the user's own Stop, again with no turn begun since, drops what
+    /// waits for them: not a stop to send a steered message at once, nor
+    /// one of a turn the agent took by itself, which wakes the held chat
+    /// without letting what waits go (CLACKA-220).
+    #[test]
+    fn only_a_second_stop_with_no_turn_since_drops_what_waits() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        drop(chat.act(ChatAction::Stop));
+        chat.deliver(message(7, "later", 1)).unwrap();
+        // Its own background work wakes it: that's no other agent's.
+        assert!(chat.wake(Some("the build ended".to_owned())));
+        assert_eq!(chat.act(ChatAction::Stop), [Action::Cancel]);
+        chat.answered(Ok(StopReason::Cancelled));
+        assert_eq!(chat.relations().inbox.len(), 1, "not dropped");
+        assert_eq!(chat.deliver_next(), [], "still held");
+        // A message steered in stops the chat to go, dropping nothing.
+        let id = chat.enqueue_user("now".into(), Vec::new(), None).unwrap();
+        drop(chat.steer_restart(id));
+        assert_eq!(chat.relations().inbox.len(), 1, "not dropped");
+        drop(chat.take_queued_user(id));
+        // The user's Stop again, with no turn since theirs: dropped.
+        drop(chat.act(ChatAction::Stop));
+        assert!(chat.relations().inbox.is_empty());
     }
 
     /// Stopping holds the messages waiting, and what comes after, for the

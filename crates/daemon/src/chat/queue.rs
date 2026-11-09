@@ -163,7 +163,7 @@ impl HostedChat {
 
     pub(crate) fn steer_restart(&mut self, id: u64) -> Vec<super::Action> {
         let mut actions = Vec::new();
-        self.stop(&mut actions);
+        self.stop_for(&mut actions, false);
         self.user_queue.restart = Some(id);
         self.show_queue();
         actions
