@@ -31,6 +31,18 @@ impl Desk {
             self.refuse("a chat needs the daemon, which is out of reach".into());
             return;
         }
+        // `:Agent@desk` from a pane of another machine's: a daemon too old
+        // to ask desk would offer the pane's machine's agents instead.
+        let own = self.workspaces.machine.as_ref().map(|own| own.id);
+        let on = self.opening_on.filter(|&on| Some(on) != own);
+        let pane_on = (self.shown).and_then(|shown| self.pane_machine(shown.pane));
+        if on != pane_on && self.opening_on.is_some() {
+            let host = self.opening_on.map(|on| self.elsewhere_on(on).host);
+            let what = format!("a chat on @{}", host.unwrap_or_default());
+            if !self.needs_daemon(&what, clackatoo_protocol::wire::CHOICES_ON) {
+                return;
+            }
+        }
         if let Some(shown) = self.shown {
             self.close_editor_panel(shown.pane);
         }

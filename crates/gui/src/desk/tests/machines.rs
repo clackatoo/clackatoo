@@ -248,6 +248,12 @@ fn the_start_page_for_another_machine_asks_that_machine() {
         (vec![Some(DESK)], vec![Some(DESK)])
     );
     assert_eq!(asked(&mut desk, "Agent"), (vec![None], vec![None]));
+    // A daemon too old to ask desk says so, rather than offer this
+    // machine's agents for a chat on desk.
+    desk.daemon_is(clackatoo_protocol::wire::CHOICES_ON - 1, None);
+    assert_eq!(asked(&mut desk, "Agent@desk"), (vec![], vec![]));
+    assert!(note_of(&desk).contains("newer"), "{}", note_of(&desk));
+    assert_eq!(asked(&mut desk, "Agent"), (vec![None], vec![None]));
 }
 
 /// `:Board@desk` with no name, from a pane of this machine's, lists
