@@ -1063,7 +1063,19 @@ impl Daemon {
         renew: bool,
     ) -> Option<Response> {
         let (at, _) = self.relayed_terminal(local)?;
-        let followed = self.links.list[at].relayed.followed.get_mut(&local)?;
+        let followed = self.links.list[at].relayed.followed.get_mut(&local);
+        // It must see what it fits, as for this daemon's own.
+        let following = (followed.as_ref())
+            .is_some_and(|followed| followed.viewers.iter().any(|viewer| viewer.token == token));
+        if size.is_some() && !renew && !following {
+            return Some(Response::Error(Error::NotFollowing(local)));
+        }
+        let Some(followed) = followed else {
+            return Some(match size {
+                None => Response::Done,
+                Some(_) => Response::Error(Error::NotFitted(local)),
+            });
+        };
         let theirs = followed.fitter == Some(token);
         match size {
             None if !theirs => Some(Response::Done),
@@ -2137,6 +2149,7 @@ impl Daemon {
                     .filter(|(_, followed)| {
                         followed.viewers.iter().any(|viewer| viewer.token == token)
                             || followed.typist == Some(token)
+                            || followed.fitter == Some(token)
                     })
                     .map(move |(&local, _)| (at, local))
             })
@@ -3945,7 +3958,23 @@ mod tests {
         daemon.route_request(phone, fit(Some(size), false));
         heard(&mut there);
         daemon.route_request(phone, Request::Detach { terminal: local });
+        assert_eq!(heard(&mut there), std::slice::from_ref(&put_back));
+        // Following it no more, the phone can't fit it again.
+        let Routed::Answered(Response::Error(Error::NotFollowing(_))) =
+            daemon.route_request(phone, fit(Some(size), false))
+        else {
+            panic!("a client not following it fitted it");
+        };
+        assert!(heard(&mut there).is_empty());
+        // A fitter that goes is forgotten, its fit put back.
+        let (other, _keep_other) = client(&mut daemon);
+        daemon.route_request(other, Request::Attach { terminal: local });
+        daemon.route_request(window, fit(Some(size), false));
+        heard(&mut there);
+        daemon.forget_relay_client(window);
         assert_eq!(heard(&mut there), [put_back]);
+        daemon.route_request(other, typing(b"o"));
+        assert_eq!(heard(&mut there), [typed(b"o")]);
     }
 
     #[test]
