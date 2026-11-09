@@ -1283,7 +1283,10 @@ fn info(lua: &Lua, world: &World, kind: &str, window: u32, id: u32) -> mlua::Res
 }
 
 /// `require`, finding modules in `client/lua/` and then the shared `lua/`,
-/// a dot in a module's name being a directory.
+/// by a name of letters, digits, `_` and `-`, a dot being a directory, as
+/// the daemon's does: never a path of its own, which could reach out of
+/// them. A module is read as the daemon reads one, never from a FIFO or
+/// a device, and up to 1 MiB.
 fn require(lua: &Lua, source: &Source) -> mlua::Result<Function> {
     let dirs = match source {
         Source::Dir(dir) => vec![dir.join("client/lua"), dir.join("lua")],
@@ -1295,13 +1298,27 @@ fn require(lua: &Lua, source: &Source) -> mlua::Result<Function> {
         if let Some(module) = loaded.get::<Option<Value>>(name.as_str())? {
             return Ok(module);
         }
+        if !clackatoo_daemon::settings::module_name(&name) {
+            return Err(mlua::Error::runtime(format!(
+                "require({name:?}): a module's name is letters, digits, _ and -, with dots \
+                 for folders"
+            )));
+        }
         let relative = name.replace('.', "/");
-        let found = dirs.iter().find_map(|dir| {
-            [format!("{relative}.lua"), format!("{relative}/init.lua")]
-                .into_iter()
-                .map(|file| dir.join(file))
-                .find_map(|path| Some((std::fs::read_to_string(&path).ok()?, path)))
-        });
+        let mut found = None;
+        'dirs: for dir in &dirs {
+            for file in [format!("{relative}.lua"), format!("{relative}/init.lua")] {
+                let path = dir.join(file);
+                match clackatoo_daemon::settings::read_file(&path) {
+                    Ok(Some(text)) => {
+                        found = Some((text, path));
+                        break 'dirs;
+                    }
+                    Ok(None) => {}
+                    Err(why) => return Err(mlua::Error::runtime(why)),
+                }
+            }
+        }
         let Some((text, path)) = found else {
             return Err(mlua::Error::runtime(format!(
                 "there's no module `{name}` in client/lua/ or lua/"

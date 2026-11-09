@@ -1285,6 +1285,36 @@ mod tests {
         dir
     }
 
+    /// `require` takes only a module's name, never a path, so nothing out
+    /// of the config's folders is run.
+    #[test]
+    fn require_reaches_only_the_configs_folders() {
+        let outside = tempfile::tempdir().unwrap();
+        let module = outside.path().join("escape.lua");
+        std::fs::write(&module, "client.opt.nuw = 9").unwrap();
+        let absolute = module.with_extension("");
+        for name in [
+            absolute.display().to_string(),
+            "../../escape".to_owned(),
+            "a/b".to_owned(),
+            String::new(),
+        ] {
+            let dir = config_dir(&[("client/init.lua", &format!("require({name:?})"))]);
+            let mut lua = Lua::start(
+                Source::Dir(dir.path().into()),
+                Options::default(),
+                vec![WINDOW],
+                Box::new(|| {}),
+            )
+            .expect("Lua started");
+            let said = lua.ready();
+            assert!(
+                matches!(&said[..], [FromLua::Error(err)] if err.contains("a module's name")),
+                "{name}: {said:?}"
+            );
+        }
+    }
+
     /// Luau's bytecode is never run: as the config, or as a module.
     #[test]
     fn bytecode_is_never_run() {
