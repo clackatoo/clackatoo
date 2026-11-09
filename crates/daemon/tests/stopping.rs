@@ -1090,3 +1090,32 @@ fn shells_killed_just_before_the_daemon_stops_come_back_with_their_workspaces() 
         });
     }
 }
+
+/// A pane kept a moment since a signal ended its program closes as the
+/// daemon upgrades, as it would have a moment later: the next build
+/// doesn't know it's only kept a moment (CLACKA-236).
+#[test]
+fn a_pane_kept_for_a_killed_program_closes_as_the_daemon_upgrades() {
+    let daemon = Process::start(&Setup::default());
+    let mut client = daemon.client();
+    let sleeping = || {
+        PaneTerminal::New(NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["sleep".to_owned(), "1000".to_owned()]),
+            cwd: None,
+            record_to: None,
+        })
+    };
+    for name in ["killed", "stays"] {
+        client.new_workspace(Some(name.into()), sleeping()).unwrap();
+    }
+    let killed = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    rustix::process::kill_process(pid_of(&mut client, killed), Signal::TERM).unwrap();
+    eventually("the daemon sees sleep go", || ended(&mut client, killed));
+    drop(client);
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    let mut client = daemon.client();
+    assert_eq!(workspace_names(&mut client), ["stays"], "{}", daemon.log());
+}

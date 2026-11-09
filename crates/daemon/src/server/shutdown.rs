@@ -102,11 +102,26 @@ impl Daemon {
             .collect();
         for id in over {
             self.graced.remove(&id);
-            if self.workspaces.get().pane_showing(id).is_some()
-                && let Err(err) = self.close_terminal(id)
-            {
-                log::error!("terminal {id}: closing its pane failed: {err}");
-            }
+            self.close_ended(id);
+        }
+    }
+
+    /// Closes every pane kept since its program ended, as the daemon
+    /// upgrades: the next build doesn't know they're only kept a moment,
+    /// and would keep them for good.
+    pub(super) fn close_graced(&mut self) {
+        for id in std::mem::take(&mut self.graced).into_keys() {
+            self.close_ended(id);
+        }
+    }
+
+    /// Closes the pane of terminal `id`, whose program has ended, if it's
+    /// still shown.
+    fn close_ended(&mut self, id: TerminalId) {
+        if self.workspaces.get().pane_showing(id).is_some()
+            && let Err(err) = self.close_terminal(id)
+        {
+            log::error!("terminal {id}: closing its pane failed: {err}");
         }
     }
 

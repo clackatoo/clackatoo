@@ -2209,7 +2209,9 @@ impl Daemon {
         // There's no way back now. What can't wait for the next build is
         // answered for the agents that go on. Language servers are asked to
         // shut down, and the other agents stopped, to do so while remote
-        // windows are told.
+        // windows are told. Panes kept a moment since their programs ended
+        // close now, as they would have.
+        self.close_graced();
         self.ready_kept(&keep);
         let servers_until = Instant::now() + stopping::STOP_WAIT;
         self.stop_servers();
