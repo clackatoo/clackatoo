@@ -170,18 +170,25 @@ fn agent_parent_prefix(
     let Some(agent) = state.agent else {
         return Ok(None);
     };
-    // AgentTerminal ends GridState but for, since 134, whether it's fed (a
-    // bool's byte): the parent's varint, three bools and, since 124, an
-    // Option<u8> (one byte for the tag and one for Some).
+    // AgentTerminal ends GridState but for, since 136, whether it's fed (a
+    // bool's byte), and since 139, the keyboard's flags and the progress:
+    // the parent's varint, three bools and, since 124, an Option<u8> (one
+    // byte for the tag and one for Some).
     let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
         1 + usize::from(agent.close_in.is_some())
     } else {
         0
     };
     let fed = usize::from(wire >= wire::FED_TERMINALS);
+    let mut fields = [0; 8];
+    let later = if wire >= wire::TERMINAL_STANDARDS {
+        postcard::to_slice(&(state.keyboard, state.progress), &mut fields)?.len()
+    } else {
+        0
+    };
     let end = payload
         .len()
-        .checked_sub(after.len() + 3 + countdown + fed)
+        .checked_sub(after.len() + 3 + countdown + fed + later)
         .ok_or(Error::DeserializeUnexpectedEnd)?;
     let mut encoded = [0; 5];
     let width = postcard::to_slice(&agent.parent, &mut encoded)?.len();
@@ -822,8 +829,11 @@ mod tests {
                     retained: false,
                     close_in,
                 });
-                // After it, since 134.
+                // After it, since 136...
                 grid.state.fed = true;
+                // ...and since 139.
+                grid.state.keyboard = 13;
+                grid.state.progress = Some(crate::TaskProgress::Running(5));
                 let patch = ViewUpdate::Patch(vec![
                     Patch::Title("test".into()),
                     Patch::Cwd(Some("/project".into())),
@@ -851,12 +861,19 @@ mod tests {
                     let reference = view_agent_parent(wire, payload).unwrap().unwrap();
                     assert_eq!(reference.parent, TerminalId(from));
                     // It reads only the small state prefix: even without the output.
-                    let tail =
-                        3 + if wire >= wire::TERMINAL_COUNTDOWN {
-                            1 + usize::from(close_in.is_some())
-                        } else {
-                            0
-                        } + usize::from(wire >= wire::FED_TERMINALS);
+                    let countdown = if wire >= wire::TERMINAL_COUNTDOWN {
+                        1 + usize::from(close_in.is_some())
+                    } else {
+                        0
+                    };
+                    let fed = usize::from(wire >= wire::FED_TERMINALS);
+                    // The flags' byte; Some, Running and its percent.
+                    let later = if wire >= wire::TERMINAL_STANDARDS {
+                        1 + 3
+                    } else {
+                        0
+                    };
+                    let tail = 3 + countdown + fed + later;
                     assert_eq!(
                         view_agent_parent(wire, &payload[..reference.end + tail]).unwrap(),
                         Some(reference)

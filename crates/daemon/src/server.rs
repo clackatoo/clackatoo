@@ -855,6 +855,11 @@ impl Subscription {
         let mut state = GridState::of(terminal);
         state.agent = agent;
         state.fed = fed;
+        // Nor are changes an older window can't read sent to it alone.
+        if wire < clackatoo_protocol::wire::TERMINAL_STANDARDS {
+            state.keyboard = 0;
+            state.progress = None;
+        }
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
             self.size = Some(size);

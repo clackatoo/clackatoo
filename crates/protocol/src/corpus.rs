@@ -19,7 +19,7 @@ use std::num::NonZeroU32;
 use clackatoo_term::mouse::{MouseEncoding, MouseTracking};
 use clackatoo_term::{
     Attributes, Block, Color, CursorShape, InputModes, LinkId, Match, Position, Selection,
-    ShellState, Size, Style, Underline, Which,
+    ShellState, Size, Style, TaskProgress, Underline, Which,
 };
 use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Piece, Severity, Span,
@@ -3860,6 +3860,8 @@ fn grid_state() -> GridState {
             close_in: Some(37),
         }),
         fed: true,
+        keyboard: 13,
+        progress: Some(TaskProgress::Paused(Some(40))),
     }
 }
 

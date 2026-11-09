@@ -77,7 +77,7 @@ use std::fmt;
 
 pub use clackatoo_term::{
     Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Position,
-    Selection, ShellState, Size, Style, Underline, Which,
+    Selection, ShellState, Size, Style, TaskProgress, Underline, Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -148,7 +148,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 138;
+pub const PROTOCOL_VERSION: u32 = 139;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

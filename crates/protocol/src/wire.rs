@@ -379,6 +379,11 @@ gates! {
     /// won't be seen (CLACKA-222): `FilesUpdate::Notice`, which an older
     /// peer isn't sent.
     FILES_NOTICE = 138,
+    /// What a terminal's program asked for beyond its modes (CLACKA-234):
+    /// the kitty keyboard protocol's flags to encode keys by,
+    /// `GridState`'s `keyboard`; and how far its task has got (OSC 9;4),
+    /// for tabs to show, `GridState`'s `progress`.
+    TERMINAL_STANDARDS = 139,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1746,6 +1751,28 @@ mod tests {
             panic!("not patches: {read:?}")
         };
         patches
+    }
+
+    #[test]
+    fn a_peer_before_terminal_standards_reads_xterm_keys_and_no_progress() {
+        let state = crate::GridState {
+            keyboard: 13,
+            progress: Some(crate::TaskProgress::Busy),
+            ..crate::GridState::default()
+        };
+        let patch = Patch::Grid {
+            node: crate::NodeId::ROOT,
+            state,
+            lines: Vec::new(),
+            links: Vec::new(),
+            marks: crate::BlockMarks::default(),
+        };
+        assert_eq!(patches_at(NEW, vec![patch.clone()]), [patch.clone()]);
+        let read = patches_at(OLD, vec![patch]);
+        let [Patch::Grid { state: older, .. }] = read.as_slice() else {
+            panic!("not one grid patch: {read:?}");
+        };
+        assert_eq!((older.keyboard, older.progress), (0, None));
     }
 
     #[test]

@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use clackatoo_term::{
-    CursorShape, InputModes, LinkId, Progress, Row, RowBuilder, ShellState, Size, Style, Terminal,
+    CursorShape, InputModes, LinkId, Progress, Row, RowBuilder, ShellState, Size, Style,
+    TaskProgress, Terminal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -294,6 +295,22 @@ pub struct GridState {
         deserialize_with = "wire::since::<{ wire::FED_TERMINALS }, _, _>"
     )]
     pub fed: bool,
+    /// The kitty keyboard protocol's flags the program asked for (see
+    /// [`clackatoo_term::keyboard`]): how it wants keys encoded, beyond
+    /// `modes`. 0, xterm's encoding, from a daemon older than protocol
+    /// 137.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS }, _, _>"
+    )]
+    pub keyboard: u8,
+    /// How far the program says its task has got (OSC 9;4), for its tab
+    /// to show.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_STANDARDS }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_STANDARDS }, _, _>"
+    )]
+    pub progress: Option<TaskProgress>,
 }
 
 /// Provenance and lifecycle of a terminal created by an agent.
@@ -534,6 +551,8 @@ impl GridState {
             block: terminal.latest_block().map(|(block, _)| block),
             agent: None,
             fed: false,
+            keyboard: terminal.keyboard(),
+            progress: terminal.progress(),
         }
     }
 }
