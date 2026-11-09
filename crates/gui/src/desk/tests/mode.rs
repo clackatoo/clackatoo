@@ -698,6 +698,40 @@ fn typed_into(requests: &[Request]) -> Vec<TerminalId> {
 }
 
 #[test]
+fn a_key_held_repeats_only_into_the_pane_that_heard_it_go_down() {
+    let mut desk = desk(two_side_by_side());
+    snapshot(&mut desk, 1);
+    snapshot(&mut desk, 2);
+    answer_all(&mut desk);
+    let a = Key::Character("a".into());
+    let press = KeyPress {
+        key: &a,
+        text: Some("a"),
+        location: winit::keyboard::KeyLocation::Standard,
+        code: Some(winit::keyboard::KeyCode::KeyA),
+        modifiers: Modifiers::default(),
+    };
+    desk.key_held(&press, false);
+    desk.key_held(&press, true);
+    assert_eq!(
+        typed_into(&answer_all(&mut desk)),
+        [TerminalId(1), TerminalId(1)]
+    );
+    // The focus moves while it's held, as a click or the pane closing
+    // moves it: it goes on in the pane it went down in, or nowhere.
+    desk.shown.as_mut().unwrap().pane = PaneId(2);
+    desk.key_held(&press, true);
+    assert_eq!(typed_into(&answer_all(&mut desk)), []);
+    // Pressed again, it's that pane's.
+    desk.key_held(&press, false);
+    desk.key_held(&press, true);
+    assert_eq!(
+        typed_into(&answer_all(&mut desk)),
+        [TerminalId(2), TerminalId(2)]
+    );
+}
+
+#[test]
 fn the_focused_pane_closed_by_another_window_arrives_in_normal_mode() {
     let layout = side_by_side(vec![pane(2), files_pane(1, 1), pane(3)]);
     let mut desk = desk(one_tab(layout));

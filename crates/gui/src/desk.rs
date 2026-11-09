@@ -572,6 +572,10 @@ pub(crate) struct Desk {
     /// Whether the key being handled is held down, repeating, which a
     /// program that asked for key events is told.
     key_repeat: bool,
+    /// The key last pressed, by where it is on the keyboard, and the
+    /// terminal or chat it was handed to, if one was: its repeats go only
+    /// there.
+    pressed_in: Option<(Option<winit::keyboard::KeyCode>, TerminalId)>,
     /// Whether a key or a click is being had as the focused pane's own
     /// doing, as Enter in an explorer is.
     acting: bool,
@@ -2086,6 +2090,9 @@ impl Desk {
     /// As [`key`](Self::key), for a key held down if `repeat`: a program
     /// that asked for key events hears a repeat, not a press.
     pub(crate) fn key_held(&mut self, press: &KeyPress<'_>, repeat: bool) -> bool {
+        if !repeat {
+            self.pressed_in = None;
+        }
         self.key_repeat = repeat;
         let redraw = self.key(press);
         self.key_repeat = false;
@@ -2342,12 +2349,26 @@ impl Desk {
     /// the pane must be redrawn.
     pub(super) fn pane_key(&mut self, press: &KeyPress<'_>) -> bool {
         let repeat = self.key_repeat;
+        let typed = self.keys_typed();
+        let heard = self
+            .focused_terminal()
+            .map(|terminal| (press.code, terminal));
+        // A key held repeats only into what heard it go down, not a pane
+        // the focus went to since.
+        if repeat && self.pressed_in != heard {
+            return false;
+        }
+        if !repeat && !typed {
+            self.pressed_in = heard;
+        }
         let (redraw, failed) = if let Some(chat) = self.focused_chat_mut() {
             (chat.key(press), chat.take_failed())
         } else if let Some(pane) = self.focused_pane() {
             pane.key_repeat = repeat;
+            pane.key_typed = typed;
             let redraw = pane.key(press);
             pane.key_repeat = false;
+            pane.key_typed = false;
             (redraw, pane.take_failed())
         } else {
             return false;

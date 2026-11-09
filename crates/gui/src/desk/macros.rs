@@ -409,6 +409,13 @@ impl Desk {
         redraw
     }
 
+    /// Whether the key being handled is typed for the user, by a macro or
+    /// a binding, or held while something waited and typed after: not one
+    /// pressed just now, whose release will come.
+    pub(super) fn keys_typed(&self) -> bool {
+        self.macros.handing.is_some()
+    }
+
     /// Says `said` once the keys held have gone, as the bar would be put
     /// out by them.
     pub(super) fn say_after_held(&mut self, said: String) {

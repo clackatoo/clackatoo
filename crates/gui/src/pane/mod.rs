@@ -114,6 +114,9 @@ pub(crate) struct Pane {
     requested_size: Option<Size>,
     /// Whether the key being handed it is held down, repeating.
     pub(crate) key_repeat: bool,
+    /// Whether the key being handed it was typed for the user, by a
+    /// macro or a binding, not pressed: no release will come for it.
+    pub(crate) key_typed: bool,
     /// The keys its program heard go down as sequences of the kitty
     /// keyboard protocol with key events asked for, by where they are on
     /// the keyboard, to be told as they come up.
@@ -207,6 +210,7 @@ impl Pane {
             requests: Requests::new(terminal),
             requested_size: None,
             key_repeat: false,
+            key_typed: false,
             held: Vec::new(),
             cell: None,
             screen: None,
@@ -1108,8 +1112,10 @@ impl Pane {
             return None;
         }
         // A key sent as a sequence, to a program that asked for key
-        // events, is told as it comes up.
+        // events, is told as it comes up: one pressed, not typed by a
+        // macro, which never comes up.
         if keyboard & clackatoo_term::keyboard::EVENT_TYPES != 0
+            && !self.key_typed
             && bytes.starts_with(b"\x1b[")
             && let Some(code) = press.code
             && !self.held.contains(&code)
@@ -4083,6 +4089,12 @@ mod mouse_tests {
         pane.key(&plain);
         assert!(!pane.key_released(&plain));
         assert_eq!(input(&mut pane), "a");
+        // Typed by a macro, it's never told as let go: no key went down.
+        pane.key_typed = true;
+        pane.key(&ctrl_a);
+        pane.key_typed = false;
+        assert!(!pane.key_released(&ctrl_a));
+        assert_eq!(input(&mut pane), "\x1b[97;5u");
     }
 
     #[test]
