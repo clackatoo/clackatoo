@@ -631,10 +631,10 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `send_to_chat` | Sends a chat a message, of at most 16 KiB. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. It answers at once, with the chat's number, without waiting for the agent to start: the message goes once it has, and if it can't, the chat fails, saying why, and a wait for it says so too. |
-| `start_chats` | Starts several at once, up to 8. |
+| `start_chats` | Starts several at once, up to 16. |
 | `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, opened and sent back to the background, or whose changes or comments wait for your review: those are yours to close. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat may go on by itself when that ends. |
-| `wait_for_chats` | Waits for several chats, up to 8, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
+| `wait_for_chats` | Waits for several chats, up to 16, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
 
 What another chat's agent said reaches an agent quoted, each line after `| `, in what `read_chat`, `wait_for_chat` and `wait_for_chats` give, as the messages in a turn are after `> `: nothing a chat says can pass for a turn of yours, or for clackatoo's words around it.
 

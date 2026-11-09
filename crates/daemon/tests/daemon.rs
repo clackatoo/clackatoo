@@ -15568,10 +15568,10 @@ fn start_chats_answers_before_the_sessions_open_and_says_how_many_more_may_start
         "start_chats and list_chats: {words}"
     );
     assert_eq!(card_of(&mut client, a).len(), 6);
-    // Each gets its message once its session opens.
+    // Each gets its message once its session opens, and works on it.
     for &kid in &kids {
         wait_for_chat_for(&mut client, kid, Duration::from_secs(15), |node| {
-            node.state == ChatState::Ready
+            node.state == ChatState::Answering
         });
     }
 }

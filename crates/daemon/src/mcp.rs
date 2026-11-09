@@ -82,8 +82,9 @@ const DEFAULT_CHAT_WAIT: Duration = Duration::from_mins(5);
 const MAX_CHAT_WAIT: Duration = Duration::from_mins(30);
 
 /// The most chats `start_chats` starts, and `wait_for_chats` waits for,
-/// at once.
-pub(crate) const MAX_FAN_OUT: usize = 8;
+/// at once: never fewer than the most the Subagents setting offers, so a
+/// chat let have that many working starts them in one call.
+pub(crate) const MAX_FAN_OUT: usize = 16;
 
 /// How many entries `board_read` gives unless asked for another number,
 /// and the most it gives.
@@ -2200,6 +2201,31 @@ mod tests {
         assert!(matches!(
             parse("wait_for_chats", &json!({ "chats": many })),
             Err(Bad(_))
+        ));
+    }
+
+    /// A chat let have as many working as its Subagents setting offers,
+    /// at most, starts them, and waits for them, in one call (CLACKA-228).
+    #[test]
+    fn one_call_starts_as_many_as_the_subagents_setting_offers() {
+        let widest = crate::agents::SubagentLimits {
+            working: 64,
+            ..Default::default()
+        };
+        let most = widest.offered().into_iter().max().map(usize::from);
+        assert!(most.is_some_and(|most| most <= MAX_FAN_OUT), "{most:?}");
+        for name in ["start_chats", "wait_for_chats"] {
+            let tools = clackatoo_tools();
+            let tool = (tools.as_array().unwrap().iter())
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            let items = &tool["inputSchema"]["properties"]["chats"]["maxItems"];
+            assert_eq!(items.as_u64(), u64::try_from(MAX_FAN_OUT).ok(), "{name}");
+        }
+        let chats = vec![json!({ "prompt": "x" }); MAX_FAN_OUT];
+        assert!(matches!(
+            parse("start_chats", &json!({ "chats": chats })),
+            Ok(Tool::StartChats(started)) if started.len() == MAX_FAN_OUT
         ));
     }
 
