@@ -1598,6 +1598,8 @@ impl Desk {
         self.arrive_if_moved(ended);
         self.fit_panes();
         self.forget_gone_handlers();
+        // The daemon may have said which machine it's on.
+        self.tell_turns();
         self.close_leftovers();
         self.settle_lesson();
         self.relist_background();

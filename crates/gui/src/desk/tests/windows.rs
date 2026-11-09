@@ -26,6 +26,20 @@ fn window(client: &Client) -> Desk {
     desk
 }
 
+/// `id`'s machine, as its daemon says it.
+fn machine(id: u8) -> clackatoo_protocol::Machine {
+    clackatoo_protocol::Machine {
+        id: clackatoo_protocol::MachineId([id; 16]),
+        name: format!("machine {id}"),
+        run: 0,
+    }
+}
+
+/// The window's daemon is on `id`'s machine, as it's said.
+fn on_machine(desk: &mut Desk, id: u8) {
+    desk.workspaces.machine = Some(machine(id));
+}
+
 /// A window of a new client running the config in `dir`, loaded.
 fn first_window(dir: &tempfile::TempDir) -> (Client, Desk) {
     let client = Client::default();
@@ -179,6 +193,7 @@ fn a_chats_turn_ending_is_heard_once_however_many_windows_hear_it() {
     let (client, mut one) = first_window(&dir);
     let mut two = window(&client);
     for desk in [&mut one, &mut two] {
+        on_machine(desk, 1);
         desk.chats_changed(vec![summary(5, 1, ChatState::Answering)]);
     }
     for desk in [&mut one, &mut two] {
@@ -308,4 +323,48 @@ fn what_a_guarded_windows_key_sets_off_is_refused_in_every_window() {
     let mut four = window(&client);
     four.lua_said();
     assert!(four.config_hosts.is_empty());
+}
+
+/// A chat on one machine, shown in a window on its daemon and in one on a
+/// daemon that passes it on, numbered afresh there, is heard once; and a
+/// window whose daemon hasn't said which machine it's on waits for that
+/// before telling of it, so it's never told twice.
+#[test]
+fn a_chat_shown_through_two_daemons_is_heard_once() {
+    let dir = config(
+        r#"
+        local heard = 0
+        client.on("turnend", function()
+            heard += 1
+            client.opt.tabstop = heard
+        end)
+        "#,
+    );
+    let (client, mut desk) = first_window(&dir);
+    on_machine(&mut desk, 1);
+    // The laptop's daemon passes the desk's workspace on, its chat 5 as
+    // chat 9; it hasn't said which machine it's on yet.
+    let mut laptop = window(&client);
+    laptop.workspaces.list[0].home = Some(clackatoo_protocol::MachineId([1; 16]));
+    let chat = |chat, state| ChatSummary {
+        title: "Claude".into(),
+        active: 7,
+        ..summary(chat, 1, state)
+    };
+    laptop.chats_changed(vec![chat(9, ChatState::Answering)]);
+    laptop.chats_changed(vec![chat(9, ChatState::Ready)]);
+    std::thread::sleep(Duration::from_millis(50));
+    laptop.lua_said();
+    assert_eq!(laptop.options.tabstop, 4, "it waits");
+    let mut workspaces = laptop.workspaces.clone();
+    workspaces.machine = Some(machine(2));
+    laptop.workspaces_changed(workspaces);
+    until(&mut [&mut laptop], |desks| desks[0].options.tabstop == 1);
+    // The desk's window hears the same turn, of chat 5: not again.
+    desk.chats_changed(vec![chat(5, ChatState::Answering)]);
+    desk.chats_changed(vec![chat(5, ChatState::Ready)]);
+    std::thread::sleep(Duration::from_millis(50));
+    desk.lua_said();
+    laptop.lua_said();
+    assert_eq!((desk.options.tabstop, laptop.options.tabstop), (1, 1));
 }

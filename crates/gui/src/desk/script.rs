@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{ChatState, ChatSummary, PaneId, Request};
+use clackatoo_protocol::{ChatState, ChatSummary, MachineId, PaneId, Request};
 
 use super::{Asked, Desk};
 use crate::client::Client;
@@ -32,6 +32,9 @@ pub(super) struct Script {
     waiting: Vec<(KeptPress, Chord)>,
     /// Keys a binding to keys is typing are being handled.
     pub(super) typing: bool,
+    /// Chats whose turn ended, to tell Lua of once the daemon has said
+    /// which machine it's on.
+    turns: Vec<ChatSummary>,
     /// The client's counts of changes to the bindings, and of reloads, as
     /// the window last followed them.
     keys_seen: u64,
@@ -382,8 +385,12 @@ impl Desk {
     }
 
     /// Tells Lua of chats whose turn has `ended`, as the daemon said, if it
-    /// listens: once, though every window on the daemon heard it.
+    /// listens: once, though every window that shows the chat heard it,
+    /// on whichever daemon. A turn heard before the daemon has said which
+    /// machine it's on waits for that, so it's never told twice.
     pub(super) fn tell_turns_ended(&mut self, ended: Vec<ChatSummary>) {
+        /// The most turns kept waiting.
+        const MOST: usize = 64;
         if ended.is_empty()
             || !self
                 .joined()
@@ -391,13 +398,44 @@ impl Desk {
         {
             return;
         }
+        self.script.turns.extend(ended);
+        let over = self.script.turns.len().saturating_sub(MOST);
+        self.script.turns.drain(..over);
+        self.tell_turns();
+    }
+
+    /// The machine `chat` is on: its pane's, or its workspace's, if
+    /// another's than the daemon's, which is `own`.
+    fn chat_home(&self, chat: &ChatSummary, own: Option<MachineId>) -> Option<MachineId> {
+        let workspaces = &self.workspaces;
+        if let Some((workspace, _, pane)) =
+            (workspaces.pane_showing(chat.chat)).and_then(|pane| workspaces.find_pane(pane))
+        {
+            return pane.home.or(workspace.home).or(own);
+        }
+        let workspace = chat.workspace.and_then(|id| workspaces.get(id));
+        workspace.and_then(|workspace| workspace.home).or(own)
+    }
+
+    /// Tells Lua of the turns waiting, once the daemon has said which
+    /// machine it's on, as a daemon older than other machines' workspaces
+    /// never does.
+    pub(super) fn tell_turns(&mut self) {
+        if self.script.turns.is_empty() {
+            return;
+        }
+        let own = self.workspaces.machine.as_ref().map(|machine| machine.id);
+        if own.is_none() && self.daemon_has(clackatoo_protocol::wire::FEDERATION) {
+            return;
+        }
+        let ended = std::mem::take(&mut self.script.turns);
         // So the pane showing it is in Lua's world.
         self.sync_lua();
         let Some((client, window)) = self.joined() else {
             return;
         };
-        let machine = self.workspaces.machine.as_ref().map(|machine| machine.id);
         for chat in ended {
+            let heard = (self.chat_home(&chat, own), chat.active, chat.title.clone());
             let failed = match chat.state {
                 ChatState::Failed(_) => Some(true),
                 _ => chat.failed,
@@ -411,7 +449,7 @@ impl Desk {
                 window,
                 guarded: self.controlled,
             };
-            client.tell_once((machine, chat.chat, chat.active), ToLua::TurnEnded(turn));
+            client.tell_once(heard, ToLua::TurnEnded(turn));
         }
     }
 

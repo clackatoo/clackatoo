@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Instant;
 
-use clackatoo_protocol::{MachineId, TerminalId};
+use clackatoo_protocol::MachineId;
 
 use crate::desk::{Binding, Keys};
 use crate::lua::{
@@ -89,9 +89,13 @@ struct Inner {
 #[derive(Default)]
 struct OptionsCell(RefCell<Option<Shared>>);
 
-/// A daemon event, as told once: a chat's turn that ended, by the daemon
-/// it's on (if it says), the chat, and when.
-pub(crate) type Heard = (Option<MachineId>, TerminalId, u64);
+/// A daemon event, as told once: a chat's turn that ended, by the machine
+/// the chat is on (if its daemon says), when it ended, and the chat's
+/// title. Not by the chat's number: a daemon numbers another machine's
+/// chats afresh as it passes them on, so windows on two daemons know one
+/// chat by two numbers; but each hears when its turn ended as the chat's
+/// own daemon said.
+pub(crate) type Heard = (Option<MachineId>, u64, String);
 
 impl Client {
     /// The client, with the options as the process starts them.
