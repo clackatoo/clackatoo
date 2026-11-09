@@ -243,6 +243,10 @@ pub fn get(path: &Path, name: &str) -> anyhow::Result<String> {
     };
     Ok(match document(path)?.get(name) {
         Some(item) => bare(item),
+        // Empty text is the font, and the system's monospace font.
+        None if info.default_value() == Value::Text(String::new()) => {
+            "the system's monospace font (the default)".into()
+        }
         None => format!(
             "{} (the default)",
             toml_value(&info.default_value())
@@ -408,6 +412,10 @@ mod tests {
         set(&path, "renderer", "opengl").unwrap();
         assert_eq!(get(&path, "renderer").unwrap(), "opengl");
         assert_eq!(get(&path, "font-size").unwrap(), "12 (the default)");
+        assert_eq!(
+            get(&path, "font").unwrap(),
+            "the system's monospace font (the default)"
+        );
 
         std::fs::write(&path, "# My font.\nfont = \"Iosevka\"\n").unwrap();
         set(&path, "font-size", "13.5").unwrap();
