@@ -619,9 +619,10 @@ mod tests {
     }
 
     /// A picture on a hidden line is in no snapshot, patch or history
-    /// fetch, even shown as it is, and its image isn't sent.
+    /// fetch, and its image isn't sent: until the line is shown as it is,
+    /// when its picture is too, while it's shown.
     #[test]
-    fn a_picture_on_a_hidden_line_is_never_sent() {
+    fn a_picture_on_a_hidden_line_is_sent_only_while_shown() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
         feed(&mut daemon, terminal, b"\r\n");
@@ -655,17 +656,10 @@ mod tests {
             keys
         };
         assert_eq!(images(&mut daemon), [1]);
-        // Shown as it is, its text is, but not its picture.
-        let unmask = Request::Unmask {
-            terminal,
-            line: Some(4),
-        };
-        let asked = daemon.respond(unmask, token);
-        assert!(matches!(asked, Response::Text(_)), "{asked:?}");
-        assert_eq!(images(&mut daemon), [1]);
+        let image = |key| clackatoo_protocol::ImageId([key; 16]);
         let fetch = |key| Request::Image {
             from: clackatoo_protocol::ImageFrom::Terminal(terminal),
-            image: clackatoo_protocol::ImageId([key; 16]),
+            image: image(key),
             fit: None,
             at: 0,
         };
@@ -673,20 +667,81 @@ mod tests {
             daemon.respond(fetch(2), token),
             Response::Image(clackatoo_protocol::ImageAnswer::Missing)
         );
-        // In history, still left out.
+        assert!(daemon.image_masked(token, terminal, image(2)));
+        assert!(!daemon.image_masked(token, terminal, image(1)));
+        // Shown as it is, its picture is too, and its image may be sent.
+        let unmask = Request::Unmask {
+            terminal,
+            line: Some(4),
+        };
+        let asked = daemon.respond(unmask, token);
+        assert!(matches!(asked, Response::Text(_)), "{asked:?}");
+        assert_eq!(images(&mut daemon), [1, 2]);
+        assert!(!daemon.image_masked(token, terminal, image(2)));
+        // Only to the window that asked.
+        let (other, _theirs) = window(&mut daemon);
+        daemon.attach(other, terminal).unwrap();
+        assert!(daemon.image_masked(other, terminal, image(2)));
+        // In history too.
         feed(&mut daemon, terminal, &b"\r\n".repeat(12));
-        let history = Request::History {
+        let history = || Request::History {
             terminal,
             end: 6,
             count: 6,
         };
-        let Response::History(lines) = daemon.respond(history, token) else {
-            panic!("no history");
+        let keys = |daemon: &mut Daemon| {
+            let Response::History(lines) = daemon.respond(history(), token) else {
+                panic!("no history");
+            };
+            let mut keys: Vec<u8> = (lines.pictures.pictures.iter())
+                .map(|(_, picture)| picture.image[0])
+                .collect();
+            keys.sort_unstable();
+            keys
         };
-        let keys: Vec<u8> = (lines.pictures.pictures.iter())
-            .map(|(_, picture)| picture.image[0])
-            .collect();
-        assert_eq!(keys, [1]);
+        assert_eq!(keys(&mut daemon), [1, 2]);
+        assert!(!daemon.image_masked(token, terminal, image(2)));
+        // Masked again once the time's up: refused again.
+        if let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) {
+            client.views.get_mut(&terminal).unwrap().shown_until = Some(Instant::now());
+        }
+        daemon.mask_again_if_due();
+        assert_eq!(keys(&mut daemon), [1]);
+        assert!(daemon.image_masked(token, terminal, image(2)));
+        assert_eq!(
+            daemon.respond(fetch(2), token),
+            Response::Image(clackatoo_protocol::ImageAnswer::Missing)
+        );
+    }
+
+    /// A picture on a line kept from agents isn't shown in a window an
+    /// agent sees, whatever the user asks to see there.
+    #[test]
+    fn a_picture_kept_from_agents_stays_masked_in_a_window_an_agent_sees() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+        feed(&mut daemon, terminal, b"\r\n");
+        show_image(
+            &mut daemon,
+            terminal,
+            b"\x1b]46373;region;start;s;secret\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]46373;region;end;s\x07",
+            2,
+        );
+        let chat = TerminalId(4242);
+        let control = clackatoo_protocol::NativeAccess::Control;
+        daemon.tools.native.insert(chat, (token, control));
+        daemon.mask_by_grants();
+        let image = clackatoo_protocol::ImageId([2; 16]);
+        assert!(daemon.image_masked(token, terminal, image));
+        let asked = daemon.respond(
+            Request::Unmask {
+                terminal,
+                line: Some(3),
+            },
+            token,
+        );
+        assert!(matches!(asked, Response::Error(_)), "{asked:?}");
+        assert!(daemon.image_masked(token, terminal, image));
     }
 
     /// A window that starts relaying has what it followed before masked as

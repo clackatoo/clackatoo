@@ -119,9 +119,10 @@ on another machine](~clackatoo/reference/remote), a daemon relaying, the
 alike. So what you copy or yank of it is the mask too, and a search (`/`,
 `?`, `n`) never goes to it, nor lights it. A picture a program shows on a
 hidden line ([images](~clackatoo/reference/images)) is never sent, nor is
-its image, even once you ask to see the line's text; on a line kept from
-agents, it's sent only where agents can't see it, and copies and agents'
-reads say nothing of it.
+its image, until you ask to see the line: then it's shown with the text,
+in that window alone, and masked again with it. On a line kept from
+agents, it's sent only where agents can't see it, whatever you ask to see,
+and copies and agents' reads say nothing of it.
 
 To see it, put the cursor on it in normal mode and press `zv`, or
 <kbd>Ctrl</kbd>+click it. The run of hidden lines around it is shown as it is

@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use clackatoo_protocol::{
     BufferId, Content, Error, Event, ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo,
-    ImageNews, PaneId, Picture, PictureId, PictureState, Response, TerminalId,
+    ImageNews, Masking, PaneId, Picture, PictureId, PictureState, Response, TerminalId,
 };
 use mio::Token;
 
@@ -353,12 +353,27 @@ impl Daemon {
         }
         // Nor one placed only on lines masked for it (see `server/masks.rs`).
         if let ImageFrom::Terminal(terminal) = from
-            && let Ok(grid) = self.grid(terminal)
-            && grid.image_hidden(image.0, self.masking_for(token, terminal).hidden)
+            && self.image_masked(token, terminal, image)
         {
             return Response::Image(ImageAnswer::Missing);
         }
         Response::Image(self.images.fetch(token, from, image, fit, at))
+    }
+
+    /// Whether `image` is placed in `terminal`, but only on lines masked
+    /// for the client at `token`: not those shown to it as they are, whose
+    /// pictures are shown too.
+    pub(super) fn image_masked(&self, token: Token, terminal: TerminalId, image: ImageId) -> bool {
+        let Ok(grid) = self.grid(terminal) else {
+            return false;
+        };
+        let masking = self.masking_for(token, terminal);
+        let shown = |line: u64, hints| {
+            masking.shows_by(line, hints, || {
+                (grid.document_line(line)).map_or(0, |row| Masking::fingerprint(&row))
+            })
+        };
+        grid.image_hidden_unless(image.0, masking.hidden, &shown)
     }
 
     /// Answers [`Request::ImageAt`](clackatoo_protocol::Request::ImageAt):

@@ -532,9 +532,22 @@ fn a_picture_in_a_private_region_is_hidden_with_its_lines() {
     assert!(!t.image_hidden([1; 16], Hints::HIDE | Hints::NOAGENT));
     // An image placed nowhere isn't hidden: there's nothing to hide.
     assert!(!t.image_hidden([9; 16], Hints::HIDE));
-    // Scrolled into history, it's still hidden.
+    // Shown as it is, its lines' pictures are: but only both of its lines.
+    let rows = |t: &Terminal| -> Vec<u64> {
+        let end = t.primary().scrollback_end();
+        (t.grid().rows().zip(end..))
+            .filter(|(row, _)| row.pieces().iter().any(|piece| piece.picture == 2))
+            .map(|(_, line)| line)
+            .collect()
+    };
+    let lines = rows(&t);
+    assert!(!t.image_hidden_unless([2; 16], Hints::HIDE, &|line, _| lines.contains(&line)));
+    assert!(!t.image_hidden_unless([2; 16], Hints::HIDE, &|line, _| line == lines[0]));
+    assert!(t.image_hidden_unless([2; 16], Hints::HIDE, &|line, _| line == lines[0] + 9));
+    // Scrolled into history, it's still hidden, and shown by its lines.
     t.advance(b"\r\n".repeat(20).as_slice());
     assert!(t.image_hidden([2; 16], Hints::HIDE));
+    assert!(!t.image_hidden_unless([2; 16], Hints::HIDE, &|line, _| line == lines[1]));
 }
 
 /// What agents read of a line kept from them says nothing of its

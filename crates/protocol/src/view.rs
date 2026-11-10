@@ -248,43 +248,47 @@ impl Pictures {
         self.pieces.is_empty() && self.virtuals.is_empty()
     }
 
-    /// The pictures `rows` show, each a row with its line, as `terminal`
-    /// has them, and every virtual placement it has, if `all_virtuals` or
-    /// a row holds a placeholder.
+    /// The pictures `rows` of `terminal`'s screen show, each a row with
+    /// its line, as `terminal` has them, and every virtual placement it
+    /// has, if `all_virtuals` or a row holds a placeholder: but none on a
+    /// line `masking` masks.
     #[must_use]
     pub fn of_rows<'a>(
         rows: impl IntoIterator<Item = (u16, &'a Row)>,
         terminal: &Terminal,
         all_virtuals: bool,
-        hidden: Hints,
+        masking: &Masking,
     ) -> Self {
         let has_virtuals = terminal.virtuals().next().is_some();
+        let end = terminal.primary().scrollback_end();
         let mut placeholders = all_virtuals;
         let mut pieces = Vec::new();
         for (line, row) in rows {
-            if !clackatoo_term::graphics::may_show(row.hints(), hidden) {
+            if masking.masks(end + u64::from(line), row, row.hints()) {
                 continue;
             }
             pieces.extend(row.pieces().iter().map(|&piece| (line, piece)));
             placeholders |= has_virtuals && clackatoo_term::graphics::has_placeholders(row);
         }
-        Self::with(pieces, terminal, placeholders, hidden)
+        Self::with(pieces, terminal, placeholders, masking.hidden)
     }
 
     /// The pictures `terminal`'s history lines numbered from `first` on,
-    /// `count` of them, show, each numbered from `first`.
+    /// `count` of them, show, each numbered from `first`: but none on a
+    /// line `masked` says is masked, nor a virtual placement as private
+    /// as lines with any of the hints `hidden`.
     #[must_use]
-    pub fn of_history(terminal: &Terminal, first: u64, count: u16, hidden: Hints) -> Self {
+    pub fn of_history(
+        terminal: &Terminal,
+        first: u64,
+        count: u16,
+        hidden: Hints,
+        masked: impl Fn(u64) -> bool,
+    ) -> Self {
         let lines = first..first + u64::from(count);
-        let hints: BTreeMap<u64, clackatoo_term::Hints> =
-            terminal.primary().history_hints(lines.clone()).collect();
-        let shown = |line: u64| {
-            let hints = hints.get(&line).copied().unwrap_or_default();
-            clackatoo_term::graphics::may_show(hints, hidden)
-        };
         let pieces = (terminal.primary())
             .history_pieces(lines)
-            .filter(|&(line, _)| shown(line))
+            .filter(|&(line, _)| !masked(line))
             .filter_map(|(line, piece)| Some((u16::try_from(line - first).ok()?, piece)))
             .collect();
         Self::with(pieces, terminal, true, hidden)
@@ -830,7 +834,7 @@ impl GridNode {
             links: LinkTarget::of(&lines, terminal),
             lines,
             marks: BlockMarks::of_rows((0..).zip(grid.rows()), terminal),
-            pictures: Pictures::of_rows((0..).zip(grid.rows()), terminal, true, masking.hidden),
+            pictures: Pictures::of_rows((0..).zip(grid.rows()), terminal, true, masking),
         }
     }
 }
@@ -924,12 +928,20 @@ impl Masking {
     /// for a window an agent sees, whatever the user asked to see there.
     #[must_use]
     pub fn shows(&self, line: u64, row: &Row, hints: Hints) -> bool {
+        self.shows_by(line, hints, || Self::fingerprint(row))
+    }
+
+    /// As [`shows`](Self::shows), for a line whose
+    /// [`fingerprint`](Self::fingerprint) `print` gives, asked only for a
+    /// line among those shown.
+    #[must_use]
+    pub fn shows_by(&self, line: u64, hints: Hints, print: impl FnOnce() -> u64) -> bool {
         !hints.intersects(self.hidden & Hints::NOAGENT)
             && self.shown.contains(&line)
             && usize::try_from(line - self.shown.start)
                 .ok()
                 .and_then(|at| self.prints.get(at))
-                .is_some_and(|&print| print == Self::fingerprint(row))
+                .is_some_and(|&shown| shown == print())
     }
 
     /// Whether the document's line `line`, `row`, with `hints`, is masked.

@@ -981,7 +981,7 @@ impl Subscription {
                 damaged.iter().map(|&line| (line, row(line))),
                 terminal,
                 false,
-                self.masking.hidden,
+                &self.masking,
             )
         } else {
             Pictures::default()
@@ -5270,6 +5270,8 @@ fn history(
     let start = end.saturating_sub(u64::from(count));
     let mut first = None;
     let mut hinted = history.hints_of(start..end).peekable();
+    // Those masked show no pictures either.
+    let mut masked = std::collections::BTreeSet::new();
     let lines = history
         .scrollback_lines(start..end)
         .map(|(number, row)| {
@@ -5277,6 +5279,9 @@ fn history(
             while hinted.next_if(|&(line, _)| line < number).is_some() {}
             let hints = (hinted.next_if(|&(line, _)| line == number))
                 .map_or(clackatoo_term::Hints::empty(), |(_, hints)| hints);
+            if masking.masks(number, &row, hints) {
+                masked.insert(number);
+            }
             HistoryLine {
                 width: u16::try_from(row.width()).expect("rows are at most Size::MAX wide"),
                 line: masking.line(&row, number, hints, wire, terminal.widths()),
@@ -5289,7 +5294,9 @@ fn history(
         first,
         links: LinkTarget::of(lines.iter().map(|line| &line.line), terminal),
         lines,
-        pictures: Pictures::of_history(terminal, first, count, masking.hidden),
+        pictures: Pictures::of_history(terminal, first, count, masking.hidden, |line| {
+            masked.contains(&line)
+        }),
         marks: BlockMarks::of_history(terminal, first, count),
     }
 }

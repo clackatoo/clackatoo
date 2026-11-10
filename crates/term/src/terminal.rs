@@ -262,7 +262,21 @@ impl Terminal {
     /// sent.
     #[must_use]
     pub fn image_hidden(&self, image: ImageKey, hidden: crate::Hints) -> bool {
-        self.emulator.image_hidden(image, hidden)
+        self.emulator.image_hidden(image, hidden, &|_, _| false)
+    }
+
+    /// As [`image_hidden`](Self::image_hidden), but for a client shown
+    /// the lines `shown` says as they are, asked with a line's number in
+    /// the document (see [`crate::document`]) and its hints: their
+    /// pictures are shown too.
+    #[must_use]
+    pub fn image_hidden_unless(
+        &self,
+        image: ImageKey,
+        hidden: crate::Hints,
+        shown: &dyn Fn(u64, crate::Hints) -> bool,
+    ) -> bool {
+        self.emulator.image_hidden(image, hidden, shown)
     }
 
     /// The hints of the virtual placement `virtual_`: those of the regions

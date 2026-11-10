@@ -1553,9 +1553,19 @@ impl Emulator {
 
     /// Whether `image` is placed, but only on lines whose pictures may not
     /// be shown to a client that has lines with any of the hints `hidden`
-    /// masked (see [`may_show`]): its pictures' pieces, in history and on
-    /// screen, and the placeholders on screen of its virtual placements.
-    pub(crate) fn image_hidden(&self, image: ImageKey, hidden: crate::Hints) -> bool {
+    /// masked (see [`may_show`]), unless `shown`, asked with a line's
+    /// number in the document and its hints, says it's one shown to it as
+    /// it is: its pictures' pieces, in history and on screen, and the
+    /// placeholders on screen of its virtual placements. A virtual
+    /// placement made or shown in a region has no line of its own, so its
+    /// own hints hide it, whatever is shown.
+    pub(crate) fn image_hidden(
+        &self,
+        image: ImageKey,
+        hidden: crate::Hints,
+        shown: &dyn Fn(u64, crate::Hints) -> bool,
+    ) -> bool {
+        let shows = |line: u64, hints: crate::Hints| may_show(hints, hidden) || shown(line, hints);
         let of_image = |number: u32| {
             (self.graphics.picture(number)).is_some_and(|picture| picture.image == image)
         };
@@ -1567,17 +1577,18 @@ impl Emulator {
                 .map_or(crate::Hints::empty(), |(_, hints)| hints),
         };
         let alternate = (self.screen == crate::terminal::Screen::Alternate).then(|| self.grid());
-        let placed: Vec<crate::Hints> = (self.primary.pieces())
+        let placed: Vec<(u64, crate::Hints)> = (self.primary.pieces())
             .filter(|&(_, piece)| of_image(piece.picture))
-            .map(|(line, _)| primary(line))
+            .map(|(line, _)| (line, primary(line)))
             .chain(
                 (alternate.into_iter())
                     .flat_map(Grid::rows)
-                    .filter(|row| row.pieces().iter().any(|piece| of_image(piece.picture)))
-                    .map(crate::Row::hints),
+                    .zip(end..)
+                    .filter(|(row, _)| row.pieces().iter().any(|piece| of_image(piece.picture)))
+                    .map(|(row, line)| (line, row.hints())),
             )
             .collect();
-        let mut shown = placed.iter().any(|&hints| may_show(hints, hidden));
+        let mut seen = placed.iter().any(|&(line, hints)| shows(line, hints));
         let mut anywhere = !placed.is_empty();
         // A virtual placement made or shown in a region is hidden as the
         // region is, wherever its placeholders are; any other, while a
@@ -1597,7 +1608,8 @@ impl Emulator {
             }
         }
         if !open.is_empty() {
-            for row in self.grid().rows().filter(|row| has_placeholders(row)) {
+            let rows = self.grid().rows().zip(end..);
+            for (row, line) in rows.filter(|(row, _)| has_placeholders(row)) {
                 for (_, said) in placeholders(row) {
                     let of_it = open.iter().any(|virtual_| {
                         virtual_.id == said.image
@@ -1605,12 +1617,12 @@ impl Emulator {
                     });
                     if of_it {
                         anywhere = true;
-                        shown |= may_show(row.hints(), hidden);
+                        seen |= shows(line, row.hints());
                     }
                 }
             }
         }
-        anywhere && !shown
+        anywhere && !seen
     }
 
     /// Adds the hints of the regions open to the virtual placements a
@@ -1679,7 +1691,8 @@ fn ids_range(control: &kitty::Control, x: u32, y: u32, graphics: &Graphics) -> O
 /// agents where they may see it. `Pictures::of_rows` and `of_history`
 /// ask, and the daemon's `serve_image` (see
 /// [`Terminal::image_hidden`](crate::Terminal::image_hidden)). A line
-/// shown as it is, as the user asked, still shows no picture.
+/// shown as it is, as the user asked, shows its pictures too: they ask
+/// that as well.
 #[must_use]
 pub fn may_show(hints: crate::Hints, hidden: crate::Hints) -> bool {
     !hints.intersects(hidden)
