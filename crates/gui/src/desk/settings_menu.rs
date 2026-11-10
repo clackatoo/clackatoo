@@ -16,7 +16,7 @@ use crate::options::persist::Change;
 use crate::options::settings_lua::Mapping;
 use crate::options::{Case, Scope, SetBy};
 use crate::settings::view::{EasyView, SettingsHit};
-use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, SettingsMenu};
+use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, Set, SettingsMenu};
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
@@ -482,6 +482,18 @@ impl Desk {
             Outcome::Close => self.settings = None,
             Outcome::Decide { revision, apply } => self.decide_daemon_config(revision, apply),
             Outcome::Set(sets) => {
+                // The daemon's, and the window's that run programs, are
+                // the user's to change: never an agent's input, nor what a
+                // chat with Control of the window does. The daemon
+                // approves what the menu saves of its own.
+                let theirs = |set: &Set| {
+                    set.info.scope == Scope::Daemon || crate::options::runs_programs(set.info)
+                };
+                if (self.automating || self.controlled) && sets.iter().any(theirs) {
+                    return self.warn_saved(
+                        "an agent's input can't change that setting: it's yours".into(),
+                    );
+                }
                 // The daemon's are saved by the daemon, which runs them.
                 let (daemons, sets): (Vec<_>, Vec<_>) =
                     (sets.into_iter()).partition(|set| set.info.scope == Scope::Daemon);

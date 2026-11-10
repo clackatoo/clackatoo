@@ -163,10 +163,17 @@ impl DaemonFacts {
         let names: Vec<&str> = (pending.changes.iter())
             .map(|change| change.name.as_str())
             .collect();
-        Some(format!(
-            "Config changed outside clackatoo: {}. :Settings to apply or discard",
+        // Why nothing was approved, if nothing was, before what's pending.
+        let why = (pending.note.as_ref()).map_or_else(String::new, |note| format!(" ({note})"));
+        let said = format!(
+            "Config changed outside clackatoo{why}: {}. :Settings to apply or discard",
             names.join(", ")
-        ))
+        );
+        // Names an agent's config chose: shown as they'd show, no more.
+        let plain = said
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch });
+        Some(clackatoo_term::visible(plain, 400))
     }
 
     fn of(&self, info: &Info) -> Option<&DaemonValue> {
@@ -2270,7 +2277,7 @@ fn modes_said(modes: &[KeyMode]) -> String {
 }
 
 /// `value`, as the menu shows it: on or off, a number, a word, or text.
-fn shown_value(info: &Info, value: &Value) -> String {
+pub(crate) fn shown_value(info: &Info, value: &Value) -> String {
     match value {
         Value::Bool(true) => "on".into(),
         Value::Bool(false) => "off".into(),

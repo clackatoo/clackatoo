@@ -1632,6 +1632,11 @@ impl Desk {
         // Its searches went with the connection.
         self.finder = None;
         self.start = None;
+        // What's pending is asked again as it's back: none stands meanwhile,
+        // nor is answered by a revision that may be gone.
+        if let Some(daemon) = &mut self.daemon_settings {
+            daemon.pending = None;
+        }
     }
 
     /// Forgets everything sent on the last connection, which will never be

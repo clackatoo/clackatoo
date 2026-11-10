@@ -1868,7 +1868,7 @@ pub enum Request {
     /// by, or discard it. Answered with [`Response::Done`], then
     /// [`Event::DaemonSettings`]; refused if `revision` isn't the change
     /// pending now, and from a web device or a daemon relaying. Only to a
-    /// daemon of protocol 150 or later ([`wire::DAEMON_SETTINGS`]).
+    /// daemon of protocol 151 or later ([`wire::DAEMON_SETTINGS`]).
     DecideDaemonConfig {
         /// The change, as [`PendingConfig::revision`] names it.
         revision: u64,

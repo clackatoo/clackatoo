@@ -1056,12 +1056,23 @@ fn a_config_changed_on_disk_takes_its_plain_options_and_nothing_else() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut said = Vec::new();
     while !said.iter().any(|(_, message)| {
-        matches!(message, FromLua::Error(text) if text.contains(":reload applies the rest"))
+        matches!(message, FromLua::Error(text) if text.contains(":reload turns on what's held"))
     }) {
         assert!(std::time::Instant::now() < deadline, "{said:?}");
         std::thread::sleep(std::time::Duration::from_millis(10));
         said.extend(client.take(window));
     }
+    // What :reload would turn on is said first (CLACKA-237 review, M2).
+    let held = (said.iter())
+        .find_map(|(_, message)| match message {
+            FromLua::Error(text) if text.contains("what's held") => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        held.ends_with("what's held: osc52=copy-paste, client.cmd(bg make), 1 key map, 1 handler"),
+        "{held}"
+    );
     // Nothing but what's said reaches the window.
     assert!(
         said.iter()
@@ -1091,6 +1102,7 @@ fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
     let mut said = daemon_said("desk");
     said.pending = Some(clackatoo_protocol::PendingConfig {
         revision: 4,
+        note: None,
         changes: vec![clackatoo_protocol::ConfigChange {
             name: "agents.claude command".into(),
             before: "{ \"claude\" }".into(),
@@ -1128,6 +1140,59 @@ fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
     // Answered: the bar lets it go.
     desk.daemon_settings_came(&daemon_said("desk"), None);
     assert!(desk.pending_config_status().is_none());
+    // Nothing approved: the bar says why. Lost, the daemon's gone: no
+    // banner stands until it's asked again (CLACKA-237 review, L2).
+    let mut said = daemon_said("desk");
+    said.pending = Some(clackatoo_protocol::PendingConfig {
+        revision: 5,
+        note: Some("the approved settings were missing".into()),
+        changes: vec![clackatoo_protocol::ConfigChange {
+            name: "agents.mine\u{1b}[31m".into(),
+            before: String::new(),
+            after: "{ command = { \"mine\" } }".into(),
+        }],
+    });
+    desk.daemon_settings_came(&said, None);
+    let text = banner(&desk);
+    assert!(
+        text.contains("(the approved settings were missing)"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    desk.lost();
+    assert!(desk.pending_config_status().is_none());
+}
+
+/// An agent's input, or a chat's with Control, never changes the daemon's
+/// settings, nor a window's that runs programs, in the menu or with
+/// `:set`; the window's others it may (CLACKA-237 review, H2).
+#[test]
+fn an_agents_input_changes_no_setting_that_runs_programs() {
+    use crate::settings::view::{Part, SettingsHit};
+    let (mut desk, _dir) = easy_configured("");
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    desk.daemon_settings_came(&daemon_said("desk"), None);
+    desk.settings_pointer(SettingsHit::Page(2));
+    let (row, _) = easy_row(&mut desk, "Keep what terminals showed");
+    for (automating, controlled) in [(true, false), (false, true)] {
+        (desk.automating, desk.controlled) = (automating, controlled);
+        desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
+        assert_eq!(answer_all(&mut desk), [], "the daemon's isn't saved");
+    }
+    named(&mut desk, NamedKey::Escape);
+    let osc52 = crate::options::find("osc52").unwrap();
+    let wrap = crate::options::find("wrap").unwrap();
+    let (before, wrapped) = (desk.options.get(osc52), desk.options.get(wrap));
+    command(&mut desk, "set osc52=copy-paste");
+    command(&mut desk, "setp osc52=copy-paste");
+    assert_eq!(desk.options.get(osc52), before, "osc52 is the user's");
+    command(&mut desk, "set wrap!");
+    assert_ne!(desk.options.get(wrap), wrapped, "wrap is anyone's");
+    // The user may.
+    (desk.automating, desk.controlled) = (false, false);
+    command(&mut desk, "set osc52=copy-paste");
+    assert_ne!(desk.options.get(osc52), before);
 }
 
 /// Easy shows the daemon's rows once the daemon has said its settings,

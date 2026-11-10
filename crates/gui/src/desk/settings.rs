@@ -279,6 +279,18 @@ impl Desk {
                     continue;
                 }
             };
+            // One that runs programs is the user's to change: never an
+            // agent's input, nor what a chat with Control does.
+            if (self.automating || self.controlled)
+                && self.set_by.is_none()
+                && options::runs_programs(info)
+            {
+                self.warn(format!(
+                    "an agent's input can't change {}: it's yours",
+                    info.name
+                ));
+                continue;
+            }
             if local {
                 // As Vim's `:setlocal nu&`: this window's own, as it starts.
                 let value = value.unwrap_or_else(|| self.options.start().get(info));

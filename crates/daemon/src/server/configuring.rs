@@ -12,11 +12,12 @@
 //! doesn't run changes nothing: the daemon goes on by what it has, and
 //! windows are told why.
 //!
-//! What runs programs, the agents, the profiles and limits raised, changes
-//! only as the user says (see [`settings::staging`]): a change the files
-//! make is *pending*, which every window shows, for the user to apply or
-//! discard there. A change the user makes in a window's settings menu is
-//! theirs, and applies.
+//! What runs programs and lets the web in, the agents, the profiles,
+//! limits raised, the web app's options and its password, changes only as
+//! the user says (see [`settings::staging`]): a change the files make is
+//! *pending*, which every window shows, for the user to apply or discard
+//! there. A change the user makes in a window's settings menu is theirs,
+//! and applies.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
@@ -30,9 +31,8 @@ use mio::Token;
 
 use super::{Daemon, Link, Source};
 use crate::DaemonConfig;
-use crate::agents::Configured;
 use crate::schema::{self, Info, Place, Value};
-use crate::settings::staging::{self, APPROVED, DISCARDED};
+use crate::settings::staging::{self, Discarded, Guarded};
 use crate::settings::{self, Settings, options};
 
 /// How long after the config's files last changed it's run again: an
@@ -56,9 +56,6 @@ pub(super) struct Configuring {
     running: Option<Running>,
     /// What windows asked for, in turn, waiting for the run under way.
     jobs: VecDeque<Job>,
-    /// Which change to what runs programs is pending, counted: a window's
-    /// answer names it, so it never applies a change it didn't see.
-    revision: u64,
 }
 
 /// A run of the config under way, off the loop.
@@ -79,7 +76,7 @@ enum Job {
     Decide {
         token: Token,
         apply: bool,
-        pending: Configured,
+        pending: Guarded,
     },
 }
 
@@ -106,8 +103,10 @@ struct Ran {
     /// What the config set, and the daemon's config with it, made off the
     /// loop, to take what changes as it runs from; or why not.
     outcome: Result<(Settings, Box<DaemonConfig>), String>,
-    /// What runs programs, as the user approved it now, if that changed.
-    approved: Option<Configured>,
+    /// The web app's password's hash, as the state directory has it now.
+    password: Option<String>,
+    /// What's staged, as the user approved it now, if that changed.
+    approved: Option<Guarded>,
     /// What the user discarded now, if that changed.
     discarded: Discarded,
     /// Why what the user decided couldn't be kept, if it couldn't.
@@ -119,23 +118,12 @@ impl Ran {
     fn only(outcome: Result<(Settings, Box<DaemonConfig>), String>) -> Self {
         Self {
             outcome,
+            password: None,
             approved: None,
             discarded: Discarded::Same,
             unkept: None,
         }
     }
-}
-
-/// What the user discarded, after a run.
-#[derive(Debug, Default)]
-enum Discarded {
-    /// As before.
-    #[default]
-    Same,
-    /// Nothing: a change applied.
-    Nothing,
-    /// This change.
-    Now(Configured),
 }
 
 impl Daemon {
@@ -227,6 +215,7 @@ impl Daemon {
     fn config_ran(&mut self, job: Option<&Job>, ran: Ran) {
         let Ran {
             outcome: ran,
+            password,
             approved,
             discarded,
             unkept,
@@ -247,14 +236,7 @@ impl Daemon {
             _ => None,
         };
         if let Some(own) = &mut self.config.own_config {
-            if let Some(approved) = approved {
-                own.staged.approved = approved;
-            }
-            match discarded {
-                Discarded::Same => {}
-                Discarded::Nothing => own.staged.discarded = None,
-                Discarded::Now(change) => own.staged.discarded = Some(change),
-            }
+            own.staged.decided(approved, discarded);
         }
         // A run as the files changed that comes to what the daemon has, as
         // the one after a window's change does, is told no one; a folder
@@ -267,16 +249,15 @@ impl Daemon {
             Ok((settings, mut fresh)) => {
                 if let Some(own) = &mut self.config.own_config {
                     let pending = own.staged.pending.clone();
-                    // What runs programs, as the user approved it.
-                    fresh.agents.configured = own.staged.stage(&fresh.agents.configured);
-                    if own.staged.pending != pending {
-                        self.configuring.revision += 1;
-                        if own.staged.pending.is_some() {
-                            log::warn!(
-                                "the daemon's config changes what runs programs, which waits \
-                                 for the user"
-                            );
-                        }
+                    // What runs programs, as the user approved it; the web
+                    // app's is read only as the daemon starts.
+                    let staged = Guarded::of(&settings, password);
+                    fresh.agents.configured = own.staged.stage(&staged).configured;
+                    if own.staged.pending != pending && own.staged.pending.is_some() {
+                        log::warn!(
+                            "the daemon's config changes what runs programs, which waits for \
+                             the user"
+                        );
                     }
                 }
                 self.take_live_config(&fresh);
@@ -397,8 +378,9 @@ impl Daemon {
                 }
             })
             .collect();
-        let pending = own.staged.pending.as_ref().map(|_| PendingConfig {
-            revision: self.configuring.revision,
+        let pending = own.staged.revision().map(|revision| PendingConfig {
+            revision,
+            note: own.staged.note.clone(),
             changes: (own.staged.changes().into_iter())
                 .map(|(name, before, after)| ConfigChange {
                     name,
@@ -497,8 +479,8 @@ impl Daemon {
             return Err(refused);
         }
         let pending = (self.config.own_config.as_ref())
+            .filter(|own| own.staged.revision() == Some(revision))
             .and_then(|own| own.staged.pending.clone())
-            .filter(|_| revision == self.configuring.revision)
             .ok_or_else(|| {
                 Error::Other(
                     "that change to the daemon's config isn't pending now: look again".to_owned(),
@@ -569,27 +551,29 @@ impl Daemon {
 /// Does `job`, off the loop, with what runs programs `approved` as the user
 /// approved it, then runs the config: a change saved; the user's answer to
 /// what's pending kept in the state directory.
-fn run_job(dirs: &settings::Dirs, mut approved: Configured, job: Option<Job>) -> Ran {
+fn run_job(dirs: &settings::Dirs, mut approved: Guarded, job: Option<Job>) -> Ran {
     // What the user's answer, or the menu's change, kept.
     let mut kept = Ran::only(Err(String::new()));
     let state = dirs.state.as_deref();
-    let keep = |file: &str, configured: Option<&Configured>| match state {
-        Some(state) => staging::keep(state, file, configured),
-        None => Ok(()),
+    // With no state directory, it's kept only as the daemon runs.
+    let approve =
+        |approved: &Guarded| state.map_or(Ok(()), |state| staging::keep_approved(state, approved));
+    let discard = |discarded: Option<&Guarded>| {
+        state.map_or(Ok(()), |state| staging::keep_discarded(state, discarded))
     };
     let ran = match job {
         Some(Job::Change(asked)) => {
             let ran = settings::change(dirs, asked.info, asked.value);
-            // The menu's change is the user's: a limit it raises applies.
+            // The menu's change is the user's: a limit it raises, or the
+            // web app's option it sets, is approved.
+            let staged = ["subagents.", "web."];
             if let Ok(settings) = &ran
-                && asked.info.name.starts_with("subagents.")
+                && staged
+                    .iter()
+                    .any(|start| asked.info.name.starts_with(start))
             {
-                staging::approve_limit(
-                    &mut approved,
-                    asked.info.name,
-                    &settings.agents().subagents,
-                );
-                match keep(APPROVED, Some(&approved)) {
+                staging::approve_option(&mut approved, asked.info.name, settings);
+                match approve(&approved) {
                     Ok(()) => kept.approved = Some(approved),
                     Err(why) => kept.unkept = Some(why),
                 }
@@ -598,9 +582,9 @@ fn run_job(dirs: &settings::Dirs, mut approved: Configured, job: Option<Job>) ->
         }
         Some(Job::Decide { apply, pending, .. }) => {
             let decided = if apply {
-                keep(APPROVED, Some(&pending)).and_then(|()| keep(DISCARDED, None))
+                approve(&pending).and_then(|()| discard(None))
             } else {
-                keep(DISCARDED, Some(&pending))
+                discard(Some(&pending))
             };
             match decided {
                 Ok(()) if apply => {
@@ -614,7 +598,9 @@ fn run_job(dirs: &settings::Dirs, mut approved: Configured, job: Option<Job>) ->
         }
         None => settings::rerun(dirs),
     };
-    // Made here, off the loop, as it reads the web app's password.
+    // Made here, off the loop, as it reads files; the password only to
+    // stage, as the web app takes it only as the daemon starts.
+    kept.password = state.and_then(|state| settings::password(state).ok().flatten());
     kept.outcome = ran.map(|settings| {
         let config = Box::new(DaemonConfig::from_settings(&settings));
         (settings, config)
@@ -665,8 +651,9 @@ mod tests {
             shared: dir.path().join("config/lua"),
             state: Some(dir.path().join("state")),
         };
-        let (staged, going) = staging::starting(&dirs, &daemon.config.agents.configured);
-        daemon.config.agents.configured = going;
+        let had = Guarded::of(&Settings::default(), None);
+        let (staged, going) = staging::starting(&dirs, &had, staging::First::Migrated);
+        daemon.config.agents.configured = going.configured;
         daemon.config.own_config = Some(settings::Own {
             dirs,
             settings: Settings::default(),

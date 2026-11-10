@@ -26847,8 +26847,10 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
             state: Some(dir.join("config/state")),
         };
         std::fs::create_dir_all(&dirs.daemon).unwrap();
-        let (staged, going) = settings::staging::starting(&dirs, &config.agents.configured);
-        config.agents.configured = going;
+        let had = settings::staging::Guarded::of(&settings::Settings::default(), None);
+        let first = settings::staging::First::Migrated;
+        let (staged, going) = settings::staging::starting(&dirs, &had, first);
+        config.agents.configured = going.configured;
         config.own_config = Some(settings::Own {
             dirs,
             settings: settings::Settings::default(),
@@ -26906,7 +26908,7 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     );
     // A stale answer is refused; the user's answer applies it.
     let decide = |revision, apply| Request::DecideDaemonConfig { revision, apply };
-    let stale = client.request(&decide(pending.revision + 1, true)).unwrap();
+    let stale = (client.request(&decide(pending.revision.wrapping_add(1), true))).unwrap();
     assert!(matches!(stale, Response::Error(_)), "{stale:?}");
     assert_eq!(
         client.request(&decide(pending.revision, true)).unwrap(),

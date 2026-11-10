@@ -101,9 +101,18 @@ it binds, handlers, `client.cmd`, `client.connect`, `client.forward` or
 splits, and not the options that start programs, reach the network or
 loosen what agents may do (`agent`, `agenttools`, `claudetask`,
 `chatbrowser`, `rewindfiles`, `languageinstall`, `osc52` and
-`updatecheck`). The bar says `:reload` applies the rest, which only you can
-do: an agent's keys can't. So a file an agent writes never runs anything by
-itself.
+`updatecheck`). The bar says what it held back, as `the config changed:
+its options are as it says; :reload turns on what's held: agenttools=allow,
+client.cmd(bg make), 2 key maps, 1 handler`, so you see what `:reload` would
+turn on before you run it. Running it is your OK: an agent's keys can't, and
+neither they nor a chat with Control of the window can set those options,
+with `:set` or in the settings menu.
+
+A window opening runs its whole config, as Vim runs your `init.vim`: it's
+yours, and what you started the window with. Only a change to it as the
+window runs is held back. So a file an agent writes never runs anything by
+itself, until you open a window or `:reload`; see
+[What this guards against](#what-this-guards-against).
 
 
 ## How a key travels
@@ -842,28 +851,57 @@ terminal and agent running, takes it in.
 
 ### Changes made outside clackatoo wait for your OK
 
-Changes made outside clackatoo to agents and limits wait for your OK. That
-covers any field of any agent, any profile, and any limit on chats agents
-start raised: what runs programs. When the config's files say otherwise of
-those than you last approved, as a file an agent wrote would, the daemon goes
-on by what you approved, and the change is *pending*. The rest of the config
-still applies, and a limit lowered applies at once.
+Changes made outside clackatoo to agents and limits wait for your OK, and so
+do changes to the web app. That covers any field of any agent, any profile,
+any limit on chats agents start raised, every `web.` option, and the web
+app's password: what runs programs, and what lets the web in. When the
+config's files say otherwise of those than you last approved, as a file an
+agent wrote would, the daemon goes on by what you approved, and the change is
+*pending*. The rest of the config still applies, and a limit lowered applies
+at once. Saving `daemon/init.lua` yourself is a change made outside clackatoo
+too: the daemon can't tell your editor from an agent's, so an agent you add
+there waits for one OK.
 
 Every window says so in its bar, as `Config changed outside clackatoo:
 agents.claude command, subagents.working`, from the moment it connects, and
 the settings menu's Advanced lists it first, under **Changed outside
 clackatoo**: each thing it changes, what you approved and what it is now,
-then **Apply these changes** and **Discard them**. Only you can answer, in a
-window: never an agent's keys, nor a web device. A change you discard isn't
-pending again until the files say something else.
+then **Apply these changes** and **Discard them**. The password is never
+shown, only whether there's one. Only you can answer, in a window: never an
+agent's keys, a chat with Control of the window, or a web device. A change
+you discard isn't pending again until the files say something else. The web
+app's options, applied, take effect as the daemon next starts, as they always
+do: `clackatoo upgrade`.
 
 What you approved is kept in clackatoo's state directory, as
-`daemon-approved.lua`, and what you discarded as `daemon-discarded.lua`, so
-a restart or an upgrade, which run the config from its files, never takes
-in a change you didn't approve: it stays pending. The first time a daemon
-with this runs, as when the old TOML files are moved in, what the config
-says is approved. A change you make in the settings menu is yours, and
+`daemon-approved.lua` and the password's hash as `daemon-approved-password`,
+and what you discarded as `daemon-discarded.lua`, so a restart or an upgrade,
+which run the config from its files, never takes in a change you didn't
+approve: it stays pending. `clackatoo web password` is yours, and approves
+the password it sets; so does a change you make in the settings menu, which
 applies at once.
+
+It fails closed. What the config says is approved without you only twice:
+as the old TOML files are moved in, on that very start, and the first time
+this daemon runs after one from before it, which approves what that one last
+ran. Otherwise, with nothing approved, or what was approved missing or
+unreadable, nothing is: your agents, profiles, raised limits and web app are
+pending, with the bar saying why, as `Config changed outside clackatoo (the
+approved settings were missing)`, until you apply them. Until then new chats
+start only the agents clackatoo knows, run as it runs them, and the web app
+starts as it is by default, off.
+
+#### What this guards against
+
+It keeps a file an agent was let write, such as your config, from taking
+effect without you seeing it. It doesn't stand up to an agent that can run
+what it likes as you, with a shell or by writing any file: that agent could
+write clackatoo's state files too, run `clackatoo web password`, or connect
+to the daemon's socket, which any program of yours can. The daemon tells a
+window from an agent by what the connection is, a window's or an agent's
+tools', not by which program opened it. What an agent may run is the agent's
+own permissions' to say, as Claude Code's are: they're the boundary, and this
+is a guard behind them.
 
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is

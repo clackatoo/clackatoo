@@ -52,8 +52,8 @@ struct Inner {
     lua: RefCell<Option<Lua>>,
     /// A run of the config as its files changed, beside the one the windows
     /// go by, while it runs: only its plain options are taken (see
-    /// [`Client::run_trial`]), and how many of what it said were left out.
-    trial: RefCell<Option<(Lua, usize)>>,
+    /// [`Client::run_trial`]), and what it said that was held back.
+    trial: RefCell<Option<(Lua, Held)>>,
     /// The last key Lua was asked about.
     seq: Cell<u64>,
     /// The windows, by number, each with what Lua has said for it that it
@@ -101,6 +101,89 @@ struct OptionsCell(RefCell<Option<Shared>>);
 /// chat by two numbers; but each hears when its turn ended as the chat's
 /// own daemon said.
 pub(crate) type Heard = (Option<MachineId>, u64, String);
+
+/// The most characters the bar is given of what a trial run of the config
+/// says, or of what it held back.
+const MOST_SAID: usize = 400;
+
+/// What a trial run of the config said that was held back for `:reload`,
+/// for the user to see before they run it: each option that runs
+/// programs and what it'd be, each command and connection, by name; keys,
+/// handlers and panes, counted.
+#[derive(Debug, Default)]
+pub(crate) struct Held {
+    /// Each named: `agenttools=allow`, `client.cmd(bg make)`.
+    named: Vec<String>,
+    /// Keys bound, taken away or grouped.
+    keys: usize,
+    /// Handlers of events.
+    handlers: usize,
+    /// Panes split, closed or gone to.
+    panes: usize,
+}
+
+impl Held {
+    /// Holds back `message`.
+    fn hold(&mut self, message: &FromLua) {
+        let named = match message {
+            FromLua::Set { option, value, .. } => format!(
+                "{}={}",
+                option.name,
+                crate::settings::shown_value(option, value)
+            ),
+            FromLua::Command { line, .. } => format!("client.cmd({line})"),
+            FromLua::Connect { host, .. } => format!("client.connect({host})"),
+            FromLua::Disconnect(host) => format!("client.disconnect({host})"),
+            FromLua::Forward(spec) => format!("client.forward({spec})"),
+            FromLua::Map { .. }
+            | FromLua::Unmap { .. }
+            | FromLua::Remap { .. }
+            | FromLua::Group { .. } => return self.keys += 1,
+            FromLua::Subscribe { .. } => return self.handlers += 1,
+            FromLua::Split { .. } | FromLua::Close { .. } | FromLua::Focus { .. } => {
+                return self.panes += 1;
+            }
+            FromLua::Unsubscribe { .. }
+            | FromLua::Decided { .. }
+            | FromLua::Error(_)
+            | FromLua::Ready => return,
+        };
+        self.named.push(named);
+    }
+
+    /// What's held, said: empty if nothing is.
+    fn said(&self) -> String {
+        let counted = |count: usize, one: &str, many: &str| match count {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            count => Some(format!("{count} {many}")),
+        };
+        let counts = [
+            counted(self.keys, "key map", "key maps"),
+            counted(self.handlers, "handler", "handlers"),
+            counted(self.panes, "pane change", "pane changes"),
+        ];
+        (self.named.iter().cloned())
+            .chain(counts.into_iter().flatten())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// `text` as the bar may show it: controls as spaces, nothing unseen or
+/// that turns text round, and at most `most` characters, cut with `…`.
+fn bar_text(text: &str, most: usize) -> String {
+    let plain = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch });
+    let shown = clackatoo_term::visible(plain, most + 1);
+    if shown.chars().count() > most {
+        let cut: String = shown.chars().take(most.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        shown
+    }
+}
 
 impl Client {
     /// The client, with the options as the process starts them.
@@ -263,7 +346,7 @@ impl Client {
             Lua::start(source.clone(), options, windows, wake())
         };
         let ran = lua.is_some();
-        *self.0.trial.borrow_mut() = lua.map(|lua| (lua, 0));
+        *self.0.trial.borrow_mut() = lua.map(|lua| (lua, Held::default()));
         ran
     }
 
@@ -280,22 +363,26 @@ impl Client {
                 FromLua::Set { option, .. } if !crate::options::runs_programs(option) => {
                     self.keep(message);
                 }
-                FromLua::Error(text) => self.to_every_window(&FromLua::Error(text)),
+                // In the bar: what it says shows as it would, no more.
+                FromLua::Error(text) => {
+                    self.to_every_window(&FromLua::Error(bar_text(&text, MOST_SAID)));
+                }
                 FromLua::Ready => {
-                    let left = (self.0.trial.borrow_mut().take()).map_or(0, |(_, left)| left);
-                    let said = if left == 0 {
-                        "the config changed, and its options are as it says"
-                    } else {
-                        "the config changed: its options are as it says, and :reload applies \
-                         the rest"
+                    let held = (self.0.trial.borrow_mut().take()).map(|(_, held)| held);
+                    let said = match held.map(|held| held.said()) {
+                        Some(held) if !held.is_empty() => format!(
+                            "the config changed: its options are as it says; :reload turns on \
+                             what's held: {held}"
+                        ),
+                        _ => "the config changed, and its options are as it says".to_owned(),
                     };
-                    self.to_every_window(&FromLua::Error(said.to_owned()));
+                    self.to_every_window(&FromLua::Error(bar_text(&said, MOST_SAID)));
                     return;
                 }
                 FromLua::Decided { .. } => {}
-                _ => {
-                    if let Some((_, left)) = &mut *self.0.trial.borrow_mut() {
-                        *left += 1;
+                message => {
+                    if let Some((_, held)) = &mut *self.0.trial.borrow_mut() {
+                        held.hold(&message);
                     }
                 }
             }

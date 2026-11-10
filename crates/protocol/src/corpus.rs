@@ -2154,7 +2154,8 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ],
         failure: Some("daemon/init.lua:3: daemon.web.port is a whole number".into()),
         pending: Some(crate::PendingConfig {
-            revision: 3,
+            revision: 0x5eed_c0de_0000_0003,
+            note: Some("the approved settings were missing".into()),
             changes: vec![
                 crate::ConfigChange {
                     name: "agents.claude command".into(),

@@ -38,9 +38,12 @@ pub struct DaemonSettings {
 /// [`Request::DecideDaemonConfig`]: crate::Request::DecideDaemonConfig
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingConfig {
-    /// Which change it is, for the user's answer to name: a change after
-    /// it is another.
+    /// Which change it is, for the user's answer to name: a hash of all
+    /// it changes, so an answer never applies another.
     pub revision: u64,
+    /// Why nothing was approved, if nothing was: what was approved was
+    /// missing or unreadable, so all the config says is pending.
+    pub note: Option<String>,
     /// What changes.
     pub changes: Vec<ConfigChange>,
 }

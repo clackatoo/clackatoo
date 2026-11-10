@@ -727,9 +727,11 @@ fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Resul
     if let Some(dirs) = clackatoo_daemon::settings::Dirs::from_env() {
         let when = clackatoo_daemon::settings::When::Starting;
         let loaded = clackatoo_daemon::settings::load(&dirs, when);
-        let fresh = loaded.settings.agents();
-        let (staged, going) = clackatoo_daemon::settings::staging::starting(&dirs, &fresh);
-        config.agents.configured = going;
+        // Approved as it is, as the user's own: a look's config is.
+        let staging = clackatoo_daemon::settings::staging::First::Migrated;
+        let fresh = clackatoo_daemon::settings::staging::Guarded::of(&loaded.settings, None);
+        let (staged, going) = clackatoo_daemon::settings::staging::starting(&dirs, &fresh, staging);
+        config.agents.configured = going.configured;
         config.own_config = Some(clackatoo_daemon::settings::Own {
             dirs,
             settings: loaded.settings,
