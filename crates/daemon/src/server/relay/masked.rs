@@ -177,6 +177,9 @@ impl Daemon {
         let Some(viewer) = self.relayed_viewer(at, local, token) else {
             return refused(format!("terminal {local} isn't shown here"));
         };
+        if line.is_some() && !viewer.masking.hidden.contains(Hints::HIDE) {
+            return refused("nothing's hidden: daemon.hints.hide is `show`".into());
+        }
         if line.is_some() {
             return self.wait_for(token, at, unmask, Then::Unmasked(local));
         }

@@ -1027,8 +1027,14 @@ fn screen_text(view: &View) -> String {
 /// Waits for a change to `terminal`'s view `client` follows to show
 /// `text`, answering each as drawn; returns how many came.
 fn wait_for_view(client: &mut Client, terminal: TerminalId, text: &str) -> usize {
+    seen_until(client, terminal, text).0
+}
+
+/// As [`wait_for_view`], returning too every line the changes showed.
+fn seen_until(client: &mut Client, terminal: TerminalId, text: &str) -> (usize, String) {
     let deadline = Instant::now() + PATIENCE;
     let mut came = 0;
+    let mut seen = String::new();
     loop {
         assert!(Instant::now() < deadline, "{text} never came");
         if let Event::View {
@@ -1053,8 +1059,9 @@ fn wait_for_view(client: &mut Client, terminal: TerminalId, text: &str) -> usize
                     .collect::<Vec<_>>()
                     .join("\n"),
             };
+            seen.push_str(&shown);
             if shown.contains(text) {
-                return came;
+                return (came, seen);
             }
         }
     }
@@ -1273,7 +1280,12 @@ fn another_machines_private_lines_are_masked_here_as_there() {
               $((6*7)) $((7*8)); echo done-$((1+1))\r",
         )
         .unwrap();
-    wait_for_view(&mut pair.window, terminal, "done-2");
+    // What the window draws: what's kept from agents, never what's hidden.
+    let (_, seen) = seen_until(&mut pair.window, terminal, "done-2");
+    assert!(
+        seen.contains("tok-56") && !seen.contains("hid-42"),
+        "{seen}"
+    );
     let shown = screen_text(&pair.window.capture(terminal).unwrap());
     assert!(
         shown.contains("tok-56") && !shown.contains("hid-42"),
