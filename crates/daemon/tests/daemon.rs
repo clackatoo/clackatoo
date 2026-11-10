@@ -6911,6 +6911,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             Event::Buffer { update, .. } => return update,
             Event::Workspaces(_) => {}
             other @ (Event::View { .. }
+            | Event::HintedView { .. }
             | Event::Installed { .. }
             | Event::Found { .. }
             | Event::Clipboard { .. }

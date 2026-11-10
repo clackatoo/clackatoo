@@ -928,6 +928,7 @@ fn variant(request: &Request) -> &'static str {
         Request::Unmask { .. } => "Unmask",
         Request::DaemonSettings => "DaemonSettings",
         Request::SetDaemonOption { .. } => "SetDaemonOption",
+        Request::Masked { .. } => "Masked",
     }
 }
 
@@ -1210,6 +1211,10 @@ fn naming(ids: Ids, machine: clackatoo_protocol::MachineId) -> Vec<Request> {
             terminal,
             line: Some(3),
         },
+        Request::Masked {
+            masking: clackatoo_protocol::Masking::RELAYED,
+            request: Box::new(Request::Capture { terminal }),
+        },
     ]
 }
 
@@ -1396,7 +1401,7 @@ fn every_kind_of_request_of_a_machine_kept_from_a_daemon_relaying_is_refused() {
         .chain(NOT_ASKED)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(asked, every);
-    assert_eq!(asked.len(), 93, "a kind of request isn't asked: {asked:?}");
+    assert_eq!(asked.len(), 94, "a kind of request isn't asked: {asked:?}");
     // Desk heard nothing of any of it, and nothing told the daemon
     // relaying names desk.
     assert!(heard(&mut world.there).is_empty());

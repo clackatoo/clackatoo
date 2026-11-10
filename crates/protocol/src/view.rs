@@ -884,7 +884,7 @@ impl CursorState {
 /// a daemon sends of a terminal's lines masks them, to any peer, so the
 /// client never has what's hidden unless it asked to see it: what it
 /// draws, copies and searches is masked alike.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Masking {
     /// The hints that mask a line: none, if the daemon's config says to
     /// show everything.
@@ -910,6 +910,14 @@ impl Masking {
     /// None is.
     pub const NONE: Self = Self {
         hidden: Hints::empty(),
+        shown: 0..0,
+        prints: Vec::new(),
+    };
+
+    /// Every line marked to be hidden or kept from agents is: as for a
+    /// daemon relaying, whose clients the daemon doesn't know.
+    pub const RELAYED: Self = Self {
+        hidden: Hints::HIDE.union(Hints::NOAGENT),
         shown: 0..0,
         prints: Vec::new(),
     };
@@ -950,6 +958,14 @@ impl Masking {
         hints.intersects(self.hidden) && !self.shows(line, row, hints)
     }
 
+    /// As [`masks`](Self::masks), for a line whose
+    /// [`fingerprint`](Self::fingerprint) `print` gives, asked only for a
+    /// line among those shown.
+    #[must_use]
+    pub fn masks_by(&self, line: u64, hints: Hints, print: impl FnOnce() -> u64) -> bool {
+        hints.intersects(self.hidden) && !self.shows_by(line, hints, print)
+    }
+
     /// The document's line `line`, `row`, with `hints`, as
     /// [`Line::from_row_for`] makes it for a peer that speaks `wire`, or
     /// masked.
@@ -979,6 +995,139 @@ impl Masking {
     }
 }
 
+/// The hints of the lines a change to a terminal's view carries, as they
+/// are, and of the cursor's line and the virtual placements it carries:
+/// what a daemon relaying is sent with a view it masks for each of its own
+/// clients as it does its own terminals' (see
+/// [`Event::HintedView`](crate::Event::HintedView)). Only the hints that
+/// mask are said, [`Hints::HIDE`] and [`Hints::NOAGENT`], and only for
+/// what has any; with each line, its
+/// [`fingerprint`](Masking::fingerprint), as the daemon whose terminal it
+/// is makes it, for telling whether it's the line shown as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineHints {
+    /// How many columns the screen has: a masked line's mask is as long.
+    pub cols: u16,
+    /// Each line with hints, numbered as the change numbers its lines,
+    /// with its hints and fingerprint, in order.
+    pub lines: Vec<(u16, Hints, u64)>,
+    /// The hints and fingerprint of the line the cursor is on, if it has
+    /// any, whether the change carries it or not.
+    pub cursor: Option<(Hints, u64)>,
+    /// Each virtual placement the change carries with hints, by its
+    /// image's ID and its own, with its hints.
+    pub virtuals: Vec<(u32, u32, Hints)>,
+}
+
+impl LineHints {
+    /// The hints that mask.
+    pub const MASKING: Hints = Hints::HIDE.union(Hints::NOAGENT);
+
+    /// Whether nothing has hints.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.cursor.is_none() && self.virtuals.is_empty()
+    }
+
+    /// Masks `update`, the change to a terminal's view these are the hints
+    /// of, as `masking` says, as the daemon whose terminal it is masks it
+    /// for its own clients: the lines masked become the mask, the pictures
+    /// on them and the links only they were part of go, a virtual
+    /// placement as private as what's masked goes, and the cursor on a
+    /// line masked is hidden.
+    pub fn mask(&self, update: &mut ViewUpdate, masking: &Masking) {
+        match update {
+            ViewUpdate::Snapshot(view) => {
+                let Node::Grid(grid) = &mut view.root else {
+                    return;
+                };
+                let masked = self.masked(grid.state.history_end, masking);
+                self.mask_cursor(&mut grid.state, masking);
+                if masked.is_empty() && self.virtuals.is_empty() {
+                    return;
+                }
+                for &line in &masked {
+                    if let Some(shown) = grid.lines.get_mut(usize::from(line)) {
+                        *shown = Line::masked_to(usize::from(self.cols));
+                    }
+                }
+                let ids = LinkTarget::ids(&grid.lines);
+                grid.links.retain(|(id, _)| ids.binary_search(id).is_ok());
+                self.mask_pictures(&mut grid.pictures, &masked, masking);
+            }
+            ViewUpdate::Patch(patches) => {
+                for patch in patches {
+                    let Patch::Grid {
+                        state,
+                        lines,
+                        links,
+                        pictures,
+                        ..
+                    } = patch
+                    else {
+                        continue;
+                    };
+                    let masked = self.masked(state.history_end, masking);
+                    self.mask_cursor(state, masking);
+                    for (line, shown) in lines.iter_mut() {
+                        if masked.binary_search(line).is_ok() {
+                            *shown = Line::masked_to(usize::from(self.cols));
+                        }
+                    }
+                    let ids = LinkTarget::ids(lines.iter().map(|(_, line)| line));
+                    links.retain(|(id, _)| ids.binary_search(id).is_ok());
+                    self.mask_pictures(pictures, &masked, masking);
+                }
+            }
+        }
+    }
+
+    /// The lines `masking` masks, numbered as the change numbers them,
+    /// the screen's first being the document's line `history_end`, in
+    /// order.
+    fn masked(&self, history_end: u64, masking: &Masking) -> Vec<u16> {
+        (self.lines.iter())
+            .filter(|&&(line, hints, print)| {
+                masking.masks_by(history_end + u64::from(line), hints, || print)
+            })
+            .map(|&(line, _, _)| line)
+            .collect()
+    }
+
+    /// Hides the cursor in `state`, as [`Masking::cursor`] does, if it's
+    /// on a line `masking` masks.
+    fn mask_cursor(&self, state: &mut GridState, masking: &Masking) {
+        let Some((hints, print)) = self.cursor else {
+            return;
+        };
+        let line = state.history_end + u64::from(state.cursor.line);
+        if masking.masks_by(line, hints, || print) {
+            state.cursor.col = 0;
+            state.cursor.visible = false;
+        }
+    }
+
+    /// Leaves out of `pictures` the pieces on the lines `masked`, the
+    /// pictures no line left shows, and the virtual placements as private
+    /// as what `masking` masks.
+    fn mask_pictures(&self, pictures: &mut Pictures, masked: &[u16], masking: &Masking) {
+        pictures
+            .pieces
+            .retain(|(line, _)| masked.binary_search(line).is_err());
+        let mut shown: Vec<u32> = (pictures.pieces.iter())
+            .map(|(_, piece)| piece.picture)
+            .collect();
+        shown.sort_unstable();
+        (pictures.pictures).retain(|(number, _)| shown.binary_search(number).is_ok());
+        pictures.virtuals.retain(|virtual_| {
+            let hints = (self.virtuals.iter())
+                .find(|&&(id, placement, _)| (id, placement) == (virtual_.id, virtual_.placement))
+                .map_or(Hints::empty(), |&(_, _, hints)| hints);
+            clackatoo_term::graphics::may_show(hints, masking.hidden)
+        });
+    }
+}
+
 impl Line {
     /// A line masked in place of `row`, which its program marked to be
     /// hidden (see [`Masking`]): [`clackatoo_term::hints::MASK`], dim, as
@@ -987,12 +1136,19 @@ impl Line {
     /// reads as rows of the mask, never one long one.
     #[must_use]
     pub fn masked(row: &Row) -> Self {
+        Self::masked_to(row.width())
+    }
+
+    /// A line masked, as [`masked`](Self::masked), in place of one
+    /// `width` columns wide.
+    #[must_use]
+    pub fn masked_to(width: usize) -> Self {
         let style = Style {
             attributes: Attributes::DIM,
             ..Style::DEFAULT
         };
         let text: String = (clackatoo_term::hints::MASK.chars())
-            .take(row.width())
+            .take(width)
             .collect();
         Self {
             runs: vec![Run {

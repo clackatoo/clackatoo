@@ -21,17 +21,118 @@
 //! relaying, which would show the lines to every client it has, phones
 //! too.
 //!
+//! # Through a daemon relaying
+//!
+//! A daemon relaying (`:connect`) of protocol 153 or later
+//! ([`wire::RELAY_HINTS`]) is one of the user's own, so it's sent lines as
+//! they are, with their hints ([`Event::HintedView`]), and masks them for
+//! each of its own clients as this daemon masks its own: what its windows
+//! may see, its phones, agents' commands and windows agents see may not,
+//! and the daemons relaying for it in turn get the hints. It asks for the
+//! lines it can't mask itself, copies, searches, history, captures and
+//! images, masked as one client of its has them ([`Request::Masked`]),
+//! and shows a window of its own a run of hidden lines itself, asking
+//! this daemon only which lines they are ([`Response::HiddenRun`]). An
+//! older one is sent every line with a hint masked, and can't show any.
+//! Whatever it asks without saying how, it's answered as an older one.
+//!
 //! [`Request::Unmask`]: clackatoo_protocol::Request::Unmask
+//! [`Request::Masked`]: clackatoo_protocol::Request::Masked
+//! [`Response::HiddenRun`]: clackatoo_protocol::Response::HiddenRun
+//! [`Event::HintedView`]: clackatoo_protocol::Event::HintedView
 //! [`HintRules::shown_for`]: crate::HintRules::shown_for
 //! [`HintRules::noagent`]: crate::HintRules::noagent
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Error, Masking, Response, TerminalId};
-use clackatoo_term::Hints;
+use clackatoo_protocol::{
+    Error, LineHints, Masking, Pictures, Request, Response, TerminalId, wire,
+};
+use clackatoo_term::{Hints, Row, Terminal};
 use mio::Token;
 
 use super::{Daemon, Source};
+
+/// The hints of `rows`, each a screen's row with its line, of `terminal`,
+/// of its cursor's line, and of the virtual placements in `pictures`,
+/// for a daemon relaying that masks them itself: `None` if none has any.
+pub(super) fn hints_of<'a>(
+    rows: impl IntoIterator<Item = (u16, &'a Row)>,
+    terminal: &Terminal,
+    pictures: &Pictures,
+) -> Option<LineHints> {
+    let masking = |row: &Row| row.hints() & LineHints::MASKING;
+    let lines: Vec<(u16, Hints, u64)> = (rows.into_iter())
+        .filter(|(_, row)| !masking(row).is_empty())
+        .map(|(line, row)| (line, masking(row), Masking::fingerprint(row)))
+        .collect();
+    let grid = terminal.grid();
+    let cursor = usize::from(terminal.cursor().line);
+    let cursor = (cursor < grid.height())
+        .then(|| grid.row(cursor))
+        .filter(|row| !masking(row).is_empty())
+        .map(|row| (masking(row), Masking::fingerprint(row)));
+    let virtuals: Vec<(u32, u32, Hints)> = (pictures.virtuals.iter())
+        .map(|virtual_| {
+            let hints = terminal.virtual_hints(virtual_) & LineHints::MASKING;
+            (virtual_.id, virtual_.placement, hints)
+        })
+        .filter(|(_, _, hints)| !hints.is_empty())
+        .collect();
+    let hints = LineHints {
+        cols: terminal.size().cols(),
+        lines,
+        cursor,
+        virtuals,
+    };
+    (!hints.is_empty()).then_some(hints)
+}
+
+/// What [`Request::Unmask`](clackatoo_protocol::Request::Unmask) does to
+/// a client's `masking`, which it shows lines as they are by until
+/// `shown_until`, given `run`, the run of hidden lines it asked about and
+/// what each holds, and `hints`, the hints of that line, if it asked
+/// about one: shows it, for `shown_for`, or masks again what was shown,
+/// or says why not. What's said is what it's answered with.
+pub(super) fn show_run(
+    masking: &mut Masking,
+    shown_until: &mut Option<Instant>,
+    run: Option<(std::ops::Range<u64>, Vec<u64>)>,
+    hints: Hints,
+    shown_for: Duration,
+) -> Result<String, Error> {
+    if !masking.hidden.contains(Hints::HIDE) {
+        return Err(Error::Other(
+            "nothing's hidden: daemon.hints.hide is `show`".into(),
+        ));
+    }
+    if masking.hidden.contains(Hints::NOAGENT) && hints.contains(Hints::NOAGENT) {
+        return Err(Error::Other(
+            "that's kept from agents, and an agent can see this window".into(),
+        ));
+    }
+    match run {
+        // Asked again where it's shown, it's masked again.
+        Some((run, prints)) if masking.shown != run => {
+            let lines = run.end - run.start;
+            masking.shown = run;
+            masking.prints = prints;
+            *shown_until = Some(Instant::now() + shown_for);
+            let plural = if lines == 1 { "" } else { "s" };
+            Ok(format!(
+                "{lines} hidden line{plural} shown for {}s",
+                shown_for.as_secs()
+            ))
+        }
+        Some(_) | None if !masking.shown.is_empty() => {
+            masking.shown = 0..0;
+            masking.prints.clear();
+            *shown_until = None;
+            Ok("hidden again".to_owned())
+        }
+        _ => Err(Error::Other("nothing's hidden there".into())),
+    }
+}
 
 /// The most lines shown as they are at once.
 const MOST_SHOWN: u64 = 10_000;
@@ -58,8 +159,16 @@ impl Daemon {
 
     /// How lines are masked for the client at `token` in `terminal`: as
     /// its view of it is, or as for a client agents may read through, if
-    /// it doesn't follow it.
+    /// it doesn't follow it. For a daemon relaying, as it asked for one
+    /// of its clients ([`Request::Masked`]), or else as for one agents
+    /// may read through.
     pub(super) fn masking_for(&self, token: Token, terminal: TerminalId) -> Masking {
+        if self.relays(token) {
+            return (self.links.masked_as.clone()).unwrap_or_else(|| Masking {
+                hidden: self.hidden_for(token, false),
+                ..Masking::NONE
+            });
+        }
         let followed = match self.sources.get(token.0) {
             Some(Source::Client(client)) => client.views.get(&terminal),
             _ => None,
@@ -71,6 +180,62 @@ impl Daemon {
             },
             |subscription| subscription.masking.clone(),
         )
+    }
+
+    /// Whether the client at `token` is a daemon relaying that masks lines
+    /// for each of its own clients: one of protocol 153 or later.
+    pub(super) fn masks_relayed(&self, token: Token) -> bool {
+        self.relays(token)
+            && self
+                .client_wire(token)
+                .is_some_and(|wire| wire >= wire::RELAY_HINTS)
+    }
+
+    /// How a view followed by the client at `token` is masked, and
+    /// whether it's sent with its lines' hints, as to a daemon relaying
+    /// that masks them itself, which is sent them as they are.
+    pub(super) fn view_masking(&self, token: Token) -> (Masking, bool) {
+        if self.masks_relayed(token) {
+            return (Masking::NONE, true);
+        }
+        let masking = Masking {
+            hidden: self.hidden_for(token, true),
+            ..Masking::NONE
+        };
+        (masking, false)
+    }
+
+    /// Answers [`Request::Masked`] from the client at `token`: `request`,
+    /// answered as for a client that has lines masked as `masking` says,
+    /// only for a daemon relaying that masks lines itself.
+    pub(super) fn respond_masked(
+        &mut self,
+        token: Token,
+        masking: Masking,
+        request: Request,
+    ) -> Response {
+        if !self.masks_relayed(token) {
+            return Response::Error(Error::Other(
+                "only a daemon relaying asks for lines masked as it says".into(),
+            ));
+        }
+        if !matches!(
+            request,
+            Request::History { .. }
+                | Request::Text { .. }
+                | Request::BlockText { .. }
+                | Request::Search { .. }
+                | Request::Capture { .. }
+                | Request::Image { .. }
+        ) {
+            return Response::Error(Error::Other(
+                "only a terminal's lines are asked for masked".into(),
+            ));
+        }
+        let before = self.links.masked_as.replace(masking);
+        let response = self.respond(request, token);
+        self.links.masked_as = before;
+        response
     }
 
     /// Answers [`Request::Unmask`](clackatoo_protocol::Request::Unmask)
@@ -87,12 +252,32 @@ impl Daemon {
                 "a device on the web app can't show what's hidden".into(),
             ));
         }
-        if self.relays(token) {
+        if self.relays(token) && !self.masks_relayed(token) {
             return Err(Error::Other(
                 "what's hidden is shown only in a window on its own machine, or one reaching it \
                  with --remote"
                     .into(),
             ));
+        }
+        // A daemon relaying shows its window the lines itself: it's told
+        // which they are.
+        if self.relays(token) {
+            let grid = self.grid(terminal)?;
+            let line = line.ok_or_else(|| Error::Other("nothing's hidden there".into()))?;
+            let run = (grid.hidden_run(line))
+                .ok_or_else(|| Error::Other("nothing's hidden there".into()))?;
+            let end = run.end.min(run.start + MOST_SHOWN);
+            let prints = (run.start..end)
+                .map(|line| {
+                    grid.document_line(line)
+                        .map_or(0, |row| Masking::fingerprint(&row))
+                })
+                .collect();
+            return Ok(Response::HiddenRun {
+                lines: run.start..end,
+                prints,
+                hints: grid.line_hints(line) & LineHints::MASKING,
+            });
         }
         let hidden = self.masking_for(token, terminal).hidden;
         let grid = self.grid(terminal)?;
@@ -119,32 +304,15 @@ impl Daemon {
         };
         let subscription = (client.views.get_mut(&terminal))
             .ok_or_else(|| Error::Other(format!("terminal {terminal} isn't shown here")))?;
-        let said = match run {
-            _ if !subscription.masking.hidden.contains(Hints::HIDE) => {
-                return Err(Error::Other(
-                    "nothing's hidden: daemon.hints.hide is `show`".into(),
-                ));
-            }
-            // Asked again where it's shown, it's masked again.
-            Some((run, prints)) if subscription.masking.shown != run => {
-                let lines = run.end - run.start;
-                subscription.masking.shown = run;
-                subscription.masking.prints = prints;
-                subscription.shown_until = Some(Instant::now() + shown_for);
-                let plural = if lines == 1 { "" } else { "s" };
-                format!(
-                    "{lines} hidden line{plural} shown for {}s",
-                    shown_for.as_secs()
-                )
-            }
-            Some(_) | None if !subscription.masking.shown.is_empty() => {
-                subscription.masking.shown = 0..0;
-                subscription.masking.prints.clear();
-                subscription.shown_until = None;
-                "hidden again".to_owned()
-            }
-            _ => return Err(Error::Other("nothing's hidden there".into())),
-        };
+        // What's kept from agents was refused above, for a line asked
+        // about.
+        let said = show_run(
+            &mut subscription.masking,
+            &mut subscription.shown_until,
+            run,
+            Hints::empty(),
+            shown_for,
+        )?;
         subscription.forget_sent();
         self.views_pending = true;
         Ok(Response::Text(said))
@@ -159,6 +327,7 @@ impl Daemon {
             })
             .flat_map(|client| client.views.values())
             .filter_map(|subscription| subscription.shown_until)
+            .chain(self.next_relayed_mask_due())
             .min()
     }
 
@@ -179,6 +348,7 @@ impl Daemon {
                 }
             }
         }
+        self.mask_relayed_again_if_due(now);
     }
 
     /// Masks what each window shows by what agents may read through it
@@ -191,23 +361,23 @@ impl Daemon {
             .map(|(key, _)| key)
             .collect();
         for key in tokens {
-            let hidden = self.hidden_for(Token(key), true);
+            let (masking, hinted) = self.view_masking(Token(key));
             let Some(Source::Client(client)) = self.sources.get_mut(key) else {
                 continue;
             };
             for subscription in client.views.values_mut() {
-                if subscription.masking.hidden != hidden {
+                if subscription.masking.hidden != masking.hidden || subscription.hinted != hinted
+                {
                     // What was shown is masked again too.
-                    subscription.masking = clackatoo_protocol::Masking {
-                        hidden,
-                        ..clackatoo_protocol::Masking::NONE
-                    };
+                    subscription.masking = masking.clone();
+                    subscription.hinted = hinted;
                     subscription.shown_until = None;
                     subscription.forget_sent();
                     self.views_pending = true;
                 }
             }
         }
+        self.mask_relayed_by_grants();
     }
 }
 
@@ -219,6 +389,7 @@ mod tests {
 
     use super::*;
     use crate::server::{Client, Hosted, Link, PROTOCOL_VERSION};
+    use clackatoo_protocol::wire;
 
     /// A window on this machine's socket, and the other end of it.
     fn window(daemon: &mut Daemon) -> (Token, std::os::unix::net::UnixStream) {
@@ -489,15 +660,21 @@ mod tests {
         assert_eq!(daemon.respond(all(), token), Response::Text(shown));
     }
 
-    /// A daemon relaying can't ask to see what's hidden, as it would show
-    /// it to every client it has.
-    #[test]
-    fn a_daemon_relaying_cant_ask_to_see_what_is_hidden() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+    /// Makes the client at `token` a daemon relaying, of protocol `wire`.
+    fn relaying(daemon: &mut Daemon, token: Token, wire: u32) {
         if let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) {
             client.relays = true;
+            client.wire = wire;
         }
+    }
+
+    /// A daemon relaying older than 153 can't ask to see what's hidden, as
+    /// it would show it to every client it has.
+    #[test]
+    fn an_older_daemon_relaying_cant_ask_to_see_what_is_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+        relaying(&mut daemon, token, wire::SECRET_REGIONS);
         let unmask = Request::Unmask {
             terminal,
             line: Some(1),
@@ -564,11 +741,11 @@ mod tests {
         assert_eq!(daemon.respond(all, token), Response::Text(MASK.to_owned()));
     }
 
-    /// A daemon relaying, following a terminal for its windows, is sent
-    /// what's kept from agents masked: it never leaves this machine as it
-    /// is.
+    /// A daemon relaying older than 153, following a terminal for its
+    /// windows, is sent what's kept from agents masked: it never leaves
+    /// this machine as it is.
     #[test]
-    fn whats_kept_from_agents_never_reaches_another_machine() {
+    fn whats_kept_from_agents_never_reaches_an_older_daemon_relaying() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, terminal, _, _theirs) = hidden(dir.path(), true);
         feed(
@@ -577,9 +754,7 @@ mod tests {
             b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
         );
         let (relay, _theirs) = window(&mut daemon);
-        if let Some(Source::Client(client)) = daemon.sources.get_mut(relay.0) {
-            client.relays = true;
-        }
+        relaying(&mut daemon, relay, wire::SECRET_REGIONS);
         daemon.attach(relay, terminal).unwrap();
         assert_eq!(snapshot(&mut daemon, relay, terminal)[3], MASK);
         let all = Request::Text {
@@ -744,10 +919,11 @@ mod tests {
         assert!(daemon.image_masked(token, terminal, image));
     }
 
-    /// A window that starts relaying has what it followed before masked as
-    /// a daemon relaying's is.
+    /// A client older than 153 that starts relaying has what it followed
+    /// before masked as an older daemon relaying's is; a newer one is sent
+    /// it as it is, with its hints, to mask for each of its own clients.
     #[test]
-    fn a_client_that_starts_relaying_gets_whats_kept_from_agents_masked() {
+    fn a_client_that_starts_relaying_is_masked_as_its_protocol_says() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
         feed(
@@ -756,8 +932,110 @@ mod tests {
             b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
         );
         assert_eq!(snapshot(&mut daemon, token, terminal)[3], "token");
+        if let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) {
+            client.wire = wire::SECRET_REGIONS;
+        }
         assert_eq!(daemon.respond(Request::Relay, token), Response::Done);
         assert_eq!(snapshot(&mut daemon, token, terminal)[3], MASK);
+        let (newer, _theirs) = window(&mut daemon);
+        daemon.attach(newer, terminal).unwrap();
+        assert_eq!(daemon.respond(Request::Relay, newer), Response::Done);
+        let (lines, hints) = hinted_snapshot(&mut daemon, newer, terminal);
+        assert_eq!(lines[1..4], ["hunter2", "two", "token"]);
+        let hinted: Vec<(u16, Hints)> = (hints.lines.iter())
+            .map(|&(line, hints, _)| (line, hints))
+            .collect();
+        assert_eq!(hinted, [(1, Hints::HIDE), (3, Hints::NOAGENT)]);
+    }
+
+    /// The lines of the next update the client at `token` is sent of
+    /// `terminal`, a snapshot, as they are, and their hints, as for a
+    /// daemon relaying that masks them itself.
+    fn hinted_snapshot(
+        daemon: &mut Daemon,
+        token: Token,
+        terminal: TerminalId,
+    ) -> (Vec<String>, LineHints) {
+        let lines = snapshot(daemon, token, terminal);
+        let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {
+            panic!("no client");
+        };
+        let hints = (client.views.get_mut(&terminal).unwrap().hints.take()).expect("no hints");
+        (lines, hints)
+    }
+
+    /// A daemon relaying of protocol 153 or later is sent lines as they
+    /// are, with their hints; asks for copies, searches and history masked
+    /// as one of its clients has them, and is answered so; is told which
+    /// lines a run of hidden ones is, to show them itself; and anything it
+    /// asks without saying how is masked as for an older one.
+    #[test]
+    fn a_daemon_relaying_masks_lines_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, _, _theirs) = hidden(dir.path(), true);
+        feed(
+            &mut daemon,
+            terminal,
+            b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
+        );
+        let (relay, _theirs) = window(&mut daemon);
+        relaying(&mut daemon, relay, PROTOCOL_VERSION);
+        daemon.attach(relay, terminal).unwrap();
+        let (lines, hints) = hinted_snapshot(&mut daemon, relay, terminal);
+        assert_eq!(lines[1..4], ["hunter2", "two", "token"]);
+        assert_eq!(hints.lines.len(), 2);
+        let all = || Request::Text {
+            terminal,
+            from: Position { line: 0, col: 0 },
+            to: Position { line: 3, col: 9 },
+            whole_lines: true,
+        };
+        // Asked plainly: masked as for an older daemon relaying.
+        let masked = format!("one\n{MASK}\ntwo\n{MASK}");
+        assert_eq!(daemon.respond(all(), relay), Response::Text(masked));
+        // Asked for a window there: what's kept from agents isn't masked.
+        let masked_for = |shown, prints| Request::Masked {
+            masking: Masking {
+                hidden: Hints::HIDE,
+                shown,
+                prints,
+            },
+            request: Box::new(all()),
+        };
+        let for_window = format!("one\n{MASK}\ntwo\ntoken");
+        assert_eq!(
+            daemon.respond(masked_for(0..0, Vec::new()), relay),
+            Response::Text(for_window)
+        );
+        // Which lines the run is, to show them to that window.
+        let unmask = Request::Unmask {
+            terminal,
+            line: Some(1),
+        };
+        let Response::HiddenRun {
+            lines,
+            prints,
+            hints,
+        } = daemon.respond(unmask, relay)
+        else {
+            panic!("no run");
+        };
+        assert_eq!((lines.clone(), hints), (1..2, Hints::HIDE));
+        let shown = "one\nhunter2\ntwo\ntoken".to_owned();
+        assert_eq!(
+            daemon.respond(masked_for(lines, prints), relay),
+            Response::Text(shown)
+        );
+        // Nothing but a terminal's lines is asked masked, and only by a
+        // daemon relaying.
+        let odd = Request::Masked {
+            masking: Masking::NONE,
+            request: Box::new(Request::ListTerminals),
+        };
+        assert!(matches!(daemon.respond(odd, relay), Response::Error(_)));
+        let (stranger, _theirs) = window(&mut daemon);
+        let asked = daemon.respond(masked_for(0..0, Vec::new()), stranger);
+        assert!(matches!(asked, Response::Error(_)), "{asked:?}");
     }
 
     /// A virtual placement made in a region isn't sent to a client that

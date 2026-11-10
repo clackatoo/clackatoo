@@ -204,6 +204,10 @@ pub(super) struct Links {
     /// worked out once for it, and forgotten after (see
     /// [`kept_for`](super::Daemon::kept_for)).
     pub(super) asking: Option<(Token, super::relay::unshared::Kept)>,
+    /// How the daemon relaying whose request is being answered or routed
+    /// asked for a terminal's lines to be masked, for one of its own
+    /// clients, and forgotten after (see `server/masks.rs`).
+    pub(super) masked_as: Option<clackatoo_protocol::Masking>,
     /// Connections to machines no longer passed on, or reached another
     /// way, are to be ended, at the end of the turn, rather than while
     /// what found them holds places in the list.
@@ -250,6 +254,7 @@ impl Default for Links {
             passed_told: Vec::new(),
             kept_told: super::relay::unshared::Kept::default(),
             asking: None,
+            masked_as: None,
             unpassed: false,
             pins: Pins::default(),
         }

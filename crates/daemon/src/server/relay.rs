@@ -64,6 +64,7 @@ pub(super) mod files;
 pub(super) mod finds;
 pub(super) mod forwards;
 pub(super) mod held;
+pub(super) mod masked;
 pub(super) mod mirror;
 pub(super) mod sessions;
 pub(super) mod shown;
@@ -306,6 +307,12 @@ struct Viewer {
     recent: bool,
     first: Option<u32>,
     before: Option<u32>,
+    /// How lines are masked for it, as for one of this daemon's own
+    /// terminals (see [`masked`]), when the daemon there sends them as
+    /// they are, with their hints.
+    masking: clackatoo_protocol::Masking,
+    /// When the lines it was shown as they are are masked again.
+    shown_until: Option<Instant>,
 }
 
 impl Viewer {
@@ -432,6 +439,10 @@ enum Then {
     /// A new pane in its layout showing the pane of this machine's
     /// numbered so here.
     Placed(u64),
+    /// The run of hidden lines of this daemon's terminal numbered so here
+    /// that its client asked to see, which it's shown here (see
+    /// [`masked`]).
+    Unmasked(TerminalId),
 }
 
 /// What's done with a frame from another daemon once it's unpacked.
@@ -978,6 +989,25 @@ impl Daemon {
     /// kept from it, if it's a daemon relaying, is worked out once for it
     /// first (CLACKA-118).
     pub(super) fn route_request(&mut self, token: Token, request: Request) -> Routed {
+        // Asked by a daemon relaying for one of its own clients: what's
+        // inside goes where it would, asked masked as that client has it.
+        if let Request::Masked { masking, request } = request {
+            if !self.masks_relayed(token) {
+                return Routed::Answered(Response::Error(Error::Other(
+                    "only a daemon relaying asks for lines masked as it says".into(),
+                )));
+            }
+            let before = self.links.masked_as.replace(masking.clone());
+            let routed = self.route_request(token, *request);
+            self.links.masked_as = before;
+            return match routed {
+                Routed::Here(request) => Routed::Here(Request::Masked {
+                    masking,
+                    request: Box::new(request),
+                }),
+                routed => routed,
+            };
+        }
         self.asking(Some(token));
         let routed = self.route_request_kept(token, request);
         self.asking(None);
@@ -1289,6 +1319,14 @@ impl Daemon {
     /// answers are waited for.
     #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
     pub(super) fn route_waited_for(&mut self, token: Token, request: Request) -> Routed {
+        if let Request::Unmask {
+            terminal: local,
+            line,
+        } = request
+            && let Some((at, remote)) = self.relayed_terminal(local)
+        {
+            return self.relay_unmask(token, (at, local, remote), line);
+        }
         let terminal = |daemon: &Self, terminal: TerminalId| daemon.relayed_terminal(terminal);
         let renumbered: Option<(usize, Renumbered)> = match &request {
             &Request::History {
@@ -1307,17 +1345,12 @@ impl Daemon {
                 } else {
                     Then::Pass
                 };
-                (
-                    at,
-                    Ok((
-                        Request::History {
-                            terminal,
-                            end,
-                            count,
-                        },
-                        then,
-                    )),
-                )
+                let history = Request::History {
+                    terminal,
+                    end,
+                    count,
+                };
+                (at, Ok((self.masked_there(token, at, local, history), then)))
             }),
             &Request::Text {
                 terminal: local,
@@ -1331,7 +1364,7 @@ impl Daemon {
                     to,
                     whole_lines,
                 };
-                (at, Ok((text, Then::Pass)))
+                (at, Ok((self.masked_there(token, at, local, text), Then::Pass)))
             }),
             &Request::BlockText {
                 terminal: local,
@@ -1339,24 +1372,7 @@ impl Daemon {
                 to,
             } => terminal(self, local).map(|(at, terminal)| {
                 let text = Request::BlockText { terminal, from, to };
-                (at, Ok((text, Then::Pass)))
-            }),
-            // Masks are the home daemon's, which one older than them
-            // never has.
-            &Request::Unmask {
-                terminal: local,
-                line,
-            } => terminal(self, local).map(|(at, terminal)| {
-                // What the other machine shows as it is would reach every
-                // client of this daemon following it, phones too, so it's
-                // shown only on its own machine (see `server/masks.rs`).
-                let _ = (terminal, line);
-                let unmask = Err(Error::Other(
-                    "what's hidden is shown only in a window on its own machine, or one \
-                     reaching it with --remote"
-                        .into(),
-                ));
-                (at, unmask)
+                (at, Ok((self.masked_there(token, at, local, text), Then::Pass)))
             }),
             Request::Search {
                 terminal: local,
@@ -1374,7 +1390,7 @@ impl Daemon {
                     exact: *exact,
                     count: *count,
                 };
-                (at, Ok((search, Then::Pass)))
+                (at, Ok((self.masked_there(token, at, *local, search), Then::Pass)))
             }),
             &Request::Block {
                 terminal: local,
@@ -1407,14 +1423,13 @@ impl Daemon {
                 at: from_byte,
             } => {
                 let found = match from {
-                    ImageFrom::Terminal(local) => {
-                        terminal(self, local).map(|(at, remote)| (at, ImageFrom::Terminal(remote)))
-                    }
+                    ImageFrom::Terminal(local) => (terminal(self, local))
+                        .map(|(at, remote)| (at, ImageFrom::Terminal(remote), Some(local))),
                     ImageFrom::Buffer(local) => (self.relayed_buffer(local))
-                        .map(|(at, remote)| (at, ImageFrom::Buffer(remote))),
+                        .map(|(at, remote)| (at, ImageFrom::Buffer(remote), None)),
                     ImageFrom::Picture(_) => None,
                 };
-                found.map(|(at, from)| {
+                found.map(|(at, from, terminal)| {
                     if self.link_wire(at) < wire::IMAGES {
                         return (at, Err(self.too_old(at, "an image")));
                     }
@@ -1423,6 +1438,10 @@ impl Daemon {
                         image,
                         fit,
                         at: from_byte,
+                    };
+                    let request = match terminal {
+                        Some(local) => self.masked_there(token, at, local, request),
+                        None => request,
                     };
                     (at, Ok((request, Then::Pass)))
                 })
@@ -1463,8 +1482,10 @@ impl Daemon {
                     )),
                 )
             }),
-            &Request::Capture { terminal: local } => terminal(self, local)
-                .map(|(at, terminal)| (at, Ok((Request::Capture { terminal }, Then::Pass)))),
+            &Request::Capture { terminal: local } => terminal(self, local).map(|(at, terminal)| {
+                let capture = self.masked_there(token, at, local, Request::Capture { terminal });
+                (at, Ok((capture, Then::Pass)))
+            }),
             &Request::CloseTerminal { terminal: local } => terminal(self, local)
                 .map(|(at, terminal)| (at, Ok((Request::CloseTerminal { terminal }, Then::Pass)))),
             &Request::Fit {
@@ -2298,6 +2319,7 @@ impl Daemon {
     /// Has the client at `token` follow this daemon's terminal `local`, of
     /// the connection at `at`, from its next snapshot.
     fn follow(&mut self, token: Token, at: usize, local: TerminalId) {
+        let hidden = self.relayed_hidden(token, true);
         let followed = self.links.list[at]
             .relayed
             .followed
@@ -2320,6 +2342,11 @@ impl Daemon {
                 recent: false,
                 first: None,
                 before: None,
+                masking: clackatoo_protocol::Masking {
+                    hidden,
+                    ..clackatoo_protocol::Masking::NONE
+                },
+                shown_until: None,
             }),
         }
     }
@@ -2844,6 +2871,15 @@ impl Daemon {
                     }
                 };
                 (Route::Answer(expect), need)
+            } else if let Some(remote) = head.hinted_view() {
+                // Lines as they are, masked here for each client: always
+                // looked at, never passed on as they came.
+                let host = reached.host.clone();
+                let Some((local, _)) = self.view_wires(&host, remote) else {
+                    continue;
+                };
+                let snapshot = head.is_hinted_view_snapshot();
+                (Route::View { local, snapshot }, Need::Decode)
             } else if let Some(remote) = head.view() {
                 let host = reached.host.clone();
                 let Some((local, wires)) = self.view_wires(&host, remote) else {
@@ -3065,13 +3101,17 @@ impl Daemon {
         // (CLACKA-118).
         self.let_go_kept_follows(at, local);
         let mapped;
-        let unpacked =
-            if let Unpacked::Decoded(Ok(ServerMessage::Event(Event::View { terminal, update }))) =
-                unpacked
-            {
-                let mut update = update.clone();
+        let unpacked = match unpacked {
+            Unpacked::Decoded(Ok(ServerMessage::Event(
+                event @ (Event::View { .. } | Event::HintedView { .. }),
+            ))) => {
+                let mut event = event.clone();
+                let (Event::View { update, .. } | Event::HintedView { update, .. }) = &mut event
+                else {
+                    unreachable!("matched above");
+                };
                 let (linked, mut fresh) = self.numbering(at);
-                map_agent_terminals(&mut update, |parent| {
+                map_agent_terminals(update, |parent| {
                     TerminalId(
                         linked
                             .relayed
@@ -3080,14 +3120,11 @@ impl Daemon {
                             .local_or_fresh(parent.0, || fresh.terminal()),
                     )
                 });
-                mapped = Unpacked::Decoded(Ok(ServerMessage::Event(Event::View {
-                    terminal: *terminal,
-                    update,
-                })));
+                mapped = Unpacked::Decoded(Ok(ServerMessage::Event(event)));
                 &mapped
-            } else {
-                unpacked
-            };
+            }
+            unpacked => unpacked,
+        };
         let newer =
             (self.links.list[at].wire).is_some_and(|wire| wire >= wire::TERMINAL_STANDARDS_2);
         let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
@@ -3121,8 +3158,8 @@ impl Daemon {
             if viewer.stalled || (viewer.snapshot_due && !snapshot) {
                 continue;
             }
-            let wire = match self.sources.get(viewer.token.0) {
-                Some(Source::Client(client)) => client.wire,
+            let (wire, relays) = match self.sources.get(viewer.token.0) {
+                Some(Source::Client(client)) => (client.wire, client.relays),
                 _ => continue,
             };
             // One it couldn't be encoded for, as at a version it came too
@@ -3143,6 +3180,9 @@ impl Daemon {
                     )
                     .ok()
                 }
+                Unpacked::Decoded(Ok(ServerMessage::Event(Event::HintedView {
+                    update, hints, ..
+                }))) => masked::hinted_frame(viewer, (wire, relays), local, update, hints, newer),
                 _ => unpacked.for_wire(wire).map(<[u8]>::to_vec),
             };
             let Some(frame) = frame else {
@@ -3267,6 +3307,15 @@ impl Daemon {
             Expect::Client {
                 token,
                 ticket,
+                then: Then::Unmasked(local),
+                ..
+            } => {
+                let response = self.unmasked_answer(at, token, local, response);
+                self.hand_answer_with(token, ticket, response);
+            }
+            Expect::Client {
+                token,
+                ticket,
                 then,
                 ..
             } => {
@@ -3298,7 +3347,8 @@ impl Daemon {
                 | Response::Found(_)
                 | Response::Searched { .. }
                 | Response::Block(_)
-                | Response::Image(_)),
+                | Response::Image(_)
+                | Response::HiddenRun { .. }),
             )
             | (Then::Recovered, response @ (Response::Done | Response::Text(_)))
             | (Then::Reviewed, response @ Response::Reviewed(_))
@@ -3859,6 +3909,15 @@ mod tests {
             notice: Notice::Close,
         };
         assert_eq!(head(notified), Some(NOTIFIED));
+        let hinted = Event::HintedView {
+            terminal: TerminalId(7),
+            update: ViewUpdate::Patch(Vec::new()),
+            hints: clackatoo_protocol::LineHints::default(),
+        };
+        let frame = frame::encode(PROTOCOL_VERSION, &ServerMessage::Event(hinted)).unwrap();
+        let read = Head::of(&frame[4..]);
+        assert_eq!(read.hinted_view(), Some(TerminalId(7)));
+        assert_eq!((read.view(), read.is_hinted_view_snapshot()), (None, false));
     }
 
     /// A try straight there, as a client asked, goes on past its
@@ -3994,7 +4053,7 @@ mod tests {
     }
 
     /// This daemon's number for the terminal the daemon there numbers 7.
-    fn terminal(daemon: &Daemon) -> TerminalId {
+    pub(super) fn terminal(daemon: &Daemon) -> TerminalId {
         let shown = daemon.shown_workspaces();
         let work = (shown.list.iter()).find(|workspace| workspace.home.is_some());
         work.expect("desk's workspace is shown").tabs[0]
@@ -4041,13 +4100,17 @@ mod tests {
             daemon.route_request(window, history),
             Routed::Waiting
         ));
-        // Asked of the daemon there by its own number.
+        // Asked of the daemon there by its own number, masked as for a
+        // client not showing it.
         assert_eq!(
             heard(&mut there),
-            [ClientMessage::Request(Request::History {
-                terminal: TerminalId(7),
-                end: 0,
-                count: 1
+            [ClientMessage::Request(Request::Masked {
+                masking: clackatoo_protocol::Masking::RELAYED,
+                request: Box::new(Request::History {
+                    terminal: TerminalId(7),
+                    end: 0,
+                    count: 1
+                }),
             })]
         );
         say(

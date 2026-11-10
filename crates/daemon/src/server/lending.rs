@@ -546,6 +546,8 @@ impl Daemon {
                 ..
             }
             | Request::ImageAt { buffer: id, .. } => buffer(id),
+            // What's inside is refused as it would be.
+            Request::Masked { ref request, .. } => self.refuse_lent(token, request),
             _ => Ok(()),
         }
     }

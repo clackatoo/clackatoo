@@ -55,6 +55,7 @@ impl Daemon {
                 Event::Listening(listening)
             }
             Event::View { terminal: id, .. }
+            | Event::HintedView { terminal: id, .. }
             | Event::Clipboard { terminal: id, .. }
             | Event::ClipboardAsked { terminal: id, .. }
             | Event::Browser { chat: id, .. }
@@ -106,6 +107,7 @@ impl Daemon {
             },
             Event::Forwarded(why) if !said(&why) => Event::Forwarded(not_said()),
             event @ (Event::View { .. }
+            | Event::HintedView { .. }
             | Event::Buffer { .. }
             | Event::Installed { .. }
             | Event::Found { .. }
@@ -194,7 +196,8 @@ impl Daemon {
             | Response::Searched { .. }
             | Response::Image(_)
             | Response::Picture(_)
-            | Response::DaemonSettings(_)) => response,
+            | Response::DaemonSettings(_)
+            | Response::HiddenRun { .. }) => response,
         }
     }
 

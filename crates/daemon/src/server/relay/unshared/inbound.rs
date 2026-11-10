@@ -80,6 +80,8 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::DaemonSettings
         | Request::SetDaemonOption { .. } => return Asked::Own,
         Request::Review(ref action) => return Asked::Review(action.clone()),
+        // What's inside names what it names.
+        Request::Masked { ref request, .. } => return request_names(request),
         // Naming nothing of another machine's.
         Request::ListTerminals
         | Request::NewTerminal(_)

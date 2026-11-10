@@ -27,6 +27,9 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 const HEADER_LEN: usize = 4;
 
+/// The number of `Event::HintedView` among the events.
+const HINTED_VIEW: u32 = 32;
+
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.
 const CLIENT_MESSAGES: u32 = 23;
@@ -635,6 +638,21 @@ impl Head {
     #[must_use]
     pub fn view(&self) -> Option<TerminalId> {
         self.event(0).map(TerminalId)
+    }
+
+    /// Of the daemon's message: the terminal, if it was a change to a
+    /// terminal's view with its lines as they are and their hints
+    /// (`Event::HintedView`), which only a daemon relaying is sent.
+    #[must_use]
+    pub fn hinted_view(&self) -> Option<TerminalId> {
+        self.event(HINTED_VIEW).map(TerminalId)
+    }
+
+    /// Of the daemon's message: whether it was a snapshot of a terminal's
+    /// view with its lines' hints.
+    #[must_use]
+    pub fn is_hinted_view_snapshot(&self) -> bool {
+        self.hinted_view().is_some() && self.get(3) == Some(0)
     }
 
     /// Of the daemon's message: the buffer, if it was a change to a buffer.

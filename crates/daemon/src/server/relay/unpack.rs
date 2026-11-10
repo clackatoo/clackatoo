@@ -165,7 +165,9 @@ fn as_before(message: &ServerMessage) -> Option<ServerMessage> {
 /// The rules the terminal of `message`, a change to its view, lays its
 /// cells out by, if it says.
 pub(super) fn widths_of(message: &ServerMessage) -> Option<Widths> {
-    let ServerMessage::Event(Event::View { update, .. }) = message else {
+    let ServerMessage::Event(Event::View { update, .. } | Event::HintedView { update, .. }) =
+        message
+    else {
         return None;
     };
     match update {

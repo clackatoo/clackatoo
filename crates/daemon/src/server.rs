@@ -639,9 +639,18 @@ fn queue_update(
     update: ViewUpdate,
     outgoing: &mut Vec<u8>,
 ) -> bool {
-    let event = ServerMessage::Event(clackatoo_protocol::Event::View {
-        terminal: id,
-        update,
+    // With the hints of its lines, for a daemon relaying that masks them
+    // for each of its clients, if any has any.
+    let event = ServerMessage::Event(match subscription.hints.take() {
+        Some(hints) => clackatoo_protocol::Event::HintedView {
+            terminal: id,
+            update,
+            hints,
+        },
+        None => clackatoo_protocol::Event::View {
+            terminal: id,
+            update,
+        },
     });
     // A daemon passing it on may have clients that need the thumbnails'
     // pixels.
@@ -801,6 +810,13 @@ struct Subscription {
     masking: Masking,
     /// When those are masked again.
     shown_until: Option<Instant>,
+    /// It's a daemon relaying that masks lines for each of its own
+    /// clients: sent them as they are, with their hints (see
+    /// `server/masks.rs`).
+    hinted: bool,
+    /// The hints of what the update made last carries, for a daemon
+    /// relaying that's [`hinted`](Self::hinted), if it has any.
+    hints: Option<clackatoo_protocol::LineHints>,
 }
 
 impl Subscription {
@@ -808,6 +824,8 @@ impl Subscription {
         Self {
             masking: Masking::ALL,
             shown_until: None,
+            hinted: false,
+            hints: None,
             damage: Damage::new(),
             size: None,
             history_generation: 0,
@@ -826,12 +844,13 @@ impl Subscription {
         let recent = self.chat.recent;
         let first = self.chat.first;
         let masking = std::mem::replace(&mut self.masking, Masking::ALL);
-        let shown_until = self.shown_until;
+        let (shown_until, hinted) = (self.shown_until, self.hinted);
         *self = Self::new();
         self.chat.recent = recent;
         self.chat.first = first;
         self.masking = masking;
         self.shown_until = shown_until;
+        self.hinted = hinted;
     }
 
     /// The update that brings the client, which speaks `wire`, from what
@@ -939,6 +958,10 @@ impl Subscription {
                 grid.state.agent = agent;
                 grid.state.fed = fed;
                 grid.state.phone = state.phone;
+                if self.hinted {
+                    let rows = (0..).zip(terminal.grid().rows());
+                    self.hints = masks::hints_of(rows, terminal, &grid.pictures);
+                }
             }
             return Some(ViewUpdate::Snapshot(view));
         }
@@ -988,6 +1011,10 @@ impl Subscription {
         };
         if !lines.is_empty() || state != self.state || !marks.exits.is_empty() {
             self.state = state;
+            if self.hinted {
+                let rows = damaged.iter().map(|&line| (line, row(line)));
+                self.hints = masks::hints_of(rows, terminal, &pictures);
+            }
             let shown = LinkTarget::of(lines.iter().map(|(_, line)| line), terminal);
             patches.push(Patch::Grid {
                 node: NodeId::ROOT,
@@ -3935,6 +3962,7 @@ impl Daemon {
                 })
             }
             Request::Unmask { terminal, line } => self.unmask(token, terminal, line),
+            Request::Masked { masking, request } => Ok(self.respond_masked(token, masking, *request)),
             Request::Search {
                 terminal,
                 query,
@@ -4353,10 +4381,11 @@ impl Daemon {
             slot.viewers.push(token);
         }
         let chat = slot.terminal.is_chat();
-        let hidden = self.hidden_for(token, true);
+        let (masking, hinted) = self.view_masking(token);
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
             let mut subscription = Subscription::new();
-            subscription.masking.hidden = hidden;
+            subscription.masking = masking;
+            subscription.hinted = hinted;
             client.views.insert(id, subscription);
         }
         self.views_pending = true;

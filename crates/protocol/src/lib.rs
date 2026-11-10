@@ -151,7 +151,8 @@ pub use settings::{
 pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
-    LinkTarget, Links, Masking, Node, NodeId, Patch, Pictures, Restarted, Run, View, ViewUpdate,
+    LineHints, LinkTarget, Links, Masking, Node, NodeId, Patch, Pictures, Restarted, Run, View,
+    ViewUpdate,
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
@@ -162,7 +163,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 152;
+pub const PROTOCOL_VERSION: u32 = 153;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -766,6 +767,23 @@ pub enum Event {
         /// outside clackatoo, for the window to say: empty for any other
         /// run, as a window's own change.
         outside: Vec<ConfigChange>,
+    },
+    /// The view of a terminal the client attached to changed, as
+    /// [`Event::View`] says, but with every line as it is, and the hints
+    /// of those a program marked private (see [`LineHints`]): sent only
+    /// to a daemon relaying, of protocol 153 or later
+    /// ([`wire::RELAY_HINTS`]), and only when the change has any. It
+    /// masks them for each of its own clients as it masks its own
+    /// terminals (see [`LineHints::mask`]), or passes them on so to a
+    /// daemon relaying for it. An older one is sent [`Event::View`], every
+    /// line with a hint masked.
+    HintedView {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The change, its lines as they are.
+        update: ViewUpdate,
+        /// The hints of what it carries.
+        hints: LineHints,
     },
 }
 
@@ -1867,6 +1885,21 @@ pub enum Request {
         /// What it's saved as.
         value: Option<String>,
     },
+    /// `request`, about a terminal's lines, answered as for a client that
+    /// has them masked as `masking` says: what a daemon relaying asks for
+    /// one of its own clients, which it masks as it masks its own
+    /// terminals for it. Only [`Request::History`], [`Request::Text`],
+    /// [`Request::BlockText`], [`Request::Search`], [`Request::Capture`]
+    /// and [`Request::Image`] are answered so, and only for a daemon
+    /// relaying; anything else is refused. Answered as `request` is. A
+    /// daemon older than protocol 153 ([`wire::RELAY_HINTS`]) is asked
+    /// `request` alone, which it masks as for a daemon relaying.
+    Masked {
+        /// How the lines are masked.
+        masking: Masking,
+        /// What's asked.
+        request: Box<Request>,
+    },
 }
 
 /// What [`Request::KeepHistory`] changes.
@@ -2105,6 +2138,21 @@ pub enum Response {
     Picture(Picture),
     /// Answers [`Request::DaemonSettings`].
     DaemonSettings(DaemonSettings),
+    /// Answers [`Request::Unmask`] from a daemon relaying, of protocol
+    /// 153 or later ([`wire::RELAY_HINTS`]), which shows the lines to the
+    /// client that asked it itself, as they are sent it with their hints
+    /// ([`Event::HintedView`]): the run of hidden lines around the line
+    /// asked about, numbered in the terminal's document, what each held
+    /// ([`Masking::fingerprint`]), and that line's hints, which say if
+    /// it's kept from agents too.
+    HiddenRun {
+        /// The lines.
+        lines: std::ops::Range<u64>,
+        /// What each held.
+        prints: Vec<u64>,
+        /// The hints of the line asked about.
+        hints: clackatoo_term::Hints,
+    },
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

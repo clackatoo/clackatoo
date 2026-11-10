@@ -4466,12 +4466,13 @@ impl App {
                     self.request_redraw();
                 }
             }
-            // A lent pane beside another is only for a daemon relaying,
-            // which a window never says it is.
+            // A lent pane beside another, and lines as they are with their
+            // hints, are only for a daemon relaying, which a window never
+            // says it is.
             SessionEvent::Message(
                 ServerMessage::Hello { .. }
                 | ServerMessage::NotUpgrading { .. }
-                | ServerMessage::Event(Event::LendBeside { .. }),
+                | ServerMessage::Event(Event::LendBeside { .. } | Event::HintedView { .. }),
             ) => {}
             SessionEvent::ChatPaste { chat, result } => {
                 self.desk.finish_image_paste(chat, result);

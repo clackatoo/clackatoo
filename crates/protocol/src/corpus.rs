@@ -2206,6 +2206,58 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::DAEMON_SETTINGS, sample)),
     );
+    // Masks applied by a daemon relaying, for each of its own clients
+    // (CLACKA-242, part 3): a view with its lines' hints, a copy asked
+    // masked as one client has it, and the run of hidden lines a window
+    // there asked to see.
+    let hints = crate::LineHints {
+        cols: 80,
+        lines: vec![
+            (0, clackatoo_term::Hints::HIDE, 0x1234),
+            (
+                1,
+                clackatoo_term::Hints::HIDE | clackatoo_term::Hints::NOAGENT,
+                0x5678,
+            ),
+        ],
+        cursor: Some((clackatoo_term::Hints::NOAGENT, 0x9abc)),
+        virtuals: vec![(42, 0, clackatoo_term::Hints::HIDE)],
+    };
+    samples.extend(
+        [
+            Sample::Server(ServerMessage::Event(Event::HintedView {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: grid_state(),
+                    lines: vec![(0, line("hunter2")), (1, line("token"))],
+                    links: Vec::new(),
+                    marks: BlockMarks::default(),
+                    pictures: pictures([1, 1]),
+                }]),
+                hints,
+            })),
+            Client(ClientMessage::Request(Request::Masked {
+                masking: crate::Masking {
+                    hidden: clackatoo_term::Hints::HIDE,
+                    shown: 40..43,
+                    prints: vec![1, 2, 3],
+                },
+                request: Box::new(Request::Text {
+                    terminal: TerminalId(5),
+                    from: Position { line: 40, col: 0 },
+                    to: Position { line: 42, col: 9 },
+                    whole_lines: true,
+                }),
+            })),
+            Sample::Server(ServerMessage::Response(Response::HiddenRun {
+                lines: 40..43,
+                prints: vec![1, 2, 3],
+                hints: clackatoo_term::Hints::HIDE,
+            })),
+        ]
+        .map(|sample| (crate::wire::RELAY_HINTS, sample)),
+    );
     samples
 }
 

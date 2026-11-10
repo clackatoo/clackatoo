@@ -22,6 +22,7 @@ use bitflags::bitflags;
 bitflags! {
     /// How private a line's text is.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Hints: u8 {
         /// Masked on screen until the user reveals it.
         const HIDE = 1 << 0;

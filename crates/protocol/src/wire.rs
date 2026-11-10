@@ -476,6 +476,17 @@ gates! {
     /// daemon's config runs again. An older daemon is never asked, and an
     /// older window never told: its menu has no daemon's settings.
     DAEMON_SETTINGS = 152,
+    /// Masks applied by a daemon relaying, for each of its own clients
+    /// (CLACKA-242, part 3): `Event::HintedView`, a terminal's view with
+    /// its lines as they are and their hints, sent only to a daemon
+    /// relaying of this protocol or later, as an older one is sent the
+    /// lines masked; `Request::Masked`, which asks for a terminal's lines
+    /// masked as one of its clients has them, an older daemon being asked
+    /// what's inside it, which it masks as for a daemon relaying; and
+    /// `Response::HiddenRun`, how `Request::Unmask` is answered for a
+    /// daemon relaying, which shows the lines to the client that asked
+    /// itself.
+    RELAY_HINTS = 153,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -829,6 +840,7 @@ impl Since for Event {
             Self::Notified { .. } => TERMINAL_STANDARDS_2,
             Self::LendBeside { .. } => FEDERATION_2,
             Self::DaemonSettings { .. } => DAEMON_SETTINGS,
+            Self::HintedView { .. } => RELAY_HINTS,
         }
     }
 }
@@ -895,6 +907,7 @@ pub fn newest(message: &ServerMessage) -> u32 {
             Response::Workspaces(workspaces) => newest_in_workspaces(workspaces),
             Response::View(view) => newest_in_node(&view.root),
             Response::Searched { .. } => SEARCH_COUNT,
+            Response::HiddenRun { .. } => RELAY_HINTS,
             _ => EARLIER,
         },
         ServerMessage::Event(event) => {
@@ -1319,6 +1332,18 @@ impl Downgrade for ClientMessage {
             )
         {
             return Downgraded::Refused;
+        }
+        // An older daemon is asked what's inside, and masks it as for a
+        // daemon relaying: as much as any client of its is masked, or
+        // more.
+        if wire < RELAY_HINTS
+            && let Self::Request(crate::Request::Masked { request, .. }) = self
+        {
+            let inside = Self::Request((**request).clone());
+            return match inside.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(inside),
+                downgraded => downgraded,
+            };
         }
         if wire < HARNESS
             && matches!(
@@ -1797,6 +1822,27 @@ impl Downgrade for ServerMessage {
                 other => other,
             };
         }
+        // Sent only to a daemon relaying of its protocol: should one reach
+        // an older peer all the same, it's masked as for a daemon relaying
+        // was before, every line with a hint.
+        if wire < RELAY_HINTS
+            && let Self::Event(Event::HintedView {
+                terminal,
+                update,
+                hints,
+            }) = self
+        {
+            let mut update = update.clone();
+            hints.mask(&mut update, &crate::Masking::RELAYED);
+            let masked = Self::Event(Event::View {
+                terminal: *terminal,
+                update,
+            });
+            return match masked.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(masked),
+                downgraded => downgraded,
+            };
+        }
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
@@ -1938,6 +1984,10 @@ impl Downgrade for ServerMessage {
             Self::Response(Response::Searched { found, .. }) => {
                 Downgraded::To(Self::Response(Response::Found(*found)))
             }
+            // Only ever answers a daemon relaying of its protocol.
+            Self::Response(Response::HiddenRun { .. }) if wire >= FALLBACKS => Downgraded::To(
+                Self::Response(Response::Error(Error::Other(TOO_NEW.into()))),
+            ),
             Self::Response(_) => Downgraded::Refused,
             _ if wire < FALLBACKS => Downgraded::Dropped,
             // What's newer than the fallbacks has no arm yet, so nothing is.
