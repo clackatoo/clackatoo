@@ -645,7 +645,7 @@ fn queue_update(
         Some(hints) => clackatoo_protocol::Event::HintedView {
             terminal: id,
             update,
-            hints,
+            hints: Box::new(hints),
         },
         None => clackatoo_protocol::Event::View {
             terminal: id,
@@ -882,6 +882,31 @@ impl Subscription {
         self.update_agent(terminal, wire, None, false, false)
     }
 
+    /// Notes the hints of the screen's `lines` of `terminal`, or all of
+    /// them, and of `pictures`, which an update carries, if it's for a
+    /// daemon relaying that masks lines itself (see
+    /// [`hinted`](Self::hinted)).
+    fn note_hints(
+        &mut self,
+        terminal: &Terminal,
+        lines: Option<&[u16]>,
+        pictures: &clackatoo_protocol::Pictures,
+    ) {
+        if !self.hinted {
+            return;
+        }
+        let grid = terminal.grid();
+        self.hints = match lines {
+            None => masks::hints_of((0..).zip(grid.rows()), terminal, pictures),
+            Some(lines) => {
+                let rows = lines
+                    .iter()
+                    .map(|&line| (line, grid.row(usize::from(line))));
+                masks::hints_of(rows, terminal, pictures)
+            }
+        };
+    }
+
     /// The screen's lines `damaged` of `terminal`, as a peer that speaks
     /// `wire` rebuilds them, masked as this client's are.
     fn masked_lines(&self, terminal: &Terminal, damaged: &[u16], wire: u32) -> Vec<(u16, Line)> {
@@ -958,10 +983,7 @@ impl Subscription {
                 grid.state.agent = agent;
                 grid.state.fed = fed;
                 grid.state.phone = state.phone;
-                if self.hinted {
-                    let rows = (0..).zip(terminal.grid().rows());
-                    self.hints = masks::hints_of(rows, terminal, &grid.pictures);
-                }
+                self.note_hints(terminal, None, &grid.pictures);
             }
             return Some(ViewUpdate::Snapshot(view));
         }
@@ -1011,10 +1033,7 @@ impl Subscription {
         };
         if !lines.is_empty() || state != self.state || !marks.exits.is_empty() {
             self.state = state;
-            if self.hinted {
-                let rows = damaged.iter().map(|&line| (line, row(line)));
-                self.hints = masks::hints_of(rows, terminal, &pictures);
-            }
+            self.note_hints(terminal, Some(&damaged), &pictures);
             let shown = LinkTarget::of(lines.iter().map(|(_, line)| line), terminal);
             patches.push(Patch::Grid {
                 node: NodeId::ROOT,
@@ -3962,7 +3981,9 @@ impl Daemon {
                 })
             }
             Request::Unmask { terminal, line } => self.unmask(token, terminal, line),
-            Request::Masked { masking, request } => Ok(self.respond_masked(token, masking, *request)),
+            Request::Masked { masking, request } => {
+                Ok(self.respond_masked(token, masking, *request))
+            }
             Request::Search {
                 terminal,
                 query,

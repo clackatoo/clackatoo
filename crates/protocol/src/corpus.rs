@@ -2235,7 +2235,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     marks: BlockMarks::default(),
                     pictures: pictures([1, 1]),
                 }]),
-                hints,
+                hints: Box::new(hints),
             })),
             Client(ClientMessage::Request(Request::Masked {
                 masking: crate::Masking {

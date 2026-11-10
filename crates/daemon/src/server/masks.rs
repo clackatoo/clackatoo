@@ -2,9 +2,10 @@
 //! [`clackatoo_term::regions`]), masked in everything a client is sent of
 //! a terminal: its view, its history, the text it copies, and where its
 //! searches go. So every client, whatever its protocol, a window on
-//! another machine, a daemon relaying and the phone alike, has only the
-//! mask, and draws, copies and searches that (see
-//! [`clackatoo_protocol::Masking`]).
+//! another machine and the phone alike, has only the mask, and draws,
+//! copies and searches that (see [`clackatoo_protocol::Masking`]); a
+//! daemon relaying masks them for its own clients itself (see below).
+//! Pictures on a line masked are left out with it.
 //!
 //! Lines kept from agents are masked too for a client agents may read
 //! through: a window that granted a chat native access to itself, which
@@ -16,10 +17,9 @@
 //! while ([`Request::Unmask`]): it's sent again as it is, in a fresh
 //! snapshot, and copies and searches see it, until it's masked again, by
 //! the same ask, once [`HintRules::shown_for`] has gone by, or line by
-//! line as anything else is printed there. Only a window that reaches
-//! this daemon itself can ask: not a web device, nor one through a daemon
-//! relaying, which would show the lines to every client it has, phones
-//! too.
+//! line as anything else is printed there; the pictures on it are shown
+//! with it. A web device can't ask, and a daemon relaying asks only which
+//! lines a run is, showing them itself, to its window alone.
 //!
 //! # Through a daemon relaying
 //!
@@ -67,7 +67,7 @@ pub(super) fn hints_of<'a>(
         .map(|(line, row)| (line, masking(row), Masking::fingerprint(row)))
         .collect();
     let grid = terminal.grid();
-    let cursor = usize::from(terminal.cursor().line);
+    let cursor = terminal.cursor().line;
     let cursor = (cursor < grid.height())
         .then(|| grid.row(cursor))
         .filter(|row| !masking(row).is_empty())
@@ -366,8 +366,7 @@ impl Daemon {
                 continue;
             };
             for subscription in client.views.values_mut() {
-                if subscription.masking.hidden != masking.hidden || subscription.hinted != hinted
-                {
+                if subscription.masking.hidden != masking.hidden || subscription.hinted != hinted {
                     // What was shown is masked again too.
                     subscription.masking = masking.clone();
                     subscription.hinted = hinted;

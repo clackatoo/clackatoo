@@ -62,7 +62,7 @@ pub(super) fn hinted_frame(
         Event::HintedView {
             terminal: local,
             update,
-            hints: hints.clone(),
+            hints: Box::new(hints.clone()),
         }
     } else {
         hints.mask(&mut update, &viewer.masking);
@@ -232,12 +232,16 @@ impl Daemon {
         };
         let shown_for = self.config.hints.shown_for;
         let Some(viewer) = self.relayed_viewer(at, local, token) else {
-            return Response::Error(Error::Other(format!(
-                "terminal {local} isn't shown here"
-            )));
+            return Response::Error(Error::Other(format!("terminal {local} isn't shown here")));
         };
         let run = Some((lines, prints));
-        match show_run(&mut viewer.masking, &mut viewer.shown_until, run, hints, shown_for) {
+        match show_run(
+            &mut viewer.masking,
+            &mut viewer.shown_until,
+            run,
+            hints,
+            shown_for,
+        ) {
             Ok(said) => {
                 self.follow_afresh(at, local, token);
                 Response::Text(said)
@@ -248,9 +252,23 @@ impl Daemon {
 
     /// The client at `token` following this daemon's terminal `local`, of
     /// the connection at `at`, if it does.
-    fn relayed_viewer(&mut self, at: usize, local: TerminalId, token: Token) -> Option<&mut Viewer> {
-        let followed = self.links.list.get_mut(at)?.relayed.followed.get_mut(&local)?;
-        followed.viewers.iter_mut().find(|viewer| viewer.token == token)
+    fn relayed_viewer(
+        &mut self,
+        at: usize,
+        local: TerminalId,
+        token: Token,
+    ) -> Option<&mut Viewer> {
+        let followed = self
+            .links
+            .list
+            .get_mut(at)?
+            .relayed
+            .followed
+            .get_mut(&local)?;
+        followed
+            .viewers
+            .iter_mut()
+            .find(|viewer| viewer.token == token)
     }
 
     /// Has the client at `token` sent a snapshot of this daemon's terminal
@@ -266,7 +284,8 @@ impl Daemon {
             .is_some_and(|followed| followed.upstream);
         if upstream
             && self.is_linked(at)
-            && let Some(remote) = (self.links.list[at].relayed.mirror.terminal_numbers).remote(local.0)
+            && let Some(remote) =
+                (self.links.list[at].relayed.mirror.terminal_numbers).remote(local.0)
         {
             let attach = ClientMessage::Request(self.follow_request(at, local, TerminalId(remote)));
             let _ = self.send_upstream(at, &attach, Expect::Nothing);
@@ -379,7 +398,7 @@ mod tests {
             &ServerMessage::Event(Event::HintedView {
                 terminal: REMOTE,
                 update: ViewUpdate::Snapshot(view),
-                hints,
+                hints: Box::new(hints),
             }),
         );
         daemon.read_reached(link, Reading::Look);
@@ -457,7 +476,12 @@ mod tests {
         let (granted, mut to_granted) = client(&mut daemon);
         let (phone, _to_phone) = crate::server::tests::web_reader(&mut daemon);
         let local = terminal(&daemon);
-        attach(&mut daemon, (link, &mut there), &[window, granted, phone], local);
+        attach(
+            &mut daemon,
+            (link, &mut there),
+            &[window, granted, phone],
+            local,
+        );
         let chat = TerminalId(4242);
         (daemon.tools.native).insert(chat, (granted, NativeAccess::Control));
         daemon.mask_by_grants();
@@ -595,29 +619,27 @@ mod tests {
         }
         attach(&mut daemon, (link, &mut there), &[newer, older], local);
         send_snapshot(&mut daemon, link, &mut there);
-        let hinted = (read::<ServerMessage>(&mut to_newer).into_iter()).find_map(|message| {
-            match message {
+        let hinted =
+            (read::<ServerMessage>(&mut to_newer).into_iter()).find_map(|message| match message {
                 ServerMessage::Event(Event::HintedView {
                     terminal, hints, ..
                 }) => Some((terminal, hints.lines.len())),
                 _ => None,
-            }
-        });
+            });
         assert_eq!(hinted, Some((local, 2)));
         let mut decoder = clackatoo_protocol::frame::FrameDecoder::new();
         let mut buffer = vec![0; 65536];
         let n = std::io::Read::read(&mut to_older, &mut buffer).unwrap();
         decoder.push(&buffer[..n]);
-        let masked = std::iter::from_fn(|| {
-            (decoder.decode::<ServerMessage>(wire::SECRET_REGIONS)).unwrap()
-        })
-        .find_map(|message| match message {
-            ServerMessage::Event(Event::View {
-                update: ViewUpdate::Snapshot(view),
-                ..
-            }) => Some(lines_of(&view)),
-            _ => None,
-        });
+        let masked =
+            std::iter::from_fn(|| (decoder.decode::<ServerMessage>(wire::SECRET_REGIONS)).unwrap())
+                .find_map(|message| match message {
+                    ServerMessage::Event(Event::View {
+                        update: ViewUpdate::Snapshot(view),
+                        ..
+                    }) => Some(lines_of(&view)),
+                    _ => None,
+                });
         assert_eq!(masked.expect("no snapshot"), ["one", MASK, "two", MASK]);
         // What it asks for one of its own is asked so there.
         let asked = Request::Masked {

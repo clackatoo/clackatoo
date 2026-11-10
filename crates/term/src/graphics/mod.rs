@@ -1565,7 +1565,8 @@ impl Emulator {
         hidden: crate::Hints,
         shown: &dyn Fn(u64, crate::Hints) -> bool,
     ) -> bool {
-        let shows = |line: u64, hints: crate::Hints| may_show(hints, hidden) || shown(line, hints);
+        let visible =
+            |line: u64, hints: crate::Hints| may_show(hints, hidden) || shown(line, hints);
         let of_image = |number: u32| {
             (self.graphics.picture(number)).is_some_and(|picture| picture.image == image)
         };
@@ -1588,7 +1589,7 @@ impl Emulator {
                     .map(|(row, line)| (line, row.hints())),
             )
             .collect();
-        let mut seen = placed.iter().any(|&(line, hints)| shows(line, hints));
+        let mut seen = placed.iter().any(|&(line, hints)| visible(line, hints));
         let mut anywhere = !placed.is_empty();
         // A virtual placement made or shown in a region is hidden as the
         // region is, wherever its placeholders are; any other, while a
@@ -1617,7 +1618,7 @@ impl Emulator {
                     });
                     if of_it {
                         anywhere = true;
-                        seen |= shows(line, row.hints());
+                        seen |= visible(line, row.hints());
                     }
                 }
             }

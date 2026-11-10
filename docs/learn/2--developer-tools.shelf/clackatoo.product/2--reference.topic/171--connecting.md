@@ -92,6 +92,12 @@ isn't answering"). If ssh needs a password and no window is open to ask, the
 connection waits until one is. In your config, `client.connect("desk")`
 connects whenever a window opens.
 
+What HOST's programs mark private ([secret
+regions](~clackatoo/reference/secret-regions#through-connect)) is masked in
+your windows as in HOST's own: a password prompt there shows here, and `zv`
+shows what's hidden, in that window alone. Your phone and agents here have
+both masked.
+
 `:portforward 8080` in one of HOST's workspaces forwards this machine's port
 8080 to HOST's, through your daemon's connection to it, which keeps listening
 while the connection drops and is made again. `:portforward` there lists the

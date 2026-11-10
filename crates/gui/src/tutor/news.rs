@@ -1560,16 +1560,22 @@ pub(crate) const NEWS: &[News] = &[
         what: "Programs mark output secret with OSC 46373: masked till zv shows it, never saved, kept from agents",
     },
     News {
+        id: "settings-daemon",
+        date: "2026-11-09",
+        lesson: "wrap",
+        what: ":Settings changes the daemon's settings too; the bar says what changed them outside clackatoo",
+    },
+    News {
         id: "secret-osc",
         date: "2026-11-10",
         lesson: "shell",
         what: "Secret regions moved to OSC 46373, off systemd's 3008, which isn't read any more",
     },
     News {
-        id: "settings-daemon",
-        date: "2026-11-09",
-        lesson: "wrap",
-        what: ":Settings changes the daemon's settings too; the bar says what changed them outside clackatoo",
+        id: "secret-connect",
+        date: "2026-11-10",
+        lesson: "shell",
+        what: "Through :connect, password prompts show in your window and zv works; zv shows a line's pictures too",
     },
 ];
 

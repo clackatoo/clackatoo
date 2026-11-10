@@ -132,6 +132,9 @@ const NOTIFIED: u32 = 30;
 /// The number of `Event::LendBeside` among the events.
 const LEND_BESIDE: u32 = 31;
 
+/// The number of `Event::HintedView` among the events.
+const HINTED_VIEW: u32 = 32;
+
 /// Whether a message from another daemon headed `head` is one this
 /// daemon decodes to take in: the workspaces, the chats, and the events
 /// it passes on to its own clients as it has them.
@@ -1364,7 +1367,10 @@ impl Daemon {
                     to,
                     whole_lines,
                 };
-                (at, Ok((self.masked_there(token, at, local, text), Then::Pass)))
+                (
+                    at,
+                    Ok((self.masked_there(token, at, local, text), Then::Pass)),
+                )
             }),
             &Request::BlockText {
                 terminal: local,
@@ -1372,7 +1378,10 @@ impl Daemon {
                 to,
             } => terminal(self, local).map(|(at, terminal)| {
                 let text = Request::BlockText { terminal, from, to };
-                (at, Ok((self.masked_there(token, at, local, text), Then::Pass)))
+                (
+                    at,
+                    Ok((self.masked_there(token, at, local, text), Then::Pass)),
+                )
             }),
             Request::Search {
                 terminal: local,
@@ -1390,7 +1399,10 @@ impl Daemon {
                     exact: *exact,
                     count: *count,
                 };
-                (at, Ok((self.masked_there(token, at, *local, search), Then::Pass)))
+                (
+                    at,
+                    Ok((self.masked_there(token, at, *local, search), Then::Pass)),
+                )
             }),
             &Request::Block {
                 terminal: local,
@@ -2871,15 +2883,6 @@ impl Daemon {
                     }
                 };
                 (Route::Answer(expect), need)
-            } else if let Some(remote) = head.hinted_view() {
-                // Lines as they are, masked here for each client: always
-                // looked at, never passed on as they came.
-                let host = reached.host.clone();
-                let Some((local, _)) = self.view_wires(&host, remote) else {
-                    continue;
-                };
-                let snapshot = head.is_hinted_view_snapshot();
-                (Route::View { local, snapshot }, Need::Decode)
             } else if let Some(remote) = head.view() {
                 let host = reached.host.clone();
                 let Some((local, wires)) = self.view_wires(&host, remote) else {
@@ -2955,9 +2958,11 @@ impl Daemon {
     /// What's done with a frame from the daemon reached at `token`,
     /// `payload`, whose first numbers are `head`, if it's about one of its
     /// buffers, explorers, boards, reviews or chats' pages followed here,
-    /// or answers a search or a file operation asked of it.
+    /// or answers a search or a file operation asked of it, or is a change
+    /// to a terminal's view with its lines' hints.
     fn event_route(&self, token: Token, head: &Head, payload: &[u8]) -> Option<(Route, Need)> {
         match head.event_kind()? {
+            HINTED_VIEW => self.hinted_view_route(token, head),
             BUFFER => self.buffer_route(token, head),
             FOUND => self.found_route(token, payload),
             FILES => self.files_route(token, head),
@@ -2967,6 +2972,19 @@ impl Daemon {
             }
             _ => None,
         }
+    }
+
+    /// What's done with a change to the view of a terminal of the daemon
+    /// reached at `token`, headed `head`, with its lines as they are and
+    /// their hints: masked here for each client following it, so always
+    /// looked at, never passed on as it came.
+    fn hinted_view_route(&self, token: Token, head: &Head) -> Option<(Route, Need)> {
+        let Some(Source::Reached(reached)) = self.sources.get(token.0) else {
+            return None;
+        };
+        let (local, _) = self.view_wires(&reached.host, head.hinted_view()?)?;
+        let snapshot = head.is_hinted_view_snapshot();
+        Some((Route::View { local, snapshot }, Need::Decode))
     }
 
     /// Takes in what the parser's thread has unpacked of what the daemon
@@ -3100,31 +3118,8 @@ impl Daemon {
         // No daemon relaying follows what's kept from it past it being so
         // (CLACKA-118).
         self.let_go_kept_follows(at, local);
-        let mapped;
-        let unpacked = match unpacked {
-            Unpacked::Decoded(Ok(ServerMessage::Event(
-                event @ (Event::View { .. } | Event::HintedView { .. }),
-            ))) => {
-                let mut event = event.clone();
-                let (Event::View { update, .. } | Event::HintedView { update, .. }) = &mut event
-                else {
-                    unreachable!("matched above");
-                };
-                let (linked, mut fresh) = self.numbering(at);
-                map_agent_terminals(update, |parent| {
-                    TerminalId(
-                        linked
-                            .relayed
-                            .mirror
-                            .terminal_numbers
-                            .local_or_fresh(parent.0, || fresh.terminal()),
-                    )
-                });
-                mapped = Unpacked::Decoded(Ok(ServerMessage::Event(event)));
-                &mapped
-            }
-            unpacked => unpacked,
-        };
+        let mapped = self.with_agents_mapped(at, unpacked);
+        let unpacked = mapped.as_ref().unwrap_or(unpacked);
         let newer =
             (self.links.list[at].wire).is_some_and(|wire| wire >= wire::TERMINAL_STANDARDS_2);
         let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
@@ -3181,7 +3176,9 @@ impl Daemon {
                     .ok()
                 }
                 Unpacked::Decoded(Ok(ServerMessage::Event(Event::HintedView {
-                    update, hints, ..
+                    update,
+                    hints,
+                    ..
                 }))) => masked::hinted_frame(viewer, (wire, relays), local, update, hints, newer),
                 _ => unpacked.for_wire(wire).map(<[u8]>::to_vec),
             };
@@ -3206,6 +3203,33 @@ impl Daemon {
             self.queue_relayed_view(token, local, &frame);
         }
         self.ack_if_drawn(at, local);
+    }
+
+    /// `unpacked`, a change to a terminal's view from the connection at
+    /// `at` that was decoded, with the agent that made the terminal by
+    /// this daemon's number: `None` if it isn't one.
+    fn with_agents_mapped(&mut self, at: usize, unpacked: &Unpacked) -> Option<Unpacked> {
+        let Unpacked::Decoded(Ok(ServerMessage::Event(
+            event @ (Event::View { .. } | Event::HintedView { .. }),
+        ))) = unpacked
+        else {
+            return None;
+        };
+        let mut event = event.clone();
+        let (Event::View { update, .. } | Event::HintedView { update, .. }) = &mut event else {
+            unreachable!("matched above");
+        };
+        let (linked, mut fresh) = self.numbering(at);
+        map_agent_terminals(update, |parent| {
+            TerminalId(
+                linked
+                    .relayed
+                    .mirror
+                    .terminal_numbers
+                    .local_or_fresh(parent.0, || fresh.terminal()),
+            )
+        });
+        Some(Unpacked::Decoded(Ok(ServerMessage::Event(event))))
     }
 
     /// Queues `frame`, a change to this daemon's terminal `local`'s view,
@@ -3912,11 +3936,12 @@ mod tests {
         let hinted = Event::HintedView {
             terminal: TerminalId(7),
             update: ViewUpdate::Patch(Vec::new()),
-            hints: clackatoo_protocol::LineHints::default(),
+            hints: Box::default(),
         };
         let frame = frame::encode(PROTOCOL_VERSION, &ServerMessage::Event(hinted)).unwrap();
         let read = Head::of(&frame[4..]);
         assert_eq!(read.hinted_view(), Some(TerminalId(7)));
+        assert_eq!(read.event_kind(), Some(HINTED_VIEW));
         assert_eq!((read.view(), read.is_hinted_view_snapshot()), (None, false));
     }
 

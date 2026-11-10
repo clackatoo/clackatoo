@@ -114,9 +114,10 @@ A hidden line is shown as `●●●●`, dim, whatever it held. Each row of a
 long line hidden is a row of the mask, so how many rows it took still
 shows, but not where its text ends; while the cursor is on one, it's
 hidden. The daemon masks it in everything it sends: the window, a [window
-on another machine](~clackatoo/reference/remote), a daemon relaying, the
+on another machine](~clackatoo/reference/remote), the
 [phone](~clackatoo/reference/phone), and windows from before this release
-alike. So what you copy or yank of it is the mask too, and a search (`/`,
+alike; a daemon relaying masks it for its own clients the same way (see
+[through `:connect`](#through-connect)). So what you copy or yank of it is the mask too, and a search (`/`,
 `?`, `n`) never goes to it, nor lights it. A picture a program shows on a
 hidden line ([images](~clackatoo/reference/images)) is never sent, nor is
 its image, until you ask to see the line: then it's shown with the text,
@@ -127,13 +128,11 @@ and copies and agents' reads say nothing of it.
 To see it, put the cursor on it in normal mode and press `zv`, or
 <kbd>Ctrl</kbd>+click it. The run of hidden lines around it is shown as it is
 in that window, and copies and searches there see it, for 30 seconds; `zv`
-again masks it at once, and a line printed on afresh is masked again. Only a
-window that reaches the terminal's daemon itself can: on its machine, or with
-`--remote`. A window through `:connect` can't, as the daemon relaying would
-show the lines to all its clients, phones too; nor can the phone, nor an
-agent driving a window (`:agentaccess`). In a window an agent can see,
-what you ask to see is only what's hidden, never what's kept from agents
-too.
+again masks it at once, and a line printed on afresh is masked again. A
+window through `:connect` can too: see [through
+`:connect`](#through-connect). The phone can't, nor can an agent driving a
+window (`:agentaccess`). In a window an agent can see, what you ask to see
+is only what's hidden, never what's kept from agents too.
 
 ### `nosave`: never on disk
 
@@ -157,15 +156,43 @@ command, or in what a command it ran printed, has `[secret]` in place of
 each run of `noagent` lines. A window that has given an agent control of
 itself (`:agentaccess`) masks them too, as the agent sees what it draws.
 
-Windows through `:connect` are sent `noagent` lines masked, so they never
-leave the terminal's machine as they are: the daemon relaying could show
-them to an agent there.
-
 Anything else that asks the daemon for a terminal without showing it, such
 as `clackatoo capture`, which a command an agent runs could run, is sent
 `noagent` lines masked; `clackatoo capture --include-private` asks for them
 as a window showing the terminal does. That's a guard, not a boundary: any
 program running as you can reach the daemon's socket, as a window does.
+
+### Through `:connect`
+
+When your daemon shows another machine's terminals, after
+[`:connect`](~clackatoo/reference/connecting), the daemon there treats
+yours as a window of yours: both are your machines. It sends it every line
+as it is, with its hints, and your daemon masks them for each of its own
+clients, by its own config, as it masks its own terminals:
+
+| Client of the daemon relaying | `hide` lines | `noagent` lines |
+|---|---|---|
+| A window | Masked until you ask to see them | Shown |
+| A window that has given an agent control of itself | Masked until you ask | Masked |
+| The phone | Masked | Masked |
+| Anything not showing the terminal, as `clackatoo capture` | Masked | Masked |
+| Another daemon relaying through it | Passed on with their hints, to mask the same way | |
+
+So a password prompt on your desktop shows as it is in your laptop's
+window. `zv` there asks the desktop's daemon only which lines the run is,
+and the laptop's shows them to that window alone, as it would its own: no
+other window, phone or daemon relaying sees them. What a window copies,
+searches, fetches of history and asks of a picture is asked of the desktop
+masked as that window has it.
+
+What's [`nosave`](#nosave-never-on-disk) is the terminal's own machine's
+business: the daemon relaying keeps nothing of another machine's terminal
+on its disk. A machine you [keep out](~clackatoo/reference/connecting#machines-passed-on) with
+`--no-share` is never relayed at all.
+
+If either daemon is from before this release, the one relaying is sent every
+line with a hint masked, `noagent` ones too, and nothing can be shown
+through it.
 
 ### Passwords typed unseen
 

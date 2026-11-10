@@ -782,8 +782,9 @@ pub enum Event {
         terminal: TerminalId,
         /// The change, its lines as they are.
         update: ViewUpdate,
-        /// The hints of what it carries.
-        hints: LineHints,
+        /// The hints of what it carries, boxed, as no other event needs
+        /// the room.
+        hints: Box<LineHints>,
     },
 }
 

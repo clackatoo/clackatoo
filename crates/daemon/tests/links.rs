@@ -1245,6 +1245,80 @@ fn another_machines_workspaces_come_in_and_its_terminals_answer_through_this_dae
     }
 }
 
+/// The first line of `view` that's the mask, by its number in the
+/// terminal's document.
+fn masked_line(view: &View) -> Option<u64> {
+    let grid = view.grid().expect("terminals show a grid");
+    let mask = clackatoo_term::hints::MASK;
+    let row = grid.lines.iter().position(|line| line.text() == mask)?;
+    Some(grid.state.history_end + row as u64)
+}
+
+/// Another machine's lines its program marked private are masked here as
+/// they would be there (CLACKA-242): a window here sees what's kept from
+/// agents, and a client not showing the terminal, as an agent's command
+/// could be, doesn't; and asked to, a window here is shown what's hidden,
+/// it alone.
+#[test]
+fn another_machines_private_lines_are_masked_here_as_there() {
+    let mut pair = Pair::new();
+    let terminal = first_terminal(&pair.work);
+    attach_to(&mut pair.window, terminal);
+    // What's printed in the regions never appears as typed.
+    pair.window
+        .send_input(
+            terminal,
+            b"printf 'a\\n\\033]46373;region;start;h;hide\\007hid-%s\\n\\033]46373;region;end;h\\007\
+              \\033]46373;region;start;p;private\\007tok-%s\\n\\033]46373;region;end;p\\007' \
+              $((6*7)) $((7*8)); echo done-$((1+1))\r",
+        )
+        .unwrap();
+    wait_for_view(&mut pair.window, terminal, "done-2");
+    let shown = screen_text(&pair.window.capture(terminal).unwrap());
+    assert!(
+        shown.contains("tok-56") && !shown.contains("hid-42"),
+        "{shown}"
+    );
+    // Kept from what an agent's command could ask.
+    let mut stranger = pair.desk.client();
+    let captured = stranger.capture(terminal).unwrap();
+    let text = screen_text(&captured);
+    assert!(
+        !text.contains("tok-56") && !text.contains("hid-42"),
+        "{text}"
+    );
+    // Shown, asked to: to the window that asked alone.
+    let line = masked_line(&captured).expect("a line masked");
+    let shown = pair
+        .window
+        .request(&Request::Unmask {
+            terminal,
+            line: Some(line),
+        })
+        .unwrap();
+    assert_eq!(shown, Response::Text("1 hidden line shown for 30s".into()));
+    wait_for_view(&mut pair.window, terminal, "hid-42");
+    let copied = pair.window.request(&Request::Text {
+        terminal,
+        from: Position { line, col: 0 },
+        to: Position { line, col: 9 },
+        whole_lines: true,
+    });
+    assert_eq!(copied.unwrap(), Response::Text("hid-42".into()));
+    let mut other = pair.desk.client();
+    let theirs = screen_text(&attach_to(&mut other, terminal));
+    assert!(
+        !theirs.contains("hid-42") && theirs.contains("tok-56"),
+        "{theirs}"
+    );
+    // And masked again, asked again.
+    let again = pair.window.request(&Request::Unmask {
+        terminal,
+        line: Some(line),
+    });
+    assert_eq!(again.unwrap(), Response::Text("hidden again".into()));
+}
+
 /// The workspace named `name` among `workspaces`.
 fn theirs_of<'a>(workspaces: &'a Workspaces, name: &str) -> &'a Workspace {
     (workspaces.list.iter())

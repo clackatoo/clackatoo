@@ -1147,9 +1147,7 @@ impl Line {
             attributes: Attributes::DIM,
             ..Style::DEFAULT
         };
-        let text: String = (clackatoo_term::hints::MASK.chars())
-            .take(width)
-            .collect();
+        let text: String = (clackatoo_term::hints::MASK.chars()).take(width).collect();
         Self {
             runs: vec![Run {
                 style,

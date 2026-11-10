@@ -1333,17 +1333,8 @@ impl Downgrade for ClientMessage {
         {
             return Downgraded::Refused;
         }
-        // An older daemon is asked what's inside, and masks it as for a
-        // daemon relaying: as much as any client of its is masked, or
-        // more.
-        if wire < RELAY_HINTS
-            && let Self::Request(crate::Request::Masked { request, .. }) = self
-        {
-            let inside = Self::Request((**request).clone());
-            return match inside.downgrade(wire) {
-                Downgraded::AsIs => Downgraded::To(inside),
-                downgraded => downgraded,
-            };
+        if let Some(inside) = inside_masked(self, wire) {
+            return inside;
         }
         if wire < HARNESS
             && matches!(
@@ -1994,6 +1985,25 @@ impl Downgrade for ServerMessage {
             _ => Downgraded::Refused,
         }
     }
+}
+
+/// What `message` asks, if it asks it masked as a client of a daemon
+/// relaying has it (`Request::Masked`), as a daemon from before that,
+/// speaking `wire`, is asked it: what's inside alone, which it masks as for
+/// a daemon relaying, as much as any client of that one is masked, or
+/// more. `None` for anything else, or a newer daemon.
+fn inside_masked(message: &ClientMessage, wire: u32) -> Option<Downgraded<ClientMessage>> {
+    let ClientMessage::Request(crate::Request::Masked { request, .. }) = message else {
+        return None;
+    };
+    if wire >= RELAY_HINTS {
+        return None;
+    }
+    let inside = ClientMessage::Request((**request).clone());
+    Some(match inside.downgrade(wire) {
+        Downgraded::AsIs => Downgraded::To(inside),
+        downgraded => downgraded,
+    })
 }
 
 /// `message`, if it's a change to a buffer, as a daemon before undo steps
@@ -2761,6 +2771,88 @@ mod tests {
         assert_eq!(older, frame::encode(TERMINAL_IMAGES - 1, &none).unwrap());
         let read: ServerMessage = decode(TERMINAL_IMAGES - 1, &older);
         assert_eq!(read, none);
+    }
+
+    /// A view with its lines' hints is masked for each client as it
+    /// says; and should one reach an older peer, every line with a hint is
+    /// masked, with its pictures, its links and the cursor on it.
+    #[test]
+    fn a_view_with_its_lines_hints_is_masked_as_each_client_has_them() {
+        use clackatoo_term::Hints;
+        let mut terminal = clackatoo_term::Terminal::new(
+            crate::Size::new(20, 5).unwrap(),
+            &clackatoo_term::Config::default(),
+        );
+        terminal.advance(b"one\r\nhunter2\r\ntwo\r\n\x1b]8;;https://x.example\x1b\\token");
+        let view = crate::View::capture_masked(&terminal, RELAY_HINTS, &crate::Masking::NONE);
+        let print = |line| crate::Masking::fingerprint(terminal.grid().row(line));
+        let virtual_ = |id| clackatoo_term::Virtual {
+            id,
+            placement: 0,
+            image: [1; 16],
+            size: [8, 8],
+            cells: [1, 1],
+        };
+        let mut view = view;
+        if let crate::Node::Grid(grid) = &mut view.root {
+            grid.pictures.virtuals = vec![virtual_(9), virtual_(10)];
+        }
+        let hints = crate::LineHints {
+            cols: 20,
+            lines: vec![(1, Hints::HIDE, print(1)), (3, Hints::NOAGENT, print(3))],
+            cursor: Some((Hints::NOAGENT, print(3))),
+            virtuals: vec![(9, 0, Hints::HIDE)],
+        };
+        let lines = |update: &ViewUpdate| -> (Vec<String>, usize, usize, bool) {
+            let ViewUpdate::Snapshot(view) = update else {
+                panic!("not a snapshot");
+            };
+            let grid = view.grid().unwrap();
+            let text = grid.lines.iter().take(4).map(crate::Line::text).collect();
+            let shown = (grid.links.len(), grid.pictures.virtuals.len());
+            (text, shown.0, shown.1, grid.state.cursor.visible)
+        };
+        let mask = clackatoo_term::hints::MASK;
+        // A window there, shown line 1 as it is.
+        let mut update = ViewUpdate::Snapshot(view.clone());
+        let window = crate::Masking {
+            hidden: Hints::HIDE,
+            shown: 1..2,
+            prints: vec![print(1)],
+        };
+        hints.mask(&mut update, &window);
+        assert_eq!(
+            lines(&update),
+            (
+                vec!["one".into(), "hunter2".into(), "two".into(), "token".into()],
+                1,
+                1,
+                true
+            )
+        );
+        // An older peer.
+        let message = ServerMessage::Event(Event::HintedView {
+            terminal: crate::TerminalId(7),
+            update: ViewUpdate::Snapshot(view),
+            hints: Box::new(hints),
+        });
+        let read: ServerMessage = decode(
+            SECRET_REGIONS,
+            &frame::encode(SECRET_REGIONS, &message).unwrap(),
+        );
+        let ServerMessage::Event(Event::View { terminal, update }) = read else {
+            panic!("not a view: {read:?}");
+        };
+        assert_eq!(terminal, crate::TerminalId(7));
+        assert_eq!(
+            lines(&update),
+            (
+                vec!["one".into(), mask.into(), "two".into(), mask.into()],
+                0,
+                1,
+                false
+            )
+        );
     }
 
     #[test]

@@ -99,8 +99,10 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         | Request::RevokeDevice { .. }
         | Request::Keep { .. }
         | Request::KeepHistory { .. }
-        // Showing what a program hid, which agents may then see.
+        // Showing what a program hid, which agents may then see, or
+        // asking for it masked otherwise, as only a daemon relaying does.
         | Request::Unmask { .. }
+        | Request::Masked { .. }
         | Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::Forget { .. }
