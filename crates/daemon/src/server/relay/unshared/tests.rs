@@ -925,6 +925,7 @@ fn variant(request: &Request) -> &'static str {
         Request::DetachPicture { .. } => "DetachPicture",
         Request::KeepHistory { .. } => "KeepHistory",
         Request::NotifyPhone { .. } => "NotifyPhone",
+        Request::Unmask { .. } => "Unmask",
     }
 }
 
@@ -1203,6 +1204,10 @@ fn naming(ids: Ids, machine: clackatoo_protocol::MachineId) -> Vec<Request> {
             how: HistoryKeeping::On,
         },
         Request::NotifyPhone { terminal, on: true },
+        Request::Unmask {
+            terminal,
+            line: Some(3),
+        },
     ]
 }
 
@@ -1384,7 +1389,7 @@ fn every_kind_of_request_of_a_machine_kept_from_a_daemon_relaying_is_refused() {
         .chain(NOT_ASKED)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(asked, every);
-    assert_eq!(asked.len(), 90, "a kind of request isn't asked: {asked:?}");
+    assert_eq!(asked.len(), 91, "a kind of request isn't asked: {asked:?}");
     // Desk heard nothing of any of it, and nothing told the daemon
     // relaying names desk.
     assert!(heard(&mut world.there).is_empty());

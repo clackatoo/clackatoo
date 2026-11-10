@@ -194,6 +194,7 @@ impl TestDaemon {
             notes: Vec::new(),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
+            hints: clackatoo_daemon::HintRules::default(),
         };
         daemon(&mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");

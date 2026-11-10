@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use crate::hints::{Hints, KEPT_FROM_AGENTS};
+use crate::hints::{Hints, KEPT_FROM_AGENTS, MASK};
 use crate::row::Row;
 use crate::terminal::Terminal;
 
@@ -72,6 +72,23 @@ impl Terminal {
         }
     }
 
+    /// The hints of the document's line `line` (see [`crate::hints`]).
+    #[must_use]
+    pub fn line_hints(&self, line: u64) -> Hints {
+        let end = self.primary().scrollback_end();
+        if line >= end {
+            let row = usize::try_from(line - end).ok();
+            return (row.filter(|&row| row < self.grid().height()))
+                .map_or(Hints::empty(), |row| self.grid().row(row).hints());
+        }
+        if self.is_alternate_screen() {
+            return Hints::empty();
+        }
+        (self.primary().hints_from(line).next())
+            .filter(|&(at, _)| at == line)
+            .map_or(Hints::empty(), |(_, hints)| hints)
+    }
+
     /// The document's lines from `first` to `last`, both included, that it
     /// has, in order, with their numbers, but no more than [`MOST_LINES`]:
     /// history's read in one pass, as reading it a line at a time would go
@@ -104,7 +121,24 @@ impl Terminal {
     /// taken whole. No more than [`MOST_TEXT`] and [`MOST_LINES`].
     #[must_use]
     pub fn text(&self, from: Position, to: Position, whole_lines: bool) -> String {
-        self.text_leaving_out(from, to, whole_lines, Hints::empty())
+        self.text_leaving_out(from, to, whole_lines, Hints::empty(), "", &|_, _, _| false)
+    }
+
+    /// The text from `from` to `to`, as [`text`](Self::text) gives it,
+    /// for a client to copy: each run of lines with any of the hints
+    /// `masked` is [`MASK`] instead, on a line of its own, as the screen
+    /// shows it, but for the lines `shown` says, by number, row and hints,
+    /// are shown as they are.
+    #[must_use]
+    pub fn text_masked(
+        &self,
+        from: Position,
+        to: Position,
+        whole_lines: bool,
+        masked: Hints,
+        shown: &dyn Fn(u64, &Row, Hints) -> bool,
+    ) -> String {
+        self.text_leaving_out(from, to, whole_lines, masked, MASK, shown)
     }
 
     /// The text from `from` to `to`, as [`text`](Self::text) gives it,
@@ -113,7 +147,14 @@ impl Terminal {
     /// its own.
     #[must_use]
     pub fn text_for_agents(&self, from: Position, to: Position, whole_lines: bool) -> String {
-        self.text_leaving_out(from, to, whole_lines, Hints::NOAGENT)
+        self.text_leaving_out(
+            from,
+            to,
+            whole_lines,
+            Hints::NOAGENT,
+            KEPT_FROM_AGENTS,
+            &|_, _, _| false,
+        )
     }
 
     fn text_leaving_out(
@@ -122,6 +163,8 @@ impl Terminal {
         to: Position,
         whole_lines: bool,
         leaving_out: Hints,
+        instead: &str,
+        except: &dyn Fn(u64, &Row, Hints) -> bool,
     ) -> String {
         let (from, to) = if from <= to { (from, to) } else { (to, from) };
         let last = to.line.min(self.document_bounds().1);
@@ -138,16 +181,15 @@ impl Terminal {
                 break;
             }
             while hinted.next_if(|&(at, _)| at < line).is_some() {}
-            if hinted
-                .next_if(|&(at, _)| at == line)
-                .is_some_and(|(_, hints)| hints.intersects(leaving_out))
-            {
+            let hints =
+                (hinted.next_if(|&(at, _)| at == line)).map_or(Hints::empty(), |(_, hints)| hints);
+            if hints.intersects(leaving_out) && !except(line, &row, hints) {
                 if !left_out {
                     left_out = true;
                     if !text.is_empty() && !text.ends_with('\n') {
                         text.push('\n');
                     }
-                    text.push_str(KEPT_FROM_AGENTS);
+                    text.push_str(instead);
                     if line != last {
                         text.push('\n');
                     }
@@ -235,15 +277,43 @@ impl Terminal {
     /// [`MOST_TEXT`] and [`MOST_LINES`].
     #[must_use]
     pub fn block_text(&self, from: Position, to: Position) -> String {
+        self.block_text_masked(from, to, Hints::empty(), &|_, _, _| false)
+    }
+
+    /// The text of the block of columns with corners at `from` and `to`,
+    /// as [`block_text`](Self::block_text) gives it, for a client to copy:
+    /// each line with any of the hints `masked` is [`MASK`] instead, but
+    /// for those `shown` says are shown as they are.
+    #[must_use]
+    pub fn block_text_masked(
+        &self,
+        from: Position,
+        to: Position,
+        masked: Hints,
+        shown: &dyn Fn(u64, &Row, Hints) -> bool,
+    ) -> String {
         let (left, right) = (from.col.min(to.col), from.col.max(to.col));
         let mut text = String::new();
-        let lines = self.lines_between(from.line.min(to.line), from.line.max(to.line));
-        for (index, (_, row)) in lines.enumerate() {
+        let (top, bottom) = (from.line.min(to.line), from.line.max(to.line));
+        let hinted = if masked.is_empty() {
+            Vec::new()
+        } else {
+            self.document_hints(top)
+        };
+        let mut hinted = hinted.into_iter().peekable();
+        for (index, (line, row)) in self.lines_between(top, bottom).enumerate() {
             if text.len() > MOST_TEXT {
                 break;
             }
             if index > 0 {
                 text.push('\n');
+            }
+            while hinted.next_if(|&(at, _)| at < line).is_some() {}
+            let hints =
+                (hinted.next_if(|&(at, _)| at == line)).map_or(Hints::empty(), |(_, hints)| hints);
+            if hints.intersects(masked) && !shown(line, &row, hints) {
+                text.push_str(MASK);
+                continue;
             }
             let at = text.len();
             let end = right.saturating_add(1).min(row.width());
@@ -277,9 +347,11 @@ impl Terminal {
         exact: bool,
     ) -> Option<Match> {
         let query: Vec<char> = query.chars().collect();
-        self.round(&query, from, backward, exact)
-            .next()
-            .map(|(found, _)| found)
+        self.round(&query, from, backward, exact, Hints::empty(), &|_, _, _| {
+            false
+        })
+        .next()
+        .map(|(found, _)| found)
     }
 
     /// The `count`th place `query` appears after `from`, or before it if
@@ -297,10 +369,37 @@ impl Terminal {
         exact: bool,
         count: usize,
     ) -> Option<(Match, bool)> {
+        self.search_nth_masked(
+            query,
+            from,
+            backward,
+            exact,
+            count,
+            Hints::empty(),
+            &|_, _, _| false,
+        )
+    }
+
+    /// The `count`th place `query` appears, as
+    /// [`search_nth`](Self::search_nth) finds it, but never in a line with
+    /// any of the hints `masked`, unless `shown` says it's shown as it is:
+    /// a client's search never finds what's masked, nor goes to it.
+    #[must_use]
+    #[allow(clippy::too_many_arguments, reason = "a search's, and what's masked")]
+    pub fn search_nth_masked(
+        &self,
+        query: &str,
+        from: Position,
+        backward: bool,
+        exact: bool,
+        count: usize,
+        masked: Hints,
+        shown: &dyn Fn(u64, &Row, Hints) -> bool,
+    ) -> Option<(Match, bool)> {
         let query: Vec<char> = query.chars().collect();
         let count = count.max(1);
         let mut seen = 0;
-        for found in self.round(&query, from, backward, exact) {
+        for found in self.round(&query, from, backward, exact, masked, shown) {
             seen += 1;
             if seen == count {
                 return Some(found);
@@ -308,7 +407,9 @@ impl Terminal {
         }
         // Fewer than the count: round as often as it takes.
         let nth = (count - 1) % seen.max(1);
-        let (found, _) = self.round(&query, from, backward, exact).nth(nth)?;
+        let (found, _) = self
+            .round(&query, from, backward, exact, masked, shown)
+            .nth(nth)?;
         Some((found, true))
     }
 
@@ -321,6 +422,8 @@ impl Terminal {
         from: Position,
         backward: bool,
         exact: bool,
+        masked: Hints,
+        shown: &'a dyn Fn(u64, &Row, Hints) -> bool,
     ) -> impl Iterator<Item = (Match, bool)> + 'a {
         let (first, last) = self.document_bounds();
         let from_line = from.line.clamp(first, last);
@@ -335,8 +438,14 @@ impl Terminal {
             } else {
                 (first + (along + step) % lines, along + step >= lines)
             };
-            let matches = self
-                .document_line(line)
+            let hints = if masked.is_empty() {
+                Hints::empty()
+            } else {
+                self.line_hints(line)
+            };
+            let skipped = hints.intersects(masked);
+            let matches = (self.document_line(line))
+                .filter(|row| !skipped || shown(line, row, hints))
                 .map(|row| matches_in(&row, query, exact))
                 .unwrap_or_default();
             let wanted = move |col: usize| match step {

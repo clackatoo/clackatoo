@@ -133,6 +133,7 @@ impl TestDaemon {
             notes: Vec::new(),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
+            hints: clackatoo_daemon::HintRules::default(),
         };
         change(dir.path(), &mut config);
         // A turn's uid is never its index here, so nothing that should

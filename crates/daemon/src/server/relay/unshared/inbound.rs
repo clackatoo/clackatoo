@@ -132,7 +132,8 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::HarnessCapabilities { terminal }
         | Request::CancelActivity { terminal, .. }
         | Request::PasteImage { terminal, .. }
-        | Request::NotifyPhone { terminal, .. } => names.push(Terminal(terminal)),
+        | Request::NotifyPhone { terminal, .. }
+        | Request::Unmask { terminal, .. } => names.push(Terminal(terminal)),
         Request::NewWorkspace {
             ref terminal, on, ..
         } => {

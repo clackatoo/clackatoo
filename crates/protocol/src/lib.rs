@@ -147,7 +147,7 @@ pub use review::{
 pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
-    LinkTarget, Links, Node, NodeId, Patch, Pictures, Restarted, Run, View, ViewUpdate,
+    LinkTarget, Links, Masking, Node, NodeId, Patch, Pictures, Restarted, Run, View, ViewUpdate,
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
@@ -158,7 +158,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 150;
+pub const PROTOCOL_VERSION: u32 = 152;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1807,6 +1807,24 @@ pub enum Request {
         terminal: TerminalId,
         /// Whether its notifications reach the phone.
         on: bool,
+    },
+    /// Shows the client, for a while, the run of masked lines of
+    /// `terminal` around the document's line `line` (numbered as
+    /// [`Request::Text`] numbers them) as they are: lines its program
+    /// marked to be hidden (`OSC 3008`, see `clackatoo_term::regions`).
+    /// They come in a fresh [`ViewUpdate::Snapshot`], and what the client
+    /// copies or searches of them is as they are, until the daemon masks
+    /// them again with another. With `line` `None`, or the line of a run
+    /// already shown, masks them again at once. Only a user asks this, in
+    /// a window: a web device's is refused. Answered with
+    /// [`Response::Text`], saying what's shown, or an error if nothing's
+    /// masked there. Only to a daemon of protocol 152 or later
+    /// ([`wire::SECRET_REGIONS`]).
+    Unmask {
+        /// The terminal.
+        terminal: TerminalId,
+        /// A line of the run to show, or `None` to mask them again.
+        line: Option<u64>,
     },
 }
 

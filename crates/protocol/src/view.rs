@@ -6,10 +6,11 @@
 //! other than these need them.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use clackatoo_term::{
-    CursorShape, InputModes, LinkId, Picture, Piece, Progress, Row, RowBuilder, ShellState, Size,
-    Style, TaskProgress, Terminal, Virtual, Widths,
+    Attributes, CursorShape, Hints, InputModes, LinkId, Picture, Piece, Progress, Row, RowBuilder,
+    ShellState, Size, Style, TaskProgress, Terminal, Virtual, Widths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -661,13 +662,21 @@ impl View {
     }
 
     /// What `terminal` is showing, its lines as a peer that speaks `wire`
-    /// rebuilds them (see [`Line::from_row_for`]).
+    /// rebuilds them (see [`Line::from_row_for`]), and those marked to be
+    /// hidden masked.
     #[must_use]
     pub fn capture_for(terminal: &Terminal, wire: u32) -> Self {
+        Self::capture_masked(terminal, wire, &Masking::ALL)
+    }
+
+    /// What `terminal` is showing, as [`capture_for`](Self::capture_for)
+    /// captures it, its lines masked as `masking` says.
+    #[must_use]
+    pub fn capture_masked(terminal: &Terminal, wire: u32, masking: &Masking) -> Self {
         Self {
             title: terminal.title().to_owned(),
             cwd: terminal.cwd().map(str::to_owned),
-            root: Node::Grid(GridNode::capture_for(terminal, wire)),
+            root: Node::Grid(GridNode::capture_masked(terminal, wire, masking)),
         }
     }
 
@@ -788,17 +797,29 @@ impl GridNode {
     }
 
     /// What `terminal`'s screen shows, its lines as a peer that speaks
-    /// `wire` rebuilds them (see [`Line::from_row_for`]).
+    /// `wire` rebuilds them (see [`Line::from_row_for`]), and those marked
+    /// to be hidden masked.
     #[must_use]
     pub fn capture_for(terminal: &Terminal, wire: u32) -> Self {
+        Self::capture_masked(terminal, wire, &Masking::ALL)
+    }
+
+    /// What `terminal`'s screen shows, as
+    /// [`capture_for`](Self::capture_for) captures it, its lines masked
+    /// as `masking` says.
+    #[must_use]
+    pub fn capture_masked(terminal: &Terminal, wire: u32, masking: &Masking) -> Self {
         let grid = terminal.grid();
-        let lines: Vec<Line> = grid
-            .rows()
-            .map(|row| Line::from_row_for(row, wire, terminal.widths()))
+        let end = terminal.primary().scrollback_end();
+        let lines: Vec<Line> = (end..)
+            .zip(grid.rows())
+            .map(|(line, row)| masking.line(row, line, row.hints(), wire, terminal.widths()))
             .collect();
+        let mut state = GridState::of(terminal);
+        masking.cursor(terminal, &mut state);
         Self {
             size: terminal.size(),
-            state: GridState::of(terminal),
+            state,
             links: LinkTarget::of(&lines, terminal),
             lines,
             marks: BlockMarks::of_rows((0..).zip(grid.rows()), terminal),
@@ -844,7 +865,126 @@ impl CursorState {
     }
 }
 
+/// Which lines a view of a terminal masks: those its program marked to be
+/// hidden ([`Hints::HIDE`], see `clackatoo_term::regions`), and for a
+/// client agents may read through, those kept from agents
+/// ([`Hints::NOAGENT`]); but any the client was shown
+/// ([`crate::Request::Unmask`]), while they're as they were. Every message
+/// a daemon sends of a terminal's lines masks them, to any peer, so the
+/// client never has what's hidden unless it asked to see it: what it
+/// draws, copies and searches is masked alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Masking {
+    /// The hints that mask a line: none, if the daemon's config says to
+    /// show everything.
+    pub hidden: Hints,
+    /// The lines shown as they are, numbered in the terminal's document
+    /// (see [`HistoryLines::first`]).
+    pub shown: Range<u64>,
+    /// What each line of [`shown`](Self::shown) held as it was shown, as
+    /// [`fingerprint`](Self::fingerprint) has it: a line that holds
+    /// anything else now, as one printed afresh under the same number, is
+    /// masked again.
+    pub prints: Vec<u64>,
+}
+
+impl Masking {
+    /// Every line marked to be hidden is masked.
+    pub const ALL: Self = Self {
+        hidden: Hints::HIDE,
+        shown: 0..0,
+        prints: Vec::new(),
+    };
+
+    /// None is.
+    pub const NONE: Self = Self {
+        hidden: Hints::empty(),
+        shown: 0..0,
+        prints: Vec::new(),
+    };
+
+    /// What `row` holds, to tell whether it's the line that was shown.
+    #[must_use]
+    pub fn fingerprint(row: &Row) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (row.width(), row.is_wrapped(), row.text()).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Whether the document's line `line`, `row`, with `hints`, is one
+    /// shown as it is: never one kept from agents while that's masked, as
+    /// for a window an agent sees, whatever the user asked to see there.
+    #[must_use]
+    pub fn shows(&self, line: u64, row: &Row, hints: Hints) -> bool {
+        !hints.intersects(self.hidden & Hints::NOAGENT)
+            && self.shown.contains(&line)
+            && usize::try_from(line - self.shown.start)
+                .ok()
+                .and_then(|at| self.prints.get(at))
+                .is_some_and(|&print| print == Self::fingerprint(row))
+    }
+
+    /// Whether the document's line `line`, `row`, with `hints`, is masked.
+    #[must_use]
+    pub fn masks(&self, line: u64, row: &Row, hints: Hints) -> bool {
+        hints.intersects(self.hidden) && !self.shows(line, row, hints)
+    }
+
+    /// The document's line `line`, `row`, with `hints`, as
+    /// [`Line::from_row_for`] makes it for a peer that speaks `wire`, or
+    /// masked.
+    #[must_use]
+    pub fn line(&self, row: &Row, line: u64, hints: Hints, wire: u32, widths: Widths) -> Line {
+        if self.masks(line, row, hints) {
+            Line::masked(row)
+        } else {
+            Line::from_row_for(row, wire, widths)
+        }
+    }
+
+    /// Hides the cursor in `state`, `terminal`'s, while it's on a line
+    /// masked, at its first column: where it is on the line would say how
+    /// much is there.
+    pub fn cursor(&self, terminal: &Terminal, state: &mut GridState) {
+        let row = usize::from(state.cursor.line);
+        if row >= terminal.grid().height() {
+            return;
+        }
+        let row = terminal.grid().row(row);
+        let line = terminal.primary().scrollback_end() + u64::from(state.cursor.line);
+        if self.masks(line, row, row.hints()) {
+            state.cursor.col = 0;
+            state.cursor.visible = false;
+        }
+    }
+}
+
 impl Line {
+    /// A line masked in place of `row`, which its program marked to be
+    /// hidden (see [`Masking`]): [`clackatoo_term::hints::MASK`], dim, as
+    /// long whatever `row` holds, so it says nothing of it, and cut to
+    /// `row`'s width. It never goes on to the next, so a long line hidden
+    /// reads as rows of the mask, never one long one.
+    #[must_use]
+    pub fn masked(row: &Row) -> Self {
+        let style = Style {
+            attributes: Attributes::DIM,
+            ..Style::DEFAULT
+        };
+        let text: String = (clackatoo_term::hints::MASK.chars())
+            .take(row.width())
+            .collect();
+        Self {
+            runs: vec![Run {
+                style,
+                text,
+                separate: false,
+            }],
+            wrapped: false,
+        }
+    }
+
     /// `row`'s text and styles, from a terminal that lays its cells out
     /// by `widths`, by which the line is rebuilt (see [`Line::to_row`]).
     #[must_use]

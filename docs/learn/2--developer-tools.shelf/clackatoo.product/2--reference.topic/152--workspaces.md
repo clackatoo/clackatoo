@@ -209,7 +209,12 @@ keeps the workspaces keeps terminals' history.
 
 - an agent's own terminals, and the panes that show what an agent's command
   printed;
-- a terminal you marked off (below), but for the commands you kept.
+- a terminal you marked off (below), but for the commands you kept;
+- what a program marked `nosave` or `secret` (see [secret
+  regions](~clackatoo/reference/secret-regions)), and a line you typed a
+  password on unseen: a run of them comes back as `[secret output not
+  kept]`. A program can ask for what's kept to be forgotten too, as
+  `:forget` does.
 
 **Your say over it:**
 

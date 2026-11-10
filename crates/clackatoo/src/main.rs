@@ -167,6 +167,11 @@ enum Command {
     /// last: run again by itself as the daemon starts afresh, and with
     /// `always`, as it ends too; or with `off`, take the mark away.
     Keep(Keep),
+    /// Run a command with what it prints marked secret: masked in windows
+    /// and on the phone until shown, never written to disk, and kept from
+    /// agents. It's a region of OSC 3008, which clackatoo's terminals read
+    /// and others ignore.
+    Secret(Secret),
     /// Trust a folder to run its language servers, which may run its code,
     /// as `:trust` does: those of its files open start now, and its files
     /// are no longer asked about. A folder is trusted with all inside it.
@@ -392,6 +397,21 @@ struct Bg {
 }
 
 #[derive(Debug, Args)]
+struct Secret {
+    /// Shown on screen, but still never written to disk and kept from
+    /// agents.
+    #[arg(long, conflicts_with = "hide_only")]
+    private: bool,
+    /// Only masked on screen: written to disk and read by agents as any
+    /// other output.
+    #[arg(long)]
+    hide_only: bool,
+    /// The command to run, and its arguments.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    command: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
 struct Keep {
     #[command(flatten)]
     target: Target,
@@ -517,6 +537,11 @@ struct Capture {
     /// Keep colours and attributes, as ANSI escape sequences.
     #[arg(long)]
     ansi: bool,
+    /// Include what programs kept from agents (OSC 3008 `noagent`), as a
+    /// window showing the terminal does. Without it, that's masked, as
+    /// any command an agent runs gets it.
+    #[arg(long)]
+    include_private: bool,
 }
 
 fn main() -> ExitCode {
@@ -557,6 +582,15 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::New(new) => new_terminal(new),
         Command::Bg(bg) => start_in_background(bg),
         Command::Keep(keep) => keep_running(&keep),
+        Command::Secret(secret) => {
+            let kind = match (secret.private, secret.hide_only) {
+                (true, _) => clackatoo_daemon::secret::Kind::Private,
+                (false, true) => clackatoo_daemon::secret::Kind::HideOnly,
+                (false, false) => clackatoo_daemon::secret::Kind::Secret,
+            };
+            let status = clackatoo_daemon::secret::run(kind, &secret.command)?;
+            std::process::exit(status);
+        }
         Command::Trust(trust) => {
             let action = if trust.list {
                 clackatoo_protocol::TrustAction::List
@@ -1170,7 +1204,13 @@ fn send(target: &Target, bytes: &[u8]) -> anyhow::Result<()> {
 
 fn capture(capture: &Capture) -> anyhow::Result<()> {
     let target = &capture.target;
-    let view = connect(&target.connection)?.capture(TerminalId(target.terminal))?;
+    let terminal = TerminalId(target.terminal);
+    let mut client = connect(&target.connection)?;
+    // A client showing the terminal is sent what's kept from agents.
+    if capture.include_private {
+        client.request(&Request::Attach { terminal })?;
+    }
+    let view = client.capture(terminal)?;
     let text = match (view.grid(), view.chat()) {
         (Some(grid), _) if capture.ansi => render::ansi(grid),
         (Some(grid), _) => render::plain(grid),

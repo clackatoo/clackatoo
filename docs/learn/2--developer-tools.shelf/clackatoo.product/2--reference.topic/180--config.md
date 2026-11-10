@@ -937,6 +937,10 @@ How the daemon's terminals behave, for every window.
 |---|---|---|
 | `daemon.terminals.notify_after` | How many seconds a command must run for its end to be [told in a notification](~clackatoo/reference/terminal-emulation#long-commands) while you aren't looking at its terminal, up to 86400. 0 tells none. | 10 |
 | `daemon.terminals.vs16` | [Variation selector 16](~clackatoo/reference/terminal-emulation#screen-behavior) widens an emoji to two columns. Terminals already open keep what they started with. | on |
+| `daemon.hints.hide` | Lines programs [mark hidden](~clackatoo/reference/secret-regions): `mask` masks them until you ask to see them; `show` shows them. | `mask` |
+| `daemon.hints.nosave` | Lines programs mark `nosave` are never written to disk. | on |
+| `daemon.hints.noagent` | Lines programs mark `noagent`: `hide` keeps them from agents; `show` lets agents read them. | `hide` |
+| `daemon.hints.shown_for` | How many seconds hidden lines you asked to see stay shown, from 1 to 86400. | 30 |
 
 ## When it goes wrong
 

@@ -277,6 +277,29 @@ impl Pane {
         self.keeping_block.take()
     }
 
+    /// Asks for what's masked on the line `line` of those in view to be
+    /// shown, if it's masked (see [`is_masked`]). Returns whether it is.
+    pub(super) fn unmask_in_view(&mut self, line: i64) -> bool {
+        let Some(line) = u64::try_from(line)
+            .ok()
+            .filter(|&line| line < self.height())
+            .map(|line| self.view_top() + line)
+        else {
+            return false;
+        };
+        if !Document(self).line(line).is_some_and(is_masked) {
+            return false;
+        }
+        self.unmasking = Some(line);
+        true
+    }
+
+    /// Takes the line to show what's masked around (`zv`), for the desk
+    /// to ask the daemon to.
+    pub(crate) fn take_unmasking(&mut self) -> Option<u64> {
+        self.unmasking.take()
+    }
+
     /// Takes the link to open, for the desk to open.
     pub(crate) fn take_opening(&mut self) -> Option<Target> {
         self.opening.take()
@@ -323,6 +346,17 @@ fn cell_col(row: &Row, col: usize) -> Option<usize> {
     } else {
         col
     })
+}
+
+/// Whether `row` is a line the daemon masked, as its program marked it
+/// hidden (`clackatoo_protocol::Line::masked`): the mask, dim. A program
+/// could print the same, which asking to see shows is what it is.
+pub(crate) fn is_masked(row: &Row) -> bool {
+    let text = row.text();
+    !text.is_empty()
+        && clackatoo_term::hints::MASK.starts_with(text.as_str())
+        && (row.cells().first())
+            .is_some_and(|&cell| row.style(cell).attributes == clackatoo_term::Attributes::DIM)
 }
 
 #[cfg(test)]
@@ -403,6 +437,24 @@ mod tests {
     fn link_cells(pane: &mut Pane, at: [i64; 2]) -> Option<Vec<(u64, Range<usize>)>> {
         pane.hover(Some((at[0], at[1], CTRL)));
         pane.hovered_link().map(|link| link.cells)
+    }
+
+    /// Ctrl+click on a line the daemon masked asks to see it; on any
+    /// other, it doesn't.
+    #[test]
+    fn ctrl_click_on_a_masked_line_asks_to_see_it() {
+        let mut pane = pane(
+            20,
+            3,
+            "one\r\n\x1b]3008;region;start;r;hide\x07pw\r\n\x1b]3008;region;end;r\x07two",
+        );
+        press(&mut pane, [0, 1], CTRL);
+        assert_eq!(pane.take_unmasking(), None);
+        press(&mut pane, [1, 1], Modifiers::default());
+        assert_eq!(pane.take_unmasking(), None, "Ctrl isn't held");
+        press(&mut pane, [1, 1], CTRL);
+        assert_eq!(pane.take_unmasking(), Some(1));
+        assert!(pane.mouse_selected().is_none());
     }
 
     #[test]

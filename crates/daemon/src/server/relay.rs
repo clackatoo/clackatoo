@@ -1341,6 +1341,23 @@ impl Daemon {
                 let text = Request::BlockText { terminal, from, to };
                 (at, Ok((text, Then::Pass)))
             }),
+            // Masks are the home daemon's, which one older than them
+            // never has.
+            &Request::Unmask {
+                terminal: local,
+                line,
+            } => terminal(self, local).map(|(at, terminal)| {
+                // What the other machine shows as it is would reach every
+                // client of this daemon following it, phones too, so it's
+                // shown only on its own machine (see `server/masks.rs`).
+                let _ = (terminal, line);
+                let unmask = Err(Error::Other(
+                    "what's hidden is shown only in a window on its own machine, or one \
+                     reaching it with --remote"
+                        .into(),
+                ));
+                (at, unmask)
+            }),
             Request::Search {
                 terminal: local,
                 query,

@@ -111,4 +111,11 @@ if set -q __clackatoo_secret; and test "$major" -ge 4 2>/dev/null
         end
         printf '\e]133;C;%s\a' $mark
     end
+
+    # The prompt, signed, which closes what a program left open of the
+    # regions it marked private (`clackatoo_term::regions`).
+    function __clackatoo_prompt_mark --on-event fish_prompt
+        set -l mark "clackatoo=$__clackatoo_secret"
+        printf '\e]3008;prompt;%s\a' $mark
+    end
 end

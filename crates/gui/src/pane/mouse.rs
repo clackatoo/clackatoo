@@ -116,6 +116,14 @@ impl Pane {
             self.mouse_selection = None;
             return true;
         }
+        // Ctrl+click on what's masked shows it, as on a link opens it.
+        if event.action == MouseAction::Press(MouseButton::Left)
+            && self.link_opens(event.modifiers)
+            && self.unmask_in_view(event.line)
+        {
+            self.mouse_selection = None;
+            return true;
+        }
         if self.reports_mouse(event.modifiers.shift) {
             self.report_mouse(event);
             return relit;

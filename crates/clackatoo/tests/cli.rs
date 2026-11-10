@@ -1078,7 +1078,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),
@@ -1505,6 +1505,40 @@ fn shells_traced_from_their_start_never_print_the_secret() {
                 .find(|run| run.len() >= 32 && !ours.iter().any(|value| value.contains(run)));
             assert_eq!(secret, None, "{name} {script:?} {env:?}: {text}");
         }
+    }
+}
+
+/// A region a program marked private and left open closes at the shell's
+/// next prompt, which the shell signs, so what's printed after reaches
+/// agents; a prompt the program forges closes nothing (CLACKA-242). The
+/// test's client doesn't show the terminal, so it's sent what's kept from
+/// agents masked, as an agent's command would be.
+#[test]
+fn the_shells_signed_prompt_closes_a_region_left_open() {
+    let mask = clackatoo_term::hints::MASK;
+    for (shell, zshenv) in integrated_shells() {
+        let name = shell.file_name().unwrap().to_string_lossy().into_owned();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".zshenv"), &zshenv).unwrap();
+        let mut user = UserShell::start(&shell, home.path(), &[]);
+        let left = user.run(r"printf '\033]3008;region;start;r;private\007inside\n'");
+        assert_eq!(user.output(&left), mask, "{name}");
+        let after = user.run("echo after");
+        assert_eq!(user.output(&after), "after", "{name}");
+        let forged = concat!(
+            r"printf '\033]3008;region;start;s;private\007",
+            r"\033]3008;prompt;clackatoo=0123456789abcdef0123456789abcdef\007",
+            r"\033]133;D;0\007\033]133;A\007st\151ll\n'",
+        );
+        // Its marks muddle where its output is: what's read is all of it.
+        user.run(forged);
+        assert!(!user.text().contains("still"), "{name}: {}", user.text());
+        user.run("echo again");
+        let text = user.text();
+        assert!(
+            text.ends_with("again\n") || text.contains("\nagain\n"),
+            "{name}: {text}"
+        );
     }
 }
 

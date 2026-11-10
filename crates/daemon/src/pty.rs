@@ -232,6 +232,18 @@ impl Pty {
         rustix::termios::tcgetpgrp(&self.master).ok()
     }
 
+    /// Whether the program reads a line without its being shown as it's
+    /// typed, as a password prompt does: echo off, and the line read
+    /// whole (`ICANON`). A full-screen program, which draws what's typed
+    /// itself, reads keys one at a time, with echo off too.
+    pub(crate) fn reads_unechoed(&self) -> bool {
+        use rustix::termios::LocalModes;
+        rustix::termios::tcgetattr(&self.master).is_ok_and(|modes| {
+            let local = modes.local_modes;
+            !local.contains(LocalModes::ECHO) && local.contains(LocalModes::ICANON)
+        })
+    }
+
     /// Sets the window size the program sees, in cells and, if known,
     /// pixels (`[width, height]`). The kernel sends it SIGWINCH.
     pub(crate) fn resize(&self, size: Size, pixels: Option<[u16; 2]>) -> io::Result<()> {

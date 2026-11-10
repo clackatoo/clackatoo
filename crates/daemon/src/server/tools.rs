@@ -83,7 +83,7 @@ pub(super) struct Tools {
     /// finish.
     waiting: Vec<Waiting>,
     pub(super) activities: Vec<crate::saved::Operation>,
-    native: BTreeMap<TerminalId, (Token, clackatoo_protocol::NativeAccess)>,
+    pub(super) native: BTreeMap<TerminalId, (Token, clackatoo_protocol::NativeAccess)>,
     /// The number the next call waiting for the user gets.
     next_call: u64,
     /// The terminals agents have run commands in.
@@ -1948,6 +1948,9 @@ impl Daemon {
         let Some(pty) = slot.terminal.pty() else {
             return Err("the terminal has closed".to_owned());
         };
+        // As for the user's typing: a line typed on unseen is kept from
+        // agents and the disk.
+        pty.mark_if_unechoed();
         pty.send_input(bytes).map_err(|err| err.to_string())?;
         if enter {
             // What the shell says back is read on a later turn, so its
@@ -2147,7 +2150,7 @@ impl Daemon {
         let (first, last) = grid.document_bounds();
         let Some(block) = last_command(grid, last) else {
             let start = last.saturating_sub(lines as u64 - 1).max(first);
-            let text = whole_lines(grid, start, last);
+            let text = whole_lines(grid, start, last, self.config.hints.noagent);
             // A reset took the marks of what was typed.
             let why = if commanded.is_some_and(|commanded| commanded.expect.is_some()) {
                 if self.shell_seen_back(terminal) {
@@ -2169,7 +2172,7 @@ impl Daemon {
             let _ = writeln!(text, "$ {command}");
         }
         if let Some(output) = block.output {
-            let output = whole_lines(grid, output, block.last);
+            let output = whole_lines(grid, output, block.last, self.config.hints.noagent);
             let output = output.trim_end();
             if !output.is_empty() {
                 text.push_str(&bounded(output, lines));
@@ -2933,18 +2936,23 @@ fn last_command(grid: &Terminal, last: u64) -> Option<clackatoo_term::Block> {
     Some(block)
 }
 
-/// Lines `first` to `last` of `grid`'s document, as text.
-fn whole_lines(grid: &Terminal, first: u64, last: u64) -> String {
+/// Lines `first` to `last` of `grid`'s document, as text for an agent:
+/// those a program said to keep from agents left out, if `noagent` says
+/// to (see [`crate::HintRules::noagent`]).
+fn whole_lines(grid: &Terminal, first: u64, last: u64, noagent: bool) -> String {
     use clackatoo_term::Position;
-    // Lines a program said to keep from agents are left out.
-    grid.text_for_agents(
+    let (from, to) = (
         Position {
             line: first,
             col: 0,
         },
         Position { line: last, col: 0 },
-        true,
-    )
+    );
+    if noagent {
+        grid.text_for_agents(from, to, true)
+    } else {
+        grid.text(from, to, true)
+    }
 }
 
 /// The last `lines` lines of `text`, and at most [`MAX_OUTPUT`] bytes of
@@ -3931,8 +3939,11 @@ mod tests {
         grid.advance(b"login\r\nhunter2\r\nok\r\nnext\r\nlast");
         grid.add_hints(1..2, clackatoo_term::Hints::NOAGENT);
         let (first, last) = grid.document_bounds();
-        let text = whole_lines(&grid, first, last);
+        let text = whole_lines(&grid, first, last, true);
         assert_eq!(text, "login\n[secret]\nok\nnext\nlast");
+        // Unless config says to show them.
+        let text = whole_lines(&grid, first, last, false);
+        assert_eq!(text, "login\nhunter2\nok\nnext\nlast");
     }
 
     #[test]

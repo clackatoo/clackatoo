@@ -47,6 +47,14 @@ const fn number(min: u32, max: u32) -> Kind {
     }
 }
 
+/// What's done with lines programs mark to be hidden, as `hints.hide`
+/// says.
+pub(crate) const HIDE_RULES: &[&str] = &["mask", "show"];
+
+/// What's done with lines programs mark to be kept from agents, as
+/// `hints.noagent` says.
+pub(crate) const NOAGENT_RULES: &[&str] = &["hide", "show"];
+
 /// The ways the web app is reached, as `web.mode` says.
 pub(crate) const WEB_MODES: &[&str] = &["off", "tailscale", "public"];
 
@@ -120,6 +128,17 @@ options! {
     /// Whether variation selector 16 widens an emoji to two columns, in
     /// terminals started from then on (see [`clackatoo_term::Widths`]).
     "terminals.vs16" ("Variation selector 16 widens an emoji") in DaemonTerminals: Kind::Bool => Value::Bool(true);
+    /// Whether lines a program marks `hide` (OSC 3008) are masked until
+    /// the user asks to see them, or shown.
+    "hints.hide" ("Lines programs mark hidden: mask or show") in DaemonTerminals: Kind::Choice(HIDE_RULES) => Value::Choice("mask");
+    /// Whether lines a program marks `nosave` are left out of the history
+    /// kept across restarts.
+    "hints.nosave" ("Never write to disk lines programs mark nosave") in DaemonTerminals: Kind::Bool => Value::Bool(true);
+    /// Whether lines a program marks `noagent` are kept from agents, or
+    /// shown to them.
+    "hints.noagent" ("Lines programs keep from agents: hide or show") in DaemonTerminals: Kind::Choice(NOAGENT_RULES) => Value::Choice("hide");
+    /// How many seconds hidden lines the user asked to see stay shown.
+    "hints.shown_for" ("Seconds hidden lines stay shown once asked to") in DaemonTerminals: number(1, 86_400) => Value::Number(30);
 }
 
 /// The option called `name`, if there is one.
@@ -182,6 +201,12 @@ mod tests {
             number("terminals.vs16"),
             Value::Bool(clackatoo_term::Config::default().widths.vs16)
         );
+        let hints = crate::HintRules::default();
+        assert_eq!(
+            number("hints.shown_for"),
+            Value::Number(u32::try_from(hints.shown_for.as_secs()).unwrap())
+        );
+        assert_eq!(number("hints.nosave"), Value::Bool(hints.nosave));
         let images = crate::images::Limits::default();
         assert_eq!(
             number("images.total_mb"),
@@ -196,7 +221,8 @@ mod tests {
                 "web",
                 "history",
                 "images",
-                "terminals"
+                "terminals",
+                "hints"
             ]
         );
     }

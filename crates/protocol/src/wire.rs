@@ -465,6 +465,11 @@ gates! {
     /// placeholders show. An older peer is sent none, and shows what's
     /// under them.
     TERMINAL_IMAGES = 150,
+    /// Regions of a terminal's output its program marked private (OSC
+    /// 3008, CLACKA-242): showing what's masked, `Request::Unmask`, which
+    /// an older daemon, with no masks, is never sent. Lines are masked
+    /// for every peer, whatever its protocol.
+    SECRET_REGIONS = 152,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1292,6 +1297,9 @@ impl Downgrade for ClientMessage {
         }
         if wire < KEPT_HISTORY && matches!(self, Self::Request(crate::Request::KeepHistory { .. }))
         {
+            return Downgraded::Refused;
+        }
+        if wire < SECRET_REGIONS && matches!(self, Self::Request(crate::Request::Unmask { .. })) {
             return Downgraded::Refused;
         }
         if wire < HARNESS

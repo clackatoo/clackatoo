@@ -2082,6 +2082,7 @@ pub(super) mod tests {
             notes: Vec::new(),
             keep_wait: crate::DEFAULT_KEEP_WAIT,
             images: crate::ImageLimits::default(),
+            hints: crate::HintRules::default(),
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);

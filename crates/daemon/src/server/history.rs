@@ -95,7 +95,23 @@ impl Marks {
         Keeping {
             from: self.from,
             marked_only: self.off,
+            ignore_nosave: false,
         }
+    }
+
+    /// Forgets all `terminal` holds now: only what comes after, from the
+    /// cursor's line on, is kept. Behind a full-screen program, the main
+    /// screen's cursor isn't where it shows, so all of that screen is.
+    fn forget(&mut self, terminal: &clackatoo_term::Terminal) {
+        let primary = terminal.primary();
+        let rows = if terminal.is_alternate_screen() {
+            primary.height()
+        } else {
+            terminal.cursor().line
+        };
+        let line = primary.scrollback_end() + rows as u64;
+        self.from = self.from.max(line);
+        self.numbered = numbering(terminal);
     }
 
     /// Makes sure `from` still holds back everything forgotten in
@@ -267,13 +283,14 @@ impl Daemon {
             }
             terminal.compact_scrollback();
         }
-        let keeping = match self.histories.marks.get_mut(&id) {
+        let mut keeping = match self.histories.marks.get_mut(&id) {
             Some(marks) => {
                 marks.follow(terminal.emulator());
                 marks.keeping()
             }
             None => Keeping::default(),
         };
+        keeping.ignore_nosave = !self.config.hints.nosave;
         let key = history::key(self.id, id.0);
         // None kept writes nothing, and removes the file.
         let job = Job::Write {
@@ -336,6 +353,35 @@ impl Daemon {
         }
     }
 
+    /// Forgets what's kept of terminal `id` so far, as `:forget` does, if
+    /// its program asked to (`OSC 3008 ; forget`, see
+    /// [`clackatoo_term::regions`]): which only ever keeps less.
+    pub(super) fn forget_if_asked(&mut self, id: TerminalId) {
+        let asked = match (self.terminals.get_mut(&id)).map(|slot| &mut slot.terminal) {
+            Some(Hosted::Pty(pty)) => pty.take_forget(),
+            _ => None,
+        };
+        let Some(line) = asked else {
+            return;
+        };
+        if !self.history_kept_of(id) || self.config.history.is_none() {
+            return;
+        }
+        let Some(Hosted::Pty(pty)) = (self.terminals.get_mut(&id)).map(|slot| &mut slot.terminal)
+        else {
+            return;
+        };
+        let marks = self.histories.marks.entry(id).or_default();
+        marks.follow(pty.emulator());
+        marks.from = marks.from.max(line);
+        marks.numbered = numbering(pty.emulator());
+        self.workspaces_changed();
+        if !(self.history_writer().is_some() && self.keep_history(id, true)) {
+            self.histories.changed.insert(id, MOST_PUT_OFF);
+            self.histories.due = Some(Instant::now() + RETRY);
+        }
+    }
+
     /// Whether this daemon keeps any terminal's history.
     fn history_kept_of_any(&self) -> bool {
         self.history_config().is_some()
@@ -387,20 +433,7 @@ impl Daemon {
                 format!("pane {pane}'s history isn't kept across a restart")
             }
             HistoryKeeping::Forget => {
-                // What it shows now is forgotten too: only what comes after,
-                // from the cursor's line on, is kept. Behind a full-screen
-                // program, the main screen's cursor isn't where it shows,
-                // so all of that screen is.
-                let emulator = pty.emulator();
-                let primary = emulator.primary();
-                let rows = if emulator.is_alternate_screen() {
-                    primary.height()
-                } else {
-                    emulator.cursor().line
-                };
-                let line = primary.scrollback_end() + rows as u64;
-                marks.from = marks.from.max(line);
-                marks.numbered = numbering(emulator);
+                marks.forget(pty.emulator());
                 format!("pane {pane}'s history kept so far is forgotten")
             }
             HistoryKeeping::BlockAt(line) => {
@@ -774,6 +807,28 @@ pub(in crate::server) mod tests {
         {
             pty.emulator_mut().advance(output.as_bytes());
         }
+    }
+
+    /// A program asks for what's kept of its terminal to be forgotten, as
+    /// `:forget` does; what it marks `nosave` isn't written, unless config
+    /// says to ignore that.
+    #[test]
+    fn programs_forget_and_keep_lines_off_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, _) = keeping(dir.path(), true);
+        print(&mut daemon, terminal, "old\r\n");
+        assert_eq!(written(&mut daemon, terminal), ["old"]);
+        print(&mut daemon, terminal, "\x1b]3008;forget\x07new\r\n");
+        daemon.forget_if_asked(terminal);
+        assert_eq!(written(&mut daemon, terminal), ["new"]);
+        let private = "\x1b]3008;region;start;p;private\x07key\r\n\x1b]3008;region;end;p\x07";
+        print(&mut daemon, terminal, private);
+        assert_eq!(
+            written(&mut daemon, terminal),
+            ["new", clackatoo_term::hints::NOT_KEPT]
+        );
+        daemon.config.hints.nosave = false;
+        assert_eq!(written(&mut daemon, terminal), ["new", "key"]);
     }
 
     /// A block kept in a terminal marked off is marked on its own rows: a

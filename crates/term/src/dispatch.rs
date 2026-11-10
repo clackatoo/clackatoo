@@ -193,6 +193,11 @@ impl Perform for Emulator {
             // no icons to name, both set the title.
             // The owner's, once it keeps them (see `Terminal::keep_names`).
             [b"0" | b"2" | b"7", ..] if self.names_kept => {}
+            // Inside a region kept from agents, a program names nothing and
+            // notifies no one: the title, directory and notifications go
+            // where agents and the phone see them (see crate::regions).
+            [b"0" | b"2" | b"7" | b"9" | b"777" | b"99", ..]
+                if self.regions.keeps_from_agents() => {}
             [b"0" | b"2", title @ ..] => {
                 self.title = String::from_utf8_lossy(&title.join(&b';')).into_owned();
             }
@@ -205,6 +210,19 @@ impl Perform for Emulator {
                 }
             }
             [b"133", kind, options @ ..] => self.shell_mark(kind, options),
+            // Regions marked private (see crate::regions).
+            [number, params @ ..] if *number == crate::regions::OSC.as_bytes() => {
+                let before = self.regions.hinting;
+                match params {
+                    [b"forget"] => self.forget_asked(),
+                    [b"prompt", options @ ..] => self.signed_prompt(options),
+                    params => self.regions.osc(params),
+                }
+                // REP never repeats a character across a region's edge.
+                if self.regions.hinting != before {
+                    self.last_printed = None;
+                }
+            }
             // Questions about colours (see crate::colours).
             [b"10", asked @ ..] => self.report_colours(10, asked, bell_terminated),
             [b"11", asked @ ..] => self.report_colours(11, asked, bell_terminated),

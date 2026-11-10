@@ -233,6 +233,16 @@ impl Grid {
         self.scrollback.hints().chain(screen)
     }
 
+    /// The lines numbered within `numbers` with hints of how private they
+    /// are (see [`crate::hints`]), in history then on screen, oldest
+    /// first, found by halving rather than walked to.
+    pub fn hints_of(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        (self.hints_from(numbers.start)).take_while(move |&(line, _)| line < numbers.end)
+    }
+
     /// The lines numbered `first` or later with hints, as
     /// [`hints`](Self::hints) gives them.
     pub(crate) fn hints_from(&self, first: u64) -> impl Iterator<Item = (u64, Hints)> + '_ {

@@ -702,6 +702,7 @@ mod tests {
                 keeping: Keeping {
                     from: u64::MAX,
                     marked_only: false,
+                    ignore_nosave: false,
                 },
             },
         );

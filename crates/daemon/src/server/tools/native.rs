@@ -59,6 +59,9 @@ impl Daemon {
                 }
             }
         }
+        // What it shows that's kept from agents is masked while one may
+        // see it.
+        self.mask_by_grants();
         self.send_event(
             window,
             Event::NativeGrantAck {

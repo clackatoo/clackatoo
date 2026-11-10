@@ -7,8 +7,9 @@
 //! shell's marks; history keeps the few lines that have any on the side,
 //! by number, so the others pay nothing for them.
 //!
-//! Programs will set them with their own escape sequence (CLACKA-242's
-//! second part). Until then, [`Terminal::add_hints`] sets them.
+//! Programs set them with clackatoo's own escape sequence, OSC 3008 (see
+//! [`crate::regions`]); the terminal's owner can add them too, with
+//! [`Terminal::add_hints`], as for a line a password was typed on.
 //!
 //! One mark that isn't a hint rides with them, as it must follow the text
 //! the same way: [`Hints::KEPT`], the user's own, which only the user
@@ -36,6 +37,11 @@ bitflags! {
         const KEPT = 1 << 3;
     }
 }
+
+/// What a line masked on screen (see [`Hints::HIDE`]) shows, and what a
+/// copy of masked lines gives, once for each run of them: as long
+/// whatever was there, so it says nothing of what's hidden.
+pub const MASK: &str = "\u{25cf}\u{25cf}\u{25cf}\u{25cf}";
 
 /// What text kept from agents reads as, in its place: once for each run of
 /// such lines.
@@ -74,6 +80,28 @@ impl crate::Terminal {
     /// [`hints`](Self::hints) gave them.
     pub fn set_hints(&mut self, hints: &[(u64, Hints)]) {
         self.primary_mut().set_hints(hints);
+    }
+
+    /// The run of lines marked to be hidden ([`Hints::HIDE`]) that the
+    /// document's line `line` is in, if it's one, by number: but no more
+    /// than [`MOST_LINES`](crate::MOST_LINES) either way.
+    #[must_use]
+    pub fn hidden_run(&self, line: u64) -> Option<std::ops::Range<u64>> {
+        let hidden = |line| self.line_hints(line).contains(Hints::HIDE);
+        let (first, last) = self.document_bounds();
+        if !(first..=last).contains(&line) || !hidden(line) {
+            return None;
+        }
+        let most = crate::MOST_LINES;
+        let mut start = line;
+        while start > first && line - start < most && hidden(start - 1) {
+            start -= 1;
+        }
+        let mut end = line + 1;
+        while end <= last && end - line < most && hidden(end) {
+            end += 1;
+        }
+        Some(start..end)
     }
 
     /// The document's lines from `first` on with hints, in order, as

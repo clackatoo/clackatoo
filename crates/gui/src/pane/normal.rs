@@ -71,6 +71,10 @@ pub(super) enum TerminalAction {
     /// what it printed, across a restart, though the terminal's history
     /// is marked not to be kept.
     KeepBlock,
+    /// `zv`: shows the lines a program marked hidden around the cursor's
+    /// as they are, for a while, or masks them again (see
+    /// `clackatoo_term::regions`).
+    Unmask,
 }
 
 /// How a terminal reads keys: every motion, as a move and as what `y`
@@ -78,7 +82,8 @@ pub(super) enum TerminalAction {
 /// operator and `i` its only way into insert mode; marks and macros, as
 /// every pane has them; a register only before a yank, which keeps its
 /// text there; but nothing that changes text, as it has none to change,
-/// and no `*` or `#` yet. Esc, `gx`, `gs`, `[[` and `]]` are its own.
+/// and no `*` or `#` yet. Esc, `gx`, `gs`, `zv`, `[[` and `]]` are its
+/// own.
 pub(super) struct TerminalKeys;
 
 impl Dialect for TerminalKeys {
@@ -91,6 +96,7 @@ impl Dialect for TerminalKeys {
             TerminalAction::Block { forward: true } => "Next shell block",
             TerminalAction::Block { forward: false } => "Previous shell block",
             TerminalAction::KeepBlock => "Keep this command's output across a restart",
+            TerminalAction::Unmask => "Show or hide again what's masked here",
         }
         .into()
     }
@@ -126,6 +132,16 @@ impl Dialect for TerminalKeys {
             's' => Some(Read::Yes(TerminalAction::KeepBlock)),
             _ => None,
         }
+    }
+
+    fn after_z(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<Self::Own>> {
+        // As Vim's `zv` shows what folds hide at the cursor.
+        (stroke.plain()? == 'v').then_some(Read::Yes(TerminalAction::Unmask))
     }
 
     fn after_bracket(
@@ -322,6 +338,10 @@ impl Pane {
             Action::Own(TerminalAction::Block { forward }) => self.jump_to_block(forward),
             Action::Own(TerminalAction::KeepBlock) => {
                 self.keeping_block = self.cursor.map(|cursor| cursor.at.line);
+                true
+            }
+            Action::Own(TerminalAction::Unmask) => {
+                self.unmasking = self.cursor.map(|cursor| cursor.at.line);
                 true
             }
             Action::Operate(..)

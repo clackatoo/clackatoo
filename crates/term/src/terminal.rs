@@ -23,6 +23,7 @@ use crate::notify::{Notice, Notifications};
 use crate::parser::Parser;
 use crate::pointer::{self, Pointer};
 use crate::progress::TaskProgress;
+use crate::regions::Regions;
 use crate::requests::{self, Request};
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
@@ -411,6 +412,14 @@ impl Terminal {
 
     pub(crate) fn shown_grid_mut(&mut self) -> &mut Grid {
         self.emulator.grid_mut()
+    }
+
+    pub(crate) fn emulator_regions(&self) -> &Regions {
+        &self.emulator.regions
+    }
+
+    pub(crate) fn emulator_regions_mut(&mut self) -> &mut Regions {
+        &mut self.emulator.regions
     }
 
     /// Whether the alternate screen is showing.
@@ -1182,7 +1191,7 @@ pub(crate) struct Emulator {
     /// The notifications the program asked for (see [`crate::notify`]).
     pub(crate) notifications: Notifications,
     /// The last character printed, for REP (repeat).
-    last_printed: Option<char>,
+    pub(crate) last_printed: Option<char>,
     /// History was cleared since [`Terminal::take_history_cleared`] last
     /// asked, freeing the memory it held.
     history_cleared: bool,
@@ -1192,6 +1201,9 @@ pub(crate) struct Emulator {
     /// The title and working directory are the owner's, which what the
     /// program prints can't change (see [`Terminal::keep_names`]).
     pub(crate) names_kept: bool,
+    /// The regions programs marked as private that are open (see
+    /// [`crate::regions`]).
+    pub(crate) regions: Regions,
     /// Prints everything through the simple per-character path, so tests can
     /// check the fast path against it.
     #[cfg(test)]
@@ -1246,6 +1258,7 @@ impl Emulator {
             history_cleared: false,
             ended: None,
             names_kept: false,
+            regions: Regions::default(),
             #[cfg(test)]
             simple_print: false,
         }
@@ -1324,9 +1337,10 @@ impl Emulator {
     }
 
     /// Whether to print a character at a time, through [`print`](Self::print).
-    /// Insert mode is rare enough not to need the fast path.
+    /// Insert mode is rare enough not to need the fast path, and so is
+    /// printing in a region marked private, whose lines it marks.
     fn prints_simply(&self) -> bool {
-        let simple = self.modes.contains(Modes::INSERT);
+        let simple = self.modes.contains(Modes::INSERT) || !self.regions.hinting.is_empty();
         #[cfg(test)]
         let simple = simple || self.simple_print;
         simple
@@ -1554,6 +1568,12 @@ impl Emulator {
             self.insert_cells(line, col, edge, cells, &pen);
         }
         self.grid_mut().row_mut(line).write(col, ch, wide, &pen);
+        self.last_printed = Some(ch);
+        // After it's noted, as a cap reached here closes the region, and
+        // forgets it.
+        if !self.regions.hinting.is_empty() {
+            self.hint_row(line);
+        }
 
         if col + cells < edge {
             self.cursor.col = col + cells;
@@ -1561,7 +1581,57 @@ impl Emulator {
             self.cursor.col = edge - 1;
             self.cursor.pending_wrap = self.modes.contains(Modes::AUTOWRAP);
         }
-        self.last_printed = Some(ch);
+    }
+
+    /// `OSC 3008 ; forget`: notes, for the terminal's owner, that what it
+    /// kept before the cursor's line is to be forgotten, or behind a
+    /// full-screen program, all the main screen holds (see
+    /// [`crate::regions`]).
+    pub(crate) fn forget_asked(&mut self) {
+        let rows = match self.screen {
+            Screen::Primary => self.cursor.line,
+            Screen::Alternate => self.primary.height(),
+        };
+        let line = self.primary.scrollback_end() + rows as u64;
+        let forget = &mut self.regions.forget;
+        *forget = Some(forget.map_or(line, |before| before.max(line)));
+    }
+
+    /// `OSC 3008 ; prompt ; clackatoo=SECRET`: clackatoo's own shell
+    /// integration says its prompt is here, signed with the terminal's
+    /// secret, so it's the shell's, never a program's: every region closes
+    /// (see [`crate::regions`]). Unsigned, it's nothing.
+    pub(crate) fn signed_prompt(&mut self, options: &[&[u8]]) {
+        if self.carries_secret(options) {
+            self.close_regions();
+        }
+    }
+
+    /// Closes every region (see [`crate::regions`]). REP never repeats a
+    /// character printed in one after.
+    pub(crate) fn close_regions(&mut self) {
+        self.regions.close_all();
+        self.last_printed = None;
+    }
+
+    /// Gives the cursor's row, `line`, just printed on, the hints of the
+    /// regions open, and counts it against their caps: a low one if no
+    /// shell will close them, and a high one whatever (see
+    /// [`crate::regions`]).
+    #[cold]
+    fn hint_row(&mut self, line: usize) {
+        let hints = self.regions.hinting;
+        self.grid_mut().row_mut(line).add_hints(hints);
+        let number = self.primary.scrollback_end() + line as u64;
+        let most = if self.secret.is_none() {
+            crate::regions::MOST_LINES
+        } else {
+            crate::regions::MOST_LINES_EVER
+        };
+        if self.regions.printed_on(number) > most {
+            log::info!("regions marked private closed after {most} lines");
+            self.close_regions();
+        }
     }
 
     /// Inserts `count` blank cells in `style` at column `col` of `line`,
@@ -1612,6 +1682,9 @@ impl Emulator {
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let insert = self.modes.contains(Modes::INSERT);
         let CursorState { line, pen, .. } = self.cursor;
+        if !self.regions.hinting.is_empty() {
+            self.hint_row(line);
+        }
         let row = self.grid_mut().row_mut(line);
         row.append_to_grapheme(col, ch);
         if col + 1 < edge && row.wants_wide(col, widths) {
@@ -2510,6 +2583,9 @@ impl Emulator {
         let renumbered = self.blocks.renumbered() + u64::from(next_block.is_none());
         let next_block = next_block.unwrap_or(0);
         let secret = self.secret.take();
+        // A program can't end regions by resetting the terminal (see
+        // crate::regions).
+        let regions = std::mem::take(&mut self.regions);
         // So do names that are the owner's.
         let kept = (self.names_kept).then(|| (std::mem::take(&mut self.title), self.cwd.take()));
         let (palette, cell_pixels) = (self.palette, self.cell_pixels);
@@ -2522,6 +2598,7 @@ impl Emulator {
         self.cell_pixels = cell_pixels;
         // The shell, which knows it, outlives the reset.
         self.secret = secret;
+        self.regions = regions;
         if let Some((title, cwd)) = kept {
             self.names_kept = true;
             self.title = title;
@@ -2598,7 +2675,12 @@ impl Emulator {
             return;
         }
         match kind {
-            b"C" if self.carries_secret(options) => self.trusted_command(options),
+            b"C" if self.carries_secret(options) => {
+                // The shell's own next command: whatever a program left
+                // open has ended.
+                self.close_regions();
+                self.trusted_command(options);
+            }
             // A prompt while a command runs is the command's output, not
             // the shell's: a program printing marks of its own, or a
             // shell nested inside it, such as one over ssh. So is a

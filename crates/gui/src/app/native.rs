@@ -99,6 +99,8 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         | Request::RevokeDevice { .. }
         | Request::Keep { .. }
         | Request::KeepHistory { .. }
+        // Showing what a program hid, which agents may then see.
+        | Request::Unmask { .. }
         | Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::Forget { .. }
@@ -430,6 +432,11 @@ mod tests {
         assert!(changes(&chat(TerminalId(2), send)));
         let draft = ChatAction::Draft { text: "x".into() };
         assert!(!changes(&chat(TerminalId(1), draft)));
+        // Nor shows itself what a program hid.
+        assert!(changes(&ClientMessage::Request(Request::Unmask {
+            terminal: TerminalId(3),
+            line: Some(4),
+        })));
         // It runs no command, by typing into a terminal or starting one.
         assert!(changes(&ClientMessage::Request(Request::SendInput {
             terminal: TerminalId(3),

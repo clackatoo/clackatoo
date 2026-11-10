@@ -1553,6 +1553,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Ports forwarded to another machine go on listening as your daemon upgrades; open connections reset",
     },
+    News {
+        id: "secret-regions",
+        date: "2026-11-09",
+        lesson: "shell",
+        what: "Programs mark output secret with OSC 3008: masked till zv shows it, never saved, kept from agents",
+    },
 ];
 
 impl News {

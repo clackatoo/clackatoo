@@ -42,7 +42,9 @@ pub struct KeptLines {
     lines: Vec<KeptLine>,
 }
 
-/// One kept line, and the hints it had, but `NOSAVE`, as bits.
+/// One kept line, and the hints it had, as bits: `NOSAVE` only where
+/// config said to keep such lines all the same, and that one's dropped as
+/// the line is read back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 struct KeptLine {
@@ -58,6 +60,9 @@ pub struct Keeping {
     /// Only those the user kept all the same, [`Hints::KEPT`]: the
     /// terminal's history is marked not to be kept.
     pub marked_only: bool,
+    /// Lines a program said never to write to disk, [`Hints::NOSAVE`],
+    /// are kept all the same: the user's config says to ignore it.
+    pub ignore_nosave: bool,
 }
 
 /// History made from [`KeptLines`], ready to be taken by a new terminal
@@ -171,7 +176,7 @@ impl KeptCopy {
             if number < keeping.from || keeping.marked_only && !hints.contains(Hints::KEPT) {
                 return;
             }
-            if hints.contains(Hints::NOSAVE) {
+            if hints.contains(Hints::NOSAVE) && !keeping.ignore_nosave {
                 if !placeholder {
                     placeholder = true;
                     lines.push(KeptLine {
@@ -374,7 +379,11 @@ mod tests {
         let mut old = terminal("a\r\nb\r\nc\r\nd\r\ne\r\nf");
         old.add_hints(1..3, Hints::KEPT);
         let copy = old.copy_to_keep(100);
-        let keeping = |from, marked_only| Keeping { from, marked_only };
+        let keeping = |from, marked_only| Keeping {
+            from,
+            marked_only,
+            ignore_nosave: false,
+        };
         assert_eq!(
             copy.lines(keeping(4, false), usize::MAX).texts(),
             ["e", "f"]

@@ -31,8 +31,9 @@ use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     BlockMarks, BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine,
-    HistoryLines, Line, LinkTarget, Machine, MachineId, NodeId, PROTOCOL_VERSION, Pane, PaneId,
-    PaneTerminal, Patch, Pictures, Request, Response, ServerMessage, Side, Size, TabId, TerminalId,
+    HistoryLines, Line, LinkTarget, Machine, MachineId, Masking, NodeId, PROTOCOL_VERSION, Pane,
+    PaneId, PaneTerminal, Patch, Pictures, Request, Response, ServerMessage, Side, Size, TabId,
+    TerminalId,
     TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
@@ -81,6 +82,7 @@ mod language;
 mod lending;
 mod lent_background;
 mod links;
+mod masks;
 mod mentions;
 mod notices;
 mod offers;
@@ -314,9 +316,9 @@ impl Hosted {
         }
     }
 
-    fn view(&self) -> View {
+    fn view(&self, masking: &Masking) -> View {
         match self {
-            Self::Pty(terminal) => terminal.view(),
+            Self::Pty(terminal) => terminal.view(masking),
             Self::Chat(chat) => chat.view(),
         }
     }
@@ -794,11 +796,18 @@ struct Subscription {
     settled: Option<u32>,
     /// An update was sent and not yet acknowledged with `FrameDone`.
     awaiting_ack: bool,
+    /// Which lines its program marked hidden it's sent masked: all, but
+    /// those the user asked to see (`Request::Unmask`), for a while.
+    masking: Masking,
+    /// When those are masked again.
+    shown_until: Option<Instant>,
 }
 
 impl Subscription {
     fn new() -> Self {
         Self {
+            masking: Masking::ALL,
+            shown_until: None,
             damage: Damage::new(),
             size: None,
             history_generation: 0,
@@ -816,9 +825,13 @@ impl Subscription {
     fn forget_sent(&mut self) {
         let recent = self.chat.recent;
         let first = self.chat.first;
+        let masking = std::mem::replace(&mut self.masking, Masking::ALL);
+        let shown_until = self.shown_until;
         *self = Self::new();
         self.chat.recent = recent;
         self.chat.first = first;
+        self.masking = masking;
+        self.shown_until = shown_until;
     }
 
     /// The update that brings the client, which speaks `wire`, from what
@@ -870,6 +883,7 @@ impl Subscription {
         });
         let size = terminal.size();
         let mut state = GridState::of(terminal);
+        self.masking.cursor(terminal, &mut state);
         state.agent = agent;
         state.fed = fed;
         state.phone = phone;
@@ -890,6 +904,14 @@ impl Subscription {
         }
         let history_generation = terminal.primary().history_generation();
         if self.size != Some(size) || self.history_generation != history_generation {
+            // Lines shown as they are are named by numbers, which a resize
+            // or history numbered afresh may give others: not so for a
+            // snapshot asked for, as when they're first shown.
+            if self.size.is_some() {
+                self.masking.shown = 0..0;
+                self.masking.prints.clear();
+                self.shown_until = None;
+            }
             self.size = Some(size);
             self.history_generation = history_generation;
             terminal.title().clone_into(&mut self.title);
@@ -899,7 +921,7 @@ impl Subscription {
             // ended, and history how those it holds did.
             self.settled = BlockMarks::settled(terminal);
             self.damage.clear();
-            let mut view = View::capture_for(terminal, wire);
+            let mut view = View::capture_masked(terminal, wire, &self.masking);
             if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
                 grid.state.agent = agent;
                 grid.state.fed = fed;
@@ -925,8 +947,13 @@ impl Subscription {
             .collect();
         self.damage.clear();
         let row = |line: u16| grid.row(usize::from(line));
+        let end = terminal.primary().scrollback_end();
         let lines: Vec<(u16, Line)> = (damaged.iter())
-            .map(|&line| (line, Line::from_row_for(row(line), wire, terminal.widths())))
+            .map(|&line| {
+                let (row, number) = (row(line), end + u64::from(line));
+                let made = (self.masking).line(row, number, row.hints(), wire, terminal.widths());
+                (line, made)
+            })
             .collect();
         // Only a window that reads them is told where prompts are, or how
         // blocks ended: a look at each line sent, and at the blocks after
@@ -1475,6 +1502,13 @@ impl Daemon {
                 }
             }
         }
+        // The regions programs marked private that are still open.
+        for open in &state.regions {
+            let slot = daemon.terminals.get_mut(&TerminalId(open.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.restore_regions(&open.regions);
+            }
+        }
         // What the user marked them with.
         for marks in &state.marks {
             let slot = daemon.terminals.get_mut(&TerminalId(marks.terminal));
@@ -1783,6 +1817,7 @@ impl Daemon {
         let mut histories = Vec::new();
         let mut marks = Vec::new();
         let mut graphics = Vec::new();
+        let mut regions = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
@@ -1824,6 +1859,12 @@ impl Daemon {
                             graphics: images,
                         });
                     }
+                    let open = terminal.emulator().regions();
+                    let (terminal, shell) = terminal.hand_over(&mut fds);
+                    regions.extend(open.map(|regions| handover::Regions {
+                        terminal: terminal.id,
+                        regions,
+                    }));
                     marks.push(handover::Marks {
                         terminal: terminal.id,
                         phone,
@@ -2017,6 +2058,7 @@ impl Daemon {
                 forwards,
                 direct_asks,
                 graphics,
+                regions,
             },
             fds,
             version: handover::VERSION,
@@ -2132,6 +2174,7 @@ impl Daemon {
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .chain(self.keeping.due())
                     .chain(self.history_due())
+                    .chain(self.next_mask_due())
                     .chain(self.links.due())
                     .chain(self.relay_due())
                     .chain(self.next_lent_due())
@@ -2242,6 +2285,7 @@ impl Daemon {
             self.send_reviews();
             self.keep_if_due();
             self.keep_histories_if_due();
+            self.mask_again_if_due();
             self.send_view_updates();
             self.transmit_quic();
             // Floods last, once this turn's updates have gone out, and
@@ -2651,6 +2695,7 @@ impl Daemon {
         self.background_moved_on(id);
         self.kept_moved_on(id);
         self.history_moved_on(id);
+        self.forget_if_asked(id);
         self.note_shell(id);
         self.command_moved_on(id);
     }
@@ -3773,7 +3818,7 @@ impl Daemon {
                 .terminals
                 .get(&terminal)
                 .map(|slot| {
-                    let mut view = slot.terminal.view();
+                    let mut view = slot.terminal.view(&self.masking_for(token, terminal));
                     if let clackatoo_protocol::Node::Grid(grid) = &mut view.root {
                         grid.state.agent = self.agent_terminal(terminal);
                     }
@@ -3838,19 +3883,35 @@ impl Daemon {
                 count,
             } => {
                 let wire = self.client_wire(token).unwrap_or(PROTOCOL_VERSION);
-                (self.grid(terminal)).map(|grid| Response::History(history(grid, end, count, wire)))
+                let masking = self.masking_for(token, terminal);
+                (self.grid(terminal))
+                    .map(|grid| Response::History(history(grid, end, count, wire, &masking)))
             }
+            // What the user copies of lines marked hidden is the mask, as
+            // the screen shows it, unless they were shown as they are.
             Request::Text {
                 terminal,
                 from,
                 to,
                 whole_lines,
-            } => self
-                .grid(terminal)
-                .map(|grid| Response::Text(grid.text(from, to, whole_lines))),
-            Request::BlockText { terminal, from, to } => self
-                .grid(terminal)
-                .map(|grid| Response::Text(grid.block_text(from, to))),
+            } => {
+                let masking = self.masking_for(token, terminal);
+                let shown =
+                    |line, row: &clackatoo_term::Row, hints| masking.shows(line, row, hints);
+                (self.grid(terminal)).map(|grid| {
+                    let text = grid.text_masked(from, to, whole_lines, masking.hidden, &shown);
+                    Response::Text(text)
+                })
+            }
+            Request::BlockText { terminal, from, to } => {
+                let masking = self.masking_for(token, terminal);
+                let shown =
+                    |line, row: &clackatoo_term::Row, hints| masking.shows(line, row, hints);
+                (self.grid(terminal)).map(|grid| {
+                    Response::Text(grid.block_text_masked(from, to, masking.hidden, &shown))
+                })
+            }
+            Request::Unmask { terminal, line } => self.unmask(token, terminal, line),
             Request::Search {
                 terminal,
                 query,
@@ -3858,17 +3919,30 @@ impl Daemon {
                 backward,
                 exact,
                 count,
-            } => self.grid(terminal).map(|grid| match count {
-                None => Response::Found(grid.search(&query, from, backward, exact)),
-                Some(count) => {
-                    let count = usize::try_from(count).unwrap_or(usize::MAX);
-                    let found = grid.search_nth(&query, from, backward, exact, count);
-                    Response::Searched {
-                        found: found.map(|(found, _)| found),
-                        wrapped: found.is_some_and(|(_, wrapped)| wrapped),
+            } => {
+                // Never to what's masked, nor lighting it.
+                let masking = self.masking_for(token, terminal);
+                let shown =
+                    |line, row: &clackatoo_term::Row, hints| masking.shows(line, row, hints);
+                let hidden = masking.hidden;
+                self.grid(terminal).map(|grid| match count {
+                    None => {
+                        let found = grid
+                            .search_nth_masked(&query, from, backward, exact, 1, hidden, &shown);
+                        Response::Found(found.map(|(found, _)| found))
                     }
-                }
-            }),
+                    Some(count) => {
+                        let count = usize::try_from(count).unwrap_or(usize::MAX);
+                        let found = grid.search_nth_masked(
+                            &query, from, backward, exact, count, hidden, &shown,
+                        );
+                        Response::Searched {
+                            found: found.map(|(found, _)| found),
+                            wrapped: found.is_some_and(|(_, wrapped)| wrapped),
+                        }
+                    }
+                })
+            }
             Request::Block {
                 terminal,
                 line,
@@ -4252,8 +4326,11 @@ impl Daemon {
             slot.viewers.push(token);
         }
         let chat = slot.terminal.is_chat();
+        let hidden = self.hidden_for(token, true);
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
-            client.views.insert(id, Subscription::new());
+            let mut subscription = Subscription::new();
+            subscription.masking.hidden = hidden;
+            client.views.insert(id, subscription);
         }
         self.views_pending = true;
         if chat {
@@ -4295,6 +4372,10 @@ impl Daemon {
             return Err(Error::NoSuchTerminal(id));
         };
         if let Some(terminal) = slot.terminal.pty() {
+            // A password typed at a prompt that doesn't show it marks its
+            // line: whatever the program shows there of it is kept from
+            // agents, and from the disk.
+            terminal.mark_if_unechoed();
             terminal.send_input(bytes)?;
             slot.typist = Some(token);
             self.typed_into(id, bytes);
@@ -5150,18 +5231,28 @@ fn write_out(
 }
 
 /// Up to `count` of `terminal`'s history lines, ending before line `end`,
-/// as a peer that speaks `wire` rebuilds them.
-fn history(terminal: &Terminal, end: u64, count: u16, wire: u32) -> HistoryLines {
+/// as a peer that speaks `wire` rebuilds them, masked as `masking` says.
+fn history(
+    terminal: &Terminal,
+    end: u64,
+    count: u16,
+    wire: u32,
+    masking: &Masking,
+) -> HistoryLines {
     let history = terminal.primary();
     let start = end.saturating_sub(u64::from(count));
     let mut first = None;
+    let mut hinted = history.hints_of(start..end).peekable();
     let lines = history
         .scrollback_lines(start..end)
         .map(|(number, row)| {
             first.get_or_insert(number);
+            while hinted.next_if(|&(line, _)| line < number).is_some() {}
+            let hints = (hinted.next_if(|&(line, _)| line == number))
+                .map_or(clackatoo_term::Hints::empty(), |(_, hints)| hints);
             HistoryLine {
                 width: u16::try_from(row.width()).expect("rows are at most Size::MAX wide"),
-                line: Line::from_row_for(&row, wire, terminal.widths()),
+                line: masking.line(&row, number, hints, wire, terminal.widths()),
             }
         })
         .collect::<Vec<_>>();
@@ -5184,7 +5275,7 @@ mod tests {
 
     /// A web reader with a real, nonblocking socket, so large frames remain
     /// queued until the test lets the reader catch up.
-    fn web_reader(daemon: &mut Daemon) -> (Token, std::os::unix::net::UnixStream) {
+    pub(super) fn web_reader(daemon: &mut Daemon) -> (Token, std::os::unix::net::UnixStream) {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         theirs.set_nonblocking(true).unwrap();
@@ -5477,6 +5568,7 @@ mod tests {
             terminal.primary().scrollback_end(),
             10,
             PROTOCOL_VERSION,
+            &Masking::ALL,
         );
         assert_eq!(fetched.lines[0].line.text(), "docs");
         assert_eq!(
@@ -5521,7 +5613,7 @@ mod tests {
         assert_eq!(marks.exits.first(), Some(&(44, 44 % 3)));
         assert_eq!(marks.exits.last(), Some(&(299, 299 % 3)));
         // Older ones come with their history.
-        let fetched = history(&terminal, 50, 10, PROTOCOL_VERSION);
+        let fetched = history(&terminal, 50, 10, PROTOCOL_VERSION, &Masking::ALL);
         assert_eq!(fetched.marks.exits.first(), Some(&(40, 40 % 3)));
         terminal.take_damage(&mut sent.damage);
         terminal.advance(b"y");

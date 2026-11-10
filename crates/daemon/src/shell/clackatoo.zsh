@@ -41,9 +41,13 @@ typeset -gi __clackatoo_fd=1
 # is now. A directory's `%` is written `%25`, as in a URL.
 __clackatoo_precmd() {
     local -i ret=$?
-    emulate -L zsh
+    emulate -L zsh -o no_xtrace
+    # The prompt, signed, first: it closes what a program left open of the
+    # regions it marked private (`clackatoo_term::regions`). Never traced,
+    # which would print the secret.
+    local mark=${__clackatoo_secret:+$'\e]3008;prompt;clackatoo='$__clackatoo_secret$'\a'}
     print -rnu $__clackatoo_fd -- \
-        $'\e]133;D;'$ret$'\a\e]7;file://'$HOST${PWD//\%/%25}$'\a'
+        $mark$'\e]133;D;'$ret$'\a\e]7;file://'$HOST${PWD//\%/%25}$'\a'
     __clackatoo_display
     return ret
 }

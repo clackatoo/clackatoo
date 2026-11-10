@@ -218,6 +218,7 @@ impl World {
             }),
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
             images: clackatoo_daemon::ImageLimits::default(),
+            hints: clackatoo_daemon::HintRules::default(),
         };
         configure(&mut config);
         let socket = dir.join("clackatoo/daemon.sock");

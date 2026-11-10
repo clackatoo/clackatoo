@@ -2088,6 +2088,21 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             }))),
         ),
     ]);
+    // Showing a terminal's masked lines, and masking them again
+    // (CLACKA-242).
+    samples.extend(
+        [
+            Client(ClientMessage::Request(Request::Unmask {
+                terminal: TerminalId(5),
+                line: Some(42),
+            })),
+            Client(ClientMessage::Request(Request::Unmask {
+                terminal: TerminalId(5),
+                line: None,
+            })),
+        ]
+        .map(|sample| (crate::wire::SECRET_REGIONS, sample)),
+    );
     samples
 }
 

@@ -9,7 +9,8 @@
 // The only unsafe code is the pre-exec hooks in `pty::spawn`,
 // `browser::cdp::spawn` and `priority`, the declaration of glibc's
 // `malloc_trim` in `memory`, the scheduling flag `priority` sets, and the
-// signal handling in `signals`, which opt out of this explicitly.
+// signal handling in `signals` and `secret`, which opt out of this
+// explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 // The list of the tools agents get is one long `json!`.
@@ -62,6 +63,7 @@ mod rpc;
 mod runtime;
 mod saved;
 pub mod schema;
+pub mod secret;
 mod server;
 pub mod settings;
 mod shell;
@@ -257,6 +259,9 @@ pub struct DaemonConfig {
     /// chat's, picture pane's or buffer's, and all of them together (see
     /// `images`).
     pub images: ImageLimits,
+    /// What the hints programs give their output mean (see
+    /// [`clackatoo_term::regions`]), as config says.
+    pub hints: HintRules,
     /// How terminals' history is kept from one run of the daemon to the
     /// next, as the workspaces are (see `history`). `None` keeps none.
     pub history: Option<HistoryConfig>,
@@ -732,8 +737,51 @@ impl DaemonConfig {
                 None => Some(dbus::system_address()),
             },
             images: images_from(settings, &non_empty),
+            hints: HintRules {
+                hide: settings.value("hints.hide") == schema::Value::Choice("mask"),
+                nosave: settings.on("hints.nosave"),
+                noagent: settings.value("hints.noagent") == schema::Value::Choice("hide"),
+                shown_for: std::time::Duration::from_secs(
+                    settings.number("hints.shown_for").into(),
+                ),
+            },
             history: history_from(settings, &non_empty),
             notes,
+        }
+    }
+}
+
+/// What the hints programs give the lines they print mean (see
+/// [`clackatoo_term::regions`]): each is honoured unless config says to
+/// ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each hint is honoured or not"
+)]
+pub struct HintRules {
+    /// Lines marked `hide` are masked in what windows and the web app are
+    /// sent, until the user asks to see them: `daemon.hints.hide`,
+    /// `mask` or `show`.
+    pub hide: bool,
+    /// Lines marked `nosave` are never written to disk:
+    /// `daemon.hints.nosave`.
+    pub nosave: bool,
+    /// Lines marked `noagent` are kept from agents: `daemon.hints.noagent`,
+    /// `hide` or `show`.
+    pub noagent: bool,
+    /// How long lines the user asked to see stay shown before they're
+    /// masked again: `daemon.hints.shown_for`, in seconds.
+    pub shown_for: std::time::Duration,
+}
+
+impl Default for HintRules {
+    fn default() -> Self {
+        Self {
+            hide: true,
+            nosave: true,
+            noagent: true,
+            shown_for: std::time::Duration::from_secs(30),
         }
     }
 }

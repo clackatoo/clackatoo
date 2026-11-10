@@ -297,10 +297,14 @@ impl Row {
     }
 
     /// Copies `len` cells of `src` from column `from` to this row's from
-    /// column `to`, which must be blank: graphemes, styles and all. Half a
+    /// column `to`, which must be blank: graphemes, styles, and the
+    /// source row's hints, added to this row's, and all. Half a
     /// wide character at either end of the span stays blank, as it can't
     /// be shown in it.
     pub(crate) fn copy_span(&mut self, to: usize, src: &Row, from: usize, len: usize) {
+        // What's copied keeps how private it is, on whatever row it lands
+        // (see crate::hints).
+        self.add_hints(src.hints());
         for offset in 0..len {
             let cell = src.cells()[from + offset];
             let cut =

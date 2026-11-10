@@ -567,6 +567,19 @@ impl HostedTerminal {
         &mut self.emulator
     }
 
+    /// Opens the regions programs marked private that `regions` says were
+    /// open, as the build that handed it over had them.
+    pub(crate) fn restore_regions(&mut self, regions: &clackatoo_term::RegionsSnapshot) {
+        self.emulator.restore_regions(regions);
+    }
+
+    /// Whether its program asked, since the last call, for what's kept of
+    /// it across restarts to be forgotten, and what before (see
+    /// [`Terminal::take_forget`]).
+    pub(crate) fn take_forget(&mut self) -> Option<u64> {
+        self.emulator.take_forget()
+    }
+
     /// Its ID.
     pub(crate) fn id(&self) -> TerminalId {
         self.id
@@ -823,8 +836,13 @@ impl HostedTerminal {
         }
     }
 
-    pub(crate) fn view(&self) -> View {
-        let mut view = View::capture(&self.emulator);
+    /// What it shows, its lines masked as `masking` says.
+    pub(crate) fn view(&self, masking: &clackatoo_protocol::Masking) -> View {
+        let mut view = View::capture_masked(
+            &self.emulator,
+            clackatoo_protocol::PROTOCOL_VERSION,
+            masking,
+        );
         if let Node::Grid(grid) = &mut view.root {
             grid.state.fed = self.fed.is_some();
         }
@@ -1146,6 +1164,21 @@ impl HostedTerminal {
         Ok(())
     }
 
+    /// Marks the cursor's line as one a secret was typed on, kept from
+    /// agents and never written to disk, if the program reads what's
+    /// typed without showing it, as a password prompt does (see
+    /// [`Pty::reads_unechoed`]): `sudo`, `ssh`'s, `read -s`. Nothing typed
+    /// there shows, but a program may show stars, or what it was told
+    /// was wrong.
+    pub(crate) fn mark_if_unechoed(&mut self) {
+        if !(self.pty.as_ref()).is_some_and(Pty::reads_unechoed) {
+            return;
+        }
+        let line = self.emulator.primary().scrollback_end() + self.emulator.cursor().line as u64;
+        let hints = clackatoo_term::Hints::NOSAVE | clackatoo_term::Hints::NOAGENT;
+        self.emulator.add_hints(line..line + 1, hints);
+    }
+
     /// Writes queued input until the PTY stops accepting it.
     pub(crate) fn flush_input(&mut self) {
         let Some(pty) = &self.pty else {
@@ -1320,6 +1353,61 @@ mod tests {
             most = most.max(terminal.input.len());
         }
         most
+    }
+
+    /// Reads `terminal`'s output until its screen shows `text`.
+    fn read_until(terminal: &mut HostedTerminal, text: &str) {
+        let mut buffer = vec![0; 4096];
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while !terminal.emulator.screen_text().contains(text) {
+            assert!(
+                Instant::now() < give_up,
+                "{:?}",
+                terminal.emulator.screen_text()
+            );
+            if terminal.read_output(&mut buffer, 4096, || false) == ReadOutcome::Drained {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// The hints of the screen's line that reads `text`.
+    fn hints_of(terminal: &HostedTerminal, text: &str) -> clackatoo_term::Hints {
+        let grid = terminal.emulator.grid();
+        let row = (0..grid.height())
+            .map(|row| grid.row(row))
+            .find(|row| row.text().contains(text))
+            .unwrap_or_else(|| panic!("no {text:?}"));
+        row.hints()
+    }
+
+    /// The line a password is typed on, with echo off, is kept from agents
+    /// and the disk; one typed on with echo on isn't.
+    #[test]
+    fn a_line_typed_on_unechoed_is_kept_from_agents_and_the_disk() {
+        let mut terminal = running(
+            "read a; printf 'Password: '; stty -echo; read b; stty echo; echo; echo done; sleep 100",
+        );
+        let unechoed =
+            |terminal: &HostedTerminal| terminal.pty.as_ref().is_some_and(Pty::reads_unechoed);
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while unechoed(&terminal) {
+            assert!(Instant::now() < give_up);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminal.mark_if_unechoed();
+        terminal.send_input(b"name\n").unwrap();
+        read_until(&mut terminal, "Password:");
+        while !unechoed(&terminal) {
+            assert!(Instant::now() < give_up, "echo stays on");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminal.mark_if_unechoed();
+        terminal.send_input(b"hunter2\n").unwrap();
+        read_until(&mut terminal, "done");
+        let secret = clackatoo_term::Hints::NOSAVE | clackatoo_term::Hints::NOAGENT;
+        assert_eq!(hints_of(&terminal, "Password:"), secret);
+        assert_eq!(hints_of(&terminal, "name"), clackatoo_term::Hints::empty());
     }
 
     /// A program that has ended but isn't reaped yet has no directory in

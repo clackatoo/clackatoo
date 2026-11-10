@@ -462,6 +462,15 @@ fn what_is_kept_of_the_focused_terminals_history_is_changed_as_asked() {
             how: HistoryKeeping::BlockAt(_),
         }]
     ));
+    // `zv` shows what's masked around it, or masks it again.
+    type_text(&mut desk, "zv");
+    assert!(matches!(
+        &answer_all(&mut desk)[..],
+        [Request::Unmask {
+            terminal: TerminalId(1),
+            line: Some(_),
+        }]
+    ));
 }
 
 #[test]

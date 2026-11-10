@@ -193,6 +193,9 @@ pub(crate) struct Pane {
     /// The line of the block `gs` asked to keep across a restart, for the
     /// desk to ask the daemon to.
     keeping_block: Option<u64>,
+    /// The line to show what's masked around (`zv`), for the desk to ask
+    /// the daemon to.
+    unmasking: Option<u64>,
     /// How many links the screen may know of before those no row shows
     /// are forgotten.
     links_kept: usize,
@@ -244,6 +247,7 @@ impl Pane {
             hovered: None,
             opening: None,
             keeping_block: None,
+            unmasking: None,
             links_kept: links::KEPT_LINKS,
             predictor: Predictor::new(),
             overlay: None,

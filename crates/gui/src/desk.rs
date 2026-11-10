@@ -139,7 +139,8 @@ enum Asked {
     /// The screen of a background tab's terminal, for the list's preview
     /// of the tab.
     BackgroundPreview(TabId),
-    /// `:keep`, whose answer is said in the bar.
+    /// `:keep`, or `zv` showing what's masked, whose answer is said in
+    /// the bar.
     Kept,
     /// `:notify phone`, or `nophone` if false, whose answer is said in the
     /// bar.
@@ -2369,6 +2370,7 @@ impl Desk {
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
             self.keep_pane_block(terminal);
+            self.unmask_pane_lines(terminal);
         }
         redraw || had_message
     }
@@ -2653,6 +2655,7 @@ impl Desk {
         }
         outcome.redraw |= pane.mouse(&event);
         self.open_pane_link(terminal);
+        self.unmask_pane_lines(terminal);
         outcome
     }
 

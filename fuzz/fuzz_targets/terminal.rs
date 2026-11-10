@@ -13,7 +13,7 @@
 
 #![no_main]
 
-use clackatoo_term::{Compaction, Config, Damage, Position, Size, Terminal, Widths};
+use clackatoo_term::{Compaction, Config, Damage, Hints, Position, Size, Terminal, Widths};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -40,6 +40,7 @@ fuzz_target!(|data: &[u8]| {
     let mut damage = Damage::new();
     for (look, piece) in stream.chunks(usize::from(chunk) + 1).enumerate() {
         terminal.advance(piece);
+        let _ = terminal.take_forget();
         let _ = terminal.take_replies();
         let _ = terminal.take_clipboard();
         let _ = terminal.take_history_cleared();
@@ -69,18 +70,28 @@ fuzz_target!(|data: &[u8]| {
     let _ = terminal.screen_text();
     let _ = terminal.text(at(first, 0), at(last, usize::MAX), false);
     let _ = terminal.text(at(last.saturating_add(3), 7), at(first, 2), true);
+    let shown = |line: u64, _: &clackatoo_term::Row, _: Hints| line % 3 == 0;
+    let _ = terminal.text_masked(at(first, 0), at(last, usize::MAX), false, Hints::all(), &shown);
+    let _ = terminal.block_text_masked(at(last, 3), at(first, 1), Hints::HIDE, &shown);
+    let _ = terminal.text_for_agents(at(first, 0), at(last, usize::MAX), true);
     let query = String::from_utf8_lossy(stream.get(..3).unwrap_or(stream));
     for (backward, count) in [(false, 1), (true, 3), (false, usize::MAX)] {
         let from = at(u64::from(chunk) + first, usize::from(width));
         let _ = terminal.search_nth(&query, from, backward, count > 1, count);
+        let _ = terminal.search_nth_masked(&query, from, backward, true, count, Hints::HIDE, &shown);
     }
 
     // Handed over and taken back, it's the same terminal.
     let (snapshot, links) = terminal.snapshot_with_links();
     let blocks = terminal.blocks_snapshot();
+    let regions = terminal.regions();
     let mut restored = Terminal::restore_with_links(&snapshot, &links, &config)
         .expect("a terminal's own snapshot restores");
     restored.restore_blocks(&blocks);
+    if let Some(regions) = &regions {
+        restored.restore_regions(regions);
+    }
+    assert_eq!(restored.regions(), regions);
     let (again, again_links) = restored.snapshot_with_links();
     assert_eq!(again, snapshot);
     assert_eq!(again_links, links);

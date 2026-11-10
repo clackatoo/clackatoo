@@ -79,6 +79,7 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
         notes: Vec::new(),
         keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         images: clackatoo_daemon::ImageLimits::default(),
+        hints: clackatoo_daemon::HintRules::default(),
     };
     let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).unwrap();
     let shutdown = daemon.shutdown_handle();

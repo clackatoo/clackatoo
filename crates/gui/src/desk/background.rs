@@ -134,6 +134,27 @@ impl Desk {
         self.keep_history(clackatoo_protocol::HistoryKeeping::BlockAt(line));
     }
 
+    /// Shows what's masked around the line of the terminal `terminal` its
+    /// pane was asked to with `zv`, if it was, or masks it again: the
+    /// daemon sends it as it is in a fresh view.
+    pub(super) fn unmask_pane_lines(&mut self, terminal: clackatoo_protocol::TerminalId) {
+        let Some(line) =
+            (self.panes.get_mut(&terminal)).and_then(crate::pane::Pane::take_unmasking)
+        else {
+            return;
+        };
+        if !self.needs_daemon("showing what's hidden", wire::SECRET_REGIONS) {
+            return;
+        }
+        self.request(
+            Request::Unmask {
+                terminal,
+                line: Some(line),
+            },
+            Asked::Kept,
+        );
+    }
+
     /// Whether `pane` shows a chat.
     fn shows_chat(&self, pane: clackatoo_protocol::PaneId) -> bool {
         let Some((_, _, found)) = self.workspaces.find_pane(pane) else {

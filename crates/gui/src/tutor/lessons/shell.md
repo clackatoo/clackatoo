@@ -145,6 +145,22 @@ In a terminal marked off, you can still keep one command: in normal mode, put th
 
 Agents' own terminals, and the panes showing what an agent's command printed, are never kept.
 
+## Secrets programs print
+
+A program can mark what it prints as secret, with an escape sequence of clackatoo's own, OSC 3008: it's masked as ●●●● wherever it's shown, the phone too, never written to disk, and agents read `[secret]` in its place. `clackatoo secret -- COMMAND` marks a command's output so. A line you type a password on, where it doesn't show, is kept from agents and the disk by itself.
+
+What you copy or search of a masked line is the mask too. To see it, put the cursor on it in normal mode and press `zv`, or Ctrl+click it: it's shown as it is, in this window, for 30 seconds, and copies see it. `zv` again masks it at once.
+
+```setup
+run "printf 'token:\\n\\033]3008;region;start;t1;secret\\007hunter2\\n\\033]3008;region;end;t1\\007'"
+```
+
+Press `zv` on the masked line, then `yy` to copy it.
+
+```check
+copied "hunter2"
+```
+
 ## On a busy machine
 
 When builds take every core, your keys still echo at once. clackatoo's daemon, which runs your terminals, asks RealtimeKit, the service desktops run so sound keeps up, to run ahead of your other programs, and so does the window. What they start never does: your shells, and everything you run in them, start as any program would.
