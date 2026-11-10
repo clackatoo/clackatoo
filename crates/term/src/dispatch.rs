@@ -13,10 +13,11 @@ use crate::requests::{Kind, Request};
 use crate::sgr;
 use crate::terminal::{Emulator, Modes};
 
-/// The reply to DA1 (primary device attributes): a VT220 (62) with ANSI
-/// colour (22). fish 4 sends this query at startup and waits for the answer,
-/// so it must always be sent.
-const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+/// The reply to DA1 (primary device attributes): a VT220 (62) with sixel
+/// graphics (4) and ANSI colour (22). fish 4 sends this query at startup
+/// and waits for the answer, so it must always be sent; programs that show
+/// sixel images look for the 4.
+const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;4;22c";
 
 /// The reply to DA2 (secondary device attributes): a VT220 (1), with
 /// clackatoo's year and month as the version, and no ROM cartridge (0).
@@ -91,6 +92,7 @@ impl Perform for Emulator {
             ([], 'M') => self.delete_lines(count(0)),
             ([], 'P') => self.delete_chars(count(0)),
             ([], 'S') => self.scroll_up(count(0)),
+            ([b'?'], 'S') => self.graphics_attributes(arg(0).unwrap_or(0), arg(1).unwrap_or(0)),
             // With more parameters, `CSI … T` is xterm's mouse highlight
             // tracking, which nothing uses.
             ([], 'T') if params.len() <= 1 => self.scroll_down(count(0)),
@@ -216,6 +218,8 @@ impl Perform for Emulator {
             [b"22", payload @ ..] => self.pointer_osc(&payload.join(&b';'), bell_terminated),
             [b"777", params @ ..] => self.notifications.urxvt(params),
             [b"99", metadata, payload @ ..] => self.notifications.kitty(metadata, payload),
+            // iTerm2's inline images (see crate::graphics).
+            [b"1337", rest @ ..] => self.iterm_image(&rest.join(&b';')),
             _ => log::trace!(
                 "unhandled OSC {:?}",
                 params.first().map(|p| String::from_utf8_lossy(p))
@@ -224,6 +228,10 @@ impl Perform for Emulator {
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if (intermediates, action, ignore) == (&[][..], 'q', false) {
+            self.graphics.sixel_start();
+            return;
+        }
         let kind = match (intermediates, action) {
             ([b'+'], 'q') => Some(Kind::Capabilities),
             ([b'$'], 'q') => Some(Kind::Setting),
@@ -238,13 +246,33 @@ impl Perform for Emulator {
     fn put(&mut self, bytes: &[u8]) {
         if let Some(request) = &mut self.request {
             request.put(bytes);
+        } else if self.graphics.collecting_sixel() {
+            self.graphics.sixel_put(bytes);
         }
     }
 
     fn unhook(&mut self) {
         if let Some(request) = self.request.take() {
             self.answer_request(&request);
+        } else if self.graphics.collecting_sixel() {
+            self.sixel_end();
         }
+    }
+
+    fn apc_start(&mut self) {
+        self.graphics.apc_start();
+    }
+
+    fn apc_put(&mut self, bytes: &[u8]) {
+        self.graphics.apc_put(bytes);
+    }
+
+    fn apc_end(&mut self, cancelled: bool) {
+        Emulator::apc_end(self, cancelled);
+    }
+
+    fn waiting(&self) -> bool {
+        self.graphics.waiting()
     }
 }
 
@@ -274,6 +302,21 @@ impl Emulator {
             }
             _ => log::trace!("unhandled DSR {query}"),
         }
+    }
+
+    /// XTSMGRAPHICS (`CSI ? Pi ; Pa S`): what sixel images may be. Only
+    /// reading is answered: 1, how many colour registers there are, and
+    /// 2, how big an image may be, in pixels; anything else fails.
+    fn graphics_attributes(&mut self, item: u16, action: u16) {
+        let reply = match (item, action) {
+            (1, 1 | 4) => format!("\x1b[?1;0;{}S", crate::graphics::sixel::MOST_REGISTERS),
+            (2, 1 | 4) => {
+                let most = crate::graphics::sixel::MOST_SIDE;
+                format!("\x1b[?2;0;{most};{most}S")
+            }
+            (item, _) => format!("\x1b[?{item};3;0S"),
+        };
+        self.reply(reply.as_bytes());
     }
 
     /// XTVERSION: reports the terminal's name and version.

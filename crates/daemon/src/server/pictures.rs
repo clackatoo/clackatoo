@@ -2,9 +2,10 @@
 //! images an editor's Markdown shows, chats' images kept in the store,
 //! and clients fetching any of them by their IDs (see `crate::images`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clackatoo_protocol::{
     BufferId, Content, Error, Event, ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo,
@@ -31,6 +32,75 @@ pub(super) struct Pictures {
     /// The clients waiting for chats' originals, written in base64 on the
     /// store's thread, by their places among their answers.
     originals: HashMap<u64, Token>,
+    /// The images each terminal's screen shows, pinned for it.
+    terminal_pins: HashMap<TerminalId, HashSet<ImageId>>,
+    /// The bytes of images being sent each terminal holds, of those that
+    /// hold any, and since when one has been sent in parts, if one is.
+    sending: HashMap<TerminalId, (u64, Option<Instant>)>,
+}
+
+impl Pictures {
+    /// The images pinned for terminal `terminal`'s screen, if any are.
+    pub(super) fn pins(&self, terminal: TerminalId) -> Option<&HashSet<ImageId>> {
+        self.terminal_pins.get(&terminal)
+    }
+
+    /// Takes the images pinned for terminal `terminal`'s screen.
+    pub(super) fn take_pins(&mut self, terminal: TerminalId) -> HashSet<ImageId> {
+        self.terminal_pins.remove(&terminal).unwrap_or_default()
+    }
+
+    /// The bytes of images being sent the terminals but `terminal` hold.
+    pub(super) fn sending_besides(&self, terminal: TerminalId) -> u64 {
+        (self.sending.iter())
+            .filter(|&(&of, _)| of != terminal)
+            .map(|(_, &(bytes, _))| bytes)
+            .sum()
+    }
+
+    /// Notes that terminal `terminal` holds `bytes` of images being sent,
+    /// and whether one is sent in parts, as at `now`.
+    pub(super) fn note_sending(
+        &mut self,
+        terminal: TerminalId,
+        bytes: u64,
+        parts: bool,
+        now: Instant,
+    ) {
+        if bytes == 0 && !parts {
+            self.sending.remove(&terminal);
+            return;
+        }
+        let entry = self.sending.entry(terminal).or_insert((0, None));
+        entry.0 = bytes;
+        entry.1 = if parts { entry.1.or(Some(now)) } else { None };
+    }
+
+    /// The terminals whose images have been sent in parts for longer than
+    /// they may be, as at `now`.
+    pub(super) fn stale_sending(&self, now: Instant) -> Vec<TerminalId> {
+        (self.sending.iter())
+            .filter(|(_, (_, since))| {
+                since.is_some_and(|since| now >= since + super::terminal_images::SENDING_WAIT)
+            })
+            .map(|(&terminal, _)| terminal)
+            .collect()
+    }
+
+    /// When the next image sent in parts is to be given up on.
+    pub(super) fn sending_due(&self) -> Option<Instant> {
+        (self.sending.values())
+            .filter_map(|&(_, since)| since)
+            .min()
+            .map(|since| since + super::terminal_images::SENDING_WAIT)
+    }
+
+    /// Says `pinned` are pinned for terminal `terminal`'s screen.
+    pub(super) fn set_pins(&mut self, terminal: TerminalId, pinned: HashSet<ImageId>) {
+        if !pinned.is_empty() {
+            self.terminal_pins.insert(terminal, pinned);
+        }
+    }
 }
 
 /// A picture pane's file, and what's shown of it.
@@ -228,6 +298,12 @@ impl Daemon {
 
     /// Lets terminal `terminal`'s images go, as it's closed: a chat's too.
     pub(super) fn forget_terminal_images(&mut self, terminal: TerminalId) {
+        for image in self.pictures.take_pins(terminal) {
+            self.images.unpin(image);
+        }
+        self.pictures.sending.remove(&terminal);
+        // What it waited for, coming later, is never kept.
+        self.images.forget_waiting(ImageFrom::Terminal(terminal));
         self.images.release(ImageFrom::Terminal(terminal));
     }
 
@@ -376,6 +452,7 @@ impl Daemon {
     /// asked. If `wait`, waits until it has done everything, as before a
     /// handover.
     pub(super) fn take_images(&mut self, wait: Option<std::time::Duration>) {
+        self.abandon_stale_sending();
         let (kept, ready) = self.images.take(wait);
         self.send_chat_originals();
         for kept in kept {
@@ -400,6 +477,11 @@ impl Daemon {
                         self.send_event(token, Event::Image(news));
                     }
                 }
+                Why::Terminal {
+                    terminal,
+                    token,
+                    file,
+                } => self.terminal_image_stored(terminal, token, file, kept.kept),
                 Why::Chat { chat, original } => match kept.kept {
                     Ok(info) => {
                         if let Some(chat_ref) = self.chat(chat)

@@ -33,6 +33,7 @@ mod marks;
 mod mouse;
 mod normal;
 mod operator;
+mod pictures;
 mod predict;
 mod requests;
 mod search;
@@ -544,6 +545,7 @@ impl Pane {
                     self.learn_links(&lines.links);
                     if let Some(screen) = &mut self.screen {
                         screen.exits.learn(&lines.marks.exits);
+                        screen.learn_pictures(&lines.pictures);
                     }
                 }
                 self.scroll = self.scroll.min(self.max_scroll());
@@ -1542,6 +1544,7 @@ mod tests {
                         first,
                         lines,
                         links: shown,
+                        pictures: clackatoo_protocol::Pictures::default(),
                         marks: clackatoo_protocol::BlockMarks::of_history(terminal, first, count),
                     })
                 }

@@ -1619,6 +1619,9 @@ impl App {
             page.place(viewport.offset_top(), viewport.height());
         }
         page.draw(&self.document, &self.state, term);
+        if let Some(watcher) = &page.images {
+            watcher.show(&page.grid, &mut self.state);
+        }
         if page.near_top() {
             self.state.older_history();
         }

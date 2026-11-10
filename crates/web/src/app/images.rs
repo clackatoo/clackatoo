@@ -123,6 +123,9 @@ impl App {
             if let Some(watcher) = self.page.as_ref().and_then(|page| page.images.as_ref()) {
                 watcher.observer.unobserve(&img);
             }
+            if let Some(watcher) = (self.term_page.as_ref()).and_then(|page| page.images.as_ref()) {
+                watcher.observer.unobserve(&img);
+            }
             if let (Some(image), Some(chat)) = (image, chat) {
                 self.state.want_image(TerminalId(chat), image, fit);
             }

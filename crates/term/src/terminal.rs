@@ -12,6 +12,9 @@ use crate::charset::Charsets;
 use crate::clipboard::{self, ClipboardRequest};
 use crate::colours::{self, Palette};
 use crate::damage::Damage;
+use crate::graphics::{
+    Graphics, GraphicsSnapshot, ImageError, ImageKept, ImageKey, ImageRequest, Picture, Virtual,
+};
 use crate::grid::Grid;
 use crate::keyboard;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
@@ -142,8 +145,141 @@ impl Terminal {
     ///
     /// Splitting a stream into calls never changes the result. An escape
     /// sequence or UTF-8 character cut in half is completed by the next call.
-    pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.emulator, bytes);
+    ///
+    /// An image the program sends needs an owner to keep it (see
+    /// [`advance_until_waiting`](Self::advance_until_waiting)): here, it's
+    /// as if it couldn't be.
+    pub fn advance(&mut self, mut bytes: &[u8]) {
+        loop {
+            let used = self.parser.advance(&mut self.emulator, bytes);
+            bytes = &bytes[used..];
+            if !self.emulator.graphics.waiting() {
+                break;
+            }
+            self.give_up_image();
+        }
+    }
+
+    /// Processes output from the program, as [`advance`](Self::advance)
+    /// does, until an image's data is all here: then it stops, and says
+    /// how many bytes it took. The owner keeps the image
+    /// ([`take_image_requests`](Self::take_image_requests)), says what
+    /// came of it ([`image_kept`](Self::image_kept)), and gives the
+    /// terminal the rest. Nothing more is taken while it waits.
+    pub fn advance_until_waiting(&mut self, bytes: &[u8]) -> usize {
+        if self.emulator.graphics.waiting() {
+            return 0;
+        }
+        self.parser.advance(&mut self.emulator, bytes)
+    }
+
+    /// Whether it waits for an image to be kept.
+    #[must_use]
+    pub fn waiting_for_image(&self) -> bool {
+        self.emulator.graphics.waiting()
+    }
+
+    /// The images to be kept, for the owner to keep and say what came of
+    /// each with [`image_kept`](Self::image_kept).
+    pub fn take_image_requests(&mut self) -> Vec<ImageRequest> {
+        self.emulator.graphics.take_requests()
+    }
+
+    /// What came of keeping the image `token` names: it's shown, and
+    /// what's waited for it goes on.
+    ///
+    /// Says whether it was the image waited for: if it wasn't, as one
+    /// given up on, the terminal holds nothing of it, and the owner lets
+    /// it go.
+    pub fn image_kept(&mut self, token: u64, result: Result<ImageKept, ImageError>) -> bool {
+        self.emulator.image_kept(token, result)
+    }
+
+    /// The bytes of images being sent that it holds now: kitty's being
+    /// sent in parts, a sixel image's, an iTerm2 image's.
+    #[must_use]
+    pub fn sending_images(&self) -> usize {
+        self.emulator.graphics.sending() + self.parser.image_osc_len()
+    }
+
+    /// Whether an image is being sent in parts, or a sixel image's data
+    /// collected: one that never ends is to be given up on
+    /// ([`abandon_sending`](Self::abandon_sending)).
+    #[must_use]
+    pub fn sending_parts(&self) -> bool {
+        self.emulator.graphics.sending_parts()
+    }
+
+    /// Gives up on the image being sent, letting go of what it holds.
+    pub fn abandon_sending(&mut self) {
+        self.emulator.graphics.abandon();
+    }
+
+    /// Lets an image being sent take no more than `bytes` now, as the
+    /// images all terminals hold leave room for.
+    pub fn set_upload_room(&mut self, bytes: usize) {
+        self.emulator.graphics.set_room(bytes);
+    }
+
+    /// Gives up waiting for an image to be kept, as if it couldn't be.
+    pub fn give_up_image(&mut self) {
+        self.emulator.graphics.take_requests();
+        if let Some(token) = self.emulator.graphics.waiting_token() {
+            self.emulator.image_kept(token, Err(ImageError::Busy));
+        }
+    }
+
+    /// The images it no longer holds, for the owner to let go of.
+    pub fn take_released_images(&mut self) -> Vec<ImageKey> {
+        self.emulator.graphics.take_released()
+    }
+
+    /// Lets it hold no more than `bytes` of images, and no image bigger.
+    pub fn set_image_limit(&mut self, bytes: u64) {
+        self.emulator.graphics.set_limit(bytes);
+        // An iTerm2 image's string, base64 and its arguments.
+        let most = usize::try_from(bytes.div_ceil(3) * 4).unwrap_or(usize::MAX);
+        self.parser.set_image_osc_len(most.saturating_add(4096));
+    }
+
+    /// The size of the part of its image each picture shows, by number.
+    pub(crate) fn picture_sizes(&self) -> std::collections::HashMap<u32, [u32; 2]> {
+        self.emulator.picture_sizes()
+    }
+
+    /// Whether it shows or keeps any image.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        self.emulator.graphics.has_images()
+    }
+
+    /// The images its screen shows, and those its placeholders may.
+    #[must_use]
+    pub fn shown_images(&self) -> std::collections::HashSet<ImageKey> {
+        self.emulator.shown_images()
+    }
+
+    /// The picture numbered `number` (see [`crate::graphics`]).
+    #[must_use]
+    pub fn picture(&self, number: u32) -> Option<&Picture> {
+        self.emulator.graphics.picture(number)
+    }
+
+    /// The virtual placements its Unicode placeholders show.
+    pub fn virtuals(&self) -> impl Iterator<Item = &Virtual> + '_ {
+        self.emulator.graphics.virtuals()
+    }
+
+    /// Its images, as plain data (see [`GraphicsSnapshot`]).
+    #[must_use]
+    pub fn graphics_snapshot(&self) -> GraphicsSnapshot {
+        self.emulator.graphics_snapshot()
+    }
+
+    /// Takes the images `snapshot` holds, after the rest of the terminal
+    /// is restored.
+    pub fn restore_graphics(&mut self, snapshot: &GraphicsSnapshot) {
+        self.emulator.restore_graphics(snapshot);
     }
 
     /// Whether a program cleared the history (`CSI 3J`, which `clear` sends)
@@ -255,6 +391,9 @@ impl Terminal {
     /// under a millisecond per thousand rows.
     pub fn compact_scrollback(&mut self) {
         self.emulator.primary.compact_scrollback();
+        if self.emulator.graphics.has_pictures() && self.emulator.sweep_due() {
+            self.emulator.sweep_pictures();
+        }
     }
 
     /// The screen being shown: the primary screen, or the alternate screen
@@ -1021,6 +1160,8 @@ pub(crate) struct Emulator {
     /// The device control string being collected, if it's a request this
     /// terminal answers (see [`crate::requests`]).
     pub(crate) request: Option<Request>,
+    /// Its images (see [`crate::graphics`]).
+    pub(crate) graphics: Graphics,
     /// The working directory the shell last reported, shared with the
     /// blocks that ran in it.
     cwd: Option<Arc<str>>,
@@ -1090,6 +1231,7 @@ impl Emulator {
             palette: None,
             cell_pixels: None,
             request: None,
+            graphics: Graphics::default(),
             cwd: None,
             blocks: Blocks::default(),
             secret: None,
@@ -1114,18 +1256,37 @@ impl Emulator {
         }
     }
 
-    fn grid_mut(&mut self) -> &mut Grid {
+    pub(crate) fn grid_mut(&mut self) -> &mut Grid {
         match self.screen {
             Screen::Primary => &mut self.primary,
             Screen::Alternate => self.alternate.as_mut().expect(ALTERNATE_EXISTS),
         }
     }
 
-    fn width(&self) -> usize {
+    /// Both screens' grids: the primary's, and the alternate's if made.
+    pub(crate) fn grids(&self) -> (&Grid, Option<&Grid>) {
+        (&self.primary, self.alternate.as_ref())
+    }
+
+    pub(crate) fn grids_mut(&mut self) -> (&mut Grid, Option<&mut Grid>) {
+        (&mut self.primary, self.alternate.as_mut())
+    }
+
+    /// How big a window draws a cell, in pixels, if one said.
+    pub(crate) fn cell_pixels(&self) -> Option<[u16; 2]> {
+        self.cell_pixels
+    }
+
+    /// Whether printing past the last column wraps.
+    pub(crate) fn autowraps(&self) -> bool {
+        self.modes.contains(Modes::AUTOWRAP)
+    }
+
+    pub(crate) fn width(&self) -> usize {
         usize::from(self.size.cols())
     }
 
-    fn height(&self) -> usize {
+    pub(crate) fn height(&self) -> usize {
         usize::from(self.size.rows())
     }
 
@@ -1830,22 +1991,26 @@ impl Emulator {
         let (width, height) = (self.width(), self.height());
         let grid = self.grid_mut();
         match mode {
+            // Erasing text leaves pictures, as in kitty.
             0 => {
                 let row = grid.edit_row(line);
                 row.fill(col..width, &blank);
                 row.set_wrapped(false);
                 for below in line + 1..height {
-                    grid.row_mut(below).reset(&blank);
+                    grid.row_mut(below).erase(&blank);
                 }
             }
             1 => {
                 for above in 0..line {
-                    grid.row_mut(above).reset(&blank);
+                    grid.row_mut(above).erase(&blank);
                 }
                 grid.edit_row(line).fill(0..col + 1, &blank);
                 grid.end_history_line();
             }
-            2 => grid.clear(&blank),
+            2 => {
+                grid.clear(&blank);
+                self.graphics.cleared();
+            }
             3 => {
                 let had_history = grid.scrollback_len() > 0;
                 grid.clear_scrollback();
@@ -2110,6 +2275,8 @@ impl Emulator {
             self.pointer_alternate = pointer::Stack::default();
         }
         self.screen = screen;
+        // The pictures the screen left showed may be forgotten.
+        self.graphics.cleared();
         // A viewer was showing the other screen.
         self.grid_mut().damage_all();
     }
@@ -2347,7 +2514,11 @@ impl Emulator {
         // So do names that are the owner's.
         let kept = (self.names_kept).then(|| (std::mem::take(&mut self.title), self.cwd.take()));
         let (palette, cell_pixels) = (self.palette, self.cell_pixels);
+        // Pictures' numbers are never reused, and what it held is let go.
+        let mut graphics = std::mem::take(&mut self.graphics);
+        graphics.reset();
         *self = Self::new(self.size, &self.config);
+        self.graphics = graphics;
         self.palette = palette;
         self.cell_pixels = cell_pixels;
         // The shell, which knows it, outlives the reset.
@@ -2658,7 +2829,7 @@ pub(crate) fn safe_reply(bytes: &[u8]) -> bool {
     let mut after_escape = false;
     bytes.iter().all(|&byte| {
         let ok = if after_escape {
-            matches!(byte, b'[' | b']' | b'P' | b'\\')
+            matches!(byte, b'[' | b']' | b'P' | b'_' | b'\\')
         } else {
             byte == 0x1B
                 || byte == 0x07

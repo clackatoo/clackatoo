@@ -219,6 +219,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         state: grid_state(),
                         lines: vec![line("$ ls"), line("Cargo.toml")],
                         links: links(),
+                        pictures: crate::Pictures::default(),
                         marks: BlockMarks::default(),
                     }),
                 }),
@@ -244,6 +245,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         state: grid_state(),
                         lines: vec![(1, line("src"))],
                         links: links(),
+                        pictures: crate::Pictures::default(),
                         marks: BlockMarks::default(),
                     },
                 ]),
@@ -274,6 +276,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     line: line("old"),
                 }],
                 links: links(),
+                pictures: crate::Pictures::default(),
                 marks: BlockMarks::default(),
             }))),
         ),
@@ -1158,6 +1161,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         state: grid_state(),
                         lines: vec![line("$ false"), line("$ true")],
                         links: links(),
+                        pictures: crate::Pictures::default(),
                         marks: marks(vec![(0, 4), (1, 5)]),
                     }),
                 }),
@@ -1172,6 +1176,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     state: grid_state(),
                     lines: vec![(2, line("$ ls"))],
                     links: links(),
+                    pictures: crate::Pictures::default(),
                     marks: marks(vec![(2, 6)]),
                 }]),
             })),
@@ -1185,6 +1190,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     line: line("$ false"),
                 }],
                 links: links(),
+                pictures: crate::Pictures::default(),
                 marks: marks(vec![(0, 4)]),
             }))),
         ),
@@ -1701,6 +1707,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     },
                     lines: Vec::new(),
                     links: links(),
+                    pictures: crate::Pictures::default(),
                     marks: BlockMarks::default(),
                 }]),
             })),
@@ -1758,6 +1765,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     },
                     lines: Vec::new(),
                     links: Vec::new(),
+                    pictures: crate::Pictures::default(),
                     marks: BlockMarks::default(),
                 }]),
             })),
@@ -1984,6 +1992,102 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             kind: PaneKind::new("editor"),
         })),
     ));
+    // A terminal's images (CLACKA-239): a picture over two lines, in a
+    // snapshot, a patch and history, and a virtual placement for kitty's
+    // Unicode placeholders.
+    let pictures = |lines: [u16; 2]| crate::Pictures {
+        pieces: vec![
+            (
+                lines[0],
+                clackatoo_term::Piece {
+                    picture: 3,
+                    col: 2,
+                    row: 0,
+                },
+            ),
+            (
+                lines[1],
+                clackatoo_term::Piece {
+                    picture: 3,
+                    col: 2,
+                    row: 1,
+                },
+            ),
+        ],
+        pictures: vec![(
+            3,
+            clackatoo_term::Picture {
+                image: [9; 16],
+                size: [25, 30],
+                crop: [0, 0, 25, 30],
+                cells: [3, 2],
+                offset: [0, 0],
+                span: [160, 96],
+                z: -1,
+            },
+        )],
+        virtuals: vec![clackatoo_term::Virtual {
+            id: 42,
+            placement: 0,
+            image: [8; 16],
+            size: [20, 10],
+            cells: [2, 1],
+        }],
+    };
+    let terminal = TerminalId(7);
+    samples.extend([
+        (
+            crate::wire::TERMINAL_IMAGES,
+            Sample::Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(View {
+                    title: String::new(),
+                    cwd: None,
+                    root: Node::Grid(GridNode {
+                        size: size(),
+                        state: grid_state(),
+                        lines: vec![line("$ icat"), line("")],
+                        links: Vec::new(),
+                        marks: BlockMarks::default(),
+                        pictures: pictures([0, 1]),
+                    }),
+                }),
+            })),
+        ),
+        (
+            crate::wire::TERMINAL_IMAGES,
+            Sample::Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: grid_state(),
+                    lines: vec![(4, line("")), (5, line(""))],
+                    links: Vec::new(),
+                    marks: BlockMarks::default(),
+                    pictures: pictures([4, 5]),
+                }]),
+            })),
+        ),
+        (
+            crate::wire::TERMINAL_IMAGES,
+            Sample::Server(ServerMessage::Response(Response::History(HistoryLines {
+                first: 12,
+                lines: vec![
+                    HistoryLine {
+                        width: 80,
+                        line: line(""),
+                    },
+                    HistoryLine {
+                        width: 80,
+                        line: line(""),
+                    },
+                ],
+                links: Vec::new(),
+                marks: BlockMarks::default(),
+                pictures: pictures([0, 1]),
+            }))),
+        ),
+    ]);
     samples
 }
 
@@ -3339,6 +3443,7 @@ fn more() -> Vec<Sample> {
                 state: grid_state(),
                 lines: vec![line("x")],
                 links: links(),
+                pictures: crate::Pictures::default(),
                 marks: BlockMarks::default(),
             }),
         })),
@@ -3973,6 +4078,7 @@ fn more() -> Vec<Sample> {
                     },
                 )],
                 links: Vec::new(),
+                pictures: crate::Pictures::default(),
                 marks: BlockMarks::default(),
             }]),
         }),

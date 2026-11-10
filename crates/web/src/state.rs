@@ -2186,6 +2186,7 @@ mod tests {
                         ..clackatoo_protocol::GridState::default()
                     },
                     lines: vec![clackatoo_protocol::Line::default(); usize::from(size.rows())],
+                    pictures: clackatoo_protocol::Pictures::default(),
                     marks: clackatoo_protocol::BlockMarks::default(),
                     links: Vec::new(),
                 }),

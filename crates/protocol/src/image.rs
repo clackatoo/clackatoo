@@ -269,7 +269,7 @@ pub fn dropped_words(limit: u64) -> String {
 /// copied: its size, never its bytes.
 #[must_use]
 pub fn image_words(width: u32, height: u32) -> String {
-    format!("[image {width}×{height}]")
+    clackatoo_term::graphics::words(width, height)
 }
 
 #[cfg(test)]

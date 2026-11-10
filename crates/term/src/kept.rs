@@ -7,7 +7,9 @@
 //! Lines keep their text and styles (colours, attributes, underlines),
 //! but not links or a shell's marks, and the hints of how private they
 //! are (see [`crate::hints`]): a line never to be written to disk is left
-//! out, a placeholder in its place.
+//! out, a placeholder in its place. Pictures aren't kept: each is its size
+//! in words where it started (see [`crate::graphics::words`]), as copied
+//! text says it.
 //!
 //! [`KeptLines`] is a file format: frozen, as [`crate::Snapshot`] is.
 
@@ -28,6 +30,8 @@ use serde::{Deserialize, Serialize};
 pub struct KeptCopy {
     history: Scrollback,
     screen: Vec<Row>,
+    /// The size of each picture its lines may show, in pixels, by number.
+    pictures: std::collections::HashMap<u32, [u32; 2]>,
 }
 
 /// Lines kept across a restart, oldest first, as plain data: what's
@@ -72,7 +76,12 @@ impl Terminal {
     #[must_use]
     pub fn copy_to_keep(&self, most: usize) -> KeptCopy {
         let (history, screen) = self.primary().copy_newest(most);
-        KeptCopy { history, screen }
+        let pictures = self.picture_sizes();
+        KeptCopy {
+            history,
+            screen,
+            pictures,
+        }
     }
 
     /// Takes `kept` as this terminal's history, if it has none yet, nor
@@ -103,6 +112,23 @@ impl Terminal {
 }
 
 impl KeptCopy {
+    /// `row`, its pictures that start on it among `pieces` said in words
+    /// where they start, if any do.
+    fn pictures_said(&self, row: &Row, pieces: &[crate::graphics::Piece]) -> Option<Row> {
+        let mut said: Option<Row> = None;
+        for piece in pieces.iter().filter(|piece| piece.row == 0) {
+            let Some(&[width, height]) = self.pictures.get(&piece.picture) else {
+                continue;
+            };
+            let row = said.get_or_insert_with(|| row.clone());
+            let words = crate::graphics::words(width, height);
+            for (col, ch) in (usize::from(piece.col)..row.width()).zip(words.chars()) {
+                row.write(col, ch, false, &Style::DEFAULT);
+            }
+        }
+        said
+    }
+
     /// The copy's lines, oldest first, the screen's last blank rows left
     /// out, as plain data, taking no more than `most_bytes` with what
     /// frames each line, the oldest let go first, and only those `keeping`
@@ -130,7 +156,18 @@ impl KeptCopy {
         let widths = self.history.widths();
         let mut lines = Vec::new();
         let mut placeholder = false;
+        let mut pieces = self.history.pieces_from(0).peekable();
         let mut push = |number: u64, hints: Hints, row: &Row| {
+            // History's pictures are beside its rows; the screen's in them.
+            let mut starting = Vec::new();
+            while let Some((line, piece)) = pieces.next_if(|&(line, _)| line <= number) {
+                if line == number {
+                    starting.push(piece);
+                }
+            }
+            starting.extend(row.pieces().iter().copied());
+            let said = self.pictures_said(row, &starting);
+            let row = said.as_ref().unwrap_or(row);
             if number < keeping.from || keeping.marked_only && !hints.contains(Hints::KEPT) {
                 return;
             }

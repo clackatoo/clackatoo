@@ -236,7 +236,7 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
   -webkit-user-select: text;
   user-select: text;
 }
-.grid .r { height: 1.45em; }
+.grid .r { height: 1.45em; position: relative; }
 .history.hidden { display: none; }
 .history .r { opacity: 0.92; }
 .grid .w { display: inline-block; width: 2ch; }

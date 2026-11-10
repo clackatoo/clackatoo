@@ -88,6 +88,10 @@ pub struct History {
     /// The lines held that end the line of a failed command's prompt,
     /// with its exit status.
     marks: BTreeMap<u64, i32>,
+    /// The pieces of pictures the lines held show, by line (CLACKA-239).
+    pieces: BTreeMap<u64, Vec<clackatoo_term::Piece>>,
+    /// The pictures those are pieces of, by number.
+    pictures: BTreeMap<u32, clackatoo_term::Picture>,
 }
 
 impl History {
@@ -109,7 +113,17 @@ impl History {
         self.asked = None;
         self.prompts.clear();
         self.marks.clear();
+        self.pieces.clear();
+        self.pictures.clear();
         self.generation += 1;
+    }
+
+    /// The pieces of pictures line `line` shows, each with its picture.
+    #[must_use]
+    pub fn pictures(&self, line: u64) -> Vec<(clackatoo_term::Piece, clackatoo_term::Picture)> {
+        (self.pieces.get(&line).into_iter().flatten())
+            .filter_map(|&piece| Some((piece, *self.pictures.get(&piece.picture)?)))
+            .collect()
     }
 
     /// The exit status line `line` is marked with, if it ends the line of
@@ -171,6 +185,9 @@ pub struct OpenTerminal {
     /// The screen's rows that end the line of a failed command's prompt,
     /// with its exit status.
     marks: BTreeMap<u16, i32>,
+    /// The virtual placements kitty's Unicode placeholders show, as the
+    /// daemon last said (CLACKA-239).
+    pub virtuals: Vec<clackatoo_term::Virtual>,
 }
 
 impl OpenTerminal {
@@ -188,6 +205,7 @@ impl OpenTerminal {
             },
             fit: Fit::Off,
             ctrl: false,
+            virtuals: Vec::new(),
             refused: 0,
             paused: false,
             fit_asked: 0.0,
@@ -214,6 +232,7 @@ impl OpenTerminal {
                 self.exits.clear();
                 if let Some(grid) = view.grid() {
                     learn(&mut self.exits, &grid.marks.exits);
+                    self.virtuals.clone_from(&grid.pictures.virtuals);
                 }
                 self.dirty.all = true;
                 self.dirty.header = true;
@@ -236,8 +255,16 @@ impl OpenTerminal {
                 for patch in &patches {
                     match patch {
                         Patch::Title(_) | Patch::Cwd(_) => self.dirty.header = true,
-                        Patch::Grid { lines, marks, .. } => {
+                        Patch::Grid {
+                            lines,
+                            marks,
+                            pictures,
+                            ..
+                        } => {
                             self.dirty.rows.extend(lines.iter().map(|&(row, _)| row));
+                            if !pictures.virtuals.is_empty() {
+                                self.virtuals.clone_from(&pictures.virtuals);
+                            }
                             // Before the view takes them in, as it keeps
                             // only those of blocks whose prompts it shows.
                             learn(&mut self.exits, &marks.exits);
@@ -352,6 +379,16 @@ impl OpenTerminal {
         if older || came.first == history.end() {
             history.prompts.extend(prompts);
             learn(&mut self.exits, &came.marks.exits);
+            for &(line, piece) in &came.pictures.pieces {
+                let line = came.first + u64::from(line);
+                history.pieces.entry(line).or_default().push(piece);
+            }
+            history
+                .pictures
+                .extend(came.pictures.pictures.iter().copied());
+            if !came.pictures.virtuals.is_empty() {
+                self.virtuals.clone_from(&came.pictures.virtuals);
+            }
         }
         if older {
             // Fewer than asked for: the daemon holds no older ones.
@@ -507,6 +544,7 @@ mod tests {
                 },
                 lines: vec![Line::default(); usize::from(size.rows())],
                 links: Vec::new(),
+                pictures: clackatoo_protocol::Pictures::default(),
                 marks: clackatoo_protocol::BlockMarks::default(),
             }),
         })
@@ -518,6 +556,7 @@ mod tests {
             state,
             lines,
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: clackatoo_protocol::BlockMarks::default(),
         }])
     }
@@ -525,6 +564,7 @@ mod tests {
     fn history(first: u64, count: u64) -> HistoryLines {
         HistoryLines {
             first,
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: clackatoo_protocol::BlockMarks::default(),
             lines: (first..first + count)
                 .map(|n| HistoryLine {
@@ -747,6 +787,7 @@ mod tests {
             state,
             lines: vec![(2, line("$"))],
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: marks(&[(2, 2)], &[(1, 2)]),
         }]));
         assert_eq!(failed_rows(&term), [(0, 2)]);
@@ -759,6 +800,7 @@ mod tests {
             state,
             lines: vec![(0, line("x"))],
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: BlockMarks::default(),
         }]));
         assert_eq!(failed_rows(&term), []);
@@ -770,6 +812,7 @@ mod tests {
     fn history_of(first: u64, lines: &[&str], marks: BlockMarks) -> HistoryLines {
         HistoryLines {
             first,
+            pictures: clackatoo_protocol::Pictures::default(),
             marks,
             lines: (lines.iter())
                 .map(|text| HistoryLine {
@@ -812,6 +855,7 @@ mod tests {
             },
             lines: vec![(2, line("$"))],
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: marks(&[(2, 6)], &[(5, 127)]),
         }]));
         assert_eq!(failed(&term), [(0, 1), (2, 2), (3, 127)]);
@@ -842,6 +886,7 @@ mod tests {
                 state,
                 lines,
                 links: Vec::new(),
+                pictures: clackatoo_protocol::Pictures::default(),
                 marks,
             }])
         };

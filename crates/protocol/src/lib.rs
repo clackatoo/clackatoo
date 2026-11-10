@@ -147,7 +147,7 @@ pub use review::{
 pub use shown::invisible;
 pub use view::{
     AgentTerminal, BlockMarks, CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line,
-    LinkTarget, Links, Node, NodeId, Patch, Restarted, Run, View, ViewUpdate,
+    LinkTarget, Links, Node, NodeId, Patch, Pictures, Restarted, Run, View, ViewUpdate,
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
@@ -158,7 +158,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 149;
+pub const PROTOCOL_VERSION: u32 = 151;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

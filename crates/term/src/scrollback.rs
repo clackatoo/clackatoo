@@ -29,6 +29,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, StyleIndex};
+use crate::graphics::Piece;
 use crate::hints::Hints;
 use crate::row::{Row, RowBuilder};
 use crate::snapshot::{self, Captured, Line};
@@ -106,6 +107,9 @@ pub(crate) struct Scrollback {
     /// The held lines with hints of how private they are (see
     /// [`crate::hints`]), by number, oldest first.
     hints: VecDeque<(u64, Hints)>,
+    /// The pieces of pictures held lines show (see [`crate::graphics`]),
+    /// by line, oldest first.
+    pieces: VecDeque<(u64, Piece)>,
     /// The line that says where history kept from before a restart of the
     /// daemon ends, and when the restart was, in seconds since 1970 (see
     /// [`crate::kept`]), until history is cleared.
@@ -170,6 +174,7 @@ impl Scrollback {
             style_indices: StyleIndices::default(),
             marks: VecDeque::new(),
             hints: VecDeque::new(),
+            pieces: VecDeque::new(),
             restarted: None,
             widths: Widths::LEGACY,
         }
@@ -208,6 +213,9 @@ impl Scrollback {
         if !hints.is_empty() {
             self.hints.push_back((self.stored, hints));
         }
+        for piece in row.take_pieces() {
+            self.pieces.push_back((self.stored, piece));
+        }
         self.stored += 1;
         let mut spare = None;
         if self.compaction == Compaction::Eager {
@@ -229,6 +237,9 @@ impl Scrollback {
             }
             while self.hints.front().is_some_and(|&(line, _)| line < first) {
                 self.hints.pop_front();
+            }
+            while self.pieces.front().is_some_and(|&(line, _)| line < first) {
+                self.pieces.pop_front();
             }
         }
         spare
@@ -293,6 +304,15 @@ impl Scrollback {
                         .map_or(Hints::empty(), |(_, hints)| hints),
                 );
             }
+            let mut pieces = Vec::new();
+            while let Some(&(line, piece)) = self.pieces.back()
+                && line == self.stored
+            {
+                pieces.push(piece);
+                self.pieces.pop_back();
+            }
+            pieces.reverse();
+            row.set_pieces(pieces);
             rows.push(row);
         }
         if self.restarted.is_some_and(|(line, _)| line >= self.stored) {
@@ -392,7 +412,35 @@ impl Scrollback {
         self.raw_cells = 0;
         self.marks = VecDeque::new();
         self.hints = VecDeque::new();
+        self.pieces = VecDeque::new();
         self.restarted = None;
+    }
+
+    /// The pieces of pictures the held lines numbered `first` or later
+    /// show, by line, oldest first, found by halving rather than walked to.
+    pub(crate) fn pieces_from(&self, first: u64) -> impl Iterator<Item = (u64, Piece)> + '_ {
+        let start = self.pieces.partition_point(|&(line, _)| line < first);
+        self.pieces.range(start..).copied()
+    }
+
+    /// Makes `pieces` the pieces of pictures held lines show, by line,
+    /// oldest first. Those of lines not held are left out.
+    pub(crate) fn set_pieces(&mut self, pieces: impl IntoIterator<Item = (u64, Piece)>) {
+        let held = self.first()..self.stored;
+        self.pieces = pieces
+            .into_iter()
+            .filter(|(line, _)| held.contains(line))
+            .collect();
+    }
+
+    /// How many pieces of pictures the held lines show.
+    pub(crate) fn pieces_len(&self) -> usize {
+        self.pieces.len()
+    }
+
+    /// Keeps only the pieces `keep` says to.
+    pub(crate) fn retain_pieces(&mut self, mut keep: impl FnMut(&Piece) -> bool) {
+        self.pieces.retain(|(_, piece)| keep(piece));
     }
 
     /// See [`Scrollback::restarted`](Self#structfield.restarted).
@@ -501,6 +549,7 @@ impl Scrollback {
             style_indices: StyleIndices::default(),
             marks: VecDeque::new(),
             hints: self.hints_from(first).collect(),
+            pieces: self.pieces_from(first).collect(),
             restarted: None,
             widths: self.widths,
         }

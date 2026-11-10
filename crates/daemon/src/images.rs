@@ -20,7 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{Cursor, Read as _};
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -29,6 +29,12 @@ use clackatoo_protocol::{
 };
 
 use crate::regular::{self, Links};
+
+mod terminal;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) use terminal::bytes_of as terminal_bytes;
+pub(crate) use terminal::{error_of, in_file};
 
 /// A mebibyte.
 pub(crate) const MIB: u64 = 1024 * 1024;
@@ -62,6 +68,16 @@ const READ_QUEUE: usize = 64;
 /// given up on: a reader that hangs past it keeps its place until it
 /// comes back, but nothing waits for it.
 const READ_WAIT: Duration = Duration::from_secs(10);
+
+/// How many threads keep terminals' images, apart from the store's own
+/// thread, so a terminal's image taking long holds up neither chats'
+/// images nor copies for windows.
+const TERMINAL_WORKERS: usize = 2;
+
+/// How long a terminal's image is waited for, kept or waiting to be,
+/// before the terminal goes on without it: it waits for it, and nothing
+/// it prints shows meanwhile.
+const TERMINAL_WAIT: Duration = READ_WAIT;
 
 /// How many bytes sent to be kept may be on their way to the thread at
 /// once: past that, more are refused until it catches up.
@@ -157,6 +173,8 @@ pub(crate) enum Source {
         /// The pixels.
         rgba: Vec<u8>,
     },
+    /// What a terminal's program sent (see [`terminal`]).
+    Terminal(clackatoo_term::ImageSource),
     /// For tests: a file that takes this long to read, as one on a mount
     /// gone away hangs, then isn't there.
     #[cfg(test)]
@@ -174,7 +192,10 @@ impl Source {
         if matches!(self, Self::Hang(_) | Self::Panics(true)) {
             return true;
         }
-        matches!(self, Self::File(_) | Self::Below { .. })
+        match self {
+            Self::Terminal(source) => terminal::in_file(source),
+            _ => matches!(self, Self::File(_) | Self::Below { .. }),
+        }
     }
 
     /// About how many bytes it holds on its way to the thread.
@@ -183,6 +204,7 @@ impl Source {
             Self::Bytes(bytes) => bytes.len() as u64,
             Self::Base64(data) => data.len() as u64,
             Self::Pixels { rgba, .. } => rgba.len() as u64,
+            Self::Terminal(source) => terminal::weight(source),
             Self::File(_) | Self::Below { .. } => 0,
             #[cfg(test)]
             Self::Hang(_) | Self::Panics(_) => 0,
@@ -201,6 +223,16 @@ pub(crate) enum Why {
         buffer: BufferId,
         /// The path.
         path: String,
+    },
+    /// An image a terminal's program sent, which it waits for, by the
+    /// token it asked with.
+    Terminal {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The token.
+        token: u64,
+        /// Whether it was in a file.
+        file: bool,
     },
     /// The original of a chat's thumbnail with this handle.
     Chat {
@@ -254,8 +286,22 @@ enum Job {
     Encode { asker: u64, bytes: Arc<[u8]> },
 }
 
+/// A terminal's image for its threads to keep (see [`TERMINAL_WORKERS`]),
+/// given up on past `due`.
+struct TerminalJob {
+    job: u64,
+    source: Source,
+    most: u64,
+    due: Instant,
+}
+
 /// What the store's thread, or a reader, did.
 enum Done {
+    /// A terminal's thread kept job `job`'s image, or didn't.
+    Terminal {
+        job: u64,
+        kept: Result<(ImageInfo, Arc<[u8]>), String>,
+    },
     /// A reader read, looked at and hashed the file of read `read`.
     Read {
         read: u64,
@@ -370,6 +416,19 @@ pub(crate) struct Images<T> {
     next_read: u64,
     /// How long a file is waited for: [`READ_WAIT`], less in tests.
     read_wait: Duration,
+    /// Terminals' images for their own threads, once started.
+    terminal_jobs: Option<mpsc::Sender<TerminalJob>>,
+    /// Those not done yet, by job, each with what it's for and when it's
+    /// given up on.
+    terminal_pending: HashMap<u64, (Why, ImageFrom, Instant)>,
+    /// The bytes each job not taken back yet holds on its way, those given
+    /// up on among them.
+    terminal_weights: HashMap<u64, u64>,
+    /// The number the next job gets.
+    next_terminal_job: u64,
+    /// How long a terminal's image is waited for: [`TERMINAL_WAIT`], less
+    /// in tests.
+    terminal_wait: Duration,
     waker: Option<Arc<mio::Waker>>,
 }
 
@@ -422,6 +481,11 @@ impl<T: Clone + PartialEq> Images<T> {
             readers: 0,
             next_read: 0,
             read_wait: READ_WAIT,
+            terminal_jobs: None,
+            terminal_pending: HashMap::new(),
+            terminal_weights: HashMap::new(),
+            next_terminal_job: 0,
+            terminal_wait: TERMINAL_WAIT,
             waker,
         }
     }
@@ -445,8 +509,8 @@ impl<T: Clone + PartialEq> Images<T> {
                 return Err("too many files to read at once: try again in a moment".into());
             }
             self.next_read += 1;
-            // Waiting its turn, as long as three reads may take.
-            let due = Instant::now() + 3 * self.read_wait;
+            // Waiting its turn counts against the time it's waited for.
+            let due = Instant::now() + self.read_wait;
             let read = ToRead {
                 why,
                 owner,
@@ -462,6 +526,9 @@ impl<T: Clone + PartialEq> Images<T> {
             return Err("too many images at once: try again in a moment".into());
         }
         let most = self.limits.per_owner;
+        if matches!(why, Why::Terminal { .. }) {
+            return self.keep_for_terminal(owner, why, source, weight);
+        }
         self.send(Job::Keep {
             why,
             owner,
@@ -470,6 +537,87 @@ impl<T: Clone + PartialEq> Images<T> {
         })?;
         self.on_the_way += weight;
         Ok(())
+    }
+
+    /// Has a terminal's image kept on the terminals' own threads, given up
+    /// on, as not kept, if it isn't by [`TERMINAL_WAIT`] from now.
+    fn keep_for_terminal(
+        &mut self,
+        owner: ImageFrom,
+        why: Why,
+        source: Source,
+        weight: u64,
+    ) -> Result<(), String> {
+        if self.terminal_jobs.is_none() {
+            let (jobs, receive) = mpsc::channel::<TerminalJob>();
+            let receive = Arc::new(Mutex::new(receive));
+            for _ in 0..TERMINAL_WORKERS {
+                let (receive, done, waker) = (
+                    Arc::clone(&receive),
+                    self.done.0.clone(),
+                    self.waker.clone(),
+                );
+                std::thread::Builder::new()
+                    .name("terminal-images".into())
+                    .spawn(move || {
+                        loop {
+                            let next = receive.lock().map(|receive| receive.recv());
+                            let Ok(Ok(job)) = next else {
+                                break;
+                            };
+                            let TerminalJob {
+                                job,
+                                source,
+                                most,
+                                due,
+                            } = job;
+                            // Given up on while it waited: not even begun.
+                            let kept = if Instant::now() >= due {
+                                Err("it took too long".to_owned())
+                            } else {
+                                unpanicking(|| {
+                                    read_source(source, most).and_then(|bytes| examine(bytes, most))
+                                })
+                            };
+                            if done.send(Done::Terminal { job, kept }).is_err() {
+                                break;
+                            }
+                            if let Some(waker) = &waker {
+                                let _ = waker.wake();
+                            }
+                        }
+                    })
+                    .map_err(|err| {
+                        format!("couldn't start the terminals' images' threads: {err}")
+                    })?;
+            }
+            self.terminal_jobs = Some(jobs);
+        }
+        self.next_terminal_job += 1;
+        let job = self.next_terminal_job;
+        let due = Instant::now() + self.terminal_wait;
+        let most = self.limits.per_owner;
+        let sent = TerminalJob {
+            job,
+            source,
+            most,
+            due,
+        };
+        let jobs = self.terminal_jobs.as_ref().expect("started above");
+        jobs.send(sent)
+            .map_err(|_| "the terminals' images' threads have stopped".to_owned())?;
+        self.on_the_way += weight;
+        self.terminal_weights.insert(job, weight);
+        self.terminal_pending.insert(job, (why, owner, due));
+        Ok(())
+    }
+
+    /// Forgets what `owner` waits for, as a terminal gone: what comes of
+    /// it is let go, never kept.
+    pub(crate) fn forget_waiting(&mut self, owner: ImageFrom) {
+        self.terminal_pending.retain(|_, (_, of, _)| *of != owner);
+        self.reading.retain(|_, (_, of, _)| *of != owner);
+        self.to_read.retain(|(_, to_read)| to_read.owner != owner);
     }
 
     /// Whether there's work on the thread not taken back yet.
@@ -488,7 +636,7 @@ impl<T: Clone + PartialEq> Images<T> {
                 why,
                 owner,
                 source,
-                due: _,
+                due: to_read_due,
             } = to_read;
             let (done, waker) = (self.done.0.clone(), self.waker.clone());
             let most = self.limits.per_owner;
@@ -506,8 +654,8 @@ impl<T: Clone + PartialEq> Images<T> {
             match spawned {
                 Ok(_) => {
                     self.readers += 1;
-                    let due = Instant::now() + self.read_wait;
-                    self.reading.insert(read, (why, owner, due));
+                    // The time it waited its turn counts.
+                    self.reading.insert(read, (why, owner, to_read_due));
                 }
                 Err(err) => {
                     let why_not = format!("couldn't start reading it: {err}");
@@ -526,6 +674,7 @@ impl<T: Clone + PartialEq> Images<T> {
     pub(crate) fn next_due(&self) -> Option<Instant> {
         (self.reading.values().map(|&(.., due)| due))
             .chain(self.to_read.iter().map(|(_, to_read)| to_read.due))
+            .chain(self.terminal_pending.values().map(|&(.., due)| due))
             .min()
     }
 
@@ -566,6 +715,17 @@ impl<T: Clone + PartialEq> Images<T> {
         let mut ready = Vec::new();
         let until = wait.map(|wait| Instant::now() + wait);
         while let Some(done) = self.next_done(until) {
+            if let Done::Terminal { job, kept: result } = done {
+                let weight = self.terminal_weights.remove(&job).unwrap_or(0);
+                self.on_the_way = self.on_the_way.saturating_sub(weight);
+                // Given up on meanwhile: nothing waits for it, so it isn't
+                // kept.
+                if let Some((why, owner, _)) = self.terminal_pending.remove(&job) {
+                    let result = result.and_then(|(info, bytes)| self.insert(owner, info, bytes));
+                    kept.push(Kept { why, kept: result });
+                }
+                continue;
+            }
             match done {
                 Done::Read { read, kept: result } => {
                     self.readers = self.readers.saturating_sub(1);
@@ -581,7 +741,7 @@ impl<T: Clone + PartialEq> Images<T> {
                 _ => self.pending = self.pending.saturating_sub(1),
             }
             match done {
-                Done::Read { .. } => {}
+                Done::Read { .. } | Done::Terminal { .. } => {}
                 Done::Kept {
                     why,
                     owner,
@@ -667,7 +827,10 @@ impl<T: Clone + PartialEq> Images<T> {
     /// What the thread or a reader has done next, if anything: waiting
     /// for it until `until`, if there's work out.
     fn next_done(&self, until: Option<Instant>) -> Option<Done> {
-        let working = self.pending > 0 || !self.reading.is_empty() || !self.to_read.is_empty();
+        let working = self.pending > 0
+            || !self.reading.is_empty()
+            || !self.to_read.is_empty()
+            || !self.terminal_pending.is_empty();
         match until {
             Some(until) if working => {
                 let left = until.saturating_duration_since(Instant::now());
@@ -681,6 +844,19 @@ impl<T: Clone + PartialEq> Images<T> {
     /// every one: said as not kept, for their owners to act on.
     fn give_up_reading(&mut self, all: bool, kept: &mut Vec<Kept>) {
         let now = Instant::now();
+        let late: Vec<u64> = (self.terminal_pending.iter())
+            .filter(|&(_, &(.., due))| all || due <= now)
+            .map(|(&job, _)| job)
+            .collect();
+        for job in late {
+            if let Some((why, ..)) = self.terminal_pending.remove(&job) {
+                let kept_not = Err("it took too long".to_owned());
+                kept.push(Kept {
+                    why,
+                    kept: kept_not,
+                });
+            }
+        }
         let late: Vec<u64> = (self.reading.iter())
             .filter(|&(_, &(.., due))| all || due <= now)
             .map(|(&read, _)| read)
@@ -864,6 +1040,12 @@ impl<T: Clone + PartialEq> Images<T> {
             self.dropped.pop_front();
         }
         self.dropped.push_back((id, limit));
+    }
+
+    /// Lets `owner` go of image `id`, as a terminal does once nothing it
+    /// shows or keeps holds it: it goes if nobody else holds it.
+    pub(crate) fn let_go(&mut self, owner: ImageFrom, id: ImageId) {
+        self.let_go_of_quietly(id, owner);
     }
 
     /// Lets every image `owner` holds go, as it's closed: those nobody
@@ -1233,6 +1415,7 @@ fn read_source(source: Source, most: u64) -> Result<Vec<u8>, String> {
             height,
             rgba,
         } => png_of(width, height, &rgba)?,
+        Source::Terminal(source) => terminal::bytes_of(source, most)?,
         #[cfg(test)]
         Source::Hang(wait) => {
             std::thread::sleep(wait);
@@ -1803,6 +1986,84 @@ mod tests {
         }
         let hang = Source::Hang(Duration::from_millis(200));
         assert!(store.keep(CHAT, Why::Test(999), hang).is_err());
+    }
+
+    /// A terminal's image of `png`'s bytes, as iTerm2 sends one.
+    fn sent(png: &[u8]) -> Source {
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        Source::Terminal(clackatoo_term::ImageSource::Encoded(data.into_bytes()))
+    }
+
+    fn for_terminal(token: u64) -> Why {
+        Why::Terminal {
+            terminal: TerminalId(1),
+            token,
+            file: false,
+        }
+    }
+
+    #[test]
+    fn a_terminals_image_is_kept_on_threads_of_its_own_in_time_or_given_up_on() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store
+            .keep(CHAT, for_terminal(1), sent(&png(3, 2, 1)))
+            .unwrap();
+        let (kept, _) = store.take(Some(WAIT));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kept.as_ref().map(|info| info.width), Ok(3));
+        assert!(store.next_due().is_none());
+        // Given up on past its time: said not kept, and never kept after.
+        store.terminal_wait = Duration::ZERO;
+        store
+            .keep(CHAT, for_terminal(2), sent(&png(4, 4, 2)))
+            .unwrap();
+        let (kept, _) = store.take(Some(WAIT));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kept, Err("it took too long".to_owned()));
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = store.take(Some(Duration::from_millis(100)));
+        assert_eq!(store.bytes(Some(CHAT)), kept_bytes(&store, 3));
+    }
+
+    /// The bytes `CHAT` holds, the 3 by 2 image the test above kept.
+    fn kept_bytes(store: &Images<u32>, width: u32) -> u64 {
+        (store.entries.values())
+            .filter(|entry| entry.info.width == width)
+            .map(|entry| entry.info.bytes)
+            .sum()
+    }
+
+    #[test]
+    fn what_a_terminal_gone_waited_for_is_never_kept() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store
+            .keep(CHAT, for_terminal(1), sent(&png(5, 5, 3)))
+            .unwrap();
+        store.forget_waiting(CHAT);
+        let (kept, _) = store.take(Some(Duration::from_millis(500)));
+        assert!(kept.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        let (kept, _) = store.take(Some(Duration::from_millis(100)));
+        assert!(kept.is_empty());
+        assert_eq!(store.bytes(Some(CHAT)), 0);
+        assert_eq!(store.on_the_way, 0);
+    }
+
+    #[test]
+    fn a_file_waiting_behind_others_is_waited_for_no_longer_in_all() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store.read_wait = Duration::from_millis(100);
+        for n in 0..=READERS {
+            let n = u32::try_from(n).unwrap();
+            let hang = Source::Hang(Duration::from_secs(2));
+            store.keep(CHAT, Why::Test(n), hang).unwrap();
+        }
+        // The last waits its turn: it's given up on as the others are,
+        // its time counted from when it was asked for.
+        std::thread::sleep(Duration::from_millis(150));
+        let (kept, _) = store.take(None);
+        assert_eq!(kept.len(), READERS + 1);
+        assert!(kept.iter().all(|kept| kept.kept.is_err()));
     }
 
     #[test]

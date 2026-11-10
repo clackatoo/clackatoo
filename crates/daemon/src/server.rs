@@ -32,7 +32,7 @@ use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     BlockMarks, BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine,
     HistoryLines, Line, LinkTarget, Machine, MachineId, NodeId, PROTOCOL_VERSION, Pane, PaneId,
-    PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size, TabId, TerminalId,
+    PaneTerminal, Patch, Pictures, Request, Response, ServerMessage, Side, Size, TabId, TerminalId,
     TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
@@ -98,6 +98,7 @@ mod shutdown;
 mod signs;
 mod stopping;
 mod symbols;
+mod terminal_images;
 mod tools;
 mod trust;
 mod turn_undo;
@@ -941,6 +942,16 @@ impl Subscription {
         } else {
             BlockMarks::default()
         };
+        // And only one that draws them, what pictures the lines show.
+        let pictures = if wire::daemon_has(wire, wire::TERMINAL_IMAGES) {
+            Pictures::of_rows(
+                damaged.iter().map(|&line| (line, row(line))),
+                terminal,
+                false,
+            )
+        } else {
+            Pictures::default()
+        };
         if !lines.is_empty() || state != self.state || !marks.exits.is_empty() {
             self.state = state;
             let shown = LinkTarget::of(lines.iter().map(|(_, line)| line), terminal);
@@ -949,6 +960,7 @@ impl Subscription {
                 state,
                 lines,
                 links: shown,
+                pictures,
                 marks,
             });
         }
@@ -1442,6 +1454,13 @@ impl Daemon {
                 pty.restore_asked(&asked.asked);
             }
         }
+        // The images they show and keep, the store's already.
+        for graphics in &state.graphics {
+            let slot = daemon.terminals.get_mut(&TerminalId(graphics.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.restore_graphics(&graphics.graphics);
+            }
+        }
         // What the user marked them with.
         for marks in &state.marks {
             let slot = daemon.terminals.get_mut(&TerminalId(marks.terminal));
@@ -1719,6 +1738,8 @@ impl Daemon {
         // chats name them.
         self.keep_chat_images();
         self.take_images(Some(HANDOVER_IMAGES_WAIT));
+        // Terminals still waiting for theirs go on without them.
+        self.give_up_terminal_images();
         let mut chat_images = Vec::new();
         // Agents' changes to big files still being worked out go into the
         // edit log first, so the next build has them.
@@ -1747,6 +1768,7 @@ impl Daemon {
         let mut asked = Vec::new();
         let mut histories = Vec::new();
         let mut marks = Vec::new();
+        let mut graphics = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
@@ -1779,7 +1801,15 @@ impl Daemon {
                     let phone = terminal.phone();
                     let widths = terminal.emulator().widths();
                     let margins = terminal.emulator().margins();
+                    let images = (terminal.emulator().has_images())
+                        .then(|| terminal.emulator().graphics_snapshot());
                     let (terminal, shell) = terminal.hand_over(&mut fds);
+                    if let Some(images) = images {
+                        graphics.push(handover::Graphics {
+                            terminal: terminal.id,
+                            graphics: images,
+                        });
+                    }
                     marks.push(handover::Marks {
                         terminal: terminal.id,
                         phone,
@@ -1972,6 +2002,7 @@ impl Daemon {
                 marks,
                 forwards,
                 direct_asks,
+                graphics,
             },
             fds,
             version: handover::VERSION,
@@ -2096,6 +2127,7 @@ impl Daemon {
                     .chain(self.next_grace_due())
                     .chain(self.held_until())
                     .chain(self.images.next_due())
+                    .chain(self.pictures.sending_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -2564,6 +2596,10 @@ impl Daemon {
             next = now + every;
             others_ready(poll, waiting, sources, unread, own)
         };
+        // The program's last output isn't held for an image.
+        if reading == Reading::Last {
+            terminal.give_up_images();
+        }
         let outcome = terminal.read_output(&mut self.buffer, budget, stop);
         match outcome {
             ReadOutcome::Drained => {}
@@ -2584,6 +2620,14 @@ impl Daemon {
         if outcome == ReadOutcome::BudgetExhausted && reading == Reading::Look {
             return;
         }
+        self.output_taken(id);
+    }
+
+    /// Acts on what terminal `id`'s emulator took in: images to keep,
+    /// clipboard requests, notices, history to compact, and the lines it
+    /// changed, for its viewers.
+    fn output_taken(&mut self, id: TerminalId) {
+        self.terminal_images(id);
         self.serve_clipboard(id);
         self.serve_notice(id);
         self.schedule_compaction(id);
@@ -5113,6 +5157,7 @@ fn history(terminal: &Terminal, end: u64, count: u16, wire: u32) -> HistoryLines
         first,
         links: LinkTarget::of(lines.iter().map(|line| &line.line), terminal),
         lines,
+        pictures: Pictures::of_history(terminal, first, count),
         marks: BlockMarks::of_history(terminal, first, count),
     }
 }

@@ -794,8 +794,8 @@ mod queries {
 
     #[test]
     fn primary_device_attributes() {
-        assert_eq!(replies("\x1b[c"), "\x1b[?62;22c");
-        assert_eq!(replies("\x1b[0c"), "\x1b[?62;22c");
+        assert_eq!(replies("\x1b[c"), "\x1b[?62;4;22c");
+        assert_eq!(replies("\x1b[0c"), "\x1b[?62;4;22c");
     }
 
     #[test]
@@ -827,7 +827,7 @@ mod queries {
         assert_eq!(answers.len() % one, 0);
         // Taken, they're answered again.
         t.advance(b"\x1b[c");
-        assert_eq!(t.take_replies(), b"\x1b[?62;22c");
+        assert_eq!(t.take_replies(), b"\x1b[?62;4;22c");
     }
 
     #[test]
@@ -1067,7 +1067,7 @@ mod queries {
     fn the_keyboard_protocol_says_what_was_asked() {
         // fish asks, then sends DA1: an answer to the first says the
         // protocol is there.
-        assert_eq!(replies("\x1b[?u\x1b[c"), "\x1b[?0u\x1b[?62;22c");
+        assert_eq!(replies("\x1b[?u\x1b[c"), "\x1b[?0u\x1b[?62;4;22c");
         assert_eq!(replies("\x1b[>1u\x1b[?u"), "\x1b[?1u");
         assert_eq!(replies("\x1b[>1u\x1b[>13u\x1b[<u\x1b[?u"), "\x1b[?1u");
         assert_eq!(replies("\x1b[>1u\x1b[>13u\x1b[<2u\x1b[?u"), "\x1b[?0u");

@@ -22,6 +22,7 @@ mod document;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
+pub mod graphics;
 mod grid;
 pub mod hints;
 mod kept;
@@ -54,6 +55,10 @@ pub use clipboard::{ClipboardRead, ClipboardRequest, MAX_CLIPBOARD_TEXT, Selecti
 pub use colours::Palette;
 pub use damage::Damage;
 pub use document::{MOST_LINES, MOST_TEXT, Match, Position, matches_in};
+pub use graphics::{
+    GraphicsSnapshot, ImageError, ImageKept, ImageKey, ImageRequest, ImageSource, KittyData,
+    Picture, Piece, Pixels, Slice, Virtual,
+};
 pub use grid::Grid;
 pub use hints::Hints;
 pub use kept::{Keeping, KeptCopy, KeptHistory, KeptLines};

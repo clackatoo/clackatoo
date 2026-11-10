@@ -94,3 +94,24 @@ path = "fuzz_targets/images.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "kitty"
+path = "fuzz_targets/kitty.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sixel"
+path = "fuzz_targets/sixel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iterm"
+path = "fuzz_targets/iterm.rs"
+test = false
+doc = false
+bench = false

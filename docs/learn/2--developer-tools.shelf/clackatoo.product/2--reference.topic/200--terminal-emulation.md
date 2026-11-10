@@ -11,7 +11,8 @@ clackatoo emulates enough of xterm for shells, ncurses programs such as htop,
 and vim, under `TERM=xterm-256color`, with the extensions modern terminals
 such as kitty, foot, WezTerm and Ghostty share: the kitty keyboard protocol,
 synchronized output, styled and colored underlines, a program's progress
-shown on its tab, and the notifications programs ask for. Sequences it doesn't support are ignored, as xterm ignores
+shown on its tab, the notifications programs ask for, and
+[images](#images): kitty's graphics protocol, sixel and iTerm2's. Sequences it doesn't support are ignored, as xterm ignores
 ones it doesn't know.
 
 ## The environment
@@ -207,7 +208,9 @@ desktop; nothing about it passes between machines.
 
 | Query | Reply |
 |---|---|
-| `CSI c` (primary device attributes) | `CSI ? 62 ; 22 c`: a VT220 with color |
+| `CSI c` (primary device attributes) | `CSI ? 62 ; 4 ; 22 c`: a VT220 with sixel graphics and color |
+| `CSI ? 1 ; 1 S`, `CSI ? 2 ; 1 S` (XTSMGRAPHICS) | `CSI ? 1 ; 0 ; 1024 S`: 1024 sixel color registers; `CSI ? 2 ; 0 ; 16384 ; 16384 S`: the largest sixel image, in pixels. Setting them isn't supported (`CSI ? Pi ; 3 ; 0 S`). |
+| kitty graphics commands with an `i` or `I` (see [images](#images)) | `APC G i=<id> ; OK ST`, with `I=<number>` and `p=<placement>` if the command had them, or `APC G i=<id> ; <error> ST` with one of a few fixed errors, such as `ENOENT:no such image` |
 | `CSI 5 n` (status) | `CSI 0 n` |
 | `OSC 52 ; c ; ?` (clipboard) | `OSC 52 ; c ; <base64> ST`, empty if refused or unanswered within 2 s, ended with BEL if the query was |
 | `CSI 6 n` and `CSI ? 6 n` (cursor position) | `CSI <line> ; <col> R`, with `?` for the second form. Relative to the scroll region in origin mode. |
@@ -429,11 +432,117 @@ agent started, and those showing what an agent's command printed, never say.
 [`daemon.terminals.notify_after`](~clackatoo/reference/config#the-daemon-s-terminals)
 in the daemon's config changes the 10 seconds, or with 0, turns it off.
 
+## Images
+
+Programs show images in a terminal in three ways, all of them kept and drawn
+through clackatoo's one [image layer](~clackatoo/reference/images), the same
+as the images in chats, Markdown and image panes:
+
+- **kitty's graphics protocol** (`APC G … ST`), as `kitten icat`, yazi,
+  ranger, timg and chafa use it: transmitting an image by an ID or a number
+  (`i`, `I`), in parts (`m=1`) or whole, as RGB, RGBA or PNG (`f=24`, `32`,
+  `100`), compressed with zlib or not (`o=z`); showing it (`a=T`, `a=p`) at
+  the cursor, all of it or a part (`x`, `y`, `w`, `h`), over some columns and
+  rows (`c`, `r`), from a point in its first cell (`X`, `Y`), above the text
+  or below it (`z`), the cursor moving past it or staying (`C=1`); deleting
+  what's shown and kept (`a=d`, every `d=` but animation frames'), and
+  answering, unless told to keep quiet (`q=1`, `q=2`). Asking whether an image
+  could be shown (`a=q`) is answered too, so programs find out images work.
+- **kitty's Unicode placeholders**: a virtual placement (`U=1`), then
+  U+10EEEE printed where the image goes, its colour naming the image, its
+  underline's colour the placement, and its marks the row and column. They're
+  text, so they scroll, wrap, split and go through tmux as text does.
+- **sixel** (`DCS q … ST`), as img2sixel, chafa and notcurses send it,
+  answering `4` among the device attributes. Its pixels nothing paints are
+  see-through, and its pixels are square, as every encoder in use sends them.
+  An image whose data paints its pixels more than 16 times over, as data
+  cheap to send and slow to draw would, isn't shown.
+- **iTerm2's inline images** (`OSC 1337 ; File=… : <base64> ST`), as
+  `imgcat` sends them: PNG, JPEG, GIF and WebP, `inline=1`, at a `width` and
+  `height` in cells, pixels (`px`), a share of the terminal (`%`) or `auto`,
+  in proportion unless `preserveAspectRatio=0`, and `doNotMoveCursor=1`.
+
+An image sits on the rows it covers: it scrolls with them into history and
+back, is kept with them through an [upgrade](~clackatoo/reference/cli), and
+goes once they leave history. Text printed over it doesn't take it away, as in
+kitty; clearing the screen (`CSI 2 J`, as `clear` does), a reset and
+switching screens do. Each cell takes the image's part that covers it, so
+copying text over an image, and what an agent reads of the terminal, says it
+once, as `[image 640×480]`, where it starts, and a placeholder's cells give no
+text. A selection shows over an image. The cursor goes after a kitty or iTerm2
+image, on its last row; after a sixel image, to the line below it, where it
+started. Until a window has said how big it draws a cell, a cell is taken as
+10 by 20 pixels.
+
+A terminal waits while its image is kept, which a big image or a slow file
+can take a moment for: its output is held, and read again once it's kept.
+It waits 10 seconds at most, a file's wait for its turn to be read included,
+then goes on without the image. Terminals' images are kept on threads of
+their own, so one slow to keep holds up neither chats' images nor what
+windows and phones fetch. While an image is being sent, what's come of it
+counts against the limit for all images, and one sent in parts whose last
+part hasn't come in 30 seconds is given up on. An
+image is kept by the daemon of the terminal's machine, as sent: a PNG stays a
+PNG, and pixels sent bare are kept as one. Each terminal keeps its images
+within the [limits](~clackatoo/reference/images#limits): past them, the image
+shown least lately that isn't on the screen is let go, and its place says
+`[image dropped: over the 64 MB limit]`; an image over the limit by itself
+isn't kept, and kitty's command is answered `EFBIG`. An image on the screen,
+or one a Unicode placeholder on the screen shows, is never let go, so a
+program whose screen shows more than the limit can't show another until some
+scroll off.
+
+### Files and shared memory
+
+kitty's commands may name where the image is instead of sending it: a file
+(`t=f`), a temporary file (`t=t`), or POSIX shared memory (`t=s`). The
+daemon whose terminal it is reads it, so a terminal on another machine reads
+that machine's files, off its loop and in time (10 seconds), through a link
+at the path's end as kitty does, but never a pipe, a device, or anything under
+`/proc`, `/sys` or `/dev` (shared memory, under `/dev/shm`, aside), and never
+more than the limit for an image. Every failure says the same,
+`EBADF:Failed to read image file`, so a program can't find out what files
+there are, though one could still tell whether a file is an image clackatoo
+shows. A temporary file is taken away once it's read only if its name holds
+`tty-graphics-protocol` and it's in `/tmp`, `/dev/shm` or the daemon's own
+folder for temporary files, reached through no link; it's read and taken away
+through that folder, so they're the same file. Shared memory is taken away
+once read, as kitty does, whoever made it. Either is left where it is if what
+was read doesn't look like the image it's said to be: a PNG that doesn't start
+as one, say, or too few pixels.
+
+Since a program anywhere you `ssh` to can ask for a file on your own machine,
+as in kitty, only the image is ever shown, to you, and never its bytes said
+back.
+
+### Answers
+
+Answers are made of fixed words and numbers clackatoo read itself, never
+anything a program sent, so a file that's `cat`-ed can't type into the shell
+with them. A command with neither `i` nor `I` gets no answer, and a command
+that looks like an answer, as one a program prints back without reading it,
+is never one, so it can't answer itself for ever.
+
+### Not done
+
+- Animation (`a=f`, `a=a`, `a=c`): an animated image shows its first frame,
+  and animation commands are answered `EINVAL`.
+- A placement relative to another (`P`, `Q`), answered `EINVAL`.
+- iTerm2's `MultipartFile`, and files that aren't `inline=1`, which iTerm2
+  downloads.
+- Sixel's display mode (DECSDM, mode 80), and pixels that aren't square.
+- Images in a terminal kept across a [restart](~clackatoo/reference/cli):
+  its history comes back, each image its size in words where it was.
+- [Recordings](~clackatoo/reference/recordings) keep what was printed, byte for
+  byte, so an image sent in the terminal's output plays back, and one named by
+  a file or shared memory plays back as unreadable.
+- Images are drawn only by windows and phones of protocol 151 or later: an
+  older one, or one through an older daemon, shows what's under them.
+
 ## Not supported
 
 These are ignored:
 
-- The kitty graphics protocol (`APC G`), sixels and other images.
 - Setting colors: `OSC 4`, `10`, `11`, `12`, `104`, and the others. Asking
   about them is [answered](#queries-answered).
 - Hyper and Meta as modifiers.

@@ -74,6 +74,11 @@ impl Desk {
         self.pictures.panes.get(&pane)
     }
 
+    /// The window's image layer, which every pane draws its images from.
+    pub(crate) fn image_layer(&self) -> &Images {
+        &self.pictures.images
+    }
+
     /// Draws images from `images`, shared with the process's other
     /// windows.
     pub(crate) fn share_images(&mut self, images: &Images) {

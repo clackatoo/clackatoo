@@ -11,7 +11,8 @@
 use clackatoo_protocol::{
     Attributes, Color, CursorShape, ImageId, Line, Style, TerminalId, Underline, Widths,
 };
-use clackatoo_term::CellFlags;
+use clackatoo_term::graphics::{self, PLACEHOLDER, Slice};
+use clackatoo_term::{CellFlags, Picture, Piece, Virtual};
 
 use crate::ui::{Element, Node, el};
 
@@ -23,9 +24,41 @@ pub struct Cursor {
     pub shape: CursorShape,
 }
 
+/// `line`, as [`row_showing`] draws it, showing no pictures.
+#[must_use]
+pub fn row(
+    line: &Line,
+    width: usize,
+    widths: Widths,
+    cursor: Option<Cursor>,
+    failed: Option<i32>,
+) -> Element {
+    let shows = Shows {
+        terminal: TerminalId(0),
+        pieces: Vec::new(),
+        virtuals: &[],
+        cell: [1.0, 1.0],
+    };
+    row_showing(line, width, widths, cursor, failed, &shows)
+}
+
+/// The pictures a row shows (CLACKA-239): those its terminal's program
+/// placed, each a piece and its picture, and the virtual placements its
+/// Unicode placeholders show, in cells `cell` in size, in proportion.
+#[derive(Clone, Debug)]
+pub struct Shows<'a> {
+    /// Whose they are.
+    pub terminal: TerminalId,
+    pub pieces: Vec<(Piece, Picture)>,
+    pub virtuals: &'a [Virtual],
+    pub cell: [f32; 2],
+}
+
 /// `line`, as a row `width` cells wide, with `cursor` on it if it's
 /// there: a `div` of the row's runs. Blank cells after the last written
-/// one are left out, unless the cursor is past them.
+/// one are left out, unless the cursor is past them. The pictures it
+/// `shows` are drawn over it, or under its text (see [`placement`]); a
+/// Unicode placeholder's cell shows its part of an image, not text.
 ///
 /// `failed`, the exit status of a command that failed, if the row ends
 /// its prompt's line, is marked two cells after the row's text, `✗ 2`,
@@ -34,12 +67,13 @@ pub struct Cursor {
 /// style sheet draws it from the span's `data-mark`, and what a style
 /// sheet draws can't be selected or copied.
 #[must_use]
-pub fn row(
+pub fn row_showing(
     line: &Line,
     width: usize,
     widths: Widths,
     cursor: Option<Cursor>,
     failed: Option<i32>,
+    shows: &Shows<'_>,
 ) -> Element {
     let row = line.to_row(width.max(1), widths);
     let cells = row.cells();
@@ -81,9 +115,42 @@ pub fn row(
             flush(&mut element, &mut run, run_style);
             run_style = style;
         }
-        row.push_text(col, &mut run);
+        if cell.ch() == PLACEHOLDER {
+            run.push(' ');
+        } else {
+            row.push_text(col, &mut run);
+        }
     }
     flush(&mut element, &mut run, run_style);
+    let mut slices: Vec<Slice> = (shows.pieces.iter())
+        .filter_map(|(piece, picture)| picture.slice(*piece))
+        .collect();
+    if !shows.virtuals.is_empty() && graphics::has_placeholders(&row) {
+        for (col, said) in graphics::placeholders(&row) {
+            let placement = (shows.virtuals.iter()).find(|placement| {
+                placement.id == said.image
+                    && (said.placement == 0 || placement.placement == said.placement)
+            });
+            if let Some(mut slice) =
+                placement.and_then(|placement| placement.slice(said.row, said.col, shows.cell))
+            {
+                #[allow(clippy::cast_precision_loss, reason = "columns are few")]
+                let col = col as f32;
+                slice.rect[0] += col;
+                slices.push(slice);
+            }
+        }
+    }
+    for slice in &slices {
+        element = element.child(placement(&Placement {
+            image: ImageId(slice.image),
+            terminal: shows.terminal,
+            size: slice.size,
+            rect: slice.rect,
+            crop: slice.crop,
+            above: slice.z >= 0,
+        }));
+    }
     if let Some(exit) = failed {
         let mark = format!("✗ {exit}");
         let col = row.text_end() + 2;
@@ -202,64 +269,50 @@ fn css(ink: Ink) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// An image a program placed over a terminal's cells (CLACKA-239).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Part of an image a program placed over a row of a terminal's cells
+/// (CLACKA-239).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     /// The image, and the terminal whose it is.
     pub image: ImageId,
     pub terminal: TerminalId,
     /// Its size in pixels, which `crop` is of.
     pub size: [u32; 2],
-    /// Its first row and column, from the grid's top left.
-    pub row: u32,
-    pub col: u32,
-    /// How many rows and columns it covers.
-    pub rows: u32,
-    pub cols: u32,
-    /// Where in its first cell it starts, in pixels of a cell `cell`
-    /// pixels in size, as the program was told cells are.
-    pub offset: [u32; 2],
-    pub cell: [u32; 2],
-    /// The part of it shown, in its pixels: left, top, width and height.
-    /// `None` for all of it.
-    pub crop: Option<[u32; 4]>,
-    /// Over the rows' text, or under it.
+    /// Where it goes: left, top, width and height, in cells from the
+    /// row's left and top.
+    pub rect: [f32; 4],
+    /// The part of the image shown there, in its pixels: left, top,
+    /// width and height.
+    pub crop: [f32; 4],
+    /// Over the row's text, or under it.
     pub above: bool,
 }
 
-/// `placed`, as an element over its cells, in the grid's own units: a
-/// cell is `1ch` wide and a row `1.45em` tall, as `.grid .r` is, so it
-/// grows and shrinks with the rows. The image inside is shown as the
-/// chats' are (see `app::images`), stretched so its crop fills it.
+/// `placed`, as an element over its row, in the grid's own units: a cell
+/// is `1ch` wide and a row `1.45em` tall, as `.grid .r` is, so it grows
+/// and shrinks with the rows. The image inside is shown as the chats' are
+/// (see `app::images`), stretched so its crop fills it.
 #[must_use]
 pub fn placement(placed: &Placement) -> Element {
-    let part = |at: u32, of: u32| {
-        if of == 0 {
-            0.0
-        } else {
-            f64::from(at) / f64::from(of)
-        }
-    };
-    let left = f64::from(placed.col) + part(placed.offset[0], placed.cell[0]);
-    let top = f64::from(placed.row) + part(placed.offset[1], placed.cell[1]);
-    let [width, height] = placed.size;
-    let [x, y, shown_w, shown_h] = placed.crop.unwrap_or([0, 0, width, height]);
-    // As percentages of the cells it covers.
-    let scale = |at: u32, of: u32| 100.0 * part(at, of.max(1));
+    let [left, top, width, height] = placed.rect.map(f64::from);
+    let [x, y, shown_w, shown_h] = placed.crop.map(|side| f64::from(side.max(0.0)));
+    let [whole_w, whole_h] = placed.size.map(f64::from);
+    // As percentages of the part shown.
+    let scale = |at: f64, of: f64| if of > 0.0 { 100.0 * at / of } else { 0.0 };
     let image = el("img")
         .attr("alt", "")
         .attr("data-image", placed.image.to_string())
         .attr("data-terminal", placed.terminal.to_string())
-        .style("width", format!("{}%", scale(width, shown_w)))
-        .style("height", format!("{}%", scale(height, shown_h)))
-        .style("left", format!("{}%", 0.0 - scale(x, shown_w)))
-        .style("top", format!("{}%", 0.0 - scale(y, shown_h)));
+        .style("width", format!("{}%", scale(whole_w, shown_w)))
+        .style("height", format!("{}%", scale(whole_h, shown_h)))
+        .style("left", format!("{}%", -scale(x, shown_w)))
+        .style("top", format!("{}%", -scale(y, shown_h)));
     el("div")
         .class("placed")
         .style("left", format!("{left}ch"))
         .style("top", format!("calc({top} * 1.45em)"))
-        .style("width", format!("{}ch", placed.cols))
-        .style("height", format!("calc({} * 1.45em)", placed.rows))
+        .style("width", format!("{width}ch"))
+        .style("height", format!("calc({height} * 1.45em)"))
         .style("z-index", if placed.above { "1" } else { "-1" })
         .child(image)
 }
@@ -467,18 +520,13 @@ mod tests {
     }
 
     #[test]
-    fn a_placed_image_covers_its_cells_showing_its_crop() {
-        let mut placed = Placement {
+    fn a_placed_image_covers_its_part_of_the_row_showing_its_crop() {
+        let placed = Placement {
             image: ImageId([1; 16]),
             terminal: TerminalId(3),
             size: [400, 200],
-            row: 2,
-            col: 5,
-            rows: 4,
-            cols: 10,
-            offset: [4, 10],
-            cell: [8, 20],
-            crop: Some([100, 50, 200, 100]),
+            rect: [5.5, 0.5, 10.0, 0.5],
+            crop: [100.0, 50.0, 200.0, 100.0],
             above: false,
         };
         let shown = placement(&placed);
@@ -487,9 +535,9 @@ mod tests {
             shown.styles,
             [
                 ("left", "5.5ch".to_owned()),
-                ("top", "calc(2.5 * 1.45em)".to_owned()),
+                ("top", "calc(0.5 * 1.45em)".to_owned()),
                 ("width", "10ch".to_owned()),
-                ("height", "calc(4 * 1.45em)".to_owned()),
+                ("height", "calc(0.5 * 1.45em)".to_owned()),
                 ("z-index", "-1".to_owned()),
             ]
         );
@@ -500,7 +548,7 @@ mod tests {
         assert_eq!(img.get("data-image"), Some("01".repeat(16).as_str()));
         assert_eq!(img.get("data-terminal"), Some("3"));
         assert_eq!(img.get("src"), None);
-        // Twice the cells' size, from half a crop to the left and above.
+        // Twice the part's size, from half a part to the left and above.
         assert_eq!(
             img.styles,
             [
@@ -510,14 +558,49 @@ mod tests {
                 ("top", "-50%".to_owned()),
             ]
         );
-        placed.crop = None;
-        placed.above = true;
-        let shown = placement(&placed);
+        let shown = placement(&Placement {
+            above: true,
+            ..placed
+        });
         assert!(shown.styles.contains(&("z-index", "1".to_owned())));
-        let Node::Element(img) = &shown.children[0] else {
+    }
+
+    #[test]
+    fn a_row_shows_its_pictures_and_its_placeholders_cells_as_blank() {
+        let picture = Picture {
+            image: [2; 16],
+            size: [20, 40],
+            crop: [0, 0, 20, 40],
+            cells: [2, 2],
+            offset: [0, 0],
+            span: [128, 128],
+            z: 0,
+        };
+        let piece = Piece {
+            picture: 1,
+            col: 3,
+            row: 1,
+        };
+        let shows = Shows {
+            terminal: TerminalId(4),
+            pieces: vec![(piece, picture)],
+            virtuals: &[],
+            cell: [0.6, 1.45],
+        };
+        let placeholder = line(&[(Style::DEFAULT, "a\u{10EEEE}\u{0305}b")]);
+        let drawn = row_showing(&placeholder, 8, Widths::default(), None, None, &shows);
+        let Node::Text(text) = &drawn.children[0] else {
+            panic!("{drawn:?}");
+        };
+        assert_eq!(text, "a b");
+        let Node::Element(placed) = &drawn.children[1] else {
+            panic!("{drawn:?}");
+        };
+        // Its second row: the lower half of the image.
+        assert_eq!(placed.styles[0], ("left", "3ch".to_owned()));
+        let Node::Element(img) = &placed.children[0] else {
             panic!("an image");
         };
-        assert_eq!(img.styles[0], ("width", "100%".to_owned()));
-        assert_eq!(img.styles[2], ("left", "0%".to_owned()));
+        assert_eq!(img.styles[3], ("top", "-100%".to_owned()));
     }
 }

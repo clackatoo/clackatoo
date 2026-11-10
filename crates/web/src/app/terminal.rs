@@ -61,7 +61,7 @@ pub(super) struct TermPage {
     main: HtmlElement,
     header: DomElement,
     pub(super) scroller: HtmlElement,
-    grid: HtmlElement,
+    pub(super) grid: HtmlElement,
     history: DomElement,
     screen: DomElement,
     keys: DomElement,
@@ -83,6 +83,9 @@ pub(super) struct TermPage {
     pinch: Option<(f64, f64)>,
     /// Whether anything has been drawn.
     drawn: bool,
+    /// Watches the images its programs show, until each is on the screen
+    /// (CLACKA-239).
+    pub(super) images: Option<super::images::Watcher>,
     controls_open: bool,
     /// What hears the fingers on the rows and the keys, for as long as
     /// the page is shown.
@@ -146,9 +149,18 @@ impl TermPage {
             zoomed: None,
             pinch: None,
             drawn: false,
+            images: super::images::Watcher::new(),
             controls_open: false,
             _touches: touches,
         }
+    }
+
+    /// A cell's width and height, in proportion: as wide as the font's
+    /// cells, and 1.45 of its size tall, as `.grid .r` is.
+    fn cell(&self) -> [f32; 2] {
+        #[allow(clippy::cast_possible_truncation, reason = "a ratio near 0.6")]
+        let ratio = self.ratio as f32;
+        [ratio, 1.45]
     }
 
     /// Draws what changed in `term`, as `state` has it.
@@ -192,9 +204,18 @@ impl TermPage {
             });
             let failed = u16::try_from(index).ok().and_then(|row| term.failed(row));
             let widths = grid.state.widths;
+            let line = u16::try_from(index).unwrap_or(u16::MAX);
+            let shows = grid::Shows {
+                terminal: term.id,
+                pieces: (grid.pictures.on(line))
+                    .filter_map(|piece| Some((piece, *grid.pictures.picture(piece.picture)?)))
+                    .collect(),
+                virtuals: &term.virtuals,
+                cell: self.cell(),
+            };
             dom::element_of(
                 document,
-                &grid::row(&grid.lines[index], cols, widths, on, failed),
+                &grid::row_showing(&grid.lines[index], cols, widths, on, failed, &shows),
             )
         };
         if dirty.all || self.screen.child_element_count() as usize != grid.lines.len() {
@@ -234,8 +255,16 @@ impl TermPage {
         // Line `index` of those held.
         let row = |index: usize| {
             let line = &history.lines[index];
-            let failed = history.failed(history.first + index as u64);
-            let row = grid::row(&line.line, usize::from(line.width), widths, None, failed);
+            let number = history.first + index as u64;
+            let failed = history.failed(number);
+            let shows = grid::Shows {
+                terminal: term.id,
+                pieces: history.pictures(number),
+                virtuals: &term.virtuals,
+                cell: self.cell(),
+            };
+            let width = usize::from(line.width);
+            let row = grid::row_showing(&line.line, width, widths, None, failed, &shows);
             dom::element_of(document, &row)
         };
         // Lines drawn before whose marks changed, as when a command ends

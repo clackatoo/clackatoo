@@ -91,6 +91,9 @@ pub(crate) struct HostedTerminal {
     /// first seen, and the command, if the shell's integration said it,
     /// signed: for how long it ran, as it ends.
     running: Option<Running>,
+    /// Output read while the emulator waits for an image to be kept (see
+    /// [`Terminal::advance_until_waiting`]), given it once it's done.
+    held: Vec<u8>,
 }
 
 /// A command a terminal's shell said started, as
@@ -315,6 +318,7 @@ impl HostedTerminal {
             phone: false,
             notices: NoticeAllowance::new(),
             running: None,
+            held: Vec::new(),
         })
     }
 
@@ -353,6 +357,7 @@ impl HostedTerminal {
             phone: false,
             notices: NoticeAllowance::new(),
             running: None,
+            held: Vec::new(),
         }
     }
 
@@ -547,6 +552,7 @@ impl HostedTerminal {
             phone: false,
             notices: NoticeAllowance::new(),
             running: None,
+            held: Vec::new(),
         };
         // Where its program is, found now rather than at the next writing
         // of the workspaces, which may never come: a shutdown that ends it
@@ -882,6 +888,11 @@ impl HostedTerminal {
         budget: usize,
         mut stop: impl FnMut() -> bool,
     ) -> ReadOutcome {
+        // Nothing more is read while an image is waited for: it's read
+        // once it's done.
+        if self.emulator.waiting_for_image() && self.pty.is_some() {
+            return ReadOutcome::Drained;
+        }
         // Taken out so processing can borrow the rest of `self`. Put back
         // unless the PTY turns out to be closed.
         let Some(pty) = self.pty.take() else {
@@ -894,6 +905,9 @@ impl HostedTerminal {
                 Ok(n) => {
                     self.process_output(&buffer[..n]);
                     total += n;
+                    if self.emulator.waiting_for_image() {
+                        break ReadOutcome::Drained;
+                    }
                     if total >= budget || stop() {
                         break ReadOutcome::BudgetExhausted;
                     }
@@ -983,7 +997,100 @@ impl HostedTerminal {
             log::warn!("terminal {}: recording stopped: {err}", self.id);
             self.recording = None;
         }
-        self.emulator.advance(bytes);
+        self.take_output(bytes);
+    }
+
+    /// Gives `bytes`, output, to the emulator, holding what it doesn't
+    /// take while it waits for an image to be kept.
+    fn take_output(&mut self, bytes: &[u8]) {
+        if !self.held.is_empty() {
+            self.held.extend_from_slice(bytes);
+            return;
+        }
+        let used = self.emulator.advance_until_waiting(bytes);
+        if used < bytes.len() {
+            self.held.extend_from_slice(&bytes[used..]);
+        }
+    }
+
+    /// Whether the emulator waits for an image to be kept: nothing more
+    /// is read meanwhile.
+    pub(crate) fn waiting_for_image(&self) -> bool {
+        self.emulator.waiting_for_image()
+    }
+
+    /// Takes the images an older build's emulator showed and kept.
+    pub(crate) fn restore_graphics(&mut self, graphics: &clackatoo_term::GraphicsSnapshot) {
+        self.emulator.restore_graphics(graphics);
+    }
+
+    /// Lets its program's images take no more than `bytes`.
+    pub(crate) fn set_image_limit(&mut self, bytes: u64) {
+        self.emulator.set_image_limit(bytes);
+    }
+
+    /// The images the emulator no longer holds.
+    pub(crate) fn take_released_images(&mut self) -> Vec<clackatoo_term::ImageKey> {
+        self.emulator.take_released_images()
+    }
+
+    /// The images its program sent to be kept.
+    pub(crate) fn take_image_requests(&mut self) -> Vec<clackatoo_term::ImageRequest> {
+        self.emulator.take_image_requests()
+    }
+
+    /// What came of keeping the image `token` names: the emulator goes on
+    /// with the output held meanwhile, and answers its program.
+    ///
+    /// Says whether it waited for it: if it didn't, it holds nothing of it.
+    pub(crate) fn image_kept(
+        &mut self,
+        token: u64,
+        result: Result<clackatoo_term::ImageKept, clackatoo_term::ImageError>,
+    ) -> bool {
+        let waited = self.emulator.image_kept(token, result);
+        self.go_on();
+        waited
+    }
+
+    /// The bytes of images being sent that its emulator holds now.
+    pub(crate) fn sending_images(&self) -> usize {
+        self.emulator.sending_images()
+    }
+
+    /// Whether an image is being sent to it in parts.
+    pub(crate) fn sending_parts(&self) -> bool {
+        self.emulator.sending_parts()
+    }
+
+    /// Gives up on the image being sent to it.
+    pub(crate) fn abandon_sending(&mut self) {
+        self.emulator.abandon_sending();
+    }
+
+    /// Lets an image being sent to it take no more than `bytes`.
+    pub(crate) fn set_upload_room(&mut self, bytes: usize) {
+        self.emulator.set_upload_room(bytes);
+    }
+
+    /// Gives up waiting for an image, as before the terminal's last output
+    /// is read, or a handover: it goes on as if it couldn't be kept, with
+    /// all the output held.
+    pub(crate) fn give_up_images(&mut self) {
+        while self.emulator.waiting_for_image() {
+            self.emulator.give_up_image();
+            self.go_on();
+        }
+    }
+
+    /// Gives the emulator the output held while it waited, and its
+    /// program the answers.
+    fn go_on(&mut self) {
+        if !self.emulator.waiting_for_image() {
+            let held = std::mem::take(&mut self.held);
+            self.take_output(&held);
+        }
+        self.queue_any_replies();
     }
 
     /// Queues input for the program and writes as much as the PTY accepts.

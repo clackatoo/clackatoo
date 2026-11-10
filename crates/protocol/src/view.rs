@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use clackatoo_term::{
-    CursorShape, InputModes, LinkId, Progress, Row, RowBuilder, ShellState, Size, Style,
-    TaskProgress, Terminal, Widths,
+    CursorShape, InputModes, LinkId, Picture, Piece, Progress, Row, RowBuilder, ShellState, Size,
+    Style, TaskProgress, Terminal, Virtual, Widths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,11 @@ pub struct View {
 
 /// One node of a view.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a grid's node is made once per snapshot and moved into its view: boxing it \
+              would cost an allocation for each to save a copy of a few hundred bytes"
+)]
 pub enum Node {
     /// A grid of character cells.
     Grid(GridNode),
@@ -76,6 +81,13 @@ pub struct GridNode {
         deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
     )]
     pub marks: BlockMarks,
+    /// The pictures the lines show. Empty from a daemon older than
+    /// protocol 151.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
+    )]
+    pub pictures: Pictures,
 }
 
 /// The most blocks a patch says have finished: more than a screen shows
@@ -206,6 +218,133 @@ impl BlockMarks {
             Progress::Finished(exit) => exit,
             Progress::Prompt | Progress::Running => None,
         }
+    }
+}
+
+/// The pictures the lines a message carries show (see
+/// [`clackatoo_term::graphics`]): the pieces of them each line shows, the
+/// pictures those are of, and the virtual placements kitty's Unicode
+/// placeholders show. A picture's number names the same picture for as
+/// long as the terminal lives, so a window may keep what it learns of one
+/// for as long as it keeps lines showing it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pictures {
+    /// The pieces, each with its line, numbered as the message numbers
+    /// its lines, in order.
+    pub pieces: Vec<(u16, Piece)>,
+    /// The pictures those are pieces of, by number, in order.
+    pub pictures: Vec<(u32, Picture)>,
+    /// Every virtual placement the terminal has, if any line here holds a
+    /// placeholder, or it's a snapshot or history: else none, and a
+    /// window keeps what it had.
+    pub virtuals: Vec<Virtual>,
+}
+
+impl Pictures {
+    /// Whether there's nothing here.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pieces.is_empty() && self.virtuals.is_empty()
+    }
+
+    /// The pictures `rows` show, each a row with its line, as `terminal`
+    /// has them, and every virtual placement it has, if `all_virtuals` or
+    /// a row holds a placeholder.
+    #[must_use]
+    pub fn of_rows<'a>(
+        rows: impl IntoIterator<Item = (u16, &'a Row)>,
+        terminal: &Terminal,
+        all_virtuals: bool,
+    ) -> Self {
+        let has_virtuals = terminal.virtuals().next().is_some();
+        let mut placeholders = all_virtuals;
+        let mut pieces = Vec::new();
+        for (line, row) in rows {
+            if !clackatoo_term::graphics::may_show(row.hints()) {
+                continue;
+            }
+            pieces.extend(row.pieces().iter().map(|&piece| (line, piece)));
+            placeholders |= has_virtuals && clackatoo_term::graphics::has_placeholders(row);
+        }
+        Self::with(pieces, terminal, placeholders)
+    }
+
+    /// The pictures `terminal`'s history lines numbered from `first` on,
+    /// `count` of them, show, each numbered from `first`.
+    #[must_use]
+    pub fn of_history(terminal: &Terminal, first: u64, count: u16) -> Self {
+        let lines = first..first + u64::from(count);
+        let hints: BTreeMap<u64, clackatoo_term::Hints> =
+            terminal.primary().history_hints(lines.clone()).collect();
+        let shown = |line: u64| {
+            let hints = hints.get(&line).copied().unwrap_or_default();
+            clackatoo_term::graphics::may_show(hints)
+        };
+        let pieces = (terminal.primary())
+            .history_pieces(lines)
+            .filter(|&(line, _)| shown(line))
+            .filter_map(|(line, piece)| Some((u16::try_from(line - first).ok()?, piece)))
+            .collect();
+        Self::with(pieces, terminal, true)
+    }
+
+    /// `pieces`, with the pictures they're of, and the virtual
+    /// placements, if `virtuals`.
+    fn with(pieces: Vec<(u16, Piece)>, terminal: &Terminal, virtuals: bool) -> Self {
+        let mut numbers: Vec<u32> = pieces.iter().map(|(_, piece)| piece.picture).collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        let pictures = (numbers.into_iter())
+            .filter_map(|number| Some((number, *terminal.picture(number)?)))
+            .collect();
+        let mut virtuals: Vec<Virtual> = if virtuals {
+            terminal.virtuals().copied().collect()
+        } else {
+            Vec::new()
+        };
+        virtuals.sort_unstable_by_key(|virtual_| (virtual_.id, virtual_.placement));
+        Self {
+            pieces,
+            pictures,
+            virtuals,
+        }
+    }
+
+    /// Takes in a patch's pictures, `patched`, which come with `lines`:
+    /// the pieces the lines show replace what they showed, and pictures
+    /// no line here shows are forgotten.
+    pub fn apply(&mut self, lines: &[(u16, Line)], patched: Self) {
+        let changed = |line: &u16| lines.binary_search_by_key(line, |&(sent, _)| sent).is_ok();
+        self.pieces.retain(|(line, _)| !changed(line));
+        self.pieces.extend(patched.pieces);
+        self.pieces.sort_by_key(|&(line, _)| line);
+        let mut known: BTreeMap<u32, Picture> = self.pictures.drain(..).collect();
+        known.extend(patched.pictures);
+        let mut shown: Vec<u32> = self.pieces.iter().map(|(_, piece)| piece.picture).collect();
+        shown.sort_unstable();
+        self.pictures = (known.into_iter())
+            .filter(|(number, _)| shown.binary_search(number).is_ok())
+            .collect();
+        if !patched.virtuals.is_empty() {
+            self.virtuals = patched.virtuals;
+        }
+    }
+
+    /// The pieces line `line` shows.
+    pub fn on(&self, line: u16) -> impl Iterator<Item = Piece> + '_ {
+        let start = self.pieces.partition_point(|&(at, _)| at < line);
+        (self.pieces[start..].iter())
+            .take_while(move |&&(at, _)| at == line)
+            .map(|&(_, piece)| piece)
+    }
+
+    /// The picture numbered `number`, if a line here shows it.
+    #[must_use]
+    pub fn picture(&self, number: u32) -> Option<&Picture> {
+        let at = (self.pictures)
+            .binary_search_by_key(&number, |&(number, _)| number)
+            .ok()?;
+        Some(&self.pictures[at].1)
     }
 }
 
@@ -403,6 +542,13 @@ pub struct HistoryLines {
         deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
     )]
     pub marks: BlockMarks,
+    /// The pictures the lines show, numbered from [`first`](Self::first).
+    /// Empty from a daemon older than protocol 151.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
+        deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
+    )]
+    pub pictures: Pictures,
 }
 
 /// One line of history.
@@ -495,6 +641,13 @@ pub enum Patch {
             deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
         )]
         marks: BlockMarks,
+        /// The pictures those lines show. Empty from a daemon older than
+        /// protocol 151.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
+            deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
+        )]
+        pictures: Pictures,
     },
     /// The chat changed.
     Chat(ChatPatch),
@@ -557,10 +710,12 @@ impl View {
                         lines,
                         links,
                         marks,
+                        pictures,
                     },
                     Node::Grid(grid),
                 ) => {
                     grid.marks.apply(&lines, marks);
+                    grid.pictures.apply(&lines, pictures);
                     grid.state = state;
                     for (index, line) in lines {
                         if let Some(old) = grid.lines.get_mut(usize::from(index)) {
@@ -647,6 +802,7 @@ impl GridNode {
             links: LinkTarget::of(&lines, terminal),
             lines,
             marks: BlockMarks::of_rows((0..).zip(grid.rows()), terminal),
+            pictures: Pictures::of_rows((0..).zip(grid.rows()), terminal, true),
         }
     }
 }
@@ -959,6 +1115,7 @@ mod tests {
                     (9, Line::default()),
                 ],
                 links: Vec::new(),
+                pictures: crate::Pictures::default(),
                 marks: BlockMarks::default(),
             },
         ]));
@@ -994,6 +1151,7 @@ mod tests {
                 state: GridState::of(&t),
                 links: LinkTarget::of(lines.iter().map(|(_, line)| line), &t),
                 lines,
+                pictures: crate::Pictures::default(),
                 marks: BlockMarks::default(),
             },
         ]));
@@ -1030,6 +1188,7 @@ mod tests {
             node: NodeId::ROOT,
             state: GridState::of(&t),
             links: Vec::new(),
+            pictures: crate::Pictures::default(),
             marks: BlockMarks {
                 prompts: BlockMarks::prompts_of(rows),
                 exits: vec![(1, 0)],

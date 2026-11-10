@@ -117,9 +117,10 @@ impl History {
             };
             self.start = Some(self.start.map_or(start, |known| known.max(start)));
         }
-        for (number, line) in (lines.first..).zip(&lines.lines) {
-            self.rows
-                .insert(number, line.line.to_row(usize::from(line.width), widths));
+        for ((number, at), line) in (lines.first..).zip(0..).zip(&lines.lines) {
+            let mut row = line.line.to_row(usize::from(line.width), widths);
+            row.set_pieces(lines.pictures.on(at).collect());
+            self.rows.insert(number, row);
             self.prompts.remove(&number);
         }
         self.prompts.extend(
@@ -151,6 +152,7 @@ mod tests {
             first: asked.end,
             lines: Vec::new(),
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: clackatoo_protocol::BlockMarks::default(),
         };
         history.receive(&answer, &asked, generation, &(90..100), Widths::LEGACY);
@@ -172,6 +174,7 @@ mod tests {
             first: 10,
             lines: vec![line; 4],
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: BlockMarks {
                 prompts: vec![(1, 7), (3, 8)],
                 exits: vec![(7, 2)],

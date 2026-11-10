@@ -10,8 +10,9 @@ related:
 ---
 
 clackatoo shows images in several places: an image file in a pane of its own,
-the images a Markdown file names, and the images in a chat. All of them go
-through one layer, kept once by the daemon and drawn the same way everywhere.
+the images a Markdown file names, the images in a chat, and those programs show
+in a terminal. All of them go through one layer, kept once by the daemon and
+drawn the same way everywhere.
 
 ## Opening an image file
 
@@ -72,9 +73,20 @@ the image layer, or a daemon older than it, still shows the small previews it
 always did, even of a chat on another machine that comes to it through newer
 daemons.
 
+## Images in terminals
+
+Programs show images in a terminal with kitty's graphics protocol, its Unicode
+placeholders, sixel, or iTerm2's inline images: `kitten icat plan.png`,
+`img2sixel plan.png`, `imgcat plan.png`, or the previews of yazi and ranger.
+They're kept in the same layer, as the terminal's own, and drawn wherever the
+terminal is, the phone included. [Terminal
+emulation](~clackatoo/reference/terminal-emulation#images) says what each
+protocol does.
+
 ## On the phone
 
-The [web app](~clackatoo/reference/phone) shows a chat's images too. It
+The [web app](~clackatoo/reference/phone) shows a chat's images too, and a
+terminal's. It
 fetches each one only as it scrolls into view, and as a copy only as big as
 the screen shows it.
 
@@ -90,13 +102,24 @@ longest ago that isn't showing in an image pane is let go, and its place says
 itself isn't kept at all. Each window keeps the images it has fetched for
 itself, within limits of its own, and lets go of the oldest the same way.
 
-`CLACKATOO_IMAGE_MEMORY` sets the daemon's limits, in MiB, each owner's and
-then all of them together, as `64,256`. It's read when the daemon starts or
-[upgrades](~clackatoo/reference/cli). The daemon keeps its images through an
-upgrade, but not through a restart.
+A terminal's images that its screen shows are never the ones let go: those
+that scrolled into history, or that kitty's commands keep for later, go first.
+So a terminal whose screen shows more than its limit of images, or Unicode
+placeholders of them, can't be given another until some leave the screen:
+new ones are refused meanwhile.
+A terminal lets go of an image once nothing it shows or keeps holds it.
+
+[`daemon.images.terminal_mb` and
+`daemon.images.total_mb`](~clackatoo/reference/config) in the daemon's config
+set the limits, and `CLACKATOO_IMAGE_MEMORY`, in MiB, each owner's and then
+all of them together, as `64,256`, overrides them. They're read when the
+daemon starts or [upgrades](~clackatoo/reference/cli). The daemon keeps its
+images through an upgrade, but not through a restart: a terminal's history
+kept across one says each image's size where it was.
 
 Agents never see an image's bytes in what they read of a pane: an image pane
-reads as `image, ~/plan.png [image 640×480]`.
+reads as `image, ~/plan.png [image 640×480]`, and an image in a terminal as
+`[image 640×480]` where it starts.
 
 ## Known limits
 
@@ -107,5 +130,5 @@ reads as `image, ~/plan.png [image 640×480]`.
 - A JPEG of more than about 37 million pixels (8000 × 6000, say) isn't shown:
   decoding one would take more memory than clackatoo allows an image.
 - SVG isn't shown as an image.
-- Terminal programs can't show images yet: kitty's graphics, sixel and iTerm2's
-  images come next.
+- kitty's animations, and its placements relative to others, aren't done (see
+  [terminal emulation](~clackatoo/reference/terminal-emulation#not-done)).

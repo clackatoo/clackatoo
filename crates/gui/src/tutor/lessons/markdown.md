@@ -72,3 +72,15 @@ At its end, the file names an image beside it, `plan.png`, which the rendered vi
 ```check
 focused image
 ```
+
+## Show an image in a terminal
+
+Programs show images in a terminal too, with kitty's graphics protocol, sixel or iTerm2's: `kitten icat plan.png`, `img2sixel plan.png` or `imgcat plan.png`, whichever you have, and the previews of yazi and ranger. They go through the same layer as the image pane's, so they show on the phone too, scroll with the text, and copy as their size, as `[image 640×480]`, never their bytes.
+
+Open a terminal beside the file with `:|Terminal`, and show the image in it, with one of those, or with this, which sends it as iTerm2's `imgcat` does:
+
+`printf '\033]1337;File=inline=1;width=16:%s\a\n' "$(base64 -w0 plan.png)"`
+
+```check
+pictures
+```

@@ -354,6 +354,7 @@ mod tests {
                 line: Line::from_row_for(row, wire, t.widths()),
             }],
             links: Vec::new(),
+            pictures: clackatoo_protocol::Pictures::default(),
             marks: clackatoo_protocol::BlockMarks::default(),
         };
         let mut relayed = history(PROTOCOL_VERSION);
@@ -381,6 +382,7 @@ mod tests {
                     },
                     lines: Vec::new(),
                     links: Vec::new(),
+                    pictures: clackatoo_protocol::Pictures::default(),
                     marks: clackatoo_protocol::BlockMarks::default(),
                 }]),
             })

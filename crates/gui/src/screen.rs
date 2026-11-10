@@ -4,9 +4,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use clackatoo_protocol::{
-    BlockMarks, GridState, LinkId, LinkTarget, Node, NodeId, Patch, Size, Style, View, ViewUpdate,
+    BlockMarks, GridState, LinkId, LinkTarget, Node, NodeId, Patch, Pictures, Size, Style, View,
+    ViewUpdate,
 };
-use clackatoo_term::{Row, RowBuilder};
+use clackatoo_term::{Picture, Row, RowBuilder, Virtual};
+
+/// The most pictures a window keeps what it was told of, for a terminal:
+/// past it, those its screen doesn't show are forgotten, and history
+/// fetched again says them again.
+const MOST_PICTURES: usize = 4096;
 
 /// What a terminal shows, as rows of cells ready to draw.
 #[derive(Debug)]
@@ -28,6 +34,13 @@ pub(crate) struct Screen {
     /// the history lines fetched. Numbers name the same block for as long
     /// as the terminal lives, so what was learnt stays true.
     pub(crate) exits: Exits,
+    /// The pictures the rows, and the history lines fetched, show pieces
+    /// of, by number, as the daemon said. A number names the same picture
+    /// for as long as the terminal lives, so what was learnt stays true.
+    pub(crate) pictures: HashMap<u32, Picture>,
+    /// The virtual placements kitty's Unicode placeholders show, as the
+    /// daemon last said.
+    pub(crate) virtuals: Vec<Virtual>,
 }
 
 /// How blocks of a shell ended, by number: those whose command finished
@@ -72,8 +85,14 @@ impl Screen {
             links: grid.links.iter().cloned().collect(),
             prompts: vec![None; grid.lines.len()],
             exits: Exits::default(),
+            pictures: HashMap::new(),
+            virtuals: Vec::new(),
         };
         screen.mark(&grid.marks);
+        for (line, row) in (0..).zip(&mut screen.rows) {
+            row.set_pieces(grid.pictures.on(line).collect());
+        }
+        screen.learn_pictures(&grid.pictures);
         Some(screen)
     }
 
@@ -99,6 +118,23 @@ impl Screen {
             rows,
             links: HashMap::new(),
             exits: Exits::default(),
+            pictures: HashMap::new(),
+            virtuals: Vec::new(),
+        }
+    }
+
+    /// Takes in what `pictures` says the pictures are, and the virtual
+    /// placements, if it says them.
+    pub(crate) fn learn_pictures(&mut self, pictures: &Pictures) {
+        self.pictures.extend(pictures.pictures.iter().copied());
+        if self.pictures.len() > MOST_PICTURES {
+            let shown: std::collections::HashSet<u32> = (self.rows.iter())
+                .flat_map(|row| row.pieces().iter().map(|piece| piece.picture))
+                .collect();
+            self.pictures.retain(|number, _| shown.contains(number));
+        }
+        if !pictures.virtuals.is_empty() {
+            self.virtuals.clone_from(&pictures.virtuals);
         }
     }
 
@@ -135,11 +171,13 @@ impl Screen {
                     lines,
                     links,
                     marks,
+                    pictures,
                 } => {
                     self.state = *state;
                     for (index, line) in lines {
                         if let Some(row) = self.rows.get_mut(usize::from(*index)) {
                             *row = line.to_row(width, state.widths);
+                            row.set_pieces(pictures.on(*index).collect());
                         }
                         // What it starts, if anything, is in the marks.
                         if let Some(prompt) = self.prompts.get_mut(usize::from(*index)) {
@@ -147,6 +185,7 @@ impl Screen {
                         }
                     }
                     self.mark(marks);
+                    self.learn_pictures(pictures);
                     // An ID always names the same link, so one known
                     // already needn't be copied again.
                     for (id, link) in links {

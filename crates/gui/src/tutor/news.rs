@@ -1506,6 +1506,12 @@ pub(crate) const NEWS: &[News] = &[
         what: ":connect HOST --no-share also refuses what other daemons ask of HOST through yours, and hides its chats",
     },
     News {
+        id: "terminal-images",
+        date: "2026-11-09",
+        lesson: "markdown",
+        what: "Terminals show images: kitty's graphics and placeholders, sixel and iTerm2's, as icat and yazi send them",
+    },
+    News {
         id: "not-shared-pane",
         date: "2026-11-09",
         lesson: "remote",

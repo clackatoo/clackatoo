@@ -113,6 +113,7 @@ mod tests {
             lines,
             links: Vec::new(),
             marks: clackatoo_protocol::BlockMarks::default(),
+            pictures: clackatoo_protocol::Pictures::default(),
         }
     }
 

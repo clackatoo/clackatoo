@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, CellFlags, StyleIndex};
+use crate::graphics::Piece;
 use crate::hints::Hints;
 use crate::links::LinkId;
 use crate::size::Size;
@@ -78,7 +79,12 @@ struct Extras {
     mark: Option<Mark>,
     /// How private its text is (see [`crate::hints`]).
     hints: Hints,
+    /// The pieces of pictures it shows (see [`crate::graphics`]).
+    pieces: Vec<Piece>,
 }
+
+/// The most pieces of pictures a row shows: past this, the oldest goes.
+const MOST_PIECES: usize = 16;
 
 impl Row {
     pub(crate) fn new(width: usize) -> Self {
@@ -423,6 +429,16 @@ impl Row {
         self.cells[cols].fill(blank);
     }
 
+    /// Blanks the whole row in `style`, as erasing its text does: what it
+    /// referenced is forgotten, but for the pieces of pictures it shows.
+    pub(crate) fn erase(&mut self, style: &Style) {
+        let pieces = self.take_pieces();
+        self.reset(style);
+        if !pieces.is_empty() {
+            self.set_pieces(pieces);
+        }
+    }
+
     /// Blanks the whole row in `style` and forgets everything it referenced.
     pub(crate) fn reset(&mut self, style: &Style) {
         self.palette.clear();
@@ -433,6 +449,7 @@ impl Row {
             extras.lookup.invalidate();
             extras.mark = None;
             extras.hints = Hints::empty();
+            extras.pieces.clear();
         }
         self.wrapped = false;
         self.padded = false;
@@ -700,6 +717,50 @@ impl Row {
         self.extras
             .as_mut()
             .map_or(Hints::empty(), |extras| std::mem::take(&mut extras.hints))
+    }
+
+    /// The pieces of pictures the row shows (see [`crate::graphics`]),
+    /// oldest first: drawn in that order, among those of one layer.
+    #[must_use]
+    pub fn pieces(&self) -> &[Piece] {
+        self.extras.as_ref().map_or(&[], |extras| &extras.pieces)
+    }
+
+    /// Makes `pieces` the pieces of pictures the row shows, as a window
+    /// rebuilding a row from a line it was sent does.
+    pub fn set_pieces(&mut self, mut pieces: Vec<Piece>) {
+        if pieces.len() > MOST_PIECES {
+            pieces.drain(..pieces.len() - MOST_PIECES);
+        }
+        if !pieces.is_empty() || self.extras.is_some() {
+            self.extras_mut().pieces = pieces;
+        }
+    }
+
+    /// Adds `piece` to the pieces of pictures the row shows, letting the
+    /// oldest go past [`MOST_PIECES`].
+    pub(crate) fn add_piece(&mut self, piece: Piece) {
+        let pieces = &mut self.extras_mut().pieces;
+        if pieces.len() >= MOST_PIECES {
+            pieces.remove(0);
+        }
+        pieces.push(piece);
+    }
+
+    pub(crate) fn take_pieces(&mut self) -> Vec<Piece> {
+        self.extras
+            .as_mut()
+            .map_or_else(Vec::new, |extras| std::mem::take(&mut extras.pieces))
+    }
+
+    /// Keeps only the pieces `keep` says to: whether any went.
+    pub(crate) fn retain_pieces(&mut self, keep: impl FnMut(&Piece) -> bool) -> bool {
+        let Some(extras) = &mut self.extras else {
+            return false;
+        };
+        let before = extras.pieces.len();
+        extras.pieces.retain(keep);
+        extras.pieces.len() != before
     }
 
     fn extras_mut(&mut self) -> &mut Extras {

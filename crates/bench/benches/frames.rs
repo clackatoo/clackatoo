@@ -62,6 +62,7 @@ fn patches(terminal: &Terminal) -> Vec<ServerMessage> {
                     ],
                     links: Vec::new(),
                     marks: BlockMarks::default(),
+                    pictures: clackatoo_protocol::Pictures::default(),
                 }]),
             })
         })

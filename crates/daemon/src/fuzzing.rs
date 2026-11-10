@@ -164,3 +164,14 @@ pub fn image(bytes: &[u8]) {
         let _ = crate::images::decode(info, bytes);
     }
 }
+
+/// The image the daemon makes of what a terminal's program sent, of no
+/// more than `most` bytes (see `images::terminal`): kitty's pixels as a
+/// PNG, a sixel image decoded, an iTerm2 file's base64 decoded.
+///
+/// # Errors
+///
+/// Why it couldn't be made.
+pub fn terminal_image(source: clackatoo_term::ImageSource, most: u64) -> Result<Vec<u8>, String> {
+    crate::images::terminal_bytes(source, most)
+}

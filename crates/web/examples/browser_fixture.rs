@@ -74,6 +74,7 @@ fn shell_snapshot(terminal: TerminalId, size: Size) {
                 state: GridState::default(),
                 lines,
                 links: vec![],
+                pictures: clackatoo_protocol::Pictures::default(),
                 marks: clackatoo_protocol::BlockMarks::default(),
             }),
         }),

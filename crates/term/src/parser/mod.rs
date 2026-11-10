@@ -44,6 +44,11 @@ const MAX_OSC_PARAMS: usize = 16;
 /// stream that never ends its string can't use unbounded memory.
 pub(crate) const MAX_OSC_LEN: usize = 3 << 19;
 
+/// The most bytes of an iTerm2 inline image's OSC string kept: as much
+/// base64 as a terminal's default limit for images, 64 MiB, takes, and a
+/// little more for its arguments.
+pub(crate) const MAX_IMAGE_OSC_LEN: usize = 88 << 20;
+
 /// The most room the OSC string's buffer keeps between strings. A big
 /// clipboard write grows it; it's given back after, rather than held for
 /// the terminal's life.
@@ -85,6 +90,25 @@ pub(crate) trait Perform {
 
     /// The end of the current DCS string.
     fn unhook(&mut self) {}
+
+    /// The start of an APC string, as kitty's graphics commands are. Its
+    /// data follows through [`apc_put`](Self::apc_put), and
+    /// [`apc_end`](Self::apc_end) ends it. vte reports none of these.
+    fn apc_start(&mut self) {}
+
+    /// Some data of the current APC string.
+    fn apc_put(&mut self, _bytes: &[u8]) {}
+
+    /// The end of the current APC string, by ESC: `cancelled` if CAN or
+    /// SUB ended it instead.
+    fn apc_end(&mut self, _cancelled: bool) {}
+
+    /// Whether what was parsed last waits for something before more may
+    /// be: the parser then stops at the end of the string it was, and
+    /// [`Parser::advance`] says how much it took.
+    fn waiting(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -104,6 +128,7 @@ enum State {
     DcsIgnore,
     OscString,
     SosPmApcString,
+    ApcString,
 }
 
 /// The parser. Feed it bytes with [`advance`](Self::advance) as they arrive;
@@ -122,6 +147,10 @@ pub(crate) struct Parser {
     /// Where each split-out OSC part ends in `osc`.
     osc_ends: [usize; MAX_OSC_PARAMS],
     osc_parts: usize,
+    /// The most bytes of an iTerm2 image's OSC string kept, if not
+    /// [`MAX_IMAGE_OSC_LEN`]: as much base64 as the terminal's limit for
+    /// images takes.
+    image_osc_most: Option<usize>,
     /// The start of a UTF-8 character that the last call ended partway
     /// through.
     partial: [u8; 4],
@@ -133,6 +162,20 @@ impl Parser {
         Self::default()
     }
 
+    /// Keeps no more than `most` bytes of an iTerm2 image's OSC string.
+    pub(crate) fn set_image_osc_len(&mut self, most: usize) {
+        self.image_osc_most = Some(most);
+    }
+
+    /// The bytes of an iTerm2 image's OSC string held now.
+    pub(crate) fn image_osc_len(&self) -> usize {
+        if self.state == State::OscString && self.osc.starts_with(b"1337File=") {
+            self.osc.len()
+        } else {
+            0
+        }
+    }
+
     /// Whether the parser is between sequences and characters, so a fresh
     /// one would carry on the same.
     #[cfg(test)]
@@ -140,8 +183,10 @@ impl Parser {
         self.state == State::Ground && self.partial_len == 0
     }
 
-    /// Parses `bytes`, reporting what it finds to `performer`.
-    pub(crate) fn advance(&mut self, performer: &mut impl Perform, bytes: &[u8]) {
+    /// Parses `bytes`, reporting what it finds to `performer`, and says
+    /// how many it took: all of them, unless the performer is
+    /// [`waiting`](Perform::waiting) after a string ends.
+    pub(crate) fn advance(&mut self, performer: &mut impl Perform, bytes: &[u8]) -> usize {
         let mut i = 0;
         if self.partial_len > 0 {
             i = self.finish_partial(performer, bytes);
@@ -149,13 +194,30 @@ impl Parser {
         while i < bytes.len() {
             i += match self.state {
                 State::Ground => self.advance_ground(performer, &bytes[i..]),
-                State::OscString => self.advance_osc_string(performer, &bytes[i..]),
-                State::DcsPassthrough => self.advance_dcs_passthrough(performer, &bytes[i..]),
+                // Only a string's end leaves the performer waiting: the
+                // rest, an ST's `\` among it, is parsed once it's done.
+                State::OscString | State::DcsPassthrough | State::ApcString => {
+                    let used = self.advance_string(performer, &bytes[i..]);
+                    if performer.waiting() {
+                        return i + used;
+                    }
+                    used
+                }
                 State::DcsIgnore | State::SosPmApcString => {
                     self.skip_string(performer, &bytes[i..])
                 }
                 _ => self.advance_sequence(performer, &bytes[i..]),
             };
+        }
+        i
+    }
+
+    /// Advances through the OSC, DCS or APC string being parsed.
+    fn advance_string(&mut self, performer: &mut impl Perform, bytes: &[u8]) -> usize {
+        match self.state {
+            State::OscString => self.advance_osc_string(performer, bytes),
+            State::DcsPassthrough => self.advance_dcs_passthrough(performer, bytes),
+            _ => self.advance_apc_string(performer, bytes),
         }
     }
 
@@ -386,7 +448,8 @@ impl Parser {
             | State::DcsPassthrough
             | State::DcsIgnore
             | State::OscString
-            | State::SosPmApcString => unreachable!("{:?} is handled in bulk", self.state),
+            | State::SosPmApcString
+            | State::ApcString => unreachable!("{:?} is handled in bulk", self.state),
         }
     }
 
@@ -517,8 +580,13 @@ impl Parser {
                 self.osc_parts = 0;
                 self.state = State::OscString;
             }
-            // SOS, PM and APC: strings nothing uses, skipped whole.
-            b'X' | b'^' | b'_' => self.state = State::SosPmApcString,
+            // SOS and PM: strings nothing uses, skipped whole.
+            b'X' | b'^' => self.state = State::SosPmApcString,
+            // APC, as kitty's graphics commands are, is passed on.
+            b'_' => {
+                performer.apc_start();
+                self.state = State::ApcString;
+            }
             0x30..=0x7E => self.esc_dispatch(performer, byte),
             // A second ESC, DEL and 8-bit bytes change nothing.
             _ => {}
@@ -657,7 +725,13 @@ impl Parser {
     }
 
     fn osc_put(&mut self, bytes: &[u8]) {
-        let room = MAX_OSC_LEN - self.osc.len();
+        // The string so far, without the `;` between its parts.
+        let most = if self.osc.starts_with(b"1337File=") {
+            self.image_osc_most.unwrap_or(MAX_IMAGE_OSC_LEN)
+        } else {
+            MAX_OSC_LEN
+        };
+        let room = most.saturating_sub(self.osc.len());
         self.osc.extend_from_slice(&bytes[..bytes.len().min(room)]);
     }
 
@@ -727,6 +801,25 @@ impl Parser {
             }
         }
         i
+    }
+
+    /// Passes APC data on until CAN, SUB or ESC ends the string, as they
+    /// end the strings skipped (see [`skip_string`](Self::skip_string)), or
+    /// the input does. Returns how many bytes it used.
+    fn advance_apc_string(&mut self, performer: &mut impl Perform, bytes: &[u8]) -> usize {
+        let end = bytes
+            .iter()
+            .position(|&byte| matches!(byte, 0x18 | 0x1A | 0x1B));
+        let data = end.unwrap_or(bytes.len());
+        if data > 0 {
+            performer.apc_put(&bytes[..data]);
+        }
+        let Some(end) = end else {
+            return bytes.len();
+        };
+        performer.apc_end(bytes[end] != 0x1B);
+        self.anywhere(performer, bytes[end]);
+        end + 1
     }
 
     /// Skips a string nothing uses until CAN, SUB or ESC ends it. Returns how

@@ -3,6 +3,7 @@
 
 pub(crate) mod host;
 mod native;
+mod terminal_pictures;
 
 use crate::shortcuts::bindings::Hint;
 
@@ -2752,6 +2753,16 @@ impl App {
                 }
             })
             .collect();
+        // The pictures terminals' programs showed, over or under their
+        // text, and words in place of those let go.
+        let terminal_scenes: Vec<(TerminalId, &Scene<'_>)> = (drawings.iter())
+            .zip(&scenes)
+            .filter_map(|(drawing, scene)| Some((drawing.terminal?, scene)))
+            .collect();
+        let terminal_pictures = terminal_pictures::terminal_pictures(desk, &terminal_scenes, cell);
+        images.extend(
+            (terminal_pictures.pictures.iter()).map(terminal_pictures::TerminalPicture::placed),
+        );
         // A pane of a workspace from another machine says over its last
         // screen that the machine isn't connected, in place of how far
         // it's scrolled.
@@ -2790,6 +2801,7 @@ impl App {
             })
             .collect();
         let mut texts = painted.texts;
+        texts.extend(terminal_pictures::words_text(&terminal_pictures.words));
         texts.extend(painted.over_texts);
         let mut over: Vec<Fill> = Vec::new();
         // The focused editor's panels by its cursor, under the palette and
@@ -2807,6 +2819,7 @@ impl App {
             }
         }
         over.extend(painted.over.into_iter().chain(chat_paint.over));
+        over.extend(terminal_pictures.lit.iter().copied());
         over.extend(bar_underline);
         // A pill over each terminal scrolled back from its live screen,
         // but for while something is raised over the panes, which its

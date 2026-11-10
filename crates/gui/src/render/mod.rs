@@ -444,8 +444,10 @@ pub(crate) struct RowScroll {
 }
 
 impl Scene<'_> {
+    /// Where row `row` of `height` pixels is drawn, its top, and what
+    /// it's cut off outside, left, top, right and bottom, as it scrolls.
     #[allow(clippy::cast_precision_loss)]
-    fn row_position(&self, row: usize, height: f32) -> (f32, [f32; 4]) {
+    pub(crate) fn row_position(&self, row: usize, height: f32) -> (f32, [f32; 4]) {
         let mut top = self.origin[1] + row as f32 * height;
         let Some(scroll) = self.scroll else {
             return (top, NO_CLIP);
@@ -1369,7 +1371,11 @@ impl Renderer {
                     style.attributes.contains(Attributes::BOLD),
                     style.attributes.contains(Attributes::ITALIC),
                 );
-                let alone = if col < run_until {
+                // A placeholder for kitty's images shows a part of one,
+                // drawn with the pictures, not as text.
+                let alone = if cell_value.ch() == clackatoo_term::graphics::PLACEHOLDER {
+                    false
+                } else if col < run_until {
                     !run_drawn
                 } else if cell_value.ch() >= FIRST_JOINING
                     && let Some(end) = joined_run(row, col, cols)

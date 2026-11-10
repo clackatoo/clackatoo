@@ -166,8 +166,20 @@ impl Terminal {
                 to.col.saturating_add(1).min(row.width())
             };
             let at = text.len();
+            // A picture is its size in words where it starts, never its
+            // bytes, and a placeholder's cell no text.
+            let pictures = self.pictures_said(&row);
+            let mut pictures = pictures.iter().peekable();
             for col in start..end {
-                row.push_text(col, &mut text);
+                while let Some((said_at, said)) = pictures.next_if(|&&(said_at, _)| said_at <= col)
+                {
+                    if *said_at >= start {
+                        text.push_str(said);
+                    }
+                }
+                if row.cells()[col].ch() != crate::graphics::PLACEHOLDER {
+                    row.push_text(col, &mut text);
+                }
             }
             let wrapped = row.is_wrapped() && end == row.width();
             if !wrapped {
@@ -181,6 +193,35 @@ impl Terminal {
             }
         }
         cut_to_most(text)
+    }
+
+    /// What `row` says of the pictures that start on it, as text copied
+    /// or read says them, each with its column, in order: its size in
+    /// words (see [`crate::graphics::words`]).
+    fn pictures_said(&self, row: &Row) -> Vec<(usize, String)> {
+        let mut said: Vec<(usize, String)> = (row.pieces().iter())
+            .filter(|piece| piece.row == 0)
+            .filter_map(|piece| {
+                let picture = self.picture(piece.picture)?;
+                let words = crate::graphics::words(picture.crop[2], picture.crop[3]);
+                Some((usize::from(piece.col), words))
+            })
+            .collect();
+        if self.virtuals().next().is_some() && crate::graphics::has_placeholders(row) {
+            for (col, placeholder) in crate::graphics::placeholders(row) {
+                let virtual_ = (self.virtuals()).find(|virtual_| virtual_.id == placeholder.image);
+                if let Some(virtual_) = virtual_
+                    && (placeholder.row, placeholder.col) == (0, 0)
+                {
+                    said.push((
+                        col,
+                        crate::graphics::words(virtual_.size[0], virtual_.size[1]),
+                    ));
+                }
+            }
+        }
+        said.sort_by_key(|&(col, _)| col);
+        said
     }
 
     /// The text of the block of columns with corners at `from` and `to`, as

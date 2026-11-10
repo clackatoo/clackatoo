@@ -278,6 +278,7 @@ mod tests {
             let count = u16::try_from(lines.len()).unwrap();
             pane.answered(Response::History(HistoryLines {
                 first: start,
+                pictures: clackatoo_protocol::Pictures::default(),
                 marks: Marks::of_history(terminal, start, count),
                 lines,
                 links: Vec::new(),
@@ -356,6 +357,7 @@ mod tests {
                     })
                     .collect(),
                 links: Vec::new(),
+                pictures: clackatoo_protocol::Pictures::default(),
                 marks: Marks {
                     prompts: Marks::prompts_of(
                         (0..4).map(|line| (line, grid.row(usize::from(line)))),

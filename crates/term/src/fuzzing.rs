@@ -4,6 +4,13 @@
 
 use crate::parser::oracle::{ours, split, vtes};
 
+/// Whether `bytes` are made only as replies to a program are (see
+/// `terminal::safe_reply`): what's written back to a program must be.
+#[must_use]
+pub fn safe_reply(bytes: &[u8]) -> bool {
+    crate::terminal::safe_reply(bytes)
+}
+
 /// Checks the parser against its oracle, vte, as the differential test
 /// does: fed `bytes` in pieces cut at `cuts` (each taken modulo one more
 /// than its length), it must report what vte reports for them whole.

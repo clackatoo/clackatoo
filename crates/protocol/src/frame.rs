@@ -863,6 +863,7 @@ mod tests {
                             .map(|(line, text)| (u16::try_from(line).unwrap(), text))
                             .collect(),
                         links: grid.links.clone(),
+                        pictures: crate::Pictures::default(),
                         marks: grid.marks.clone(),
                     },
                 ]);

@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::damage::Damage;
+use crate::graphics::Piece;
 use crate::hints::Hints;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
@@ -275,6 +276,74 @@ impl Grid {
         }
     }
 
+    /// The pieces of pictures the history lines numbered within `numbers`
+    /// show (see [`crate::graphics`]), oldest first, each with its line's
+    /// number.
+    pub fn history_pieces(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, Piece)> + '_ {
+        self.scrollback
+            .pieces_from(numbers.start)
+            .take_while(move |&(line, _)| line < numbers.end)
+    }
+
+    /// How many pieces of pictures history's lines show.
+    pub(crate) fn history_piece_count(&self) -> usize {
+        self.scrollback.pieces_len()
+    }
+
+    /// The hints of how private they are of the history lines numbered
+    /// within `numbers` that have any, oldest first, each with its number.
+    pub fn history_hints(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, Hints)> + '_ {
+        self.scrollback
+            .hints_from(numbers.start)
+            .take_while(move |&(line, _)| line < numbers.end)
+    }
+
+    /// The pieces of pictures every line shows, in history then on
+    /// screen, numbered as in [`crate::document`].
+    pub(crate) fn pieces(&self) -> impl Iterator<Item = (u64, Piece)> + '_ {
+        let end = self.scrollback.end();
+        let screen = (end..)
+            .zip(&self.rows)
+            .flat_map(|(line, row)| row.pieces().iter().map(move |&piece| (line, piece)));
+        self.scrollback.pieces_from(0).chain(screen)
+    }
+
+    /// Makes `pieces` the pieces of pictures the lines show, numbered as
+    /// [`pieces`](Self::pieces) numbers them. Lines that aren't held are
+    /// left out.
+    pub(crate) fn set_pieces(&mut self, pieces: &[(u64, Piece)]) {
+        let end = self.scrollback.end();
+        self.scrollback
+            .set_pieces(pieces.iter().copied().filter(|&(line, _)| line < end));
+        for row in &mut self.rows {
+            row.take_pieces();
+        }
+        for &(line, piece) in pieces {
+            if let Some(row) = self.screen_row_mut(line) {
+                row.add_piece(piece);
+            }
+        }
+    }
+
+    /// Keeps only the pieces of pictures `keep` says to, on screen, and in
+    /// history if `history`.
+    pub(crate) fn retain_pieces(&mut self, history: bool, mut keep: impl FnMut(&Piece) -> bool) {
+        if history {
+            self.scrollback.retain_pieces(&mut keep);
+        }
+        for line in 0..self.height {
+            if self.rows[line].retain_pieces(&mut keep) {
+                self.damage.mark(line);
+            }
+        }
+    }
+
     /// The screen's row numbered `line` in the document, if it's on screen.
     fn screen_row_mut(&mut self, line: u64) -> Option<&mut Row> {
         line.checked_sub(self.scrollback.end())
@@ -491,8 +560,10 @@ impl Grid {
                 out_col = 0;
             }
             // A mark goes to the row its row's first character lands on, and
-            // so does the top of the screen.
+            // so does the top of the screen. Pictures' pieces go to the
+            // row it ends on.
             let mut mark = row.mark();
+            let pieces = row.pieces();
             let mut top = line == screen_start;
             let text_end = if row.is_wrapped() {
                 row.width() - usize::from(row.is_padded())
@@ -563,6 +634,9 @@ impl Grid {
             if let Some(mark) = mark {
                 out.set_mark(Some(mark));
             }
+            for &piece in pieces {
+                out.add_piece(piece);
+            }
             if top {
                 screen_top = rows.len();
             }
@@ -590,6 +664,7 @@ impl Grid {
         while rows.len() > screen_top + height
             && rows.len() > cursor + 1
             && content_end(&rows[rows.len() - 1]) == 0
+            && rows[rows.len() - 1].pieces().is_empty()
         {
             rows.pop();
         }

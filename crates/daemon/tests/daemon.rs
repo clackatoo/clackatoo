@@ -1330,6 +1330,91 @@ fn history_lines_keep_their_numbers() {
     assert!(client.history(terminal, 0, 10).unwrap().lines.is_empty());
 }
 
+/// The picture a terminal shows first, from its screen as `client` sees
+/// it, once `ready` says its text is there: the line it's on, and the
+/// picture.
+fn first_picture(
+    client: &mut Client,
+    terminal: TerminalId,
+    ready: &str,
+) -> (u16, clackatoo_term::Picture) {
+    wait_for_screen(client, terminal, |text| text.contains(ready));
+    let view = client.capture(terminal).unwrap();
+    let pictures = &view.grid().unwrap().pictures;
+    let (line, piece) = *pictures.pieces.first().expect("a picture is shown");
+    (
+        line,
+        *pictures
+            .picture(piece.picture)
+            .expect("its picture is said"),
+    )
+}
+
+/// What fetching the whole of image `image`, terminal `terminal`'s, gets.
+fn fetch_terminal_image(
+    client: &mut Client,
+    terminal: TerminalId,
+    image: [u8; 16],
+) -> clackatoo_protocol::ImageAnswer {
+    let answer = client
+        .request(&clackatoo_protocol::Request::Image {
+            from: clackatoo_protocol::ImageFrom::Terminal(terminal),
+            image: clackatoo_protocol::ImageId(image),
+            fit: None,
+            at: 0,
+        })
+        .unwrap();
+    match answer {
+        clackatoo_protocol::Response::Image(answer) => answer,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A program's images (CLACKA-239): kitty's, sixel's and iTerm2's, kept
+/// as the terminal's own, shown where they were sent, fetched by their
+/// IDs, and answered, the answer never answering itself as `cat` prints
+/// it back.
+#[test]
+fn a_programs_images_are_kept_shown_and_fetched() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Two pixels, red and green.
+    let kitty =
+        r"stty -echo; printf '\033_Ga=T,f=24,s=2,v=1,i=5;/wAAAP8A\033\\'; printf done; exec cat";
+    let terminal = spawn(&mut client, &["sh", "-c", kitty]);
+    let (line, picture) = first_picture(&mut client, terminal, "done");
+    assert_eq!((line, picture.size, picture.cells), (0, [2, 1], [1, 1]));
+    let clackatoo_protocol::ImageAnswer::Part {
+        info, total, bytes, ..
+    } = fetch_terminal_image(&mut client, terminal, picture.image)
+    else {
+        panic!("not fetched");
+    };
+    assert_eq!((info.width, info.height), (2, 1));
+    assert_eq!(info.format, clackatoo_protocol::ImageFormat::Png);
+    assert_eq!(total, info.bytes);
+    // Another terminal can't fetch it as its own.
+    let other = spawn(&mut client, &["sh", "-c", "exec cat"]);
+    assert_eq!(
+        fetch_terminal_image(&mut client, other, picture.image),
+        clackatoo_protocol::ImageAnswer::Missing
+    );
+
+    // A sixel image, two pixels wide and six tall, after a line of text.
+    let sixel = r"printf 'text\r\n\033Pq#1;2;100;0;0#1~~\033\\'; printf done; exec cat";
+    let terminal = spawn(&mut client, &["sh", "-c", sixel]);
+    let (line, sixel) = first_picture(&mut client, terminal, "done");
+    assert_eq!((line, sixel.size), (1, [2, 6]));
+
+    // An iTerm2 image: kitty's, as the PNG it was kept as, four columns
+    // wide, so as tall as it keeps its proportions.
+    let png = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let iterm = format!(r"printf '\033]1337;File=width=4;inline=1:{png}\a'; printf done; exec cat");
+    let terminal = spawn(&mut client, &["sh", "-c", &iterm]);
+    let (_, shown) = first_picture(&mut client, terminal, "done");
+    assert_eq!((shown.image, shown.cells[0]), (picture.image, 4));
+}
+
 #[test]
 fn windows_hear_where_prompts_are_and_how_their_commands_ended() {
     let daemon = TestDaemon::start();

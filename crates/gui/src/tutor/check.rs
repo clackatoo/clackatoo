@@ -69,6 +69,9 @@ pub(crate) enum Check {
     Kept(usize),
     /// `zoomed`: the lesson's tab is zoomed to one of its panes.
     Zoomed,
+    /// `pictures`: a terminal of the tab shown shows a picture its program
+    /// sent (CLACKA-239).
+    Pictures,
     Phoned(usize),
     Not(Box<Check>),
 }
@@ -188,6 +191,11 @@ pub(crate) trait Facts {
     /// How many terminals of the tab shown are marked to have their
     /// notifications reach the phone.
     fn phone_terminals(&self) -> usize;
+    /// How many terminals of the tab shown show pictures their programs
+    /// sent.
+    fn terminal_pictures(&self) -> usize {
+        0
+    }
 }
 
 impl Check {
@@ -258,6 +266,7 @@ impl Check {
             ["background", count] => Self::Background(number(count)?),
             ["kept", count] => Self::Kept(number(count)?),
             ["zoomed"] => Self::Zoomed,
+            ["pictures"] => Self::Pictures,
             ["phone", count] => Self::Phoned(number(count)?),
             _ => return Err("that isn't a check".into()),
         })
@@ -313,6 +322,7 @@ impl Check {
             Self::Background(count) => facts.background_tabs() == *count,
             Self::Kept(count) => facts.kept_terminals() == *count,
             Self::Zoomed => facts.zoomed(),
+            Self::Pictures => facts.terminal_pictures() > 0,
             Self::Phoned(count) => facts.phone_terminals() == *count,
             Self::Not(check) => !check.holds(facts),
         }

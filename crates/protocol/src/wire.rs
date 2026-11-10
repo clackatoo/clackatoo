@@ -458,6 +458,13 @@ gates! {
     /// tries ssh straight there, asking for a password, and says how it
     /// went.
     FEDERATION_2 = 149,
+    /// Images in terminals (CLACKA-239, part 2): the pictures programs
+    /// show with kitty's graphics protocol, sixel and iTerm2's inline
+    /// images, as `Pictures` on a grid's snapshot, its patches and its
+    /// history's lines, and the virtual placements kitty's Unicode
+    /// placeholders show. An older peer is sent none, and shows what's
+    /// under them.
+    TERMINAL_IMAGES = 151,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -2010,6 +2017,7 @@ mod tests {
             state,
             lines: Vec::new(),
             links: Vec::new(),
+            pictures: crate::Pictures::default(),
             marks: crate::BlockMarks::default(),
         };
         assert_eq!(
@@ -2043,6 +2051,7 @@ mod tests {
             state,
             lines: Vec::new(),
             links: Vec::new(),
+            pictures: crate::Pictures::default(),
             marks: crate::BlockMarks::default(),
         };
         assert_eq!(
@@ -2633,6 +2642,48 @@ mod tests {
             frame::encode(CHAT_IMAGES - 1, &message),
             Err(crate::frame::FrameError::TooNew(_))
         ));
+    }
+
+    #[test]
+    fn a_terminals_pictures_are_left_out_for_an_older_peer() {
+        let piece = clackatoo_term::Piece {
+            picture: 1,
+            col: 0,
+            row: 0,
+        };
+        let picture = clackatoo_term::Picture {
+            image: [3; 16],
+            size: [8, 8],
+            crop: [0, 0, 8, 8],
+            cells: [1, 1],
+            offset: [0, 0],
+            span: [51, 25],
+            z: 0,
+        };
+        let history = |pictures| crate::HistoryLines {
+            first: 0,
+            lines: Vec::new(),
+            links: Vec::new(),
+            marks: crate::BlockMarks::default(),
+            pictures,
+        };
+        let shown = crate::Pictures {
+            pieces: vec![(0, piece)],
+            pictures: vec![(1, picture)],
+            virtuals: Vec::new(),
+        };
+        let message = ServerMessage::Response(Response::History(history(shown.clone())));
+        let read: ServerMessage = decode(
+            TERMINAL_IMAGES,
+            &frame::encode(TERMINAL_IMAGES, &message).unwrap(),
+        );
+        assert_eq!(read, message);
+        // An older window is told of none, and reads the lines as before.
+        let older = frame::encode(TERMINAL_IMAGES - 1, &message).unwrap();
+        let none = ServerMessage::Response(Response::History(history(crate::Pictures::default())));
+        assert_eq!(older, frame::encode(TERMINAL_IMAGES - 1, &none).unwrap());
+        let read: ServerMessage = decode(TERMINAL_IMAGES - 1, &older);
+        assert_eq!(read, none);
     }
 
     #[test]
