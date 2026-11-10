@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.36 (2026-11-10)
+
+### Features
+
+- secret regions, OSC 3008: hide, nosave and noagent hints, masked in every view (CLACKA-242) (4a0c6d8a)
+
+### Fixes
+
+- secret regions meet terminal images: pictures on masked lines are never sent (CLACKA-242) (f6f62803)
+- secret regions meet terminal images: virtual placements, the alternate screen, the cap (CLACKA-242) (a3ec7550)
+
 ## 2026.11.35 (2026-11-10)
 
 ### Features
