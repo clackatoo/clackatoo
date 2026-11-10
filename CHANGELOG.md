@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.34 (2026-11-10)
+
+### Features
+
+- **relay:** federation follow-ups: phone rings, direct connect, lent panes, forwards (CLACKA-118) (0a2083ec)
+
 ## 2026.11.33 (2026-11-09)
 
 ### Features
