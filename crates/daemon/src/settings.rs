@@ -75,9 +75,6 @@ pub struct Loaded {
     pub notes: Vec<String>,
     /// Why the config didn't run, if it didn't.
     pub failure: Option<String>,
-    /// What may be approved, with nothing approved yet (see
-    /// [`staging::first`]), found before the config ran.
-    pub first: staging::First,
 }
 
 /// The daemon's own config, as it started: where it is, to watch it, run
@@ -95,12 +92,6 @@ pub struct Own {
     /// says that waits for the user (see [`staging`]).
     pub staged: staging::Staged,
 }
-
-/// The line in [`LAST_GOOD`] that says a daemon that stages wrote it (see
-/// [`staging::first`]): what it keeps is what the config said, approved
-/// or not, so it's never approved for being there.
-pub const STAGED: &str =
-    "-- What runs programs is as approved, in daemon-approved.lua, not as this says.";
 
 /// The file in the state directory the settings that last ran without a
 /// mistake are kept in, as Luau, to run in their place when they go
@@ -406,10 +397,8 @@ impl Settings {
     fn to_lua(&self) -> String {
         let mut text = String::from(
             "-- The daemon's config as it last ran without a mistake, kept by clackatoo\n\
-             -- to run in its place when it goes wrong. Change daemon/init.lua, not this.\n",
+             -- to run in its place when it goes wrong. Change daemon/init.lua, not this.\n\n",
         );
-        text.push_str(STAGED);
-        text.push_str("\n\n");
         text.push_str(&self.statements());
         text
     }
@@ -687,8 +676,6 @@ fn run_apart(
 pub fn load(dirs: &Dirs, when: When) -> Loaded {
     let mut notes = Vec::new();
     let migrated = migrate::once(dirs, &mut notes);
-    // Before the config runs, which keeps what it says as the last good.
-    let first = staging::first(dirs, migrated.is_some());
     let chunks = match migrated {
         // What couldn't be moved is run as it would have been.
         Some(text) => Ok(vec![lua::Chunk {
@@ -727,7 +714,6 @@ pub fn load(dirs: &Dirs, when: When) -> Loaded {
         settings,
         notes,
         failure: failed,
-        first,
     }
 }
 

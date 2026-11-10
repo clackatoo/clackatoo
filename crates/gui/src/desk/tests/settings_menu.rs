@@ -1145,7 +1145,7 @@ fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
     let mut said = daemon_said("desk");
     said.pending = Some(clackatoo_protocol::PendingConfig {
         revision: 5,
-        note: Some("the approved settings were missing".into()),
+        note: Some(clackatoo_daemon::settings::staging::ASKS_NOW.into()),
         changes: vec![clackatoo_protocol::ConfigChange {
             name: "agents.mine\u{1b}[31m".into(),
             before: String::new(),
@@ -1155,7 +1155,10 @@ fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
     desk.daemon_settings_came(&said, None);
     let text = banner(&desk);
     assert!(
-        text.contains("(the approved settings were missing)"),
+        text.starts_with(
+            "clackatoo now asks before agents, limits and web settings from your config files \
+             are used. Review and Apply in :Settings: agents.mine"
+        ),
         "{text}"
     );
     assert!(!text.contains('\u{1b}'), "{text:?}");

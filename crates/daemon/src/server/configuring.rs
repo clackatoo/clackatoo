@@ -652,7 +652,7 @@ mod tests {
             state: Some(dir.path().join("state")),
         };
         let had = Guarded::of(&Settings::default(), None);
-        let (staged, going) = staging::starting(&dirs, &had, staging::First::Migrated);
+        let (staged, going) = staging::starting(&dirs, &had);
         daemon.config.agents.configured = going.configured;
         daemon.config.own_config = Some(settings::Own {
             dirs,

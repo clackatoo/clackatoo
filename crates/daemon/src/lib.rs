@@ -582,7 +582,7 @@ impl DaemonConfig {
                 .flatten()
         });
         let fresh = settings::staging::Guarded::of(&loaded.settings, password);
-        let (staged, going) = settings::staging::starting(&dirs, &fresh, loaded.first);
+        let (staged, going) = settings::staging::starting(&dirs, &fresh);
         let applied = settings::staging::applied(&loaded.settings, &going);
         let mut config = Self::from_settings_with(&applied, going.password.clone());
         config.agents.configured = going.configured;

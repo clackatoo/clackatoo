@@ -26848,8 +26848,7 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
         };
         std::fs::create_dir_all(&dirs.daemon).unwrap();
         let had = settings::staging::Guarded::of(&settings::Settings::default(), None);
-        let first = settings::staging::First::Migrated;
-        let (staged, going) = settings::staging::starting(&dirs, &had, first);
+        let (staged, going) = settings::staging::starting(&dirs, &had);
         config.agents.configured = going.configured;
         config.own_config = Some(settings::Own {
             dirs,

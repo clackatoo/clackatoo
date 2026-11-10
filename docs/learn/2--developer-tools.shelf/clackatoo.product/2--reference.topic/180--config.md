@@ -881,15 +881,16 @@ approve: it stays pending. `clackatoo web password` is yours, and approves
 the password it sets; so does a change you make in the settings menu, which
 applies at once.
 
-It fails closed. What the config says is approved without you only twice:
-as the old TOML files are moved in, on that very start, and the first time
-this daemon runs after one from before it, which approves what that one last
-ran. Otherwise, with nothing approved, or what was approved missing or
-unreadable, nothing is: your agents, profiles, raised limits and web app are
-pending, with the bar saying why, as `Config changed outside clackatoo (the
-approved settings were missing)`, until you apply them. Until then new chats
-start only the agents clackatoo knows, run as it runs them, and the web app
-starts as it is by default, off.
+It fails closed, and nothing approves itself. With nothing approved, as on
+a new install, the first start of a clackatoo that asks, the old TOML files
+moving in, or what was approved missing or unreadable, the daemon goes by its
+defaults: Claude Code and the other agents clackatoo knows run as it runs
+them, the limits are as they are by default, and the web app is off.
+Whatever your config adds to those is pending, and the bar says so, as
+`clackatoo now asks before agents, limits and web settings from your config
+files are used. Review and Apply in :Settings: agents.opencode, web.mode`.
+Apply it once, and it's approved from then on. A config that adds none of
+them has nothing pending.
 
 #### What this guards against
 
@@ -951,7 +952,9 @@ rest still runs. A field an agent or profile never had is left out alone,
 keeping the agent, as before. If any of `web.toml` is left out, so is its
 `mode`: the web app stays off until it's put right, as it did when `web.toml`
 went wrong. Every comment written is a line comment of its own, with nothing
-in it that could end it or open a block comment.
+in it that could end it or open a block comment. The agents, limits and web
+app moved in wait for your OK like any others (see
+[Changes made outside clackatoo](#changes-made-outside-clackatoo-wait-for-your-ok)).
 
 It goes in order, each step only once the one before has worked: the web
 app's password to the state directory (see

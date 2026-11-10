@@ -163,12 +163,18 @@ impl DaemonFacts {
         let names: Vec<&str> = (pending.changes.iter())
             .map(|change| change.name.as_str())
             .collect();
-        // Why nothing was approved, if nothing was, before what's pending.
-        let why = (pending.note.as_ref()).map_or_else(String::new, |note| format!(" ({note})"));
-        let said = format!(
-            "Config changed outside clackatoo{why}: {}. :Settings to apply or discard",
-            names.join(", ")
-        );
+        // With nothing approved, why, kindly: it's not that anything
+        // changed, as after an upgrade to this.
+        let said = match &pending.note {
+            Some(note) => format!(
+                "{note}. Review and Apply in :Settings: {}",
+                names.join(", ")
+            ),
+            None => format!(
+                "Config changed outside clackatoo: {}. :Settings to apply or discard",
+                names.join(", ")
+            ),
+        };
         // Names an agent's config chose: shown as they'd show, no more.
         let plain = said
             .chars()

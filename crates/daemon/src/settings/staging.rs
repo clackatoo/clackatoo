@@ -13,14 +13,14 @@
 //! says something else. The daemon goes by this as it starts and upgrades
 //! as well, so a restart never takes in what wasn't approved.
 //!
-//! It fails closed. What's approved first is what the config says only
-//! when the old TOML files move in, on that very start, or as a daemon
-//! from before this first runs (see [`First`]). Otherwise, with nothing
-//! approved, or what was approved gone or unreadable, nothing is: the
-//! user's agents, profiles, raised limits and web app are pending, and
-//! windows say why. `clackatoo web password`, and a change the user makes
-//! in a window's settings menu, are the user's own, and approved as
-//! they're made, each of only what it changes.
+//! It fails closed, and nothing approves itself. With nothing approved, as
+//! on a new install, the first start with staging, the old TOML files
+//! moving in, or what was approved gone or unreadable, the daemon goes by
+//! its defaults, and the user's agents, profiles, raised limits and web
+//! app are pending, windows saying why (see [`starting`]). Only the user
+//! approves: answering what's pending in a window, `clackatoo web
+//! password`, or a change made in a window's settings menu, each of only
+//! what it changes.
 //!
 //! None of this stands up to an agent that can run what it likes as the
 //! user: it could write these files too, or run `clackatoo web password`.
@@ -545,88 +545,41 @@ pub fn approve_password(state: &Path, hash: Option<&str>) -> std::io::Result<()>
     }
 }
 
-/// What may be approved as the daemon starts with nothing approved, as
-/// [`super::load`] finds it before the config runs.
-#[derive(Clone, Debug, Default)]
-pub enum First {
-    /// Nothing: with nothing approved, nothing is.
-    #[default]
-    No,
-    /// What the config says: the old TOML files moved into it on this very
-    /// start, so it's what the user had, from before there was a config
-    /// an agent could write.
-    Migrated,
-    /// What the daemon ran before this one, from before there was staging:
-    /// what it last ran without a mistake, kept in [`super::LAST_GOOD`].
-    Before(Settings),
-}
-
-/// What may be approved as the daemon starts, in `dirs`, the old TOML
-/// files `migrated` into its config on this start or not; found before
-/// the config runs, as running it keeps what it says as the last good.
-///
-/// Only with nothing approved, and nothing in its place, is anything. A
-/// daemon from before there was staging approved nothing, and kept no
-/// mark in its [`super::LAST_GOOD`] (see [`super::STAGED`]); so the first
-/// time this daemon runs after that one, what that one last ran is what
-/// the user had, and is approved, once. A last good with the mark was
-/// written by a daemon that stages, from whatever the config said, so it
-/// never is: taking away [`APPROVED`] then approves nothing.
-#[must_use]
-pub fn first(dirs: &Dirs, migrated: bool) -> First {
-    let Some(state) = &dirs.state else {
-        return First::No;
-    };
-    let approved = std::fs::symlink_metadata(state.join(APPROVED));
-    if !approved.is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound) {
-        return First::No;
-    }
-    if migrated {
-        return First::Migrated;
-    }
-    match read(state, super::LAST_GOOD) {
-        Ok(Some((settings, text))) if !text.contains(super::STAGED) => First::Before(settings),
-        _ => First::No,
-    }
-}
+/// What a window says of what's pending with nothing approved: as on the
+/// first start with staging, a new install, or what was approved gone.
+pub const ASKS_NOW: &str =
+    "clackatoo now asks before agents, limits and web settings from your config files are used";
 
 /// What's staged as the daemon starts, its config saying `fresh` of it:
 /// what's approved, kept in the state directory, and what's pending; and
-/// what the daemon goes by. With nothing approved, only as `first` says is
-/// anything; with what was approved unreadable, nothing is.
+/// what the daemon goes by.
+///
+/// Nothing is ever approved but by the user. With nothing approved, as on
+/// a new install, the first start with staging, or the old TOML files
+/// moving in, or with what was approved gone or unreadable, nothing is:
+/// the daemon goes by its defaults, Claude Code and the other agents it
+/// knows run as it runs them, and all the config adds is pending, for the
+/// user to apply once. Anything else would let a file an agent wrote, a
+/// last good, a TOML file, approve itself.
 #[must_use]
-pub fn starting(dirs: &Dirs, fresh: &Guarded, first: First) -> (Staged, Guarded) {
+pub fn starting(dirs: &Dirs, fresh: &Guarded) -> (Staged, Guarded) {
     let (approved, note) = match &dirs.state {
         None => (
             Guarded::nothing(),
-            Some("there's no state directory to keep what you approve in".to_owned()),
+            Some(format!(
+                "{ASKS_NOW}, and there's no state directory to keep your OK in"
+            )),
         ),
         Some(state) => match read_approved(state) {
             Ok(Some(approved)) => (approved, None),
-            Ok(None) => {
-                let approved = match first {
-                    First::Migrated => Some(fresh.clone()),
-                    First::Before(settings) => Some(Guarded::of(&settings, fresh.password.clone())),
-                    First::No => None,
-                };
-                match approved {
-                    Some(approved) => {
-                        if let Err(why) = keep_approved(state, &approved) {
-                            log::warn!("{why}");
-                        }
-                        (approved, None)
-                    }
-                    None => (
-                        Guarded::nothing(),
-                        Some("the approved settings were missing".to_owned()),
-                    ),
-                }
-            }
+            Ok(None) => (Guarded::nothing(), Some(ASKS_NOW.to_owned())),
             Err(why) => {
                 log::warn!("{why}");
                 (
                     Guarded::nothing(),
-                    Some(format!("the approved settings were unreadable: {why}")),
+                    Some(format!(
+                        "{ASKS_NOW}, as what you approved couldn't be read ({why})"
+                    )),
                 )
             }
         },
@@ -684,7 +637,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dirs = dirs(&temp);
         let first = guarded("daemon.agents.mine = { command = { \"mine\" } }");
-        let (staged, going) = starting(&dirs, &first, First::Migrated);
+        approve(&dirs, &first);
+        let (staged, going) = starting(&dirs, &first);
         assert_eq!(
             (staged.pending, going.configured.agents),
             (None, first.configured.agents.clone())
@@ -693,7 +647,7 @@ mod tests {
         let written = guarded(
             "daemon.agents.mine = { command = { \"evil\" } }\ndaemon.subagents.working = 64",
         );
-        let (mut staged, going) = starting(&dirs, &written, First::No);
+        let (mut staged, going) = starting(&dirs, &written);
         assert_eq!(going.configured.agents, first.configured.agents);
         assert_eq!(going.configured.subagents, first.configured.subagents);
         assert_eq!(
@@ -714,12 +668,12 @@ mod tests {
         // Discarded: not pending again, through a restart.
         let state = dirs.state.as_ref().unwrap();
         keep_discarded(state, staged.pending.as_ref()).unwrap();
-        let (staged_again, _) = starting(&dirs, &written, First::No);
+        let (staged_again, _) = starting(&dirs, &written);
         assert_eq!(staged_again.pending, None);
         // Applied: what the daemon goes by, through a restart.
         keep_approved(state, staged.pending.as_ref().unwrap()).unwrap();
         keep_discarded(state, None).unwrap();
-        let (applied, going) = starting(&dirs, &written, First::No);
+        let (applied, going) = starting(&dirs, &written);
         assert_eq!(
             (applied.pending, going.configured.agents),
             (None, written.configured.agents.clone())
@@ -732,6 +686,13 @@ mod tests {
         ));
         assert_eq!(staged.pending, None);
         assert_eq!(going.configured.subagents.working, 2);
+    }
+
+    /// `guarded` approved in `dirs`, as the user's answer keeps it.
+    fn approve(dirs: &Dirs, guarded: &Guarded) {
+        let state = dirs.state.as_ref().unwrap();
+        std::fs::create_dir_all(state).unwrap();
+        keep_approved(state, guarded).unwrap();
     }
 
     /// What was approved, gone or unreadable, approves nothing: the user's
@@ -750,17 +711,12 @@ mod tests {
             Some("$argon2id$hash".into()),
         );
         // Gone, as an agent deleting it would leave it.
-        let (staged, going) = starting(&dirs, &fresh, First::No);
-        assert_eq!(
-            staged.note.as_deref(),
-            Some("the approved settings were missing")
-        );
+        let (staged, going) = starting(&dirs, &fresh);
+        assert_eq!(staged.note.as_deref(), Some(ASKS_NOW));
         assert!(going.configured.agents.is_empty());
         assert_eq!(going.web, Guarded::nothing().web);
         assert_eq!(going.password, None);
-        let names: Vec<String> = staged
-            .changes()
-            .into_iter()
+        let names: Vec<String> = (staged.changes().into_iter())
             .map(|(name, ..)| name)
             .collect();
         assert_eq!(names, ["agents.mine", "web.mode", "web password"]);
@@ -768,81 +724,76 @@ mod tests {
         // Broken: as gone, saying so.
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join(APPROVED), "daemon.agents.x = (").unwrap();
-        let (staged, going) = starting(&dirs, &fresh, First::No);
+        let (staged, going) = starting(&dirs, &fresh);
         let note = staged.note.unwrap();
-        assert!(
-            note.starts_with("the approved settings were unreadable"),
-            "{note}"
-        );
+        assert!(note.contains("couldn't be read"), "{note}");
         assert!(going.configured.agents.is_empty());
         // Not a file: as broken.
         std::fs::remove_file(state.join(APPROVED)).unwrap();
         std::fs::create_dir(state.join(APPROVED)).unwrap();
-        let (staged, _) = starting(&dirs, &fresh, First::No);
-        assert!(staged.note.unwrap().contains("unreadable"));
-        // Broken, it's no first time either.
-        assert!(matches!(first(&dirs, true), First::No));
+        let (staged, _) = starting(&dirs, &fresh);
+        assert!(staged.note.unwrap().contains("couldn't be read"));
         std::fs::remove_dir(state.join(APPROVED)).unwrap();
         // No state directory: nothing approved.
         let stateless = Dirs {
             state: None,
             ..dirs.clone()
         };
-        let (staged, going) = starting(&stateless, &fresh, First::Migrated);
+        let (staged, going) = starting(&stateless, &fresh);
         assert!(staged.pending.is_some() && going.configured.agents.is_empty());
     }
 
-    /// Nothing approved is approved only as the old TOML files move in on
-    /// that start, or the first time after a daemon from before staging,
-    /// then as that one last ran; never from a last good this daemon wrote
-    /// (CLACKA-237 review, H1).
+    /// Nothing approves itself: what was approved taken away, a last good
+    /// in the state directory, as a daemon from before staging kept it or
+    /// an agent wrote it, approves nothing (CLACKA-237 review, H1).
     #[test]
-    fn only_a_migration_or_the_upgrade_to_staging_approves_at_first() {
+    fn a_last_good_approves_nothing() {
         let temp = tempfile::tempdir().unwrap();
         let dirs = dirs(&temp);
         let state = dirs.state.clone().unwrap();
+        let theirs = settings("daemon.agents.mine = { command = { \"evil\" } }");
         std::fs::create_dir_all(&state).unwrap();
-        let old = settings("daemon.agents.mine = { command = { \"mine\" } }");
-        // As a daemon from before staging kept it: no mark.
-        let before = old.to_lua().replace(super::super::STAGED, "");
-        assert!(!before.contains(super::super::STAGED));
-        std::fs::write(state.join(super::super::LAST_GOOD), before).unwrap();
-        let First::Before(last) = first(&dirs, false) else {
-            panic!("not the upgrade to staging");
-        };
-        // The config changed meanwhile: what the old daemon ran is
-        // approved, and the change is pending.
-        let fresh = guarded("daemon.agents.mine = { command = { \"evil\" } }");
-        let (staged, going) = starting(&dirs, &fresh, First::Before(last));
-        assert_eq!(going.configured.agents, old.agents().agents);
-        let names: Vec<String> = staged
-            .changes()
-            .into_iter()
-            .map(|(name, ..)| name)
-            .collect();
-        assert_eq!(names, ["agents.mine command"]);
-        assert!(state.join(APPROVED).exists());
-        // Approved now, there's no first time again.
-        assert!(matches!(first(&dirs, true), First::No));
-        // Taken away, a last good this daemon wrote approves nothing.
-        std::fs::remove_file(state.join(APPROVED)).unwrap();
-        std::fs::write(state.join(super::super::LAST_GOOD), fresh_lua(&fresh)).unwrap();
-        assert!(matches!(first(&dirs, false), First::No));
-        // Nor does a config with nothing moved in.
-        std::fs::remove_file(state.join(super::super::LAST_GOOD)).unwrap();
-        assert!(matches!(first(&dirs, false), First::No));
-        assert!(matches!(first(&dirs, true), First::Migrated));
+        std::fs::write(state.join(super::super::LAST_GOOD), theirs.to_lua()).unwrap();
+        let fresh = Guarded::of(&theirs, None);
+        let (staged, going) = starting(&dirs, &fresh);
+        assert!(going.configured.agents.is_empty());
+        assert_eq!(staged.changes()[0].0, "agents.mine");
+        assert!(!state.join(APPROVED).exists());
     }
 
-    /// `guarded`'s agents as this daemon keeps its last good.
-    fn fresh_lua(guarded: &Guarded) -> String {
-        Settings {
-            agents: (guarded.configured.agents.iter())
-                .map(|agent| (agent.clone(), SetBy::DEFAULT))
-                .collect(),
-            ..Settings::default()
-        }
-        .to_lua()
+    /// The old TOML files moved in, as an agent taking settings.lua away
+    /// and writing an agents.toml could have them, are run, but what they
+    /// add waits for the user like the rest (CLACKA-237 review, H1).
+    #[test]
+    fn what_moves_in_from_toml_waits_too() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = dirs(&temp);
+        std::fs::create_dir_all(&dirs.daemon).unwrap();
+        std::fs::write(
+            dirs.daemon.join("agents.toml"),
+            "[agents.mine]\ncommand = [\"evil\"]\n",
+        )
+        .unwrap();
+        let loaded = super::super::load(&dirs, When::Starting);
+        assert!(dirs.daemon.join("settings.lua").exists(), "moved in");
+        let fresh = Guarded::of(&loaded.settings, None);
+        assert_eq!(fresh.configured.agents.len(), 1);
+        let (staged, going) = starting(&dirs, &fresh);
+        assert!(going.configured.agents.is_empty());
+        assert_eq!(staged.changes()[0].0, "agents.mine");
+        assert_eq!(staged.note.as_deref(), Some(ASKS_NOW));
+    }
+
+    /// A new install, with no config, has nothing pending: the daemon's
+    /// defaults, and the agents it knows, are approved as they are.
+    #[test]
+    fn a_new_install_has_nothing_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = dirs(&temp);
+        let loaded = super::super::load(&dirs, When::Starting);
+        let (staged, going) = starting(&dirs, &Guarded::of(&loaded.settings, None));
+        assert_eq!((staged.revision(), staged.pending), (None, None));
+        assert_eq!(going, Guarded::nothing());
     }
 
     /// The web app's options and password are staged too: a port or a
@@ -858,19 +809,20 @@ mod tests {
         let two = "daemon.agents.a = { command = { \"a\" } }\n\
                    daemon.agents.b = { command = { \"b\" } }\n";
         let approved = Guarded::of(&settings(two), Some("$argon2id$one".into()));
-        let (staged, _) = starting(&dirs, &approved, First::Migrated);
+        approve(&dirs, &approved);
+        let (staged, _) = starting(&dirs, &approved);
         assert_eq!(staged.pending, None);
         // In another order: nothing pending.
         let reordered = "daemon.agents.b = { command = { \"b\" } }\n\
                          daemon.agents.a = { command = { \"a\" } }\n";
         let fresh = Guarded::of(&settings(reordered), Some("$argon2id$one".into()));
-        assert_eq!(starting(&dirs, &fresh, First::No).0.pending, None);
+        assert_eq!(starting(&dirs, &fresh).0.pending, None);
         // A port and a password: pending, the approved ones gone by.
         let fresh = Guarded::of(
             &settings(&format!("{two}daemon.web.port = 9999")),
             Some("$argon2id$two".into()),
         );
-        let (staged, going) = starting(&dirs, &fresh, First::No);
+        let (staged, going) = starting(&dirs, &fresh);
         assert_eq!(going.password.as_deref(), Some("$argon2id$one"));
         assert_ne!(going.web["web.port"], Value::Number(9999));
         let changes = staged.changes();
@@ -886,24 +838,18 @@ mod tests {
         );
         // The revision is of what's pending, the same each time.
         let revision = staged.revision().unwrap();
-        assert_eq!(
-            starting(&dirs, &fresh, First::No).0.revision(),
-            Some(revision)
-        );
+        assert_eq!(starting(&dirs, &fresh).0.revision(), Some(revision));
         let other = Guarded::of(&settings(two), Some("$argon2id$three".into()));
-        assert_ne!(
-            starting(&dirs, &other, First::No).0.revision(),
-            Some(revision)
-        );
+        assert_ne!(starting(&dirs, &other).0.revision(), Some(revision));
         // Discarded, the password kept only as a mark: not pending again.
         keep_discarded(&state, staged.pending.as_ref()).unwrap();
         let kept = std::fs::read_to_string(state.join(DISCARDED)).unwrap();
         assert!(!kept.contains("argon2id"), "{kept}");
-        assert_eq!(starting(&dirs, &fresh, First::No).0.pending, None);
+        assert_eq!(starting(&dirs, &fresh).0.pending, None);
         // `clackatoo web password` approves its own.
         approve_password(&state, Some("$argon2id$two")).unwrap();
         keep_discarded(&state, None).unwrap();
-        let (staged, going) = starting(&dirs, &fresh, First::No);
+        let (staged, going) = starting(&dirs, &fresh);
         assert_eq!(going.password.as_deref(), Some("$argon2id$two"));
         assert_eq!(staged.changes()[0].0, "web.port");
         assert_eq!(staged.changes().len(), 1);
