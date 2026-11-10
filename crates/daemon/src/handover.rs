@@ -11313,10 +11313,10 @@ mod v53 {
     use super::{
         AgentCommand, Applied, Asked, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches,
         ChatContinuation, ChatDraft, ChatForks, ChatNotices, ChatPreviews, ChatQueue, ChatUids,
-        Connection, Deserialize, EditLog, Exe, Files, Forwarded, Graphics, History, ImageOriginals, Images,
-        Kept, Known, LayoutExtras, Lender, Lent, LentBackground, Live, Marks, Mcp, NestedItem,
-        Process, Restored, Reviews, Sharing, Shell, Talk, Terminal, ToolPreviews, Trusted,
-        Undelivered, Workspaces, relay,
+        Connection, Deserialize, EditLog, Exe, Files, Forwarded, Graphics, History, ImageOriginals,
+        Images, Kept, Known, LayoutExtras, Lender, Lent, LentBackground, Live, Marks, Mcp,
+        NestedItem, Process, Restored, Reviews, Sharing, Shell, Talk, Terminal, ToolPreviews,
+        Trusted, Undelivered, Workspaces, relay,
     };
     #[derive(Debug, Deserialize)]
     pub(super) struct State {

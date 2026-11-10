@@ -256,6 +256,15 @@ impl Terminal {
         self.emulator.graphics.has_images()
     }
 
+    /// Whether `image` is placed, but only on lines whose pictures may not
+    /// be shown to a client that has lines with any of the hints `hidden`
+    /// masked (see [`crate::graphics::may_show`]): one the client isn't
+    /// sent.
+    #[must_use]
+    pub fn image_hidden(&self, image: ImageKey, hidden: crate::Hints) -> bool {
+        self.emulator.image_hidden(image, hidden)
+    }
+
     /// The images its screen shows, and those its placeholders may.
     #[must_use]
     pub fn shown_images(&self) -> std::collections::HashSet<ImageKey> {
@@ -1131,7 +1140,7 @@ pub(crate) struct SavedCursor {
 pub(crate) struct Emulator {
     size: Size,
     config: Config,
-    primary: Grid,
+    pub(crate) primary: Grid,
     /// Made the first time a program switches to it. Most terminals only
     /// ever run a shell, which never does.
     alternate: Option<Grid>,
@@ -1619,7 +1628,7 @@ impl Emulator {
     /// shell will close them, and a high one whatever (see
     /// [`crate::regions`]).
     #[cold]
-    fn hint_row(&mut self, line: usize) {
+    pub(crate) fn hint_row(&mut self, line: usize) {
         let hints = self.regions.hinting;
         self.grid_mut().row_mut(line).add_hints(hints);
         let number = self.primary.scrollback_end() + line as u64;

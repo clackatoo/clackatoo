@@ -1438,6 +1438,10 @@ impl Emulator {
                     break;
                 }
                 self.grid_mut().row_mut(line).add_piece(piece);
+                // A picture shown in a region is as private as text.
+                if !self.regions.hinting.is_empty() {
+                    self.hint_row(line);
+                }
                 continue;
             }
             if row > 0 {
@@ -1445,6 +1449,9 @@ impl Emulator {
             }
             let line = self.cursor.line;
             self.grid_mut().row_mut(line).add_piece(piece);
+            if !self.regions.hinting.is_empty() {
+                self.hint_row(line);
+            }
         }
         match moves {
             Moves::Stays => {}
@@ -1535,6 +1542,65 @@ impl Emulator {
             .collect()
     }
 
+    /// Whether `image` is placed, but only on lines whose pictures may not
+    /// be shown to a client that has lines with any of the hints `hidden`
+    /// masked (see [`may_show`]): its pictures' pieces, in history and on
+    /// screen, and the placeholders on screen of its virtual placements.
+    pub(crate) fn image_hidden(&self, image: ImageKey, hidden: crate::Hints) -> bool {
+        let of_image = |number: u32| {
+            (self.graphics.picture(number)).is_some_and(|picture| picture.image == image)
+        };
+        let placed: Vec<u64> = (self.primary.pieces())
+            .filter(|&(_, piece)| of_image(piece.picture))
+            .map(|(line, _)| line)
+            .chain(self.alternate_pieces(&of_image))
+            .collect();
+        let hints = |line: u64| {
+            let end = self.primary.scrollback_end();
+            match usize::try_from(line.wrapping_sub(end)) {
+                Ok(row) if line >= end && row < self.grid().height() => {
+                    self.grid().row(row).hints()
+                }
+                _ => (self.primary.history_hints(line..line + 1).next())
+                    .map_or(crate::Hints::empty(), |(_, hints)| hints),
+            }
+        };
+        let mut shown = placed.iter().any(|&line| may_show(hints(line), hidden));
+        let mut anywhere = !placed.is_empty();
+        let virtual_ = (self.graphics.virtuals.values()).any(|virtual_| virtual_.image == image);
+        if virtual_ {
+            for row in self.grid().rows().filter(|row| has_placeholders(row)) {
+                for (_, said) in placeholders(row) {
+                    let of_it = (self.graphics.virtuals.values()).any(|virtual_| {
+                        virtual_.image == image
+                            && virtual_.id == said.image
+                            && (said.placement == 0 || virtual_.placement == said.placement)
+                    });
+                    if of_it {
+                        anywhere = true;
+                        shown |= may_show(row.hints(), hidden);
+                    }
+                }
+            }
+        }
+        anywhere && !shown
+    }
+
+    /// The lines of the alternate screen, numbered on from the main
+    /// screen's history, that hold a piece of a picture `of_image` says
+    /// is the image's, while it shows.
+    fn alternate_pieces<'a>(
+        &'a self,
+        of_image: &'a dyn Fn(u32) -> bool,
+    ) -> impl Iterator<Item = u64> + 'a {
+        let end = self.primary.scrollback_end();
+        let alternate = (self.screen == crate::terminal::Screen::Alternate).then(|| self.grid());
+        (alternate.into_iter())
+            .flat_map(|grid| grid.rows().enumerate())
+            .filter(move |(_, row)| row.pieces().iter().any(|piece| of_image(piece.picture)))
+            .map(move |(row, _)| end + row as u64)
+    }
+
     /// The images the screen shows, and those Unicode placeholders may.
     pub(crate) fn shown_images(&self) -> HashSet<ImageKey> {
         let mut shown: HashSet<ImageKey> = pieces_of(self.grid())
@@ -1573,15 +1639,16 @@ fn ids_range(control: &kitty::Control, x: u32, y: u32, graphics: &Graphics) -> O
     }
 }
 
-/// Whether the pictures on a line with `hints` may be shown, to windows,
-/// phones and agents alike. Every one may, for now: this is where a line's
-/// hints that hide it (CLACKA-242) leave its pictures out too, as
-/// `Pictures::of_rows` and `of_history` ask, and the daemon's `serve_image`
-/// should ask before it answers for a terminal's image.
+/// Whether the pictures on a line with `hints` may be shown to a client
+/// that has lines with any of the hints `hidden` masked (see
+/// [`crate::regions`]): not on a line masked, as hidden, or kept from
+/// agents where they may see it. `Pictures::of_rows` and `of_history`
+/// ask, and the daemon's `serve_image` (see
+/// [`Terminal::image_hidden`](crate::Terminal::image_hidden)). A line
+/// shown as it is, as the user asked, still shows no picture.
 #[must_use]
-pub fn may_show(hints: crate::Hints) -> bool {
-    let _ = hints;
-    true
+pub fn may_show(hints: crate::Hints, hidden: crate::Hints) -> bool {
+    !hints.intersects(hidden)
 }
 
 /// The pieces of pictures `grid`'s screen shows.

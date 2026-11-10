@@ -256,12 +256,13 @@ impl Pictures {
         rows: impl IntoIterator<Item = (u16, &'a Row)>,
         terminal: &Terminal,
         all_virtuals: bool,
+        hidden: Hints,
     ) -> Self {
         let has_virtuals = terminal.virtuals().next().is_some();
         let mut placeholders = all_virtuals;
         let mut pieces = Vec::new();
         for (line, row) in rows {
-            if !clackatoo_term::graphics::may_show(row.hints()) {
+            if !clackatoo_term::graphics::may_show(row.hints(), hidden) {
                 continue;
             }
             pieces.extend(row.pieces().iter().map(|&piece| (line, piece)));
@@ -273,13 +274,13 @@ impl Pictures {
     /// The pictures `terminal`'s history lines numbered from `first` on,
     /// `count` of them, show, each numbered from `first`.
     #[must_use]
-    pub fn of_history(terminal: &Terminal, first: u64, count: u16) -> Self {
+    pub fn of_history(terminal: &Terminal, first: u64, count: u16, hidden: Hints) -> Self {
         let lines = first..first + u64::from(count);
         let hints: BTreeMap<u64, clackatoo_term::Hints> =
             terminal.primary().history_hints(lines.clone()).collect();
         let shown = |line: u64| {
             let hints = hints.get(&line).copied().unwrap_or_default();
-            clackatoo_term::graphics::may_show(hints)
+            clackatoo_term::graphics::may_show(hints, hidden)
         };
         let pieces = (terminal.primary())
             .history_pieces(lines)
@@ -823,7 +824,7 @@ impl GridNode {
             links: LinkTarget::of(&lines, terminal),
             lines,
             marks: BlockMarks::of_rows((0..).zip(grid.rows()), terminal),
-            pictures: Pictures::of_rows((0..).zip(grid.rows()), terminal, true),
+            pictures: Pictures::of_rows((0..).zip(grid.rows()), terminal, true, masking.hidden),
         }
     }
 }

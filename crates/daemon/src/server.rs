@@ -33,8 +33,7 @@ use clackatoo_protocol::{
     BlockMarks, BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine,
     HistoryLines, Line, LinkTarget, Machine, MachineId, Masking, NodeId, PROTOCOL_VERSION, Pane,
     PaneId, PaneTerminal, Patch, Pictures, Request, Response, ServerMessage, Side, Size, TabId,
-    TerminalId,
-    TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
+    TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -863,6 +862,19 @@ impl Subscription {
         self.update_agent(terminal, wire, None, false, false)
     }
 
+    /// The screen's lines `damaged` of `terminal`, as a peer that speaks
+    /// `wire` rebuilds them, masked as this client's are.
+    fn masked_lines(&self, terminal: &Terminal, damaged: &[u16], wire: u32) -> Vec<(u16, Line)> {
+        let (grid, end) = (terminal.grid(), terminal.primary().scrollback_end());
+        (damaged.iter())
+            .map(|&line| {
+                let (row, number) = (grid.row(usize::from(line)), end + u64::from(line));
+                let made = (self.masking).line(row, number, row.hints(), wire, terminal.widths());
+                (line, made)
+            })
+            .collect()
+    }
+
     /// As [`update`](Self::update), for a terminal an agent started, as
     /// `agent` says, or one the daemon writes an agent's command's output
     /// into, if `fed`, or one marked to notify the phone, if `phone`.
@@ -947,14 +959,7 @@ impl Subscription {
             .collect();
         self.damage.clear();
         let row = |line: u16| grid.row(usize::from(line));
-        let end = terminal.primary().scrollback_end();
-        let lines: Vec<(u16, Line)> = (damaged.iter())
-            .map(|&line| {
-                let (row, number) = (row(line), end + u64::from(line));
-                let made = (self.masking).line(row, number, row.hints(), wire, terminal.widths());
-                (line, made)
-            })
-            .collect();
+        let lines = self.masked_lines(terminal, &damaged, wire);
         // Only a window that reads them is told where prompts are, or how
         // blocks ended: a look at each line sent, and at the blocks after
         // the last one it was told of, which is the newest but after a
@@ -975,6 +980,7 @@ impl Subscription {
                 damaged.iter().map(|&line| (line, row(line))),
                 terminal,
                 false,
+                self.masking.hidden,
             )
         } else {
             Pictures::default()
@@ -1852,6 +1858,7 @@ impl Daemon {
                     let margins = terminal.emulator().margins();
                     let images = (terminal.emulator().has_images())
                         .then(|| terminal.emulator().graphics_snapshot());
+                    let open = terminal.emulator().regions();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
                     if let Some(images) = images {
                         graphics.push(handover::Graphics {
@@ -1859,8 +1866,6 @@ impl Daemon {
                             graphics: images,
                         });
                     }
-                    let open = terminal.emulator().regions();
-                    let (terminal, shell) = terminal.hand_over(&mut fds);
                     regions.extend(open.map(|regions| handover::Regions {
                         terminal: terminal.id,
                         regions,
@@ -5262,7 +5267,7 @@ fn history(
         first,
         links: LinkTarget::of(lines.iter().map(|line| &line.line), terminal),
         lines,
-        pictures: Pictures::of_history(terminal, first, count),
+        pictures: Pictures::of_history(terminal, first, count, masking.hidden),
         marks: BlockMarks::of_history(terminal, first, count),
     }
 }

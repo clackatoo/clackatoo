@@ -502,3 +502,68 @@ fn pictures_survive_a_snapshot() {
     assert!(restored.take_released_images().is_empty());
     assert_eq!(graphics.images(), [[9; 16]].into_iter().collect());
 }
+
+/// A picture shown in a region marked private is as private as text: its
+/// rows get the region's hints, and its image is hidden from a client
+/// that has them masked (CLACKA-242).
+#[test]
+fn a_picture_in_a_private_region_is_hidden_with_its_lines() {
+    use crate::Hints;
+    let mut t = terminal();
+    feed(&mut t, b"\x1b_Ga=T,f=100,i=7;iVBORw0K\x1b\\\r\n", |_| {
+        Ok(image(1, 25, 30))
+    });
+    feed(
+        &mut t,
+        b"\x1b]3008;region;start;r;secret\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;r\x07",
+        |_| Ok(image(2, 25, 30)),
+    );
+    let hidden_rows: Vec<Hints> = (t.grid().rows())
+        .filter(|row| row.pieces().iter().any(|piece| piece.picture == 2))
+        .map(crate::Row::hints)
+        .collect();
+    assert_eq!(hidden_rows.len(), 2);
+    assert!(hidden_rows.iter().all(|hints| hints.contains(Hints::HIDE)));
+    // The second image is placed only on hidden lines: hidden from a
+    // window masking HIDE, not from one that masks nothing; the first is
+    // shown.
+    assert!(t.image_hidden([2; 16], Hints::HIDE));
+    assert!(!t.image_hidden([2; 16], Hints::empty()));
+    assert!(!t.image_hidden([1; 16], Hints::HIDE | Hints::NOAGENT));
+    // An image placed nowhere isn't hidden: there's nothing to hide.
+    assert!(!t.image_hidden([9; 16], Hints::HIDE));
+    // Scrolled into history, it's still hidden.
+    t.advance(b"\r\n".repeat(20).as_slice());
+    assert!(t.image_hidden([2; 16], Hints::HIDE));
+}
+
+/// What agents read of a line kept from them says nothing of its
+/// pictures; history kept across a restart says nothing of the pictures
+/// on a line never to be written to disk.
+#[test]
+fn pictures_on_private_lines_are_never_said() {
+    let mut t = terminal();
+    feed(
+        &mut t,
+        b"\x1b]3008;region;start;r;private\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;r\x07\r\n",
+        |_| Ok(image(2, 25, 30)),
+    );
+    let (first, last) = t.document_bounds();
+    let (from, to) = (
+        crate::Position {
+            line: first,
+            col: 0,
+        },
+        crate::Position { line: last, col: 0 },
+    );
+    assert!(t.text(from, to, true).contains("[image 25×30]"));
+    assert!(!t.text_for_agents(from, to, true).contains("[image"));
+    let kept = t
+        .copy_to_keep(100)
+        .lines(crate::Keeping::default(), 1 << 20);
+    assert!(
+        kept.texts().iter().all(|text| !text.contains("[image")),
+        "{:?}",
+        kept.texts()
+    );
+}

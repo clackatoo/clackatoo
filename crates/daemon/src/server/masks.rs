@@ -589,4 +589,102 @@ mod tests {
         };
         assert_eq!(daemon.respond(all, relay), Response::Text(MASK.to_owned()));
     }
+
+    /// Shows `bytes` in `terminal`, keeping each image it asks for under
+    /// `key`, as the store would.
+    fn show_image(daemon: &mut Daemon, terminal: TerminalId, bytes: &[u8], key: u8) {
+        let Some(Hosted::Pty(pty)) =
+            (daemon.terminals.get_mut(&terminal)).map(|slot| &mut slot.terminal)
+        else {
+            panic!("no terminal");
+        };
+        let emulator = pty.emulator_mut();
+        let mut rest = bytes;
+        loop {
+            let used = emulator.advance_until_waiting(rest);
+            rest = &rest[used..];
+            for request in emulator.take_image_requests() {
+                let kept = clackatoo_term::ImageKept {
+                    key: [key; 16],
+                    width: 20,
+                    height: 20,
+                };
+                emulator.image_kept(request.token, Ok(kept));
+            }
+            if rest.is_empty() && !emulator.waiting_for_image() {
+                return;
+            }
+        }
+    }
+
+    /// A picture on a hidden line is in no snapshot, patch or history
+    /// fetch, even shown as it is, and its image isn't sent.
+    #[test]
+    fn a_picture_on_a_hidden_line_is_never_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+        feed(&mut daemon, terminal, b"\r\n");
+        show_image(
+            &mut daemon,
+            terminal,
+            b"\x1b_Ga=T,f=100,i=7;iVBORw0K\x1b\\\r\n",
+            1,
+        );
+        show_image(
+            &mut daemon,
+            terminal,
+            b"\x1b]3008;region;start;s;hide\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;s\x07",
+            2,
+        );
+        let images = |daemon: &mut Daemon| {
+            let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {
+                panic!("no window");
+            };
+            let slot = &daemon.terminals[&terminal];
+            let subscription = client.views.get_mut(&terminal).unwrap();
+            let update = subscription.update_from(&slot.terminal, PROTOCOL_VERSION, None);
+            let Some(ViewUpdate::Snapshot(view)) = update else {
+                panic!("not a snapshot");
+            };
+            let grid = view.grid().unwrap().clone();
+            let mut keys: Vec<u8> = (grid.pictures.pictures.iter())
+                .map(|(_, picture)| picture.image[0])
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(images(&mut daemon), [1]);
+        // Shown as it is, its text is, but not its picture.
+        let unmask = Request::Unmask {
+            terminal,
+            line: Some(4),
+        };
+        let asked = daemon.respond(unmask, token);
+        assert!(matches!(asked, Response::Text(_)), "{asked:?}");
+        assert_eq!(images(&mut daemon), [1]);
+        let fetch = |key| Request::Image {
+            from: clackatoo_protocol::ImageFrom::Terminal(terminal),
+            image: clackatoo_protocol::ImageId([key; 16]),
+            fit: None,
+            at: 0,
+        };
+        assert_eq!(
+            daemon.respond(fetch(2), token),
+            Response::Image(clackatoo_protocol::ImageAnswer::Missing)
+        );
+        // In history, still left out.
+        feed(&mut daemon, terminal, &b"\r\n".repeat(12));
+        let history = Request::History {
+            terminal,
+            end: 6,
+            count: 6,
+        };
+        let Response::History(lines) = daemon.respond(history, token) else {
+            panic!("no history");
+        };
+        let keys: Vec<u8> = (lines.pictures.pictures.iter())
+            .map(|(_, picture)| picture.image[0])
+            .collect();
+        assert_eq!(keys, [1]);
+    }
 }

@@ -351,6 +351,13 @@ impl Daemon {
         if !self.may_have_images(token, from) {
             return Response::Image(ImageAnswer::Missing);
         }
+        // Nor one placed only on lines masked for it (see `server/masks.rs`).
+        if let ImageFrom::Terminal(terminal) = from
+            && let Ok(grid) = self.grid(terminal)
+            && grid.image_hidden(image.0, self.masking_for(token, terminal).hidden)
+        {
+            return Response::Image(ImageAnswer::Missing);
+        }
         Response::Image(self.images.fetch(token, from, image, fit, at))
     }
 
