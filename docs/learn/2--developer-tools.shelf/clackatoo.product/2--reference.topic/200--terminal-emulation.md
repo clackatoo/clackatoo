@@ -536,7 +536,7 @@ is never one, so it can't answer itself for ever.
 - [Recordings](~clackatoo/reference/recordings) keep what was printed, byte for
   byte, so an image sent in the terminal's output plays back, and one named by
   a file or shared memory plays back as unreadable.
-- Images are drawn only by windows and phones of protocol 151 or later: an
+- Images are drawn only by windows and phones of protocol 150 or later: an
   older one, or one through an older daemon, shows what's under them.
 
 ## Not supported

@@ -207,18 +207,20 @@ impl Terminal {
     /// ([`abandon_sending`](Self::abandon_sending)).
     #[must_use]
     pub fn sending_parts(&self) -> bool {
-        self.emulator.graphics.sending_parts()
+        self.emulator.graphics.sending_parts() || self.parser.image_osc_len() > 0
     }
 
     /// Gives up on the image being sent, letting go of what it holds.
     pub fn abandon_sending(&mut self) {
         self.emulator.graphics.abandon();
+        self.parser.abandon_image_osc();
     }
 
     /// Lets an image being sent take no more than `bytes` now, as the
     /// images all terminals hold leave room for.
     pub fn set_upload_room(&mut self, bytes: usize) {
         self.emulator.graphics.set_room(bytes);
+        self.parser.set_image_osc_room(bytes);
     }
 
     /// Gives up waiting for an image to be kept, as if it couldn't be.
@@ -2009,7 +2011,6 @@ impl Emulator {
             }
             2 => {
                 grid.clear(&blank);
-                self.graphics.cleared();
             }
             3 => {
                 let had_history = grid.scrollback_len() > 0;
@@ -2275,8 +2276,6 @@ impl Emulator {
             self.pointer_alternate = pointer::Stack::default();
         }
         self.screen = screen;
-        // The pictures the screen left showed may be forgotten.
-        self.graphics.cleared();
         // A viewer was showing the other screen.
         self.grid_mut().damage_all();
     }

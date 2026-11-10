@@ -464,7 +464,7 @@ gates! {
     /// history's lines, and the virtual placements kitty's Unicode
     /// placeholders show. An older peer is sent none, and shows what's
     /// under them.
-    TERMINAL_IMAGES = 151,
+    TERMINAL_IMAGES = 150,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

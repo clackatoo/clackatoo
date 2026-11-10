@@ -281,6 +281,7 @@ fn placing_again_or_deleting_touches_only_the_screen_however_long_history_is() {
     t.advance(b"\x1b_Ga=p,i=1,p=7,q=2\x1b\\");
     // Into history, with a thousand lines after it.
     t.advance(&b"\n".repeat(1000));
+    t.compact_scrollback();
     let held = || t.primary().history_pieces(0..u64::MAX).count();
     assert_eq!(held(), 1);
     // Placed again: the first goes from the table at once, and from
@@ -288,8 +289,14 @@ fn placing_again_or_deleting_touches_only_the_screen_however_long_history_is() {
     t.advance(b"\x1b_Ga=p,i=1,p=7,q=2\x1b\\");
     assert!(t.picture(1).is_none());
     assert_eq!(t.primary().history_pieces(0..u64::MAX).count(), 1);
+    // Swept only once history has moved on enough to pay for it.
     t.compact_scrollback();
-    assert_eq!(t.primary().history_pieces(0..u64::MAX).count(), 0);
+    assert_eq!(t.primary().history_pieces(0..u64::MAX).count(), 1);
+    t.advance(b"\x1b[999H");
+    t.advance(&b"\n".repeat(256));
+    t.compact_scrollback();
+    // The first's piece is gone; the second has scrolled up there too.
+    assert!((t.primary().history_pieces(0..u64::MAX)).all(|(_, piece)| piece.picture == 2));
     assert!(t.picture(2).is_some());
     // Deleting by ID finds the picture by its index.
     t.advance(b"\x1b_Ga=d,d=i,i=1,p=7\x1b\\");
@@ -315,6 +322,24 @@ fn an_image_sent_in_parts_takes_no_more_than_there_is_room_for_and_can_be_given_
     t.abandon_sending();
     assert!(!t.sending_parts());
     assert_eq!(t.sending_images(), 0);
+    // An iTerm2 image too: it counts while it comes, and given up on, is
+    // never kept, and output goes on after it.
+    t.advance(b"\x1b]1337;File=inline=1:AAAA");
+    assert!(t.sending_parts());
+    assert_eq!(t.sending_images(), "1337File=inline=1:AAAA".len());
+    t.abandon_sending();
+    assert!(!t.sending_parts());
+    let asked = feed(&mut t, b"AAAA\x07after", |_| unreachable!());
+    assert!(asked.is_empty());
+    assert!(t.screen_text().contains("after"));
+    // Nor is one past the room there is.
+    t.set_upload_room(8);
+    let asked = feed(
+        &mut t,
+        b"\x1b]1337;File=inline=1:AAAAAAAA\x07",
+        |_| unreachable!(),
+    );
+    assert!(asked.is_empty());
 }
 
 #[test]
@@ -342,6 +367,21 @@ fn a_virtual_placements_image_is_pinned_only_while_a_placeholder_shows_it() {
     assert!(t.shown_images().is_empty());
     t.advance("\x1b[38;5;9m\u{10EEEE}".as_bytes());
     assert_eq!(t.shown_images(), [[5; 16]].into_iter().collect());
+}
+
+#[test]
+fn a_full_table_is_swept_once_before_a_picture_is_refused() {
+    let mut t = terminal();
+    feed(&mut t, b"\x1b_Ga=t,f=100,i=1,q=2;AAAA\x1b\\", |_| {
+        Ok(image(1, 10, 20))
+    });
+    // As many pictures as are kept, each cleared from the screen at once.
+    for _ in 0..super::MOST_PICTURES {
+        t.advance(b"\x1b_Ga=p,i=1,q=2,C=1\x1b\\\x1b[2J");
+    }
+    // A sweep makes room, rather than refusing.
+    t.advance(b"\x1b_Ga=p,i=1,C=1\x1b\\");
+    assert_eq!(t.take_replies(), b"\x1b_Gi=1;OK\x1b\\");
 }
 
 #[test]
@@ -434,6 +474,17 @@ fn history_kept_across_a_restart_says_pictures_in_words() {
         true,
     );
     assert!(text.starts_with("a[image 8×20]\n"), "{text}");
+}
+
+#[test]
+fn a_snapshot_leaves_out_pictures_no_row_shows_and_their_images() {
+    let mut t = terminal();
+    feed(&mut t, b"\x1b_Ga=T,f=100,q=2;AAAA\x1b\\", |_| {
+        Ok(image(4, 10, 20))
+    });
+    t.advance(b"\x1b[2J");
+    let graphics = t.graphics_snapshot();
+    assert!(graphics.images().is_empty());
 }
 
 #[test]

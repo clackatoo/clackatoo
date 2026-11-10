@@ -385,9 +385,9 @@ pub(crate) struct Graphics {
     /// kitty's placements among them: image ID, placement ID and the
     /// picture's number, so a command naming some finds them at once.
     placements: BTreeSet<(u32, u32, u32)>,
-    /// Pictures were deleted, or rows cleared, since pictures no row
-    /// shows were last forgotten.
-    dirty: bool,
+    /// The table was found full, and a sweep didn't make room: until a
+    /// picture goes, more are refused without sweeping again.
+    full: bool,
     /// How far history had come when they were last forgotten.
     swept_end: u64,
     /// The most bytes of an image's data being sent may take now, if the
@@ -559,6 +559,7 @@ impl Graphics {
     }
 
     fn forget_placement(&mut self, number: u32, placed: Placed) {
+        self.full = false;
         if let Some((id, placement)) = placed.kitty {
             self.placements.remove(&(id, placement, number));
         }
@@ -606,11 +607,6 @@ impl Graphics {
             sixel.over = true;
             sixel.data = Vec::new();
         }
-    }
-
-    /// Rows were cleared, and the pictures they showed are to be swept.
-    pub(crate) fn cleared(&mut self) {
-        self.dirty = true;
     }
 
     pub(crate) fn set_room(&mut self, room: usize) {
@@ -1265,22 +1261,22 @@ impl Emulator {
         if let Some(alternate) = alternate {
             alternate.retain_pieces(false, |piece| !gone.contains(&piece.picture));
         }
-        self.graphics.dirty = true;
         (gone.into_iter())
             .filter_map(|number| Some(self.graphics.remove_picture(number)?.kitty))
             .collect()
     }
 
-    /// Whether pictures no row shows may be worth forgetting: some were
-    /// deleted, or rows cleared, or history has moved on far enough since
-    /// they last were that the work of a sweep, a look at every piece
-    /// history holds, is paid for by the lines it took.
+    /// Whether pictures no row shows are worth forgetting as output
+    /// pauses: history has moved on far enough since they last were that
+    /// the work of a sweep, a look at every piece history holds, is paid
+    /// for by the lines it took. Those deleted, or on rows cleared, wait
+    /// for it too, or for the table to fill.
     pub(crate) fn sweep_due(&self) -> bool {
         let primary = self.grids().0;
         let moved = primary
             .scrollback_end()
             .saturating_sub(self.graphics.swept_end);
-        self.graphics.dirty || moved >= (primary.history_piece_count() as u64 / 8).max(256)
+        moved >= (primary.history_piece_count() as u64 / 8).max(256)
     }
 
     /// Forgets the pictures no row shows any more, and the pieces history
@@ -1302,7 +1298,6 @@ impl Emulator {
             self.graphics.remove_picture(number);
         }
         self.graphics.sweep_at = (self.graphics.pictures.len() * 2).max(64);
-        self.graphics.dirty = false;
         self.graphics.swept_end = self.grids().0.scrollback_end();
     }
 
@@ -1314,6 +1309,10 @@ impl Emulator {
     }
 
     /// Shows the image `kept` at the cursor, as `spec` says.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one layout, worked out a step at a time"
+    )]
     fn place_picture(&mut self, kept: ImageKept, spec: Spec) -> Result<(), kitty::Error> {
         let [cell_width, cell_height] = self.cell();
         let size = [kept.width, kept.height];
@@ -1392,10 +1391,15 @@ impl Emulator {
             span: [parts(drawn_w, cell_width), parts(drawn_h, cell_height)],
             z: spec.z,
         };
-        if self.graphics.pictures.len() >= self.graphics.sweep_at.max(64) {
+        let full = self.graphics.pictures.len() >= MOST_PICTURES;
+        if self.graphics.pictures.len() >= self.graphics.sweep_at.max(64)
+            || full && !self.graphics.full
+        {
             self.sweep_pictures();
         }
         if self.graphics.pictures.len() >= MOST_PICTURES {
+            // Not swept again until a picture goes.
+            self.graphics.full = true;
             return Err(kitty::Error::Busy);
         }
         let number = loop {

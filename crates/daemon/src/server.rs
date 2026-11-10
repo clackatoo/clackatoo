@@ -1454,11 +1454,25 @@ impl Daemon {
                 pty.restore_asked(&asked.asked);
             }
         }
-        // The images they show and keep, the store's already.
+        // The images they show and keep, the store's already; those the
+        // store holds for them that they no longer do, as a picture no row
+        // showed by the time of the handover, are let go.
         for graphics in &state.graphics {
             let slot = daemon.terminals.get_mut(&TerminalId(graphics.terminal));
             if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
                 pty.restore_graphics(&graphics.graphics);
+            }
+        }
+        for terminal in &state.terminals {
+            let owner = clackatoo_protocol::ImageFrom::Terminal(TerminalId(terminal.id));
+            let kept = (state.graphics.iter())
+                .find(|graphics| graphics.terminal == terminal.id)
+                .map(|graphics| graphics.graphics.images())
+                .unwrap_or_default();
+            for image in daemon.images.held_by(owner) {
+                if !kept.contains(&image.0) {
+                    daemon.images.let_go(owner, image);
+                }
             }
         }
         // What the user marked them with.

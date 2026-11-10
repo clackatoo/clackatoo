@@ -49,6 +49,10 @@ pub(crate) const MAX_OSC_LEN: usize = 3 << 19;
 /// little more for its arguments.
 pub(crate) const MAX_IMAGE_OSC_LEN: usize = 88 << 20;
 
+/// How an iTerm2 image's OSC string starts, without the `;` between its
+/// parts.
+const IMAGE: &[u8] = b"1337File=";
+
 /// The most room the OSC string's buffer keeps between strings. A big
 /// clipboard write grows it; it's given back after, rather than held for
 /// the terminal's life.
@@ -151,6 +155,12 @@ pub(crate) struct Parser {
     /// [`MAX_IMAGE_OSC_LEN`]: as much base64 as the terminal's limit for
     /// images takes.
     image_osc_most: Option<usize>,
+    /// The most bytes it may take now, as the room images leave says.
+    image_osc_room: Option<usize>,
+    /// The OSC string being collected is an image's that went past its
+    /// most, or was given up on: the rest of it is dropped, and it's
+    /// never dispatched.
+    osc_dropped: bool,
     /// The start of a UTF-8 character that the last call ended partway
     /// through.
     partial: [u8; 4],
@@ -167,9 +177,22 @@ impl Parser {
         self.image_osc_most = Some(most);
     }
 
+    /// Lets an iTerm2 image's OSC string take no more than `room` bytes now.
+    pub(crate) fn set_image_osc_room(&mut self, room: usize) {
+        self.image_osc_room = Some(room);
+    }
+
+    /// Gives up on the iTerm2 image's OSC string being collected, if one
+    /// is: what it held goes, and so does the rest of it.
+    pub(crate) fn abandon_image_osc(&mut self) {
+        if self.image_osc_len() > 0 {
+            self.drop_osc();
+        }
+    }
+
     /// The bytes of an iTerm2 image's OSC string held now.
     pub(crate) fn image_osc_len(&self) -> usize {
-        if self.state == State::OscString && self.osc.starts_with(b"1337File=") {
+        if self.state == State::OscString && self.osc.starts_with(IMAGE) {
             self.osc.len()
         } else {
             0
@@ -725,14 +748,38 @@ impl Parser {
     }
 
     fn osc_put(&mut self, bytes: &[u8]) {
-        // The string so far, without the `;` between its parts.
-        let most = if self.osc.starts_with(b"1337File=") {
-            self.image_osc_most.unwrap_or(MAX_IMAGE_OSC_LEN)
+        if self.osc_dropped {
+            return;
+        }
+        // The string so far, without the `;` between its parts, and what
+        // comes now: whether it's an iTerm2 image's.
+        let image = if self.osc.len() >= IMAGE.len() {
+            self.osc.starts_with(IMAGE)
+        } else {
+            let more = IMAGE.len() - self.osc.len();
+            IMAGE.starts_with(&self.osc)
+                && bytes.len() >= more
+                && bytes[..more] == IMAGE[self.osc.len()..]
+        };
+        let most = if image {
+            (self.image_osc_most.unwrap_or(MAX_IMAGE_OSC_LEN))
+                .min(self.image_osc_room.unwrap_or(usize::MAX))
         } else {
             MAX_OSC_LEN
         };
         let room = most.saturating_sub(self.osc.len());
+        if image && bytes.len() > room {
+            self.drop_osc();
+            return;
+        }
         self.osc.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    /// Drops the OSC string being collected, and what's left of it as it
+    /// comes, and never dispatches it.
+    fn drop_osc(&mut self) {
+        self.osc_dropped = true;
+        self.osc = Vec::new();
     }
 
     /// Ends one `;`-separated part of the OSC string. After the last part
@@ -746,6 +793,11 @@ impl Parser {
     }
 
     fn osc_end(&mut self, performer: &mut impl Perform, bell_terminated: bool) {
+        if std::mem::take(&mut self.osc_dropped) {
+            self.osc.clear();
+            self.osc_parts = 0;
+            return;
+        }
         self.osc_split();
         let mut parts: [&[u8]; MAX_OSC_PARAMS] = [&[]; MAX_OSC_PARAMS];
         let mut start = 0;

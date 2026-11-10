@@ -10,8 +10,8 @@
 //! holds `tty-graphics-protocol` and it's in a folder for temporary files,
 //! reached through no link, as kitty's rules say; a shared memory object
 //! is too, as kitty takes it away. Either is read and taken away through
-//! its folder, opened once, so they're the same file, and only if what
-//! was read looks like the image it's said to be. Every failure to read a
+//! its folder, opened once, only if its name still names the file read,
+//! and only if what was read looks like the image it's said to be. Every failure to read a
 //! file is said alike (see [`UNREADABLE`]), so a program can't find out
 //! what's there.
 
@@ -85,7 +85,8 @@ pub(crate) fn bytes_of(source: ImageSource, most: u64) -> Result<Vec<u8>, String
             Ok(bytes)
         }
         ImageSource::Sixel(data) => {
-            let image = sixel::decode(&data, most / 4).map_err(|refused| match refused {
+            let pixels = (most / 4).min(sixel::MOST_PIXELS);
+            let image = sixel::decode(&data, pixels).map_err(|refused| match refused {
                 sixel::Refused::TooBig => too_big(),
                 sixel::Refused::Empty => not_an_image(),
             })?;
@@ -225,9 +226,11 @@ fn read_from(mut file: std::fs::File, (offset, size, most): Span) -> Result<Vec<
 }
 
 /// The file `name` in the folder `dir`, as much of it as `span` says, never
-/// through a link, then taken away, if what was read `looks_whole`: the
-/// same file read and taken away, as both go by the folder, whatever
-/// becomes of the path meanwhile.
+/// through a link, then taken away, if what was read `looks_whole` and the
+/// name, looked at again just before, still names the file read. Both go
+/// by the folder, so a path changed meanwhile can't lead elsewhere; a file
+/// put in the name's place in the moment after that look could still be
+/// taken away in its stead.
 fn read_and_take_away(
     dir: &OwnedFd,
     name: &OsStr,
@@ -241,8 +244,16 @@ fn read_and_take_away(
         return Err(unreadable());
     }
     let file = regular::open_at(dir, name, Links::Refuse).map_err(|_| unreadable())?;
+    let read = rustix::fs::fstat(&file).map_err(|_| unreadable())?;
     let bytes = read_from(file, span)?;
-    if looks_whole(&bytes) {
+    if !looks_whole(&bytes) {
+        return Ok(bytes);
+    }
+    // Taken away only if the name still names the file read, looked at
+    // just before.
+    let named = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW);
+    let same = named.is_ok_and(|named| (named.st_dev, named.st_ino) == (read.st_dev, read.st_ino));
+    if same {
         let _ = rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty());
     }
     Ok(bytes)
@@ -317,6 +328,13 @@ mod tests {
     }
 
     #[test]
+    fn a_sixel_image_is_no_bigger_than_the_default_limit_allows_whatever_the_limit() {
+        // 5000 by 5000, said by its raster attributes: 25 million pixels.
+        let source = ImageSource::Sixel(b"\"1;1;5000;5000~".to_vec());
+        assert!(bytes_of(source, 1 << 40).unwrap_err().contains("limit"));
+    }
+
+    #[test]
     fn compressed_data_is_uncompressed_no_further_than_it_may_be() {
         use std::io::Write as _;
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -374,6 +392,17 @@ mod tests {
         std::fs::write(&kept, png).unwrap();
         assert!(temporary_place(&link.join("tty-graphics-protocol-2.png")).is_none());
         assert!(kept.exists());
+        // Nor another file put in its name's place after it was read.
+        let swapped = folder.path().join("tty-graphics-protocol-4.png");
+        std::fs::write(&swapped, png).unwrap();
+        let (dir, name) = temporary_place(&swapped).unwrap();
+        let _ = read_and_take_away(&dir, name, (0, 0, 100), |_| {
+            let other = folder.path().join("other");
+            std::fs::write(&other, b"someone else's").unwrap();
+            std::fs::rename(&other, &swapped).unwrap();
+            true
+        });
+        assert_eq!(std::fs::read(&swapped).unwrap(), b"someone else's");
         // Nor what doesn't look like the image it's said to be.
         let wrong = folder.path().join("tty-graphics-protocol-3.png");
         std::fs::write(&wrong, b"not a png").unwrap();

@@ -26,6 +26,12 @@ pub const MOST_SIDE: u32 = 16384;
 /// the same pixels over and over is refused before it's decoded.
 pub const MOST_COATS: u64 = 16;
 
+/// The most pixels a sixel image may have, whatever the limit for images
+/// says: what the default limit, 64 MiB, holds at four bytes a pixel. So
+/// decoding even the most work an image may take stays well inside the
+/// time a terminal waits for it.
+pub const MOST_PIXELS: u64 = 1 << 24;
+
 /// A sixel image, decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decoded {

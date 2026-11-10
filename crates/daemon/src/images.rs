@@ -61,6 +61,11 @@ const ORIGINAL_INSTEAD: u64 = 16 * MIB;
 /// file that hangs, as on a mount gone away, holds up only its own.
 const READERS: usize = 4;
 
+/// How many readers given up on may still be out, hung, as on a mount gone
+/// away: past that, no more files are read until some come back, as each
+/// holds a thread.
+const MOST_ABANDONED: usize = 32;
+
 /// How many files may wait to be read: past that, more are refused.
 const READ_QUEUE: usize = 64;
 
@@ -410,8 +415,13 @@ pub(crate) struct Images<T> {
     to_read: VecDeque<(u64, ToRead)>,
     /// The files being read, each with when it's given up on.
     reading: HashMap<u64, (Why, ImageFrom, Instant)>,
-    /// How many readers are out, those given up on among them.
+    /// How many readers are out, not given up on: never more than
+    /// [`READERS`].
     readers: usize,
+    /// How many readers given up on are still out, hung.
+    abandoned: usize,
+    /// Whether it was said that too many readers hang to read more.
+    said_hung: bool,
     /// The number the next file read gets.
     next_read: u64,
     /// How long a file is waited for: [`READ_WAIT`], less in tests.
@@ -479,6 +489,8 @@ impl<T: Clone + PartialEq> Images<T> {
             to_read: VecDeque::new(),
             reading: HashMap::new(),
             readers: 0,
+            abandoned: 0,
+            said_hung: false,
             next_read: 0,
             read_wait: READ_WAIT,
             terminal_jobs: None,
@@ -616,8 +628,15 @@ impl<T: Clone + PartialEq> Images<T> {
     /// it is let go, never kept.
     pub(crate) fn forget_waiting(&mut self, owner: ImageFrom) {
         self.terminal_pending.retain(|_, (_, of, _)| *of != owner);
-        self.reading.retain(|_, (_, of, _)| *of != owner);
+        let reads: Vec<u64> = (self.reading.iter())
+            .filter(|(_, (_, of, _))| *of == owner)
+            .map(|(&read, _)| read)
+            .collect();
+        for read in reads {
+            self.abandon_read(read);
+        }
         self.to_read.retain(|(_, to_read)| to_read.owner != owner);
+        self.start_reading();
     }
 
     /// Whether there's work on the thread not taken back yet.
@@ -629,6 +648,16 @@ impl<T: Clone + PartialEq> Images<T> {
     /// Starts reading the files waiting, as readers come free: each on a
     /// thread of its own, which wakes the loop once it's read.
     fn start_reading(&mut self) {
+        if self.abandoned >= MOST_ABANDONED {
+            if !self.to_read.is_empty() && !std::mem::replace(&mut self.said_hung, true) {
+                log::warn!(
+                    "{} image files' reads hang, as on a mount gone away: no more are read \
+                     until some come back",
+                    self.abandoned
+                );
+            }
+            return;
+        }
         while self.readers < READERS
             && let Some((read, to_read)) = self.to_read.pop_front()
         {
@@ -728,12 +757,16 @@ impl<T: Clone + PartialEq> Images<T> {
             }
             match done {
                 Done::Read { read, kept: result } => {
-                    self.readers = self.readers.saturating_sub(1);
-                    // Given up on meanwhile: nothing waits for it.
+                    // Given up on meanwhile: nothing waits for it, and its
+                    // reader, hung till now, is back.
                     if let Some((why, owner, _)) = self.reading.remove(&read) {
+                        self.readers = self.readers.saturating_sub(1);
                         let result =
                             result.and_then(|(info, bytes)| self.insert(owner, info, bytes));
                         kept.push(Kept { why, kept: result });
+                    } else {
+                        self.abandoned = self.abandoned.saturating_sub(1);
+                        self.said_hung = false;
                     }
                     self.start_reading();
                     continue;
@@ -862,7 +895,7 @@ impl<T: Clone + PartialEq> Images<T> {
             .map(|(&read, _)| read)
             .collect();
         for read in late {
-            if let Some((why, ..)) = self.reading.remove(&read) {
+            if let Some((why, ..)) = self.abandon_read(read) {
                 let kept_not = Err("its file took too long to read".to_owned());
                 kept.push(Kept {
                     why,
@@ -881,6 +914,17 @@ impl<T: Clone + PartialEq> Images<T> {
                 kept: kept_not,
             });
         }
+        // Readers given up on leave their places to those waiting.
+        self.start_reading();
+    }
+
+    /// Gives up on read `read`: its reader's place goes to the next file,
+    /// and it's counted as hung until it comes back.
+    fn abandon_read(&mut self, read: u64) -> Option<(Why, ImageFrom, Instant)> {
+        let reading = self.reading.remove(&read)?;
+        self.readers = self.readers.saturating_sub(1);
+        self.abandoned += 1;
+        Some(reading)
     }
 
     /// Keeps `bytes`, an image `info` says, for `owner`, letting older
@@ -1064,6 +1108,14 @@ impl<T: Clone + PartialEq> Images<T> {
         for id in gone {
             self.forget(id);
         }
+    }
+
+    /// The images `owner` holds.
+    pub(crate) fn held_by(&self, owner: ImageFrom) -> Vec<ImageId> {
+        (self.entries.iter())
+            .filter(|(_, entry)| entry.owners.contains(&owner))
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Pins image `id`, as shown: it isn't let go while it's pinned.
@@ -2064,6 +2116,38 @@ mod tests {
         let (kept, _) = store.take(None);
         assert_eq!(kept.len(), READERS + 1);
         assert!(kept.iter().all(|kept| kept.kept.is_err()));
+    }
+
+    #[test]
+    fn readers_that_never_come_back_leave_their_places_to_others() {
+        let mut store = Images::<u32>::new(Limits::default(), None);
+        store.read_wait = Duration::from_millis(50);
+        for n in 0..READERS {
+            let n = u32::try_from(n).unwrap();
+            let never = Source::Hang(Duration::from_hours(1));
+            store.keep(CHAT, Why::Test(n), never).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        let (kept, _) = store.take(None);
+        assert_eq!(kept.len(), READERS);
+        assert_eq!((store.readers, store.abandoned), (0, READERS));
+        // A file read after them is read, though they never come back.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.png");
+        std::fs::write(&file, png(2, 2, 7)).unwrap();
+        store.keep(CHAT, Why::Test(99), Source::File(file)).unwrap();
+        let (kept, _) = store.take(Some(WAIT));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kept.as_ref().map(|info| info.width), Ok(2));
+        // Past the most that may hang, no more are read until some are back.
+        store.abandoned = MOST_ABANDONED;
+        let dir_file = dir.path().join("b.png");
+        std::fs::write(&dir_file, png(3, 3, 7)).unwrap();
+        store
+            .keep(CHAT, Why::Test(100), Source::File(dir_file))
+            .unwrap();
+        assert_eq!(store.readers, 0);
+        assert!(store.said_hung);
     }
 
     #[test]

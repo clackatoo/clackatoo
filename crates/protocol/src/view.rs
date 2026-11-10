@@ -82,7 +82,7 @@ pub struct GridNode {
     )]
     pub marks: BlockMarks,
     /// The pictures the lines show. Empty from a daemon older than
-    /// protocol 151.
+    /// protocol 150.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
@@ -543,7 +543,7 @@ pub struct HistoryLines {
     )]
     pub marks: BlockMarks,
     /// The pictures the lines show, numbered from [`first`](Self::first).
-    /// Empty from a daemon older than protocol 151.
+    /// Empty from a daemon older than protocol 150.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
         deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
@@ -642,7 +642,7 @@ pub enum Patch {
         )]
         marks: BlockMarks,
         /// The pictures those lines show. Empty from a daemon older than
-        /// protocol 151.
+        /// protocol 150.
         #[serde(
             skip_serializing_if = "wire::before::<{ wire::TERMINAL_IMAGES }, _>",
             deserialize_with = "wire::since::<{ wire::TERMINAL_IMAGES }, _, _>"
