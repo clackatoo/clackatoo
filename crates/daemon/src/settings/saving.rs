@@ -102,9 +102,9 @@ impl Scan {
             let here = rest;
             let found = here.find(['-', '"', '\'', '[', ']', '{', '}', '(', ')']);
             // What's between, outside strings and comments.
-            if self.depth == 0 {
-                self.statements += statements_in(&here[..found.unwrap_or(here.len())]);
-            }
+            // At any depth: `daemon.` inside a table may be a statement of
+            // a function's, which sets what it likes.
+            self.statements += statements_in(&here[..found.unwrap_or(here.len())]);
             let Some(at) = found else {
                 return Ok(());
             };
@@ -601,12 +601,16 @@ daemon.history.lines = 4000
                 .set(info("machine.name"), Some(Value::Text("desk".into())))
                 .unwrap();
         }
-        // An agent's table naming the daemon inside it is one statement.
-        let text = "daemon.agents.x = { command = { daemon.machine.name } }\n";
+        // `daemon.` inside a table counts too: a function there could set
+        // anything.
+        let text = "daemon.agents.x = { command = (function() daemon.machine.name = \"x\" \
+                    return { \"x\" } end)() }\n";
         let mut model = Model::parse(text).unwrap();
-        model
-            .set(info("machine.name"), Some(Value::Text("desk".into())))
-            .unwrap();
+        assert!(
+            model
+                .set(info("machine.name"), Some(Value::Text("desk".into())))
+                .is_err()
+        );
     }
 
     #[test]

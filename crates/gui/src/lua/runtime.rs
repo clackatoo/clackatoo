@@ -102,9 +102,6 @@ struct State {
     keyed: Cell<bool>,
     /// The files of Lua that have set something, each kept once.
     files: RefCell<Vec<Arc<str>>>,
-    /// The config was run again by itself, as its files changed: what it
-    /// says but for a key's is unattended (see [`Origin::unattended`]).
-    unattended: bool,
 }
 
 impl State {
@@ -122,7 +119,6 @@ impl State {
             guarded: Cell::new(false),
             keyed: Cell::new(false),
             files: RefCell::default(),
-            unattended: false,
         }
     }
 
@@ -130,7 +126,6 @@ impl State {
         let from = Origin {
             window: self.window.get(),
             guarded: self.guarded.get(),
-            unattended: self.unattended && !self.keyed.get(),
         };
         if self.to_windows.send((to, from, message)).is_ok() {
             (self.wake)();
@@ -206,9 +201,6 @@ pub(super) struct Start<'a> {
     pub(super) options: Options,
     /// The windows open as it starts.
     pub(super) windows: Vec<u32>,
-    /// It's run again by itself, as its files changed (see
-    /// [`Origin::unattended`]).
-    pub(super) unattended: bool,
 }
 
 /// Runs the config, as `start` says, then whatever the windows ask, until
@@ -225,11 +217,8 @@ pub(super) fn run(
         chunks,
         options,
         windows,
-        unattended,
     } = start;
-    let mut state = State::new(options, to_windows, wake);
-    state.unattended = unattended;
-    let state = Rc::new(state);
+    let state = Rc::new(State::new(options, to_windows, wake));
     // Windows open now are there as the config loads, though nothing's
     // shown in them yet.
     for window in windows {
@@ -482,7 +471,6 @@ impl Runtime {
                     let origin = Origin {
                         window: Some(key.window),
                         guarded: key.guarded,
-                        unattended: false,
                     };
                     let event = |runtime: &Self| runtime.decided_event(&key);
                     self.later(&handler, event, origin, Some(binding));
@@ -515,7 +503,6 @@ impl Runtime {
                     let origin = Origin {
                         window: Some(turn.window),
                         guarded: turn.guarded,
-                        unattended: false,
                     };
                     self.later(&handler, |runtime| runtime.turn_event(&turn), origin, None);
                 }
@@ -594,7 +581,6 @@ impl Runtime {
                     let origin = Origin {
                         window: Some(key.window),
                         guarded: key.guarded,
-                        unattended: false,
                     };
                     let job = Job {
                         keyed: true,

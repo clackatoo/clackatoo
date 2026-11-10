@@ -1309,7 +1309,7 @@ impl Daemon {
             tutor: tutor::Tutor::default(),
             finds,
             tools: Tools::with_limits(config.agents.subagent_limits()),
-            configuring: configuring::Configuring::starting(&config.agents.configured),
+            configuring: configuring::Configuring::default(),
             background: background::Backgrounds::default(),
             keeps: keep::Keeps::default(),
             closed: closed::ClosedList::default(),
@@ -2425,9 +2425,6 @@ impl Daemon {
                 None => drained = Some(self.agents_to_keep(&upgrading.takes)),
             }
         };
-        // What windows asked of the daemon's config, not done, is said not
-        // to be.
-        self.config_upgrading();
         let Upgrading {
             executable,
             takes,
@@ -2449,11 +2446,14 @@ impl Daemon {
             self.refuse_upgrade(token, reason);
             return Ok(None);
         }
-        // There's no way back now. What can't wait for the next build is
-        // answered for the agents that go on. Language servers are asked to
+        // There's no way back now. What windows asked of the daemon's
+        // config, not done, is said not to be. What can't wait for the
+        // next build is answered for the agents that go on. Language
+        // servers are asked to
         // shut down, and the other agents stopped, to do so while remote
         // windows are told. Panes kept a moment since their programs ended
         // close now, as they would have.
+        self.config_upgrading();
         self.close_graced();
         self.ready_kept(&keep);
         let servers_until = Instant::now() + stopping::STOP_WAIT;
@@ -4085,6 +4085,9 @@ impl Daemon {
             Request::DaemonSettings => self.serve_daemon_settings(token),
             Request::SetDaemonOption { name, value } => {
                 self.serve_set_daemon_option(token, &name, value.as_deref())
+            }
+            Request::DecideDaemonConfig { revision, apply } => {
+                self.serve_decide_daemon_config(token, revision, apply)
             }
             Request::Connect {
                 host,

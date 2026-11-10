@@ -451,22 +451,9 @@ impl Daemon {
     pub(super) fn start_hosted_chat(&mut self, chat: HostedChat) {
         let id = chat.info().id;
         // The limits on chats agents start, as the daemon's config set
-        // them, are taken as the user starts a chat: never as an agent
-        // calls a tool, nor starts one, so an agent that changed the
-        // config can't raise them. What it says of agents, too, is what
-        // chats agents start under this one go by.
-        let users = chat.relations().root.is_none();
-        let lower = super::configuring::lower_or_same(
-            &self.config.agents.subagent_limits(),
-            &self.tools.subagent_limits(),
-        );
-        if users || lower {
-            self.refresh_subagent_limits();
-        }
+        // them, are taken as a chat starts: never as an agent calls a tool.
+        self.refresh_subagent_limits();
         self.add_chat(chat);
-        if users {
-            self.note_tree(id);
-        }
         // Its own value was worked out before the limits were read again.
         self.hold_subagents_of(id);
         self.offer_providers(Some(id));
@@ -476,21 +463,7 @@ impl Daemon {
     /// The agent called `name`, as it's set up now, or else one by that
     /// name that can't start, which says why when it's asked to.
     pub(super) fn agent_spec(&self, name: &str) -> AgentSpec {
-        Self::agent_spec_from(name, self.config.agents.find(name))
-    }
-
-    /// The agent called `name` for a chat an agent starts under `chat`, as
-    /// the config said as `chat`'s tree began (see
-    /// [`Daemon::tree_agents`]).
-    pub(super) fn agent_spec_under(&self, chat: TerminalId, name: &str) -> AgentSpec {
-        let found = (self.config.agents).find_in(name, self.tree_agents(chat));
-        Self::agent_spec_from(name, found)
-    }
-
-    /// `found`, the agent called `name`, or else one by that name that
-    /// can't start.
-    fn agent_spec_from(name: &str, found: Result<AgentSpec, String>) -> AgentSpec {
-        found.unwrap_or_else(|_| AgentSpec {
+        self.config.agents.find(name).unwrap_or_else(|_| AgentSpec {
             name: name.to_owned(),
             title: name.to_owned(),
             launch: Launch::Command(Vec::new()),
@@ -656,13 +629,7 @@ impl Daemon {
     /// Starts the agent called `name` for the chat in `id`, unless it
     /// can't be: then the chat hears why, or is offered to install it.
     fn start_agent_for(&mut self, id: TerminalId, name: &str) -> Option<AgentId> {
-        // One an agent started runs the agent as its tree's config says.
-        let found = if self.agent_started(id) {
-            (self.config.agents).find_in(name, self.tree_agents(id))
-        } else {
-            self.config.agents.find(name)
-        };
-        let spec = match found {
+        let spec = match self.config.agents.find(name) {
             Ok(spec) => spec,
             Err(why) => {
                 self.chat(id)?.failed_to_connect(&why);

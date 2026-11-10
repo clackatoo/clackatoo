@@ -569,10 +569,17 @@ impl DaemonConfig {
             .unwrap_or_default();
         let mut config = Self::from_settings(&loaded.settings);
         config.notes.splice(0..0, loaded.notes);
-        config.own_config = dirs.map(|dirs| settings::Own {
-            dirs,
-            settings: loaded.settings.clone(),
-            failure: loaded.failure,
+        config.own_config = dirs.map(|dirs| {
+            // What runs programs is what the user approved, whatever the
+            // files say now: a change made outside clackatoo waits.
+            let (staged, going) = settings::staging::starting(&dirs, &config.agents.configured);
+            config.agents.configured = going;
+            settings::Own {
+                dirs,
+                settings: loaded.settings.clone(),
+                failure: loaded.failure,
+                staged,
+            }
         });
         (config, loaded.settings)
     }

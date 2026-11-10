@@ -727,11 +727,14 @@ fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Resul
     if let Some(dirs) = clackatoo_daemon::settings::Dirs::from_env() {
         let when = clackatoo_daemon::settings::When::Starting;
         let loaded = clackatoo_daemon::settings::load(&dirs, when);
-        config.agents.configured = loaded.settings.agents();
+        let fresh = loaded.settings.agents();
+        let (staged, going) = clackatoo_daemon::settings::staging::starting(&dirs, &fresh);
+        config.agents.configured = going;
         config.own_config = Some(clackatoo_daemon::settings::Own {
             dirs,
             settings: loaded.settings,
             failure: loaded.failure,
+            staged,
         });
     }
     let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;

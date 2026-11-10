@@ -753,17 +753,11 @@ impl Host {
             }
             // Run again from the start, once for every window, which each
             // follow.
+            // Run again beside the one the windows go by, for its plain
+            // options: the windows hear of it as Lua says.
             Wake::Config => {
                 if let Some(client) = &self.client {
-                    client.reload_unattended();
-                }
-                let keys: Vec<WindowKey> = self.windows.keys().copied().collect();
-                for key in keys {
-                    self.on_window(key, |app| {
-                        if app.session_event(SessionEvent::ConfigRan) {
-                            app.closing = true;
-                        }
-                    });
+                    client.run_trial();
                 }
             }
             Wake::Desktop(desktop) => {

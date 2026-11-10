@@ -94,13 +94,16 @@ the config doesn't require yet is picked up once the file that requires it
 changes. If the user's inotify instances are all in use, nothing's watched,
 which the window's log says, and `:reload` still works.
 
-A config run again by itself starts no program by itself: what it runs as it
-loads, or in a handler of something other than your keys, such as a chat's
-turn ending, isn't done (`client.cmd`, `client.connect`, `client.forward`,
-splits and closes), and the bar says it waits for `:reload`. Its bindings
-and handlers of your keys work as soon as it has run, as what they do is
-yours to start. So a file an agent writes never runs a program you didn't
-ask for.
+A config run again by itself, as its files changed, applies only its plain
+options. It runs beside the config the windows go by, which keeps its keys,
+handlers and all it does, and only the options it sets are taken: not keys
+it binds, handlers, `client.cmd`, `client.connect`, `client.forward` or
+splits, and not the options that start programs, reach the network or
+loosen what agents may do (`agent`, `agenttools`, `claudetask`,
+`chatbrowser`, `rewindfiles`, `languageinstall`, `osc52` and
+`updatecheck`). The bar says `:reload` applies the rest, which only you can
+do: an agent's keys can't. So a file an agent writes never runs anything by
+itself.
 
 
 ## How a key travels
@@ -829,22 +832,38 @@ modules they require, in `daemon/lua/` and `lua/`. A quarter of a second
 after one changes, it runs the config again, on a thread of its own, never
 holding up the terminals. What can change as the daemon runs does, at once,
 for what it starts from then on: the agents and profiles new chats can start
-with, the limits on chats agents start, whether agents go on through
-upgrades, the notification when a long command ends, how terminals started
+with, and the limits on chats agents start, once you've approved them (see
+below), whether agents go on through upgrades, the notification when a long
+command ends, how terminals started
 then lay out emoji, and how many lines of terminals' history are kept, and
 how often. The rest, as [the daemon's options](#the-daemon-s-options) say,
 is read only as the daemon starts: `clackatoo upgrade`, which keeps every
 terminal and agent running, takes it in.
 
-What runs programs changes only as you start a chat, so an agent that can
-write a file of config can't make itself, or the chats it starts, run
-something else. Chats agents start, and the chats those start, go by the
-agents and profiles as they were when your own chat at the top started;
-the limits on chats agents start go up only as you start a chat, though
-limits lowered apply at once. And a change to an agent's command, a profile,
-or a limit raised, made anywhere but the settings menu, is said in every
-window's bar, as `daemon config changed outside clackatoo: agents.claude
-command, subagents.working`, for you to undo if it isn't yours.
+### Changes made outside clackatoo wait for your OK
+
+Changes made outside clackatoo to agents and limits wait for your OK. That
+covers any field of any agent, any profile, and any limit on chats agents
+start raised: what runs programs. When the config's files say otherwise of
+those than you last approved, as a file an agent wrote would, the daemon goes
+on by what you approved, and the change is *pending*. The rest of the config
+still applies, and a limit lowered applies at once.
+
+Every window says so in its bar, as `Config changed outside clackatoo:
+agents.claude command, subagents.working`, from the moment it connects, and
+the settings menu's Advanced lists it first, under **Changed outside
+clackatoo**: each thing it changes, what you approved and what it is now,
+then **Apply these changes** and **Discard them**. Only you can answer, in a
+window: never an agent's keys, nor a web device. A change you discard isn't
+pending again until the files say something else.
+
+What you approved is kept in clackatoo's state directory, as
+`daemon-approved.lua`, and what you discarded as `daemon-discarded.lua`, so
+a restart or an upgrade, which run the config from its files, never takes
+in a change you didn't approve: it stays pending. The first time a daemon
+with this runs, as when the old TOML files are moved in, what the config
+says is approved. A change you make in the settings menu is yours, and
+applies at once.
 
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is

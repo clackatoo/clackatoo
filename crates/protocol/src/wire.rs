@@ -1314,7 +1314,9 @@ impl Downgrade for ClientMessage {
             && matches!(
                 self,
                 Self::Request(
-                    crate::Request::DaemonSettings | crate::Request::SetDaemonOption { .. }
+                    crate::Request::DaemonSettings
+                        | crate::Request::SetDaemonOption { .. }
+                        | crate::Request::DecideDaemonConfig { .. }
                 )
             )
         {

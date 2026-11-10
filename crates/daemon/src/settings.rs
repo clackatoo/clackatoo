@@ -28,6 +28,7 @@ mod lua;
 mod migrate;
 pub mod options;
 mod saving;
+pub mod staging;
 
 pub use lua::{module_name, read as read_file, read_text};
 
@@ -87,6 +88,9 @@ pub struct Own {
     pub settings: Settings,
     /// Why it didn't run, as the daemon started, if it didn't.
     pub failure: Option<String>,
+    /// What runs programs, as the user approved it, and what the config
+    /// says that waits for the user (see [`staging`]).
+    pub staged: staging::Staged,
 }
 
 /// The file in the state directory the settings that last ran without a
@@ -395,6 +399,13 @@ impl Settings {
             "-- The daemon's config as it last ran without a mistake, kept by clackatoo\n\
              -- to run in its place when it goes wrong. Change daemon/init.lua, not this.\n\n",
         );
+        text.push_str(&self.statements());
+        text
+    }
+
+    /// The statements of Luau that set it again.
+    fn statements(&self) -> String {
+        let mut text = String::new();
         for (name, (value, _)) in &self.options {
             let literal = match value {
                 Value::Bool(on) => Literal::Bool(*on),

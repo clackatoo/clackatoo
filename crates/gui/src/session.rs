@@ -126,9 +126,6 @@ pub(crate) enum SessionEvent {
     /// asked to save has been. Sent from the Lua thread, or the settings
     /// writer, by way of the process of windows, not the session's.
     Lua,
-    /// The config's files changed, so it's been run again from the start,
-    /// as `:reload` runs it (see `crate::config_watch`).
-    ConfigRan,
     /// What's on the clipboard and the primary selection, as far as they
     /// could be read, for the editors. Sent from a thread reading them, not
     /// the session's.

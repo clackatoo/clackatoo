@@ -18,8 +18,8 @@
 use super::find;
 use super::view::{Card, ControlView, EasyView, Part, Preview, RowView, SectionView, SettingsHit};
 use super::{
-    Bound, Editing, Entry as AdvancedEntry, Facts, FontPicker, History, Mode, Outcome, Set,
-    SettingsMenu, bindings, short_place, shown_value, typed_value,
+    Bound, Editing, Entry as AdvancedEntry, Facts, FontPicker, History, Mode, Outcome, PENDING,
+    Set, SettingsMenu, bindings, short_place, shown_value, typed_value,
 };
 use crate::desk::Binding;
 use crate::finder::rank::{Items, Ranking};
@@ -186,6 +186,7 @@ impl SettingsMenu {
             .filter(|&index| match &self.entries[index] {
                 AdvancedEntry::Option(info) => !easy::shows(info.name),
                 AdvancedEntry::Keys(bound) => !curated.contains(&bound.binding),
+                AdvancedEntry::Change(_) | AdvancedEntry::Decide(_) => true,
             })
             .take(ADVANCED_FOUND)
             .map(Shown::Advanced)
@@ -310,6 +311,7 @@ impl SettingsMenu {
                                 entry.control,
                                 Control::Keys(action) if bound.binding == Binding::Window(action)
                             ),
+                            AdvancedEntry::Change(_) | AdvancedEntry::Decide(_) => false,
                         })
                     }
                     None => None,
@@ -929,6 +931,9 @@ impl SettingsMenu {
                         (info.name.to_owned(), info.description.to_owned())
                     }
                     AdvancedEntry::Keys(bound) => (display(&bound.keys), bound.does()),
+                    AdvancedEntry::Change(_) | AdvancedEntry::Decide(_) => {
+                        ("Changed outside clackatoo".to_owned(), PENDING.to_owned())
+                    }
                 };
                 return RowView {
                     label,

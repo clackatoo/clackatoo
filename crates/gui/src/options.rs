@@ -846,6 +846,32 @@ choice! {
 /// The option called `name`, or by its short name; or why there's none,
 /// with the name nearest it if it looks like a slip. Tab lists them all,
 /// so the error doesn't.
+/// The options that start programs, reach the network, or loosen what
+/// agents or programs in terminals may do: which a config run again by
+/// itself, as its files changed, never sets (see `Client::run_trial`), as
+/// a file an agent wrote mustn't change them. `:reload` does.
+const RUNS_PROGRAMS: &[&str] = &[
+    // Which agent a new chat starts, and what it may do there.
+    "agent",
+    "agenttools",
+    "claudetask",
+    "chatbrowser",
+    // Files a rewind takes out, undone without asking.
+    "rewindfiles",
+    // Language servers fetched and run.
+    "languageinstall",
+    // The clipboard, to programs in terminals, as far as other machines.
+    "osc52",
+    // Asking GitHub for releases.
+    "updatecheck",
+];
+
+/// Whether `info`'s option is one a config run again by itself never sets
+/// (see [`RUNS_PROGRAMS`]).
+pub(crate) fn runs_programs(info: &Info) -> bool {
+    RUNS_PROGRAMS.contains(&info.name)
+}
+
 pub(crate) fn find(name: &str) -> Result<&'static Info, String> {
     lookup(name).ok_or_else(|| match nearest_name(name, false) {
         Some(near) => format!("no option ‘{name}’: did you mean ‘{near}’?"),

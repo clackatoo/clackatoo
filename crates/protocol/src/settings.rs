@@ -26,6 +26,36 @@ pub struct DaemonSettings {
     /// Why its config, as its files are now, didn't run, if it didn't:
     /// the daemon goes by what last ran without a mistake meanwhile.
     pub failure: Option<String>,
+    /// A change to what runs programs that its config says, made outside
+    /// clackatoo, which waits for the user to apply or discard it: the
+    /// daemon goes by what the user approved meanwhile.
+    pub pending: Option<PendingConfig>,
+}
+
+/// A change to what runs programs, made outside clackatoo, which waits for
+/// the user (see [`Request::DecideDaemonConfig`]).
+///
+/// [`Request::DecideDaemonConfig`]: crate::Request::DecideDaemonConfig
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingConfig {
+    /// Which change it is, for the user's answer to name: a change after
+    /// it is another.
+    pub revision: u64,
+    /// What changes.
+    pub changes: Vec<ConfigChange>,
+}
+
+/// One thing a [`PendingConfig`] changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigChange {
+    /// What, as config names it: `agents.claude command`,
+    /// `subagents.working`.
+    pub name: String,
+    /// What the user approved, as config writes it; empty for something
+    /// added.
+    pub before: String,
+    /// What the config says now; empty for something taken out.
+    pub after: String,
 }
 
 /// One of the daemon's options.

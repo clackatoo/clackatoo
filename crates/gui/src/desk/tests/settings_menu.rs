@@ -1030,7 +1030,104 @@ fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
         dir: dir.into(),
         options,
         failure: None,
+        pending: None,
     }
+}
+
+/// The config changed on disk is run again beside the one the windows go
+/// by, for its plain options only: a keypress handler or key it adds isn't
+/// taken, nor a command run, nor `osc52` loosened; and the bar says
+/// :reload does the rest (CLACKA-237 review).
+#[test]
+fn a_config_changed_on_disk_takes_its_plain_options_and_nothing_else() {
+    use crate::lua::FromLua;
+    let (mut desk, dir) = configured("client.opt.wrap = false\n");
+    std::fs::write(
+        dir.path().join("client/init.lua"),
+        "client.opt.wrap = true\nclient.opt.osc52 = \"copy-paste\"\n\
+         client.on(\"keypress\", function() end)\n\
+         client.keys.map(\"n\", \"<A-q>\", function() end)\nclient.cmd(\"bg make\")\n",
+    )
+    .unwrap();
+    let (client, window) = desk.client();
+    let osc52 = crate::options::find("osc52").unwrap();
+    let before = client.options().borrow().get(osc52);
+    assert!(client.run_trial());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut said = Vec::new();
+    while !said.iter().any(|(_, message)| {
+        matches!(message, FromLua::Error(text) if text.contains(":reload applies the rest"))
+    }) {
+        assert!(std::time::Instant::now() < deadline, "{said:?}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        said.extend(client.take(window));
+    }
+    // Nothing but what's said reaches the window.
+    assert!(
+        said.iter()
+            .all(|(_, message)| matches!(message, FromLua::Error(_))),
+        "{said:?}"
+    );
+    let options = client.options();
+    assert_eq!(
+        options.borrow().get(crate::options::find("wrap").unwrap()),
+        crate::options::Value::Bool(true)
+    );
+    assert_eq!(options.borrow().get(osc52), before);
+    let alt_q = crate::keymap::parse_keys("<A-q>").unwrap();
+    assert!(
+        !(client.keys().bound(KeyMode::Normal)).any(|(keys, _, _)| *keys == alt_q),
+        "a key the trial bound"
+    );
+    assert!(client.keypress_handlers(window, None).is_empty());
+}
+
+/// A change to what runs programs made outside clackatoo stands in the bar
+/// and heads the menu, until the user answers it there: an agent's keys
+/// can't (CLACKA-237 review).
+#[test]
+fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
+    let (mut desk, _dir) = configured("");
+    let mut said = daemon_said("desk");
+    said.pending = Some(clackatoo_protocol::PendingConfig {
+        revision: 4,
+        changes: vec![clackatoo_protocol::ConfigChange {
+            name: "agents.claude command".into(),
+            before: "{ \"claude\" }".into(),
+            after: "{ \"other\" }".into(),
+        }],
+    });
+    desk.daemon_settings_came(&said, None);
+    let banner = |desk: &Desk| match desk.pending_config_status() {
+        Some(crate::chrome::Status::Typing { text, .. }) => text,
+        other => panic!("no banner: {other:?}"),
+    };
+    assert!(banner(&desk).contains("agents.claude command"));
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    let (picked, _, preview) = menu(&mut desk);
+    assert!(picked.starts_with("agents.claude command"), "{picked}");
+    assert!(
+        preview.iter().any(|line| line.contains("{ \"other\" }")),
+        "{preview:#?}"
+    );
+    // An agent's keys can't answer it.
+    type_keys(&mut desk, "j");
+    desk.automating = true;
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(answer_all(&mut desk), []);
+    desk.automating = false;
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::DecideDaemonConfig {
+            revision: 4,
+            apply: true,
+        }]
+    );
+    // Answered: the bar lets it go.
+    desk.daemon_settings_came(&daemon_said("desk"), None);
+    assert!(desk.pending_config_status().is_none());
 }
 
 /// Easy shows the daemon's rows once the daemon has said its settings,

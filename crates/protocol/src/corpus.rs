@@ -2153,6 +2153,21 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         ],
         failure: Some("daemon/init.lua:3: daemon.web.port is a whole number".into()),
+        pending: Some(crate::PendingConfig {
+            revision: 3,
+            changes: vec![
+                crate::ConfigChange {
+                    name: "agents.claude command".into(),
+                    before: "{ \"claude-agent-acp\" }".into(),
+                    after: "{ \"other\" }".into(),
+                },
+                crate::ConfigChange {
+                    name: "subagents.working".into(),
+                    before: "16".into(),
+                    after: "64".into(),
+                },
+            ],
+        }),
     };
     samples.extend(
         [
@@ -2167,6 +2182,14 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Sample::Client(ClientMessage::Request(Request::SetDaemonOption {
                 name: "history.lines".into(),
                 value: None,
+            })),
+            Sample::Client(ClientMessage::Request(Request::DecideDaemonConfig {
+                revision: 3,
+                apply: true,
+            })),
+            Sample::Client(ClientMessage::Request(Request::DecideDaemonConfig {
+                revision: 3,
+                apply: false,
             })),
             Sample::Server(ServerMessage::Event(Event::DaemonSettings {
                 settings: settings.clone(),

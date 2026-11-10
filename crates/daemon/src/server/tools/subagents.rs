@@ -382,10 +382,8 @@ impl Daemon {
                     project.display()
                 ));
             }
-            let profile = crate::agents::AgentConfig::profile_in(
-                new.profile.as_deref().unwrap_or(profiles::DEFAULT),
-                self.tree_agents(chat),
-            )?;
+            let profile = (self.config.agents)
+                .profile(new.profile.as_deref().unwrap_or(profiles::DEFAULT))?;
             planned.push((new, profile, dir));
         }
         let mut text = String::new();
@@ -457,7 +455,7 @@ impl Daemon {
         let role = role_for(&profile.name, &profile.prompt, limits);
         let (root, depth) = (own.relations().root.unwrap_or(chat), own.relations().depth);
         let (size, tools, task, browser) = (own.size(), own.tools(), own.task(), own.browser());
-        let spec = self.agent_spec_under(chat, &name);
+        let spec = self.agent_spec(&name);
         let id = self.next_terminal();
         let cwd = dir.to_string_lossy().into_owned();
         let mut child = HostedChat::new(id, size, cwd, &spec, tools, task, browser);

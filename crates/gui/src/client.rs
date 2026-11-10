@@ -50,6 +50,10 @@ struct Inner {
     wake: RefCell<Option<Box<dyn Fn() -> lua::Wake>>>,
     /// The config's Lua, if there's a config.
     lua: RefCell<Option<Lua>>,
+    /// A run of the config as its files changed, beside the one the windows
+    /// go by, while it runs: only its plain options are taken (see
+    /// [`Client::run_trial`]), and how many of what it said were left out.
+    trial: RefCell<Option<(Lua, usize)>>,
     /// The last key Lua was asked about.
     seq: Cell<u64>,
     /// The windows, by number, each with what Lua has said for it that it
@@ -77,9 +81,6 @@ struct Inner {
     running: Cell<Option<Instant>>,
     /// How many times the config has been run again from the start.
     reloads: Cell<u64>,
-    /// The config was run again by itself last, as its files changed, not
-    /// by `:reload` (see [`crate::lua::Origin::unattended`]).
-    unattended: Cell<bool>,
     /// What the config asked of each window's daemon, `client.connect`'s
     /// machines and `client.forward`'s ports, for windows that open later.
     hosts: RefCell<Vec<(String, Option<bool>)>>,
@@ -140,8 +141,7 @@ impl Client {
             };
             let options = (**self.options().borrow()).clone();
             let windows = self.0.windows.borrow().keys().copied().collect();
-            let unattended = self.0.unattended.get();
-            Lua::start_as(source.clone(), options, windows, wake(), unattended)
+            Lua::start(source.clone(), options, windows, wake())
         };
         self.0.running.set(lua.as_ref().map(|_| Instant::now()));
         *self.0.lua.borrow_mut() = lua;
@@ -238,7 +238,75 @@ impl Client {
         for (to, from, message) in received {
             self.route(to, from, message);
         }
+        self.take_trial();
         self.queued(window)
+    }
+
+    /// Runs the config as its files changed, by itself, as no one asked:
+    /// beside the one the windows go by, which keeps its keys, handlers
+    /// and all it does. Only its options are taken, but those that start
+    /// programs, reach the network or loosen what agents may do (see
+    /// [`crate::options::runs_programs`]); nothing else it says, keys
+    /// bound, handlers, commands, splits, connections or forwards, is
+    /// taken or done, as a file an agent wrote mustn't do anything by
+    /// itself. The bar then says `:reload` does the rest. Returns whether
+    /// there's a config to run.
+    pub(crate) fn run_trial(&self) -> bool {
+        let lua = {
+            let source = self.0.source.borrow();
+            let wake = self.0.wake.borrow();
+            let (Some(source), Some(wake)) = (source.as_ref(), wake.as_ref()) else {
+                return false;
+            };
+            let options = (**self.options().borrow()).clone();
+            let windows = self.0.windows.borrow().keys().copied().collect();
+            Lua::start(source.clone(), options, windows, wake())
+        };
+        let ran = lua.is_some();
+        *self.0.trial.borrow_mut() = lua.map(|lua| (lua, 0));
+        ran
+    }
+
+    /// Takes what the trial run of the config said, if one runs: its plain
+    /// options set, its mistakes said; and once it's run, says what was
+    /// left out, and lets it go.
+    fn take_trial(&self) {
+        let received = match &*self.0.trial.borrow() {
+            Some((lua, _)) => lua.received(),
+            None => return,
+        };
+        for (_, _, message) in received {
+            match message {
+                FromLua::Set { option, .. } if !crate::options::runs_programs(option) => {
+                    self.keep(message);
+                }
+                FromLua::Error(text) => self.to_every_window(&FromLua::Error(text)),
+                FromLua::Ready => {
+                    let left = (self.0.trial.borrow_mut().take()).map_or(0, |(_, left)| left);
+                    let said = if left == 0 {
+                        "the config changed, and its options are as it says"
+                    } else {
+                        "the config changed: its options are as it says, and :reload applies \
+                         the rest"
+                    };
+                    self.to_every_window(&FromLua::Error(said.to_owned()));
+                    return;
+                }
+                FromLua::Decided { .. } => {}
+                _ => {
+                    if let Some((_, left)) = &mut *self.0.trial.borrow_mut() {
+                        *left += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Queues `message` for every window, as from no window's event.
+    fn to_every_window(&self, message: &FromLua) {
+        for queue in self.0.windows.borrow_mut().values_mut() {
+            queue.push((Origin::default(), message.clone()));
+        }
     }
 
     /// What's queued for `window`, taken.
@@ -307,8 +375,7 @@ impl Client {
             To::All => {
                 // Kept for windows opened later only if no window refuses
                 // it now, as one a chat has Control of does.
-                let refused =
-                    from.guarded || from.unattended || !self.0.guarded.borrow().is_empty();
+                let refused = from.guarded || !self.0.guarded.borrow().is_empty();
                 match &message {
                     _ if refused => {}
                     FromLua::Connect { host, share } => {
@@ -539,22 +606,10 @@ impl Client {
     /// and the options are as the process started them. Returns whether
     /// there's a config to run.
     pub(crate) fn reload(&self) -> bool {
-        self.0.unattended.set(false);
-        self.run_again()
-    }
-
-    /// Runs the config again, as [`reload`](Self::reload) does, by itself,
-    /// as its files changed: what it runs then, but for keys of the
-    /// user's, waits for `:reload`, as a file anyone wrote never starts a
-    /// program by itself.
-    pub(crate) fn reload_unattended(&self) -> bool {
-        self.0.unattended.set(true);
-        self.run_again()
-    }
-
-    fn run_again(&self) -> bool {
-        // Its thread ends once it lets go of its end.
+        // Its thread ends once it lets go of its end; a trial run's too, as
+        // this runs all of it.
         *self.0.lua.borrow_mut() = None;
+        *self.0.trial.borrow_mut() = None;
         for queue in self.0.windows.borrow_mut().values_mut() {
             queue.clear();
         }

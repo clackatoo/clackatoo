@@ -116,7 +116,7 @@ impl Desk {
 
     /// Asks the daemon for its settings, for the menu, if it can say them:
     /// the menu lists them once it has, and as they change after.
-    fn ask_daemon_settings(&mut self) {
+    pub(super) fn ask_daemon_settings(&mut self) {
         if self.connected && self.daemon_has(wire::DAEMON_SETTINGS) {
             self.request(Request::DaemonSettings, Asked::DaemonSettings);
         }
@@ -133,6 +133,18 @@ impl Desk {
             }
             _ => false,
         }
+    }
+
+    /// The daemon's answer to the user's answer to what's pending: refused
+    /// at once, as when another change came meanwhile, the menu says why,
+    /// and what's pending now is asked for.
+    pub(super) fn daemon_decided(&mut self, response: Response) -> bool {
+        let Response::Error(err) = response else {
+            return false;
+        };
+        self.warn_saved(format!("your answer wasn't taken: {err}"));
+        self.ask_daemon_settings();
+        true
     }
 
     /// The daemon's answer to a change to its option `info`: refused at
@@ -223,6 +235,42 @@ impl Desk {
             },
             Asked::DaemonOption(info),
         );
+    }
+
+    /// Answers the change to what runs programs made outside clackatoo
+    /// that's pending, the one `revision` names: applies it, or discards
+    /// it. Only the user's own keys answer: never an agent's, nor what a
+    /// chat with Control of the window does.
+    fn decide_daemon_config(&mut self, revision: u64, apply: bool) {
+        if self.automating || self.controlled {
+            return self.warn_saved("an agent's input can't answer this: it's yours".into());
+        }
+        self.request(
+            Request::DecideDaemonConfig { revision, apply },
+            Asked::DaemonDecided,
+        );
+        self.say_saved(if apply {
+            "applying the change made outside clackatoo".into()
+        } else {
+            "discarding the change made outside clackatoo".into()
+        });
+    }
+
+    /// The bar's standing notice of a change to what runs programs made
+    /// outside clackatoo, while one is pending and the command line isn't
+    /// open: it stays until the user answers it.
+    pub(super) fn pending_config_status(&self) -> Option<crate::chrome::Status> {
+        if self.input.is_some() {
+            return None;
+        }
+        let text = self.daemon_settings.as_ref()?.pending_said()?;
+        Some(crate::chrome::Status::Typing {
+            label: None,
+            text,
+            choices: Vec::new(),
+            selected: None,
+            under: None,
+        })
     }
 
     /// A change this window asked the daemon to save of its option called
@@ -432,6 +480,7 @@ impl Desk {
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Close => self.settings = None,
+            Outcome::Decide { revision, apply } => self.decide_daemon_config(revision, apply),
             Outcome::Set(sets) => {
                 // The daemon's are saved by the daemon, which runs them.
                 let (daemons, sets): (Vec<_>, Vec<_>) =

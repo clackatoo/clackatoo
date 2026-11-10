@@ -423,13 +423,6 @@ impl AgentConfig {
         self.find_among(name, &self.configured.agents)
     }
 
-    /// The agent called `name`, as [`find`](Self::find) finds it, but as
-    /// `configured`, the config as it was, says: for chats agents start,
-    /// which go by the config as their tree's first chat started.
-    pub(crate) fn find_in(&self, name: &str, configured: &Configured) -> Result<AgentSpec, String> {
-        self.find_among(name, &configured.agents)
-    }
-
     /// The agent called `name`, as [`find`](Self::find) finds it, with
     /// `from_file` the agents the config adds.
     fn find_among(&self, name: &str, from_file: &[CustomAgent]) -> Result<AgentSpec, String> {
@@ -634,18 +627,16 @@ impl AgentConfig {
     }
 
     /// Every profile chats can be started as: clackatoo's, changed by
-    /// `configured`, the config as it was when the chats' tree began (see
-    /// the server's `tree_agents`), then the user's own.
-    pub(crate) fn profiles_in(configured: &Configured) -> Vec<Profile> {
+    /// the config, then the user's own.
+    pub(crate) fn profiles(&self) -> Vec<Profile> {
         let mut profiles = profiles::built_in();
-        profiles::apply(&configured.profiles, &mut profiles);
+        profiles::apply(&self.configured.profiles, &mut profiles);
         profiles
     }
 
-    /// The profile called `name`, as `configured`, the config as it was,
-    /// changes it, or why there isn't one.
-    pub(crate) fn profile_in(name: &str, configured: &Configured) -> Result<Profile, String> {
-        let profiles = Self::profiles_in(configured);
+    /// The profile called `name`, or why there isn't one.
+    pub(crate) fn profile(&self, name: &str) -> Result<Profile, String> {
+        let profiles = self.profiles();
         if let Some(profile) = profiles.iter().find(|profile| profile.name == name) {
             return Ok(profile.clone());
         }

@@ -146,7 +146,8 @@ pub use review::{
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
 pub use settings::{
-    DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy, OptionSource,
+    ConfigChange, DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy,
+    OptionSource, PendingConfig,
 };
 pub use shown::invisible;
 pub use view::{
@@ -1861,6 +1862,18 @@ pub enum Request {
         name: String,
         /// What it's saved as.
         value: Option<String>,
+    },
+    /// The user's answer to a change to what runs programs made outside
+    /// clackatoo ([`PendingConfig`]): apply it, which the daemon then goes
+    /// by, or discard it. Answered with [`Response::Done`], then
+    /// [`Event::DaemonSettings`]; refused if `revision` isn't the change
+    /// pending now, and from a web device or a daemon relaying. Only to a
+    /// daemon of protocol 150 or later ([`wire::DAEMON_SETTINGS`]).
+    DecideDaemonConfig {
+        /// The change, as [`PendingConfig::revision`] names it.
+        revision: u64,
+        /// Apply it, or else discard it.
+        apply: bool,
     },
 }
 

@@ -26847,10 +26847,13 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
             state: Some(dir.join("config/state")),
         };
         std::fs::create_dir_all(&dirs.daemon).unwrap();
+        let (staged, going) = settings::staging::starting(&dirs, &config.agents.configured);
+        config.agents.configured = going;
         config.own_config = Some(settings::Own {
             dirs,
             settings: settings::Settings::default(),
             failure: None,
+            staged,
         });
     });
     let config = daemon.dir.path().join("config");
@@ -26869,7 +26872,8 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     assert!(daemon_option(&settings, "web.mode").restart);
     assert_eq!(settings.dir, config.display().to_string());
 
-    // init.lua made: run again, its agent a new chat's at once.
+    // init.lua made: run again. Its agent, made outside clackatoo, waits
+    // for the user; a limit lowered applies.
     std::fs::write(
         config.join("daemon/init.lua"),
         "daemon.subagents.working = 8\ndaemon.agents.mine = { command = { \"mine-acp\" } }\n",
@@ -26877,6 +26881,39 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     .unwrap();
     let (settings, saved) = next_daemon_settings(&mut client);
     assert_eq!(saved, None);
+    let pending = settings.pending.clone().expect("pending");
+    let names: Vec<&str> = pending
+        .changes
+        .iter()
+        .map(|change| change.name.as_str())
+        .collect();
+    assert_eq!(names, ["agents.mine"]);
+    let agents = |client: &mut Client| {
+        let Response::ChatChoices(choices) = client
+            .request(&Request::ChatChoices {
+                pane: None,
+                on: None,
+            })
+            .unwrap()
+        else {
+            panic!("no choices");
+        };
+        (choices.agents.iter()).any(|agent| agent.agent == "mine")
+    };
+    assert!(
+        !agents(&mut client),
+        "a pending agent isn't one a chat starts"
+    );
+    // A stale answer is refused; the user's answer applies it.
+    let decide = |revision, apply| Request::DecideDaemonConfig { revision, apply };
+    let stale = client.request(&decide(pending.revision + 1, true)).unwrap();
+    assert!(matches!(stale, Response::Error(_)), "{stale:?}");
+    assert_eq!(
+        client.request(&decide(pending.revision, true)).unwrap(),
+        Response::Done
+    );
+    let (settings, _) = next_daemon_settings(&mut client);
+    assert_eq!(settings.pending, None);
     let working = daemon_option(&settings, "subagents.working");
     assert_eq!(working.value, "8");
     assert_eq!(working.by.source, clackatoo_protocol::OptionSource::Config);
@@ -26885,20 +26922,20 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
         at.file.ends_with("daemon/init.lua") && at.line == 1,
         "{at:?}"
     );
-    let Response::ChatChoices(choices) = client
-        .request(&Request::ChatChoices {
-            pane: None,
-            on: None,
-        })
-        .unwrap()
-    else {
-        panic!("no choices");
-    };
-    assert!(
-        choices.agents.iter().any(|agent| agent.agent == "mine"),
-        "{:?}",
-        choices.agents
-    );
+    assert!(agents(&mut client), "applied, it's one a chat starts");
+    // Changed again outside clackatoo, and discarded: the agent stays as
+    // approved, and the change isn't pending again.
+    std::fs::write(
+        config.join("daemon/init.lua"),
+        "daemon.subagents.working = 8\ndaemon.agents.mine = { command = { \"other\" } }\n",
+    )
+    .unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    let pending = settings.pending.expect("pending");
+    assert_eq!(pending.changes[0].name, "agents.mine command");
+    client.request(&decide(pending.revision, false)).unwrap();
+    let (settings, _) = next_daemon_settings(&mut client);
+    assert_eq!(settings.pending, None);
 
     // A window's menu saves one, as the config runs it.
     let set = |name: &str, value: Option<&str>| Request::SetDaemonOption {

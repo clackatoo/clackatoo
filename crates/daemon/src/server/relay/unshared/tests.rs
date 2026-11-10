@@ -928,6 +928,7 @@ fn variant(request: &Request) -> &'static str {
         Request::Unmask { .. } => "Unmask",
         Request::DaemonSettings => "DaemonSettings",
         Request::SetDaemonOption { .. } => "SetDaemonOption",
+        Request::DecideDaemonConfig { .. } => "DecideDaemonConfig",
     }
 }
 
@@ -1233,6 +1234,10 @@ fn own() -> Vec<Request> {
         Request::SetDaemonOption {
             name: "subagents.working".into(),
             value: Some("8".into()),
+        },
+        Request::DecideDaemonConfig {
+            revision: 1,
+            apply: true,
         },
     ]
 }
