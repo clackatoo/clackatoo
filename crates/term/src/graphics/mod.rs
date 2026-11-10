@@ -1572,7 +1572,7 @@ impl Emulator {
             .map(|(line, _)| primary(line))
             .chain(
                 (alternate.into_iter())
-                    .flat_map(|grid| grid.rows())
+                    .flat_map(Grid::rows)
                     .filter(|row| row.pieces().iter().any(|piece| of_image(piece.picture)))
                     .map(crate::Row::hints),
             )
