@@ -619,6 +619,34 @@ fn connect_says_how_it_went() {
     assert_eq!(note_of(&desk), "connected to ‘desk’");
 }
 
+/// Asked for again while it goes through another machine, the daemon
+/// tries ssh straight there, which may ask for a password (CLACKA-118).
+#[test]
+fn connect_again_through_another_machine_tries_straight_there() {
+    let mut desk = desk(three());
+    normal_mode(&mut desk);
+    let mut through = to_desk(connected());
+    through[0].through = vec!["nas".into()];
+    desk.connections_changed(through);
+    command(&mut desk, "connect desk");
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::Connect {
+            host: "desk".into(),
+            command: None,
+            share: None,
+        }]
+    );
+    assert_eq!(
+        note_of(&desk),
+        "trying ssh straight to ‘desk’, which goes through nas now"
+    );
+    desk.connections_changed(to_desk(connected()));
+    command(&mut desk, "connect desk");
+    answer_all(&mut desk);
+    assert_eq!(note_of(&desk), "connected to ‘desk’ already");
+}
+
 #[test]
 fn connect_no_share_asks_the_daemon_not_to_pass_the_machine_on_if_it_knows_how() {
     let mut desk = desk(three());
@@ -724,4 +752,38 @@ fn a_new_tab_of_a_workspace_not_shown_goes_on_its_machine() {
         Some(LAPTOP),
         "the one shown, this machine's"
     );
+}
+
+/// A window that is itself on another machine than its daemon forwards
+/// its own port to the machine the pane is on, which its daemon passes on
+/// (CLACKA-118), once the daemon knows how; never asking an older one,
+/// which would forward to its own machine.
+#[test]
+fn a_remote_windows_port_forward_in_another_machines_workspace_goes_on_there() {
+    use crate::command::Forwarding;
+    let mut desk = desk(three());
+    desk.remote = true;
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    command(&mut desk, "workspace work");
+    answer_all(&mut desk);
+    command(&mut desk, "PortForward 8080");
+    let asked = desk.take_forwards_asked();
+    assert!(
+        matches!(&asked[..], [Forwarding::Add(spec)]
+            if spec.on.as_ref().is_some_and(|on| on.id == DESK && on.name == "desk")),
+        "{asked:?}"
+    );
+    // The window's own list, and stop.
+    command(&mut desk, "PortForward! 8080");
+    assert!(matches!(
+        desk.take_forwards_asked()[..],
+        [Forwarding::Stop(Some(8080))]
+    ));
+    // Nothing goes to the daemon itself.
+    assert_eq!(answer_all(&mut desk), []);
+    desk.daemon_is(clackatoo_protocol::wire::FEDERATION_2 - 1, None);
+    command(&mut desk, "PortForward 8080");
+    assert!(desk.take_forwards_asked().is_empty());
+    assert!(note_of(&desk).contains("newer"), "{}", note_of(&desk));
 }

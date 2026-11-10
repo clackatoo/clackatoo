@@ -209,6 +209,7 @@ impl Desk {
                 local: port,
                 host: "localhost".to_owned(),
                 port,
+                on: None,
             };
             self.port_forward_from(pane, crate::command::Forwarding::Add(spec));
         }

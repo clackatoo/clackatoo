@@ -118,6 +118,10 @@ struct State {
     current: Option<Vec<MachineId>>,
     /// When ssh straight there last failed.
     direct_failed: Option<Instant>,
+    /// ssh straight there asks a question, such as for a password, as a
+    /// try a client asked for found (CLACKA-118): the tries for a better
+    /// way, which never ask, don't try it, until a client asks again.
+    direct_asks: bool,
     /// Counts changes, for a carrier lost waiting for one to tell.
     generation: u64,
     /// Counts the connections that have ended, so the threads of one
@@ -221,6 +225,13 @@ impl Ways {
         });
     }
 
+    /// Notes whether ssh straight there asks a question, as a try a client
+    /// asked for found: while it does, the tries for a better way leave it
+    /// out, as they never ask, and would only fail, a login at a time.
+    pub(in crate::server) fn direct_asks(&self, asks: bool) {
+        self.state().direct_asks = asks;
+    }
+
     /// Sets the machine, if known, what it's called here, and the ways
     /// through other daemons to it, best first.
     pub(in crate::server) fn set_through(
@@ -284,6 +295,7 @@ impl Ways {
         };
         let mut better = Vec::new();
         if !current.is_empty()
+            && !state.direct_asks
             && let Some(direct) = &state.direct
         {
             better.push(Attempt::Direct(direct.clone()));
@@ -544,6 +556,20 @@ impl Ways {
         None
     }
 
+    /// Opens a carrier with ssh straight there, asking ssh's questions,
+    /// as a client asked for it while the connection goes through another
+    /// machine. `None` if it has no ssh straight there, as one not asked
+    /// for here hasn't.
+    pub(in crate::server) fn open_direct(&self) -> Option<Result<Opened, RemoteError>> {
+        let direct = self.state().direct.clone()?;
+        Some(self.open(&Attempt::Direct(direct), false))
+    }
+
+    /// Whether ssh straight there was found to ask a question.
+    pub(in crate::server) fn asks_direct(&self) -> bool {
+        self.state().direct_asks
+    }
+
     /// Opens a carrier in place of one lost, for the connection of
     /// `epoch`: see [`for_lost`](Self::for_lost). With no way, waits a
     /// while for one to come. Once that connection has ended, opens none.
@@ -580,6 +606,16 @@ pub(in crate::server) fn redialed(
     opened: Opened,
     used: &Arc<dyn Fn(Vec<MachineId>) + Send + Sync>,
 ) -> Redialed {
+    redialed_then(opened, used, || {})
+}
+
+/// As [`redialed`], calling `then` too once the connection takes it on.
+/// It isn't called, and goes, with the carrier, if the carrier is let go.
+pub(in crate::server) fn redialed_then(
+    opened: Opened,
+    used: &Arc<dyn Fn(Vec<MachineId>) + Send + Sync>,
+    then: impl FnOnce() + Send + 'static,
+) -> Redialed {
     let Opened {
         stream,
         ssh,
@@ -592,7 +628,10 @@ pub(in crate::server) fn redialed(
         None => Redialed::new(stream),
     };
     let used = Arc::clone(used);
-    carrier.reached_at(address).when_used(move || used(through))
+    carrier.reached_at(address).when_used(move || {
+        used(through);
+        then();
+    })
 }
 
 /// How a connection going by `ways`, the one in use now, replaces a

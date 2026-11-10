@@ -148,6 +148,12 @@ pub(crate) struct Connection {
     /// once, if it's passed on too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) machine: Option<String>,
+    /// ssh straight there was found to ask a question, such as for a
+    /// password, as a client asked for it: it isn't tried in the
+    /// background until a client asks again (CLACKA-118). Builds before
+    /// pass it over, and write the file without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) direct_asks: bool,
 }
 
 /// A workspace.
@@ -1305,12 +1311,14 @@ mod tests {
                     command: None,
                     unshared: false,
                     machine: None,
+                    direct_asks: false,
                 },
                 Connection {
                     host: "jack@server:2222".into(),
                     command: Some("~/.cargo/bin/clackatoo".into()),
                     unshared: true,
                     machine: Some("5e".repeat(16)),
+                    direct_asks: true,
                 },
             ],
             ..state()
@@ -1322,6 +1330,7 @@ mod tests {
         // Passed on and machine unknown, neither written.
         assert_eq!(text.matches("\"unshared\"").count(), 1, "{text}");
         assert_eq!(text.matches("\"machine\"").count(), 1, "{text}");
+        assert_eq!(text.matches("\"direct_asks\"").count(), 1, "{text}");
         // None, none written: a file an older build reads as it wrote it.
         assert!(
             !String::from_utf8(state().encode())

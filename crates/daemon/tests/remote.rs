@@ -997,6 +997,7 @@ fn typing_beside(
             local: 0,
             host: "localhost".into(),
             port,
+            on: None,
         };
         let local = forwards.add(spec).unwrap().local;
         let browser = TcpStream::connect(("127.0.0.1", local)).unwrap();

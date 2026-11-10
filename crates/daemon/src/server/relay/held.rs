@@ -40,7 +40,9 @@
 //! then: a pane is in one layout at a time. The workspace has the number
 //! of the first one's own, hidden workspace, and only this daemon's own
 //! clients are shown it, never a daemon relaying. Closing it closes every
-//! pane parked for desk; it can't be renamed, nor a pane made in it or
+//! pane parked for desk. Renaming it names the workspaces lent to desk,
+//! which are called nothing otherwise, so it's called that whenever desk
+//! is away, kept as their names are (CLACKA-118). No pane is made in it or
 //! beside one, which goes in desk's layout once desk is back.
 //!
 //! # Cleaning up
@@ -548,7 +550,8 @@ impl Daemon {
     /// workspace, tab or pane parked here, and one of this daemon's own
     /// clients asks something it can't of one: closing the workspace
     /// parked panes are shown in closes every one parked for that
-    /// machine; renaming it, or making a pane in it or beside one, is
+    /// machine; renaming it names it from then on, whenever that machine
+    /// is away (CLACKA-118); making a pane in it or beside one is
     /// refused, saying why. `None` for anything else.
     pub(in crate::server) fn parked_request(
         &mut self,
@@ -572,10 +575,13 @@ impl Daemon {
         let host = self.machine_named(lent.to);
         Some(match request {
             Request::CloseWorkspace { .. } => self.close_parked(token, lent.to),
-            Request::RenameWorkspace { .. } => Err(Error::Other(format!(
-                "this workspace only holds panes parked while ‘{host}’ is away, and goes once \
-                 it's back: it can't be renamed"
-            ))),
+            Request::RenameWorkspace { name, .. } => {
+                let named = self.workspaces.name_parked(lent.to, name);
+                if named.is_ok() {
+                    self.workspaces_changed();
+                }
+                named.map(|_| Response::Done)
+            }
             _ => Err(Error::Other(format!(
                 "this pane is parked while ‘{host}’ is away: a pane beside it can be made once \
                  it's back in {host}'s workspace"
@@ -642,7 +648,15 @@ impl Daemon {
         let mut taken = Vec::new();
         let mut parked = Vec::new();
         for (machine, list) in by {
-            let base = format!("from-{}", self.machine_named(machine));
+            // Its name, if one was given it (see `name_parked`), else the
+            // machine's.
+            let base = (list.iter())
+                .map(|workspace| workspace.name.as_str())
+                .find(|name| !name.is_empty())
+                .map_or_else(
+                    || format!("from-{}", self.machine_named(machine)),
+                    str::to_owned,
+                );
             let name = self.workspaces.free_name(&base, &taken);
             taken.push(name.clone());
             let first = list[0];
@@ -902,6 +916,9 @@ mod tests {
             .workspaces
             .new_lent(placed, Content::Terminal(TerminalId(51)));
         daemon.workspaces.refresh_lent();
+        // A name given what's parked here never leaves this machine
+        // (CLACKA-118).
+        daemon.workspaces.name_parked(desk().id, "mine").unwrap();
         say(&mut desk_end, &desk_names(own, Some(2)));
         daemon.read_reached(link, Reading::Look);
         // A third machine's daemon is shown, and may use, only the one in
@@ -916,6 +933,11 @@ mod tests {
             .filter_map(|workspace| Some(workspace.lent?.key))
             .collect();
         assert_eq!(keys, [2]);
+        assert!(
+            (with.list.iter())
+                .all(|workspace| workspace.lent.is_none() || workspace.name.is_empty()),
+            "{with:?}"
+        );
         let keys = |terminal| Request::SendInput {
             terminal: TerminalId(terminal),
             bytes: b"x".to_vec(),

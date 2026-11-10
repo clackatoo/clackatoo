@@ -764,7 +764,7 @@ impl Daemon {
                 // Lent to another machine's daemon, it still is, as that
                 // daemon finds its pane again by the number it gave it.
                 if let Some(lent) = workspace.lent.as_ref().and_then(restored_lent) {
-                    self.workspaces.set_lent(made, lent);
+                    self.workspaces.set_lent(made, lent, &workspace.name);
                 }
                 Some(made)
             });

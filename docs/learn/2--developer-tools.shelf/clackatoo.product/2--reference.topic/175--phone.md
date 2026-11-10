@@ -169,6 +169,18 @@ providers, and workspace names within the selected filter. **Terminals** is a
 separate view, with search matching names and directories. The top bar says
 whether the app is connected or retrying.
 
+A workspace from [another machine](~clackatoo/reference/connecting) says
+which, after its name, as `notes ◯ @desk`, with a ring as a window's bar has:
+in the accent colour while your daemon is connected to desk, red while the
+connection is down or being made, and filled amber while ssh needs a password,
+which only a window can give. A chat or terminal on another machine than its
+workspace, such as a pane borrowed from desk into one of your own, says so in
+its row, and every chat or terminal on another machine says so in its
+heading. In a browser on a computer the mouse over the ring, and on a phone a
+screen reader, says the machine's name, the machines its connection goes
+through, and how it is. The app isn't told what ssh said when a connection
+failed: that's for your windows.
+
 Long chats open on their recent turns first. Scrolling near the top fetches
 older messages without moving the message you're reading; **Load earlier
 messages** also fetches a page. Each connected client keeps its own loaded

@@ -1258,10 +1258,12 @@ fn naming_nothing() -> Vec<Request> {
 
 /// The kinds of request never asked below, as they'd make the asker
 /// something else, and why each is safe: [`Request::CarryQuic`] only
-/// carries QUIC; [`Request::Forward`] is a stream to a port on this
-/// machine; [`Request::Tutor`] writes a lesson here; [`Request::RelayAs`]
+/// carries QUIC; [`Request::Forward`] is a stream's first message, to a
+/// port on this machine, or with a machine, on through this daemon's
+/// connection to it, refused there for a machine kept from the asker as
+/// any request is; [`Request::Tutor`] writes a lesson here; [`Request::RelayAs`]
 /// says which machine the asker is; [`Request::NewTerminal`] starts a
-/// shell here. None names another machine's.
+/// shell here. None but `Forward` names another machine's.
 const NOT_ASKED: [&str; 5] = ["CarryQuic", "Forward", "Tutor", "RelayAs", "NewTerminal"];
 
 /// Asks `request` of `world`'s daemon as the daemon relaying, as the

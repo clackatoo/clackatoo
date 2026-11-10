@@ -1955,6 +1955,7 @@ mod tests {
                 local: 3000,
                 host: "localhost".into(),
                 port: 8080,
+                on: None,
             }))
         );
         assert_eq!(

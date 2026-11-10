@@ -986,6 +986,7 @@ fn ask(spec: &Spec, wire: u32, unpaced: bool) -> Result<Vec<u8>, frame::FrameErr
         host: spec.host.clone(),
         port: spec.port,
         unpaced,
+        machine: spec.on.as_ref().map(|on| on.id),
     }));
     frame::encode(wire, &request)
 }

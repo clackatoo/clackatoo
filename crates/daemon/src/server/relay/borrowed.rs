@@ -46,6 +46,12 @@ use super::{Expect, Routed, Then};
 use crate::server::{Daemon, Link, Source};
 use crate::workspaces::Borrowed;
 
+/// The most panes borrowed from another machine's daemon, all told, for
+/// it to lend one more beside one of them: what an agent opens beside a
+/// lent chat, which this daemon puts in its layouts on that daemon's word
+/// alone.
+const MOST_BORROWED_BESIDE: usize = 64;
+
 /// Where a pane being lent goes in this daemon's layout, once it has been.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum Placing {
@@ -588,6 +594,57 @@ impl Daemon {
         self.workspaces.lender_named(machine.id, &name);
         self.workspaces_changed();
         Some(Ok(Response::PaneCreated(pane)))
+    }
+
+    /// Shows the pane the daemon of the connection at `at` lends this one
+    /// as `key`, on the `side` of the one here borrowed from it as
+    /// `beside`, as it asked ([`Event::LendBeside`], CLACKA-118): a pane
+    /// borrowed from it as any other, which shows what it lends once it's
+    /// told it. Passed over if no pane here borrows `beside` from it, if
+    /// the layout has no room, or if that machine has lent this one as
+    /// many as it may already; what it lent then is given back, as any
+    /// lent pane nothing here shows is.
+    pub(in crate::server) fn borrow_beside(
+        &mut self,
+        at: usize,
+        key: u64,
+        beside: u64,
+        side: clackatoo_protocol::Side,
+        kind: clackatoo_protocol::PaneKind,
+    ) {
+        let Some(machine) = self.links.list[at].machine_id() else {
+            return;
+        };
+        let host = &self.links.list[at].remote.host;
+        if self.workspaces.borrowed_as(machine, key).is_some() {
+            return;
+        }
+        let Some(pane) = self.workspaces.borrowed_as(machine, beside) else {
+            log::info!("{host} lent a pane beside one this daemon doesn't show: passed over");
+            return;
+        };
+        let lent = (self.workspaces.borrowed().values())
+            .filter(|borrowed| borrowed.machine == machine)
+            .count();
+        if lent >= MOST_BORROWED_BESIDE {
+            log::warn!("{host} lent more panes beside its own than are shown: passed over");
+            return;
+        }
+        if let Err(err) = self.workspaces.check_split(pane, side) {
+            log::info!("{host} lent a pane beside one that has no room: {err}");
+            return;
+        }
+        let new = (self.workspaces).split(pane, side, Content::Other { kind });
+        self.workspaces.borrow(
+            new,
+            Borrowed {
+                machine,
+                key,
+                kind,
+                placed: false,
+            },
+        );
+        self.workspaces_changed();
     }
 
     /// Puts the chats of `chats`, other machines' as this daemon's clients

@@ -1511,6 +1511,42 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "A pane on a machine kept with --no-share now says \"Not shared\" to other machines, naming nothing",
     },
+    News {
+        id: "phone-host-ring",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "The phone shows @host and the ring for workspaces, chats and terminals on other machines, as a window does",
+    },
+    News {
+        id: "parked-rename",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "The from-desk workspace panes are parked in while desk is away can be renamed, and keeps its name",
+    },
+    News {
+        id: "connect-direct",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: ":connect HOST again while it goes through another machine tries ssh straight there, asking for a password",
+    },
+    News {
+        id: "remote-forward-on",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "A --remote window's :portforward in another machine's workspace forwards there, through its daemon",
+    },
+    News {
+        id: "lent-beside",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "An agent in a chat borrowed from another machine opens files, terminals and subagents beside it",
+    },
+    News {
+        id: "forwards-upgrade",
+        date: "2026-11-09",
+        lesson: "remote",
+        what: "Ports forwarded to another machine go on listening as your daemon upgrades; open connections reset",
+    },
 ];
 
 impl News {

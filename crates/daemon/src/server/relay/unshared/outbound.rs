@@ -130,6 +130,8 @@ impl Daemon {
             | Event::Image(_)
             | Event::Picture { .. }
             | Event::Notified { .. }
+            // Sent only to the machine the pane is lent to, of its own.
+            | Event::LendBeside { .. }
             | Event::Connections(_)
             | Event::Login { .. }
             | Event::Said(_)) => event,

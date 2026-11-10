@@ -128,6 +128,9 @@ const LISTENING: u32 = 22;
 /// The number of `Event::Notified` among the events.
 const NOTIFIED: u32 = 30;
 
+/// The number of `Event::LendBeside` among the events.
+const LEND_BESIDE: u32 = 31;
+
 /// Whether a message from another daemon headed `head` is one this
 /// daemon decodes to take in: the workspaces, the chats, and the events
 /// it passes on to its own clients as it has them.
@@ -137,7 +140,7 @@ fn taken_in(head: &Head) -> bool {
         || head.is_small_event()
         || matches!(
             head.event_kind(),
-            Some(INSTALLED | LISTENING | SESSIONS | NOTIFIED)
+            Some(INSTALLED | LISTENING | SESSIONS | NOTIFIED | LEND_BESIDE)
         )
 }
 
@@ -3337,6 +3340,12 @@ impl Daemon {
                     self.send_event(token, installed);
                 }
             }
+            Event::LendBeside {
+                key,
+                beside,
+                side,
+                kind,
+            } => self.borrow_beside(at, key, beside, side, kind),
             Event::Exited { terminal } => {
                 let mirror = &self.links.list[at].relayed.mirror;
                 let Some(local) = mirror.terminal_numbers.local(terminal.0) else {
@@ -3830,6 +3839,32 @@ mod tests {
             notice: Notice::Close,
         };
         assert_eq!(head(notified), Some(NOTIFIED));
+    }
+
+    /// A try straight there, as a client asked, goes on past its
+    /// connection dropping, its ssh stopped with what stopped the
+    /// connection's, and says how it went to that client as it ends; what
+    /// stops the connection's from then on is another (CLACKA-118).
+    #[test]
+    fn a_try_straight_there_is_stopped_with_its_connection_and_still_says_how_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _link, _there) = linked(dir.path());
+        let (asker, mut end) = client(&mut daemon);
+        let at = daemon.links.find("desk").unwrap();
+        daemon.links.list[at].going_direct = Some(asker);
+        let before = std::sync::Arc::clone(&daemon.links.list[at].cancel);
+        daemon.link_down(at);
+        assert!(before.cancelled());
+        assert!(!daemon.links.list[at].cancel.cancelled());
+        assert_eq!(daemon.links.list[at].going_direct, Some(asker));
+        daemon.went_direct("desk", Err("ssh was stopped".into()));
+        assert_eq!(daemon.links.list[at].going_direct, None);
+        let said: Vec<ServerMessage> = read(&mut end);
+        assert!(
+            said.iter().any(|message| matches!(message,
+                ServerMessage::Event(Event::Said(said)) if said.contains("couldn't go straight to ‘desk’"))),
+            "{said:?}"
+        );
     }
 
     pub(super) fn desk() -> Machine {

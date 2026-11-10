@@ -472,12 +472,6 @@ struct Client {
     machine: Option<Machine>,
     /// Whether the client is told when the chats change.
     watching_chats: bool,
-    /// Made for a stream reaching this daemon from another machine: it may
-    /// only greet the daemon and carry QUIC.
-    carrier_only: bool,
-    /// For a test's daemon in the way: the machine it signs its QUIC
-    /// certificate as, in that machine's place, with its own key.
-    carrier_as: Option<MachineId>,
     /// Whether the client is told when the connections to other daemons
     /// change.
     watching_connections: bool,
@@ -730,8 +724,6 @@ impl Client {
             machine: None,
             watching_chats: false,
             watching_connections: false,
-            carrier_only: false,
-            carrier_as: None,
             present_until: None,
             last_here: None,
             is_window: false,
@@ -1631,6 +1623,8 @@ impl Daemon {
         }));
         if let Some(federation) = &state.federation {
             daemon.resume_federation(federation)?;
+            daemon.resume_relayed_forwards(&state.forwards, fds);
+            daemon.resume_direct_asks(&state.direct_asks);
         } else {
             daemon.connect_kept(links::Kept::taken_over(state));
         }
@@ -1713,6 +1707,8 @@ impl Daemon {
     ) -> io::Result<Handover> {
         // Capture before ending links or dropping their client receipts.
         let federation = Some(self.hand_over_federation()?);
+        // And the ports forwarded through them, still listening.
+        let relayed_forwards = self.hand_over_relayed_forwards();
         let mcp = Some(self.hand_over_mcp());
         self.close_remotes("the daemon is upgrading to a new build");
         let kept_names = self.agent_names(keep);
@@ -1735,6 +1731,15 @@ impl Daemon {
         let activities = self.hand_over_activities().map_err(io::Error::other)?;
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
+        let forwards = (relayed_forwards.into_iter())
+            .map(|(host, spec, listeners)| handover::Forwarded {
+                host,
+                local: spec.local,
+                to: spec.host,
+                port: spec.port,
+                listeners: listeners.into_iter().map(|fd| fds.add(fd)).collect(),
+            })
+            .collect();
         let mut terminals = Vec::new();
         let mut shells = Vec::new();
         let mut trusted = Vec::new();
@@ -1879,7 +1884,12 @@ impl Daemon {
             })
             .collect();
         // Their ssh processes end with them, rather than outlive the exec.
-        let (connections, sharing) = links::Kept::handed_over(self.end_links());
+        let kept = self.end_links();
+        let direct_asks = (kept.iter())
+            .filter(|kept| kept.direct_asks)
+            .map(|kept| kept.host.clone())
+            .collect();
+        let (connections, sharing) = links::Kept::handed_over(kept);
         let images = Some(self.hand_over_images(chat_images));
         Ok(Handover {
             state: handover::State {
@@ -1960,6 +1970,8 @@ impl Daemon {
                 images,
                 histories,
                 marks,
+                forwards,
+                direct_asks,
             },
             fds,
             version: handover::VERSION,
@@ -3331,24 +3343,6 @@ impl Daemon {
                         protocol_version: client.wire,
                     }
                 }
-                // A client made for a stream reaching this daemon from
-                // another machine (see `Request::Reach`) may only greet it
-                // and carry QUIC: it's not one of this machine's own,
-                // whatever its socket.
-                Some(ref message)
-                    if client.carrier_only
-                        && !matches!(
-                            message,
-                            ClientMessage::Hello { .. }
-                                | ClientMessage::Request(Request::CarryQuic)
-                        ) =>
-                {
-                    client.finished = true;
-                    ServerMessage::Response(Response::Error(Error::Other(
-                        "a stream reaching this daemon from another machine only carries QUIC"
-                            .to_owned(),
-                    )))
-                }
                 Some(ClientMessage::Upgrade {
                     protocol_version,
                     executable,
@@ -4347,8 +4341,7 @@ impl Daemon {
                 return Ok(());
             }
             ChatAction::Open { chat } => {
-                self.open_subagent(id, chat);
-                return Ok(());
+                return self.open_subagent(id, chat).map_err(Error::Other);
             }
             ChatAction::Switch {
                 agent,
@@ -4634,6 +4627,14 @@ impl Daemon {
                 "only a connection to the daemon's socket can carry QUIC".into(),
             ));
         }
+        client.carrying = true;
+        self.carrying(None)
+    }
+
+    /// The answer to asking to carry QUIC, by a client's socket or a
+    /// stream reaching this daemon: this daemon's certificate, signed as
+    /// its machine, or as `carrier_as`, as a test's daemon in the way.
+    fn carrying(&mut self, carrier_as: Option<MachineId>) -> Result<Response, Error> {
         if self.quic.is_none() {
             self.quic = Some(QuicServer::new().map_err(|err| Error::CantCarry(err.to_string()))?);
             self.udp = self.config.udp_ports.clone().and_then(|ports| {
@@ -4642,8 +4643,7 @@ impl Daemon {
                     .ok()
             });
         }
-        client.carrying = true;
-        let mut signer_as = client.carrier_as.unwrap_or(self.machine.id);
+        let mut signer_as = carrier_as.unwrap_or(self.machine.id);
         // As a test's daemon lying about which machine it is.
         if let Some(lies) = (self.config.links.as_ref()).map(|config| &config.lies)
             && lies.forges
@@ -4950,17 +4950,36 @@ impl Daemon {
     }
 
     /// Sends the packets the QUIC endpoint has ready, each on its carrier.
+    /// What it makes for a stream fed to it (see `forwards/fed.rs`) is
+    /// written to that stream at once, and the packets that carry that
+    /// sent in the same turn.
     fn transmit_quic(&mut self) {
+        // A stream's packets, then the connection's carrying them, and so
+        // on for a stream through a stream: never deeper than this.
+        for _ in 0..4 {
+            let fed = self.transmit_quic_once();
+            if fed.is_empty() || !self.flush_fed(&fed) {
+                return;
+            }
+        }
+    }
+
+    /// Sends the packets the QUIC endpoint has ready, as
+    /// [`transmit_quic`](Self::transmit_quic) does, once. Returns the fed
+    /// streams it made packets for.
+    fn transmit_quic_once(&mut self) -> Vec<usize> {
+        let mut fed = Vec::new();
         let Some(quic) = self.quic.as_mut() else {
-            return;
+            return fed;
         };
         let mut carriers = Vec::new();
         let registry = self.poll.registry();
         // Carriers backed up already get no packets made for them.
         let full: Vec<usize> = (self.sources.iter())
-            .filter(|(_, source)| {
-                matches!(source, Source::Carrier(carrier)
-                    if carrier.outgoing.len() >= quic::CARRIER_BACKLOG)
+            .filter(|(_, source)| match source {
+                Source::Carrier(carrier) => carrier.outgoing.len() >= quic::CARRIER_BACKLOG,
+                Source::Forward(pipe) => pipe.fed_full(),
+                _ => false,
             })
             .map(|(key, _)| key)
             .collect();
@@ -4978,6 +4997,14 @@ impl Daemon {
                 }
                 return true;
             };
+            if let Some(Source::Forward(pipe)) = self.sources.get_mut(key)
+                && pipe.fed_carrier() == Some(generation)
+            {
+                if !fed.contains(&key) {
+                    fed.push(key);
+                }
+                return pipe.feed_packet(packet);
+            }
             if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
                 && carrier.generation == generation
             {
@@ -5004,6 +5031,7 @@ impl Daemon {
         for key in carriers {
             self.flush_carrier(Token(key));
         }
+        fed
     }
 }
 

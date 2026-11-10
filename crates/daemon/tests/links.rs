@@ -2831,6 +2831,116 @@ fn a_port_here_forwards_through_the_connection_to_another_machine() {
     );
 }
 
+/// A window that is itself on another machine than desk forwards a port
+/// of its own to laptop, which desk is connected to: desk passes each
+/// connection on through its connection to laptop, whose daemon connects
+/// there (CLACKA-118). One to a machine desk isn't connected to is
+/// refused, saying so.
+#[test]
+fn a_remote_windows_port_forwards_through_its_daemon_to_another_machine() {
+    use std::io::Read as _;
+    use std::net::{TcpListener, TcpStream};
+
+    use clackatoo_daemon::forward::{Forwards, On, Problem, Spec};
+
+    let mut pair = Pair::new();
+    // A server "on laptop", which says back what it's sent.
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in server.incoming().flatten() {
+            let mut reader = stream.try_clone().unwrap();
+            let mut writer = stream;
+            std::thread::spawn(move || drop(std::io::copy(&mut reader, &mut writer)));
+        }
+    });
+    // A window on another machine, reaching desk over ssh and QUIC.
+    let window = remote_client(&pair.world, "desk");
+    let mut forwards = Forwards::new(|| {});
+    let on = |id, name: &str| {
+        Some(On {
+            id,
+            name: name.into(),
+        })
+    };
+    let laptop = pair.laptop().machine().id;
+    let spec = Spec {
+        local: 0,
+        host: "localhost".into(),
+        port,
+        on: on(laptop, "laptop"),
+    };
+    let local = forwards.add(spec).unwrap().local;
+    assert!(forwards.attach(window.forwarder().expect("over QUIC")));
+    let mut stream = TcpStream::connect(("127.0.0.1", local)).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.write_all(b"through desk\n").unwrap();
+    let mut echoed = [0; 13];
+    stream.read_exact(&mut echoed).unwrap();
+    assert_eq!(&echoed, b"through desk\n");
+    // One to a machine desk isn't connected to: refused, and said.
+    let nowhere = Spec {
+        local: 0,
+        host: "localhost".into(),
+        port,
+        on: on(MachineId([0x5e; 16]), "nas"),
+    };
+    let local = forwards.add(nowhere).unwrap().local;
+    let mut refused = TcpStream::connect(("127.0.0.1", local)).unwrap();
+    refused.set_read_timeout(Some(PATIENCE)).unwrap();
+    let ended = refused.read(&mut [0; 8]);
+    assert!(matches!(ended, Ok(0) | Err(_)), "{ended:?}");
+    let deadline = Instant::now() + PATIENCE;
+    let report = loop {
+        if let Some(report) = forwards.take_reports().pop() {
+            break report;
+        }
+        assert!(Instant::now() < deadline, "never said");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(matches!(report.problem, Problem::Failed(_)), "{report:?}");
+    let said = report.describe("desk");
+    assert!(said.contains("isn't connected to the machine"), "{said}");
+    // A daemon relaying, as laptop, is never sent round a loop to itself.
+    let mut looping = remote_client(&pair.world, "desk");
+    relay_as(&mut looping, laptop);
+    let mut round = Forwards::new(|| {});
+    let local = (round.add(Spec {
+        local: 0,
+        host: "localhost".into(),
+        port,
+        on: on(laptop, "laptop"),
+    }))
+    .unwrap()
+    .local;
+    assert!(round.attach(looping.forwarder().expect("over QUIC")));
+    let mut refused = TcpStream::connect(("127.0.0.1", local)).unwrap();
+    refused.set_read_timeout(Some(PATIENCE)).unwrap();
+    let ended = refused.read(&mut [0; 8]);
+    assert!(matches!(ended, Ok(0) | Err(_)), "{ended:?}");
+    let deadline = Instant::now() + PATIENCE;
+    let report = loop {
+        if let Some(report) = round.take_reports().pop() {
+            break report;
+        }
+        assert!(Instant::now() < deadline, "never said");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let said = report.describe("desk");
+    assert!(said.contains("round a loop"), "{said}");
+    // It went through laptop's daemon, not desk's own: with laptop gone,
+    // one is refused, though the server still listens.
+    drop(pair.laptop.take());
+    wait_for(&mut pair.window, "laptop", |state| {
+        !matches!(state, ConnectionState::Connected { .. })
+    });
+    let mut cut = TcpStream::connect(("127.0.0.1", forwards.list()[0].0.local)).unwrap();
+    cut.set_read_timeout(Some(PATIENCE)).unwrap();
+    let _ = cut.write_all(b"gone\n");
+    let ended = cut.read(&mut [0; 8]);
+    assert!(matches!(ended, Ok(0) | Err(_)), "{ended:?}");
+}
+
 // --- Panes on another machine in this daemon's own workspaces ----------
 
 /// The pane `pane` in `workspaces`, and its workspace.
@@ -3257,6 +3367,73 @@ fn borrow(pair: &mut Pair, content: PaneTerminal) -> (PaneId, Content) {
     let there = made(&mut pair.window, &new_tab_on(home, content, laptop));
     let content = wait_for_borrowed(&mut pair.window, there);
     (there, content)
+}
+
+/// A chat lent from laptop, borrowed into a workspace of desk's: what its
+/// agent opens beside it is lent too, in a workspace of its own, which
+/// laptop asks desk to show beside the chat (CLACKA-118). So a subagent's
+/// card opens it, beside the borrowed chat, in desk's layout.
+#[test]
+fn what_a_borrowed_chats_agent_opens_beside_it_is_lent_beside_it() {
+    use clackatoo_protocol::AgentTools;
+    let mut pair = Pair::with(|world, host| {
+        world.start_configured(host, false, |config| {
+            config.mcp = Some(vec![example("fake_agent").into(), "mcp".into()]);
+        })
+    });
+    let tooled = match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent {
+            tools: AgentTools::Allow,
+            ..new
+        }),
+        other => other,
+    };
+    let before = lent_by(&mut pair.laptop().client());
+    let (pane, content) = borrow(&mut pair, tooled);
+    let chat = terminal_of(content);
+    attach_to(&mut pair.window, chat);
+    wait_for_chat(&mut pair.window, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    pair.window
+        .chat(
+            chat,
+            ChatAction::Send("mcp start_chat {\"prompt\":\"hi\"}".into()),
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut pair.window, chat, |node| !node.subagents.is_empty());
+    let kid = node.subagents[0].chat;
+    pair.window
+        .chat(chat, ChatAction::Open { chat: kid })
+        .unwrap();
+    // Beside the borrowed chat, in desk's own workspace, showing laptop's
+    // subagent's chat once laptop lends it.
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, tab, _)| {
+            (tab.layout.panes().iter())
+                .any(|other| other.id != pane && matches!(other.content, Content::Terminal(_)))
+        })
+    });
+    let (workspace, tab, _) = shown.find_pane(pane).unwrap();
+    assert!(
+        workspace.lent.is_none() && workspace.home.is_none(),
+        "desk's own"
+    );
+    let beside = (tab.layout.panes().into_iter())
+        .find(|other| other.id != pane)
+        .unwrap();
+    let opened = terminal_of(beside.content);
+    let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+        panic!("no chats");
+    };
+    let summary = (chats.iter()).find(|summary| summary.chat == opened);
+    assert_eq!(
+        summary.and_then(|summary| summary.parent),
+        Some(chat),
+        "{chats:?}"
+    );
+    // Laptop lends each in a workspace of its own.
+    assert_eq!(lent_by(&mut pair.laptop().client()), before + 2);
 }
 
 /// A chat in a pane another machine lent is among the chats in the
@@ -4115,11 +4292,18 @@ fn a_pane_of_this_machine_is_parked_here_while_the_layouts_machine_is_away() {
         .send_input(terminal, b"echo two-$((2 + 2))\r")
         .unwrap();
     wait_for_view(&mut mixed.window, terminal, "two-4");
+    // Named while parked, it's called that whenever desk is away.
+    let rename = Request::RenameWorkspace {
+        workspace: parked.id,
+        name: "desk work".into(),
+    };
+    assert_eq!(mixed.window.request(&rename).unwrap(), Response::Done);
+    wait_for_workspaces(&mut mixed.window, |shown| own(shown, "desk work").is_some());
     // Desk back, it's back where it was, the same terminal, and the
     // workspace it was parked in has gone.
     mixed.desk = Some(mixed.world.start_with("desk", true));
     let shown = wait_for_workspaces(&mut mixed.window, |shown| {
-        own(shown, "from-desk").is_none()
+        own(shown, "desk work").is_none()
             && panes_of(shown, laptop)
                 .iter()
                 .any(|pane| pane.content == Content::Terminal(terminal))
@@ -4129,6 +4313,11 @@ fn a_pane_of_this_machine_is_parked_here_while_the_layouts_machine_is_away() {
         .send_input(terminal, b"echo three-$((3 + 3))\r")
         .unwrap();
     wait_for_view(&mut mixed.window, terminal, "three-6");
+    // Away again, parked under the name it was given.
+    drop(mixed.desk.take());
+    wait_for_workspaces(&mut mixed.window, |shown| {
+        own(shown, "desk work").is_some() && own(shown, "from-desk").is_none()
+    });
 }
 
 #[test]
@@ -4435,7 +4624,7 @@ fn what_is_asked_of_a_pane_of_this_machine_is_answered_here_without_desk() {
 }
 
 #[test]
-fn the_workspace_panes_are_parked_in_closes_them_all_but_takes_no_new_name_or_pane() {
+fn the_workspace_panes_are_parked_in_closes_them_all_takes_a_name_but_no_new_pane() {
     let mut mixed = Mixed::new();
     let before = mixed.lent();
     mixed.place(shell());
@@ -4446,16 +4635,25 @@ fn the_workspace_panes_are_parked_in_closes_them_all_but_takes_no_new_name_or_pa
     });
     let parked = own(&shown, "from-desk").unwrap().clone();
     let first = parked.tabs[0].layout.panes()[0].id;
-    // Neither a new name nor a pane beside one: they go back to desk.
-    let rename = Request::RenameWorkspace {
+    // A new name, kept for whenever desk is away (CLACKA-118), as any
+    // workspace's is, unless it's no name.
+    let rename = |name: &str| Request::RenameWorkspace {
         workspace: parked.id,
-        name: "mine".into(),
+        name: name.into(),
     };
-    let refused = mixed.window.request(&rename).unwrap();
+    let refused = mixed.window.request(&rename(" ")).unwrap();
     assert!(
-        matches!(&refused, Response::Error(Error::Other(why)) if why.contains("parked while ‘desk’ is away")),
+        matches!(&refused, Response::Error(Error::BadName { .. })),
         "{refused:?}"
     );
+    assert_eq!(
+        mixed.window.request(&rename("mine")).unwrap(),
+        Response::Done
+    );
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| own(shown, "mine").is_some());
+    assert_eq!(own(&shown, "mine").unwrap().tabs.len(), 2);
+    assert!(own(&shown, "from-desk").is_none());
+    // No pane beside one: they go back to desk.
     let split = Request::Split {
         pane: first,
         side: Side::Right,
@@ -4472,7 +4670,7 @@ fn the_workspace_panes_are_parked_in_closes_them_all_but_takes_no_new_name_or_pa
         workspace: parked.id,
     };
     assert_eq!(mixed.window.request(&close).unwrap(), Response::Done);
-    wait_for_workspaces(&mut mixed.window, |shown| own(shown, "from-desk").is_none());
+    wait_for_workspaces(&mut mixed.window, |shown| own(shown, "mine").is_none());
     mixed.wait_for_lent(before);
 }
 
@@ -5401,8 +5599,18 @@ fn a_better_way_tried_never_asks_for_a_password() {
     let mut answering = chain.laptop.client();
     answering.watch_connections(true).unwrap();
     connect(&mut chain.window, "server");
-    // Tried straight again and again, it never asks, and stays through
-    // desk.
+    // Asked for, ssh straight there is tried at once, which asks
+    // (CLACKA-118); turned down, it stays through desk.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "never asked");
+        if let Event::Login { ask, .. } = answering.next_event().expect("an event") {
+            answering.answer_login(ask, None).unwrap();
+            break;
+        }
+    }
+    // Tried straight again and again after, it never asks, and stays
+    // through desk.
     asked_nothing(&mut answering);
     going(&mut chain.window, "server", &["desk"]);
 }
@@ -5581,6 +5789,88 @@ fn reached_straight_too_a_machine_goes_straight_falls_back_through_another_and_c
     let shown = chain.window.watch_workspaces().unwrap();
     let srvs = (shown.list.iter()).filter(|workspace| workspace.name == "srv");
     assert_eq!(srvs.count(), 1, "shown once");
+}
+
+/// What `client` is told of asking for ssh straight to a machine: the
+/// questions ssh asks it on the way, answered as `answer` says, then what
+/// it came to.
+fn went_direct(client: &mut Client, answer: Option<&str>) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "never told how it went");
+        match client.next_event().expect("an event") {
+            Event::Login { ask, .. } => {
+                client.answer_login(ask, answer.map(str::to_owned)).unwrap();
+            }
+            Event::Said(said) => return said,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// A machine whose ssh wants a password stays reached through another,
+/// as the tries for a better way never ask; asked for again, ssh straight
+/// there asks the window that asked, and once given it, the connection
+/// goes straight there, the same terminal and all (CLACKA-118). Turned
+/// down, only that try fails.
+#[test]
+fn a_machine_that_wants_a_password_goes_straight_there_once_asked_and_given_it() {
+    let mut chain = Chain::with(quick_to_better);
+    let terminal = first_terminal(&chain.srv);
+    attach_to(&mut chain.window, terminal);
+    going(&mut chain.window, "server", &["desk"]);
+    chain.world.password(Some("hunter2"));
+    // Asked for here, tries for a better way ask nothing, and fail.
+    connect(&mut chain.window, "server");
+    assert!(went_direct(&mut chain.window, None).contains("couldn't go straight"));
+    std::thread::sleep(Duration::from_secs(1));
+    going(&mut chain.window, "server", &["desk"]);
+    // A window that answers asks again, and turns the password down: it
+    // still goes through desk, and works.
+    let mut asker = chain.laptop.client();
+    asker.watch_connections(true).unwrap();
+    connect(&mut asker, "server");
+    let said = went_direct(&mut asker, None);
+    assert!(
+        said.contains("couldn't go straight to ‘server’, which still goes through desk"),
+        "{said}"
+    );
+    // Found to ask, ssh straight there isn't tried in the background any
+    // more, which would fail a login there every 200 ms here.
+    let tried = pid(&chain.world, "ssh.server.pid");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        pid(&chain.world, "ssh.server.pid"),
+        tried,
+        "tried in the background"
+    );
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo through-$((2 * 3))\r",
+        "through-6",
+    );
+    going(&mut chain.window, "server", &["desk"]);
+    // Given it, it goes straight there.
+    connect(&mut asker, "server");
+    assert_eq!(
+        went_direct(&mut asker, Some("hunter2")),
+        "‘server’ goes straight there now"
+    );
+    going(&mut chain.window, "server", &[]);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo straight-$((6 * 7))\r",
+        "straight-42",
+    );
+    // Kept as asked for, so a fresh start tries ssh straight there first.
+    let kept = chain.laptop.client().watch_connections(false).unwrap();
+    assert!(
+        kept.iter()
+            .any(|link| link.host == "server" && link.through.is_empty())
+    );
 }
 
 #[test]
@@ -6947,6 +7237,81 @@ fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
         matches!(ended, Some(clackatoo_protocol::Outcome::Done)),
         "{node:#?}"
     );
+}
+
+/// A port forwarded to laptop through desk's connection to it goes on
+/// listening as desk's daemon upgrades in place (CLACKA-118): a connection
+/// made as it does goes through once the connection to laptop is made
+/// again, and the forward is still listed. Connections open through it
+/// are reset, as the connection carrying them ends.
+#[test]
+fn a_port_forwarded_to_another_machine_listens_on_through_an_upgrade() {
+    use std::io::Read as _;
+    use std::net::{TcpListener, TcpStream};
+
+    let world = World::new();
+    let laptop = world.start("laptop");
+    laptop
+        .client()
+        .new_workspace(Some("work".into()), shell())
+        .unwrap();
+    let (child, socket) = process_daemon_with(&world, "desk", |daemon| {
+        daemon.env("CLACKATOO_SSH", world.path().join("ssh"));
+    });
+    let mut window = Client::connect(&socket).unwrap();
+    window.set_read_timeout(Some(PATIENCE)).unwrap();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let pane = theirs(&shown, "work").unwrap().tabs[0].layout.panes()[0].id;
+    // A server "on laptop", which says back what it's sent.
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in server.incoming().flatten() {
+            let mut reader = stream.try_clone().unwrap();
+            let mut writer = stream;
+            std::thread::spawn(move || drop(std::io::copy(&mut reader, &mut writer)));
+        }
+    });
+    let forward = |forwarding| Request::Forwards { pane, forwarding };
+    let added = window.request(&forward(Forwarding::Add {
+        local: 0,
+        host: "localhost".into(),
+        port,
+    }));
+    let Ok(Response::Text(said)) = added else {
+        panic!("{added:?}");
+    };
+    let local: u16 = (said.strip_prefix("Forwarding port "))
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(local, _)| local.parse().ok())
+        .unwrap_or_else(|| panic!("{said}"));
+    let echoes = |text: &[u8]| {
+        let mut stream = TcpStream::connect(("127.0.0.1", local)).unwrap();
+        stream.set_read_timeout(Some(PATIENCE)).unwrap();
+        stream.write_all(text).unwrap();
+        let mut echoed = vec![0; text.len()];
+        stream.read_exact(&mut echoed).unwrap();
+        assert_eq!(echoed, text);
+        stream
+    };
+    let mut open = echoes(b"before\n");
+    drop(window);
+
+    upgrade_process(&child, &socket);
+    // The connection open through it was reset.
+    let ended = open.read(&mut [0; 8]);
+    assert!(matches!(ended, Ok(0) | Err(_)), "{ended:?}");
+    // Still listening, and through to laptop again once it's reached.
+    drop(echoes(b"after the upgrade\n"));
+    let mut window = Client::connect(&socket).unwrap();
+    window.set_read_timeout(Some(PATIENCE)).unwrap();
+    let listed = window.request(&forward(Forwarding::List)).unwrap();
+    let Response::Text(listed) = listed else {
+        panic!("{listed:?}");
+    };
+    assert!(listed.contains(&local.to_string()), "{listed}");
 }
 
 /// Sets a daemon to stop its agents as it upgrades, as before they went on

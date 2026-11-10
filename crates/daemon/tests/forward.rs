@@ -133,6 +133,7 @@ impl Window {
             local: 0,
             host: host.into(),
             port,
+            on: None,
         };
         self.forwards.add(spec).expect("forward").local
     }
@@ -449,6 +450,7 @@ fn a_connection_nothing_answers_is_cut_off_and_told_once() {
                 local,
                 host: "localhost".into(),
                 port,
+                on: None,
             },
             problem: Problem::Failed(ForwardFailure::Refused),
         }],

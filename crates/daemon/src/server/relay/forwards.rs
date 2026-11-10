@@ -12,8 +12,12 @@
 //! of the connection's own, the daemon there connecting where it says.
 //! The forwards are the connection's: they keep listening while it's
 //! dropped, and are handed to it again once it's made again, until
-//! they're stopped, or the connection is ended. What they run into is
-//! told to the client that last asked about them.
+//! they're stopped, or the connection is ended. They keep listening
+//! through an in-place upgrade too, their sockets handed over
+//! (CLACKA-118): connections open through them are reset, as the
+//! connection carrying them ends, and connections made meanwhile go
+//! through once it's made again. What they run into is told to the client
+//! that last asked about them.
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -37,6 +41,91 @@ pub(in crate::server) struct Forwarded {
 }
 
 impl Daemon {
+    /// The ports forwarded through each connection, with copies of their
+    /// listening sockets, for the next build to go on listening on
+    /// (CLACKA-118): by the connection's host.
+    pub(in crate::server) fn hand_over_relayed_forwards(
+        &self,
+    ) -> Vec<(String, Spec, Vec<std::os::fd::OwnedFd>)> {
+        (self.links.list.iter())
+            .filter_map(|linked| Some((&linked.remote.host, linked.relayed.forwards.as_ref()?)))
+            .flat_map(|(host, forwarded)| {
+                (forwarded.forwards.hand_over().into_iter())
+                    .map(|(spec, listeners)| (host.clone(), spec, listeners))
+            })
+            .collect()
+    }
+
+    /// Goes on forwarding the ports a build before this one forwarded
+    /// through its connections, listening on the sockets it handed over:
+    /// once each connection is made again, connections made meanwhile go
+    /// through. One whose connection has gone is let go.
+    pub(in crate::server) fn resume_relayed_forwards(
+        &mut self,
+        kept: &[crate::handover::Forwarded],
+        fds: &mut crate::handover::Fds,
+    ) {
+        for forwarded in kept {
+            let listeners: Vec<std::net::TcpListener> = (forwarded.listeners.iter())
+                .filter_map(|&fd| {
+                    (fds.take(fd))
+                        .inspect_err(|err| {
+                            log::warn!("a forward's socket wasn't handed over: {err}");
+                        })
+                        .ok()
+                })
+                .map(std::net::TcpListener::from)
+                .collect();
+            let Some(at) = self.links.find(&forwarded.host) else {
+                continue;
+            };
+            if listeners.is_empty() {
+                continue;
+            }
+            let spec = Spec {
+                local: forwarded.local,
+                host: forwarded.to.clone(),
+                port: forwarded.port,
+                on: None,
+            };
+            self.relayed_forwards(at).take_over(spec, listeners);
+        }
+    }
+
+    /// Notes, of the connections a build before this one handed over, by
+    /// host, those whose ssh straight there was found to ask a question:
+    /// they aren't tried straight there in the background (CLACKA-118).
+    pub(in crate::server) fn resume_direct_asks(&mut self, hosts: &[String]) {
+        for host in hosts {
+            if let Some(at) = self.links.find(host) {
+                self.links.list[at].ways.direct_asks(true);
+            }
+        }
+    }
+
+    /// The ports forwarded through the connection at `at`, made if none
+    /// were: handed to it while it's made.
+    fn relayed_forwards(&mut self, at: usize) -> &mut Forwards {
+        let link = (self.reached(at))
+            .and_then(|reached| Some(reached.carried.as_ref()?.forwarder(reached.wire)));
+        let waker = Arc::clone(&self.waker);
+        let news = Arc::clone(&self.links.forward_news);
+        let forwarded = (self.links.list[at].relayed.forwards).get_or_insert_with(|| {
+            let mut forwards = Forwards::new(move || {
+                news.store(true, Ordering::Release);
+                drop(waker.wake());
+            });
+            if let Some(link) = link {
+                forwards.attach(link);
+            }
+            Forwarded {
+                forwards,
+                asker: None,
+            }
+        });
+        &mut forwarded.forwards
+    }
+
     /// Does what `forwarding` says to the ports forwarded to the machine
     /// `pane` is on, as the client at `token` asks, if that's another
     /// machine: answered at once, saying what was done.
@@ -73,23 +162,10 @@ impl Daemon {
             return Some(Routed::Answered(Response::Error(refused)));
         }
         let host = self.links.list[at].remote.host.clone();
-        let link = (self.reached(at))
-            .and_then(|reached| Some(reached.carried.as_ref()?.forwarder(reached.wire)));
-        let waker = Arc::clone(&self.waker);
-        let news = Arc::clone(&self.links.forward_news);
-        let forwarded = (self.links.list[at].relayed.forwards).get_or_insert_with(|| {
-            let mut forwards = Forwards::new(move || {
-                news.store(true, Ordering::Release);
-                drop(waker.wake());
-            });
-            if let Some(link) = link {
-                forwards.attach(link);
-            }
-            Forwarded {
-                forwards,
-                asker: None,
-            }
-        });
+        self.relayed_forwards(at);
+        let Some(forwarded) = &mut self.links.list[at].relayed.forwards else {
+            return None;
+        };
         forwarded.asker = Some(token);
         let forwards = &mut forwarded.forwards;
         let said = match forwarding {
@@ -103,6 +179,7 @@ impl Daemon {
                     local: *local,
                     host: to.clone(),
                     port: *port,
+                    on: None,
                 };
                 match forwards.add(asked.clone()) {
                     Ok(spec) => Ok(format!(

@@ -123,10 +123,18 @@ pub(crate) fn connect(args: &ConnectArgs) -> anyhow::Result<()> {
     // As it is now: anything heard before is older.
     let find = |list: Vec<Link>| list.into_iter().find(|link| link.host == args.host);
     let mut link = find(client.watch_connections(true)?);
+    // Connected through another machine, the daemon tries ssh straight
+    // there, as asked, which may ask for a password, and says how it went
+    // (CLACKA-118).
+    let straight = client.daemon_has(wire::FEDERATION_2)
+        && link.as_ref().is_some_and(|link| {
+            matches!(link.state, ConnectionState::Connected { .. }) && !link.through.is_empty()
+        });
     let deadline = Instant::now() + CONNECT_WAIT;
     loop {
         if let Some(link) = &link {
             match &link.state {
+                ConnectionState::Connected { .. } if straight => {}
                 ConnectionState::Connected { wire } => {
                     let machine = (link.machine.as_ref())
                         .map(|machine| format!(": {} ({})", machine.name, machine.id))
@@ -160,6 +168,11 @@ pub(crate) fn connect(args: &ConnectArgs) -> anyhow::Result<()> {
         client.set_read_timeout(Some(left))?;
         match client.next_event() {
             Ok(Event::Connections(list)) => link = find(list),
+            Ok(Event::Said(said)) if straight => {
+                anyhow::ensure!(said.ends_with("goes straight there now"), "{said}");
+                println!("{said}");
+                return Ok(());
+            }
             Ok(Event::Login {
                 ask,
                 host,

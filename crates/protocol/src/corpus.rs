@@ -750,6 +750,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             host: "::1".into(),
             port: 5173,
             unpaced: true,
+            machine: None,
         }))),
     ));
     // The code in an agent's words, asked about and coloured.
@@ -1961,6 +1962,28 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::NOT_SHARED,
         Sample::Server(ServerMessage::Event(Event::Workspaces(not_shared))),
     ));
+    // A window on another machine forwarding to a pane on a third, through
+    // its daemon (CLACKA-118).
+    samples.push((
+        crate::wire::FEDERATION_2,
+        Sample::Client(ClientMessage::Request(Request::Forward(Forward {
+            host: "localhost".into(),
+            port: 5173,
+            unpaced: false,
+            machine: Some(crate::MachineId([0x5e; 16])),
+        }))),
+    ));
+    // A pane lent beside one lent before, as a lent chat's agent opens one
+    // (CLACKA-118).
+    samples.push((
+        crate::wire::FEDERATION_2,
+        Sample::Server(ServerMessage::Event(Event::LendBeside {
+            key: 0x5eed,
+            beside: 0x00be_51de,
+            side: Side::Below,
+            kind: PaneKind::new("editor"),
+        })),
+    ));
     samples
 }
 
@@ -3049,6 +3072,7 @@ fn forwards() -> Vec<Sample> {
             host: "localhost".into(),
             port: 8080,
             unpaced: false,
+            machine: None,
         }))),
         Server(ServerMessage::Response(Response::Done)),
     ];

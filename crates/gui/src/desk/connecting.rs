@@ -29,34 +29,29 @@ use crate::chrome::Reach;
 use crate::options::ShowHost;
 
 /// Where a workspace from another machine is, and how this window's
-/// daemon reaches it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Elsewhere {
-    /// The machine, as the daemon's connection to it is named, as typed
-    /// after `:connect`: `desk`.
-    pub(crate) host: String,
-    /// What the daemon there calls its machine, if it has said:
-    /// `jack-ubuntu-desktop`.
-    pub(crate) machine: Option<String>,
-    /// How the connection is.
-    pub(crate) reach: Reach,
-    /// The machines the connection goes through, nearest first, by what
-    /// they're called: none while it goes straight there.
-    pub(crate) through: Vec<String>,
-}
+/// daemon reaches it: the protocol's, which the phone shows too.
+pub(crate) use clackatoo_protocol::Elsewhere;
 
-impl Elsewhere {
+/// What this window says of where something from another machine is.
+pub(crate) trait Said {
     /// What the mouse over its workspace says: which machine, and how its
     /// connection is.
-    pub(crate) fn said(&self) -> String {
-        let mut machine = match &self.machine {
-            Some(machine) if *machine != self.host => format!("on {machine} ({})", self.host),
-            _ => format!("on {}", self.host),
-        };
-        if !self.through.is_empty() {
-            machine = format!("{machine}, through {}", self.through.join(" and "));
-        }
+    fn said(&self) -> String;
+
+    /// What a pane of its workspace says over its last screen while it's
+    /// not connected, if it isn't.
+    fn notice(&self) -> Option<String>;
+}
+
+impl Said for Elsewhere {
+    fn said(&self) -> String {
+        let machine = self.which();
         let how = match &self.reach {
+            // ssh straight there may want a password, which the tries for
+            // a better way never ask.
+            Reach::Connected if !self.through.is_empty() => {
+                format!("connected · :connect {} goes straight there", self.host)
+            }
             Reach::Connected => "connected".to_owned(),
             Reach::Connecting => "connecting".to_owned(),
             Reach::NeedsPassword => format!("needs a password: :connect {}", self.host),
@@ -67,9 +62,7 @@ impl Elsewhere {
         format!("{machine} · {how}")
     }
 
-    /// What a pane of its workspace says over its last screen while it's
-    /// not connected, if it isn't.
-    pub(crate) fn notice(&self) -> Option<String> {
+    fn notice(&self) -> Option<String> {
         let host = &self.host;
         match &self.reach {
             // Its panes say so themselves.
@@ -107,13 +100,20 @@ impl Desk {
             },
             Asked::Command,
         );
-        let connected = (self.connections.iter()).any(|connection| {
+        let connected = (self.connections.iter()).find(|connection| {
             connection.host == host && matches!(connection.state, ConnectionState::Connected { .. })
         });
-        if connected {
+        if let Some(connection) = connected {
+            // Through another machine, the daemon tries ssh straight there,
+            // which may ask for a password, and says how it went.
+            let through = !connection.through.is_empty() && self.daemon_has(wire::CHAIN);
             self.say(match share {
                 Some(false) => format!("‘{host}’ isn't passed on from now on"),
                 Some(true) => format!("‘{host}’ is passed on from now on"),
+                None if through => format!(
+                    "trying ssh straight to ‘{host}’, which goes through {} now",
+                    connection.through.join(" and ")
+                ),
                 None => format!("connected to ‘{host}’ already"),
             });
             return;
@@ -261,47 +261,12 @@ impl Desk {
     /// Where the machine `home` is, another than the daemon's: the
     /// connection to it, as the daemon last said.
     pub(crate) fn elsewhere_on(&self, home: clackatoo_protocol::MachineId) -> Elsewhere {
-        let connection = (self.connections.iter()).find(|connection| {
-            connection
-                .machine
-                .as_ref()
-                .is_some_and(|machine| machine.id == home)
-        });
-        // A machine the daemon has no connection to: by what it says that
-        // machine is called, or the start of its ID. Its panes are in a
-        // workspace another machine put them in, out of reach; or, from a
-        // daemon that doesn't say, still to come.
-        let Some(connection) = connection else {
-            let named = (self.workspaces.others.iter()).find(|other| other.id == home);
-            return Elsewhere {
-                host: named.map_or_else(
-                    || home.to_string()[..8].to_owned(),
-                    |other| other.name.clone(),
-                ),
-                machine: None,
-                reach: if self.daemon_has(wire::MIXED) {
-                    Reach::Unreachable
-                } else {
-                    Reach::Connecting
-                },
-                through: Vec::new(),
-            };
-        };
-        Elsewhere {
-            host: connection.host.clone(),
-            through: connection.through.clone(),
-            machine: connection
-                .machine
-                .as_ref()
-                .map(|machine| machine.name.clone()),
-            reach: match &connection.state {
-                ConnectionState::Connected { .. } => Reach::Connected,
-                ConnectionState::Asking | ConnectionState::NeedsPassword => Reach::NeedsPassword,
-                ConnectionState::Down { reason } => Reach::Down(reason.clone()),
-                ConnectionState::Stopped { reason } => Reach::Stopped(reason.clone()),
-                ConnectionState::Connecting | ConnectionState::Other => Reach::Connecting,
-            },
-        }
+        Elsewhere::on(
+            home,
+            &self.connections,
+            &self.workspaces.others,
+            self.daemon_has(wire::MIXED),
+        )
     }
 
     /// `workspace`'s name, as the bar and the command line show it: with
@@ -418,21 +383,35 @@ impl Desk {
         forwarding: crate::command::Forwarding,
     ) {
         use crate::command::Forwarding as Typed;
-        let Some(elsewhere) = self.pane_elsewhere(pane) else {
+        let (Some(elsewhere), Some(machine)) = (self.pane_elsewhere(pane), self.pane_machine(pane))
+        else {
             return self.forwards_asked.push(forwarding);
         };
         let host = elsewhere.host;
         if self.remote {
-            // The daemon's machine isn't this one: its ports aren't the
-            // window's.
-            if !matches!(forwarding, Typed::Config(_)) {
-                self.warn(format!(
-                    "A window on another machine than its daemon can't forward ports to {host} \
-                     yet: :portforward in one of the daemon's own workspaces forwards to its \
-                     machine"
-                ));
-            }
-            return;
+            // The daemon's machine isn't this one: the window forwards its
+            // own ports, which the daemon passes on to the pane's machine
+            // (CLACKA-118). The config's go to the daemon's machine alone.
+            let forwarding = match forwarding {
+                Typed::Config(_) => return,
+                Typed::Add(spec) => {
+                    // An older daemon would read past the machine, and
+                    // connect on its own.
+                    if !self.needs_daemon(":portforward to another machine", wire::FEDERATION_2) {
+                        return;
+                    }
+                    let on = clackatoo_daemon::forward::On {
+                        id: machine,
+                        name: host,
+                    };
+                    Typed::Add(clackatoo_daemon::forward::Spec {
+                        on: Some(on),
+                        ..spec
+                    })
+                }
+                Typed::List | Typed::Stop(_) => forwarding,
+            };
+            return self.forwards_asked.push(forwarding);
         }
         if !self.needs_daemon(":portforward", wire::RELAY) {
             return;
@@ -471,7 +450,8 @@ mod tests {
         passed.through = vec!["desk".into()];
         assert_eq!(
             passed.said(),
-            "on jack-server (server), through desk · connected"
+            "on jack-server (server), through desk · connected · :connect server goes straight \
+             there"
         );
         passed.through.push("nas".into());
         assert!(passed.said().contains(", through desk and nas ·"));

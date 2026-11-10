@@ -242,19 +242,30 @@ impl Daemon {
 
     /// Shows the chat `child`, which the chat `chat`'s agent started, in a
     /// pane beside `chat`, as the user asked from its card; or if it's in
-    /// one, points it out.
-    pub(in crate::server) fn open_subagent(&mut self, chat: TerminalId, child: TerminalId) {
+    /// one, points it out. Says why it couldn't, as when the chat is lent
+    /// to a machine that isn't connected.
+    pub(in crate::server) fn open_subagent(
+        &mut self,
+        chat: TerminalId,
+        child: TerminalId,
+    ) -> Result<(), String> {
         let theirs = (self.chat_ref(child)).is_some_and(|kid| kid.relations().parent == Some(chat));
         if !theirs {
-            return;
+            return Ok(());
         }
         if let Some(pane) = self.workspaces.get().pane_showing(child) {
             self.show(pane, None);
-            return;
+            return Ok(());
         }
         match self.place_beside(chat, PaneTerminal::Existing(child)) {
-            Ok(pane) => self.show(pane, None),
-            Err(why) => log::warn!("chat {child} couldn't be shown: {why}"),
+            Ok(pane) => {
+                self.show(pane, None);
+                Ok(())
+            }
+            Err(why) => {
+                log::warn!("chat {child} couldn't be shown: {why}");
+                Err(format!("the subagent's chat couldn't be opened: {why}"))
+            }
         }
     }
 

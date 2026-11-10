@@ -89,6 +89,9 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::RevokeDevice { .. }
         | Request::AnswerPairing { .. }
         | Request::UnlockPairing
+        // Never asked as a request: a forwarded stream's first message,
+        // checked where the stream is read (`forward_on`'s
+        // `refuse_unshared`, for one going on to another machine).
         | Request::Forward(_)
         | Request::Relay
         | Request::RelayAs { .. }

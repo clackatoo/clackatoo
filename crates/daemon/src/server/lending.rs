@@ -154,6 +154,106 @@ impl Daemon {
         Ok(done)
     }
 
+    /// Opens `content` on the `side` of the pane `beside`, which is lent
+    /// to another machine's daemon, as a lent chat's agent opens a pane
+    /// beside the chat (CLACKA-118). A lent workspace holds its one pane
+    /// alone, as that daemon shows it in a layout of its own, so a pane
+    /// beside it is lent too, in a workspace of its own, numbered by this
+    /// daemon, and that daemon is asked to show it there
+    /// ([`Event::LendBeside`]), before it's told the workspaces that hold
+    /// it. It's made here first, so what's asked of it works at once; one
+    /// that daemon can't show it gives back as it does any lent pane
+    /// nothing shows. Refused if that daemon isn't connected, or is too
+    /// old to be asked.
+    ///
+    /// *Rejected:* a lent workspace holding a layout, mirrored as part of
+    /// the borrower's: a second layout the borrower would have to follow
+    /// and keep, through restarts and upgrades on both sides, to show what
+    /// one pane more already shows; and opening it in a workspace of this
+    /// machine's own, where nobody at the borrower's window would see it.
+    pub(super) fn lend_beside(
+        &mut self,
+        beside: PaneId,
+        side: clackatoo_protocol::Side,
+        content: PaneTerminal,
+    ) -> Result<PaneId, Error> {
+        let refused = |why: String| Err(Error::Other(why));
+        let Some(lent) = self.workspaces.lent_of_pane(beside) else {
+            return refused("that pane isn't lent to another machine".into());
+        };
+        let name = self.machine_named(lent.to);
+        // Placed by this daemon in that machine's layout, or a background
+        // tab of that daemon's: that daemon can't be asked.
+        if lent.placed || lent.background.is_some() {
+            return refused(format!(
+                "this pane is shown in a workspace on ‘{name}’: a pane beside it goes there"
+            ));
+        }
+        let borrower = (self.sources.iter())
+            .filter_map(|(key, source)| match source {
+                Source::Client(client)
+                    if !client.finished
+                        && client.machine.as_ref().is_some_and(|m| m.id == lent.to) =>
+                {
+                    Some((Token(key), client.wire, client.machine.clone()))
+                }
+                _ => None,
+            })
+            .max_by_key(|(_, wire, _)| *wire);
+        let Some((token, wire, Some(machine))) = borrower else {
+            return refused(format!(
+                "this pane is shown on ‘{name}’, which isn't connected: a pane beside it can be \
+                 opened once it is"
+            ));
+        };
+        if !wire::daemon_has(wire, wire::FEDERATION_2) {
+            return refused(format!(
+                "‘{name}’ runs a clackatoo too old to show a pane beside this one: update it there"
+            ));
+        }
+        let key = self.fresh_lent_key(lent.to)?;
+        let content = self.pane_content(content, Some(beside))?;
+        let kind = clackatoo_protocol::PaneKind::new(content.kind_name());
+        let pane = self.workspaces.new_lent(
+            Lent {
+                to: lent.to,
+                key,
+                placed: false,
+                background: None,
+            },
+            content,
+        );
+        self.workspaces
+            .borrower_seen(machine.id, &machine.name, now_seconds());
+        let asked = Event::LendBeside {
+            key,
+            beside: lent.key,
+            side,
+            kind,
+        };
+        self.send_event(token, asked);
+        self.workspaces_changed();
+        Ok(pane)
+    }
+
+    /// A number for a new pane lent to `machine` that no pane lent to it
+    /// has.
+    fn fresh_lent_key(&self, machine: MachineId) -> Result<u64, Error> {
+        use ring::rand::SecureRandom as _;
+        let random = ring::rand::SystemRandom::new();
+        for _ in 0..8 {
+            let mut bytes = [0; 8];
+            random
+                .fill(&mut bytes)
+                .map_err(|_| Error::Other("no random number to be had".into()))?;
+            let key = u64::from_le_bytes(bytes);
+            if self.workspaces.lent_workspace(machine, key).is_none() {
+                return Ok(key);
+            }
+        }
+        Err(Error::Other("no random number to be had".into()))
+    }
+
     /// The machine the client at `token` said it is, if it did.
     pub(super) fn machine_of_client(&self, token: Token) -> Option<&Machine> {
         match self.sources.get(token.0) {
@@ -254,7 +354,13 @@ impl Daemon {
             .peekable();
         lent.peek()?;
         let mut with = shown.clone();
-        with.list.extend(lent.cloned());
+        // Called nothing there: a name given what's parked here is this
+        // machine's own (CLACKA-118).
+        with.list
+            .extend(lent.map(|workspace| clackatoo_protocol::Workspace {
+                name: String::new(),
+                ..workspace.clone()
+            }));
         Some(with)
     }
 

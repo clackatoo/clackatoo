@@ -493,6 +493,7 @@ impl Download {
             local: 0,
             host: "localhost".into(),
             port,
+            on: None,
         };
         let local = forwards.add(spec)?.local;
         let forwarder = client.forwarder().context("the bridge's client forwards")?;

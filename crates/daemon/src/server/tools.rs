@@ -1294,11 +1294,25 @@ impl Daemon {
         let (_, tab, _) = workspaces
             .find_pane(chat_pane)
             .ok_or("the chat isn't in a pane")?;
-        let side = (self.tools.sides.get(&chat).copied()).filter(|&pane| tab.layout.contains(pane));
+        // A chat lent to another machine's daemon: what it opens is lent
+        // too, each pane in a workspace of its own (CLACKA-118).
+        let lent = self.workspaces.lent_of_pane(chat_pane);
+        let beside = |pane: PaneId| match lent {
+            Some(lent) => (self.workspaces.lent_of_pane(pane)).is_some_and(|its| its.to == lent.to),
+            None => tab.layout.contains(pane),
+        };
+        let side = (self.tools.sides.get(&chat).copied()).filter(|&pane| beside(pane));
         let (pane, side) = match side {
             Some(pane) => (pane, Side::Below),
             None => (chat_pane, Side::Right),
         };
+        if lent.is_some() {
+            let new = self
+                .lend_beside(pane, side, content)
+                .map_err(|err| err.to_string())?;
+            self.tools.sides.insert(chat, new);
+            return Ok(new);
+        }
         match self.split(pane, side, content) {
             Ok(Response::PaneCreated(new)) => {
                 self.tools.sides.insert(chat, new);

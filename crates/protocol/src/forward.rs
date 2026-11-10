@@ -44,6 +44,18 @@ pub struct Forward {
         deserialize_with = "wire::since::<{ wire::FORWARD_PACE }, _, _>"
     )]
     pub unpaced: bool,
+    /// The machine to connect on, if it isn't the daemon's: another the
+    /// daemon is connected to, which it passes the stream on to, asking
+    /// the same with no machine, as a window that is itself on another
+    /// machine than its daemon forwards to a pane on a third (CLACKA-118).
+    /// `None` from a window older than protocol 149; and never sent to a
+    /// daemon that old, which would read past it and connect on its own
+    /// machine.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FEDERATION_2 }, _>",
+        deserialize_with = "wire::since::<{ wire::FEDERATION_2 }, _, _>"
+    )]
+    pub machine: Option<crate::MachineId>,
 }
 
 /// What a window asks of the ports the daemon forwards from its own

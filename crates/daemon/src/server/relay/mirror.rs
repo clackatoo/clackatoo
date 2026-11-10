@@ -81,8 +81,8 @@ const MOST_BOARDS: usize = 4096;
 pub(crate) const MOST_HUNKS: usize = 1 << 16;
 
 /// The longest name of another daemon's kept, in characters: a workspace's,
-/// a tab's, or a chat's title.
-const LONGEST_NAME: usize = 256;
+/// a tab's, or a chat's title, as long as this daemon's own may be.
+use crate::workspaces::LONGEST_NAME;
 
 /// The longest home directory taken in from another daemon, in bytes: a
 /// longer one is taken as none.

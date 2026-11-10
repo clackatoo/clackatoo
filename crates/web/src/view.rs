@@ -7,9 +7,10 @@
 //! [`grid`](crate::grid)'s).
 
 use clackatoo_protocol::{
-    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Field, FieldInput, FieldValue, Form,
-    FormAsk, Fullness, Item, Outcome, Remedy, Said, Setting, SettingKind, Subagent, SubagentStatus,
-    TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
+    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Elsewhere, Field, FieldInput, FieldValue,
+    Form, FormAsk, Fullness, Item, Outcome, Reach, Remedy, Said, Setting, SettingKind, Subagent,
+    SubagentStatus, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn,
+    TurnFilesState,
 };
 
 use crate::action::{Action, RowKey};
@@ -57,7 +58,36 @@ fn terminal_title(terminal: &TerminalInfo) -> String {
 
 /// A terminal, as a row of the list: what it's called, and what it's
 /// running, where, and at what size.
-pub(crate) fn terminal_row(terminal: &TerminalInfo) -> Element {
+/// Which machine something from another one is on, as a window says
+/// it: a ring in the colour of how it's reached, and `@host`, as
+/// `◯ @desk` (CLACKA-118). Its label says the machine, the way there, and
+/// how the connection is. A phone never answers ssh's questions, so one
+/// waiting for a password says a window gives it.
+pub(crate) fn away(elsewhere: &Elsewhere) -> Element {
+    let (class, how) = match &elsewhere.reach {
+        Reach::Connected => ("connected", "connected"),
+        Reach::Connecting => ("connecting", "connecting"),
+        Reach::NeedsPassword => ("password", "needs a password, which a window gives"),
+        Reach::Down(_) => ("down", "not connected, trying again"),
+        Reach::Stopped(_) => ("down", "not connected"),
+        Reach::Unreachable => ("down", "not reachable from here"),
+    };
+    let said = format!("{} · {how}", elsewhere.which());
+    el("span")
+        .class("away")
+        .class(class)
+        .attr("title", said.clone())
+        .attr("aria-label", said)
+        .child(el("span").class("ring").attr("aria-hidden", "true"))
+        .child(
+            el("span")
+                .class("host")
+                .attr("aria-hidden", "true")
+                .text(format!("@{}", elsewhere.host)),
+        )
+}
+
+pub(crate) fn terminal_row(terminal: &TerminalInfo, elsewhere: Option<&Elsewhere>) -> Element {
     let mut said = Vec::new();
     match terminal.status {
         TerminalStatus::Running => {
@@ -83,7 +113,8 @@ pub(crate) fn terminal_row(terminal: &TerminalInfo) -> Element {
             el("div")
                 .class("top")
                 .child(el("span").class("prompt-mark").text("❯"))
-                .child(el("span").class("title").text(terminal_title(terminal))),
+                .child(el("span").class("title").text(terminal_title(terminal)))
+                .children(elsewhere.map(away)),
         )
         .child(el("div").class("meta").text(said.join(" · ")))
 }
@@ -123,7 +154,11 @@ pub fn terminal_header(state: &State, term: &OpenTerminal) -> Element {
         .child(
             el("div")
                 .class("heading")
-                .child(el("h1").text(title))
+                .child(
+                    el("h1")
+                        .text(title)
+                        .children(state.terminal_away(term.id).as_ref().map(away)),
+                )
                 .child(el("div").class("meta").text(said.join(" · "))),
         )
         .child(
@@ -270,7 +305,7 @@ pub(crate) fn online(online: Online) -> Element {
 }
 
 /// A chat, as a row of the list.
-pub(crate) fn chat_row(chat: &ChatSummary, now: u64) -> Element {
+pub(crate) fn chat_row(chat: &ChatSummary, now: u64, elsewhere: Option<&Elsewhere>) -> Element {
     let (status, label) = if chat.asking {
         ("asking", "Needs approval")
     } else {
@@ -315,7 +350,12 @@ pub(crate) fn chat_row(chat: &ChatSummary, now: u64) -> Element {
         .child(
             el("span")
                 .class("session-body")
-                .child(el("span").class("title").text(chat.title.clone()))
+                .child(
+                    el("span")
+                        .class("title")
+                        .text(chat.title.clone())
+                        .children(elsewhere.map(away)),
+                )
                 .child(
                     el("span")
                         .class("meta")
@@ -412,7 +452,11 @@ pub fn chat_header(state: &State, open: &OpenChat) -> Element {
         .child(
             el("div")
                 .class("heading")
-                .child(el("h1").text(title))
+                .child(
+                    el("h1")
+                        .text(title)
+                        .children(state.terminal_away(open.id).as_ref().map(away)),
+                )
                 .child(el("div").class("meta").text(said.join(" · "))),
         );
     if node.is_some_and(|node| node.question.is_some()) {
@@ -3014,6 +3058,84 @@ mod tests {
         assert_eq!(opened, 1, "only the terminal opens");
     }
 
+    /// The connection to desk, as a phone is told it: no reason.
+    fn to_desk(state: clackatoo_protocol::ConnectionState) -> clackatoo_protocol::Connection {
+        clackatoo_protocol::Connection {
+            host: "desk".into(),
+            machine: Some(clackatoo_protocol::Machine {
+                id: clackatoo_protocol::MachineId([9; 16]),
+                name: "jack-desktop".into(),
+                run: 1,
+            }),
+            state,
+            through: Vec::new(),
+            unshared: false,
+        }
+    }
+
+    /// The `@host` and ring shown in `page`, with the ring's class.
+    fn aways(page: &Element) -> Vec<(String, String)> {
+        (page.find_all("class").into_iter())
+            .filter(|found| (found.get("class")).is_some_and(|class| class.starts_with("away ")))
+            .map(|found| (found.get("class").unwrap().to_owned(), found.all_text()))
+            .collect()
+    }
+
+    /// Another machine's workspace says which machine it's on, with a ring
+    /// in the colour of how it's reached, as a window does; its terminals
+    /// don't say it again (CLACKA-118).
+    #[test]
+    fn another_machines_workspace_says_where_with_a_ring() {
+        use clackatoo_protocol::ConnectionState;
+        let mut state = listing_terminals(clackatoo_protocol::Layout::Pane(terminal_pane(1)));
+        state.workspaces.list[0].home = Some(clackatoo_protocol::MachineId([9; 16]));
+        state.connections = vec![to_desk(ConnectionState::Connected { wire: 1 })];
+        let page = home(&state, Notifications::On, 0);
+        assert_eq!(
+            aways(&page),
+            [("away connected".to_owned(), "@desk".to_owned())]
+        );
+        let label = (page.find_all("aria-label").into_iter())
+            .filter_map(|found| found.get("aria-label"))
+            .find(|label| label.contains("jack-desktop"))
+            .map(str::to_owned);
+        assert_eq!(label.as_deref(), Some("on jack-desktop (desk) · connected"));
+        state.connections = vec![to_desk(ConnectionState::NeedsPassword)];
+        let page = home(&state, Notifications::On, 0);
+        assert_eq!(aways(&page)[0].0, "away password");
+        state.connections = vec![to_desk(ConnectionState::Down {
+            reason: String::new(),
+        })];
+        let page = home(&state, Notifications::On, 0);
+        assert_eq!(aways(&page)[0].0, "away down");
+    }
+
+    /// A terminal of another machine's in a workspace of this one's, as a
+    /// pane borrowed from it, says which machine it's on, in its row and
+    /// in its own page's heading.
+    #[test]
+    fn a_terminal_on_another_machine_in_a_workspace_here_says_where() {
+        use clackatoo_protocol::ConnectionState;
+        let mut borrowed = terminal_pane(1);
+        borrowed.home = Some(clackatoo_protocol::MachineId([9; 16]));
+        let mut state = listing_terminals(clackatoo_protocol::Layout::Pane(borrowed));
+        state.connections = vec![to_desk(ConnectionState::Connected { wire: 1 })];
+        let page = home(&state, Notifications::On, 0);
+        assert_eq!(
+            aways(&page),
+            [("away connected".to_owned(), "@desk".to_owned())]
+        );
+        state.open_terminal(TerminalId(2));
+        let header = terminal_header(&state, state.term.as_ref().unwrap());
+        assert_eq!(
+            aways(&header),
+            [("away connected".to_owned(), "@desk".to_owned())]
+        );
+        // One of this machine's own says nothing.
+        let state = listing_terminals(clackatoo_protocol::Layout::Pane(terminal_pane(1)));
+        assert!(aways(&home(&state, Notifications::On, 0)).is_empty());
+    }
+
     #[test]
     fn terminal_controls_offer_fitting_and_say_when_its_fitted() {
         let mut state = State::default();
@@ -3204,7 +3326,7 @@ mod tests {
         };
         let ready = summary(3, None, false, 0);
         let dots = |chat: &ChatSummary| {
-            (chat_row(chat, 0).find_all("class").into_iter())
+            (chat_row(chat, 0, None).find_all("class").into_iter())
                 .any(|element| element.get("class") == Some("session-status running"))
         };
         assert!(dots(&working));

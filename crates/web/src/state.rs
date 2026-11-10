@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatPatch, ChatSummary, ClientMessage, Content, Event, MachineId,
-    PROTOCOL_VERSION, Patch, Request, Response, ServerMessage, Size, TerminalId, TerminalInfo,
-    View, ViewUpdate, Workspace, WorkspaceId, Workspaces,
+    ChatAction, ChatNode, ChatPatch, ChatSummary, ClientMessage, Connection, Content, Elsewhere,
+    Event, MachineId, PROTOCOL_VERSION, Patch, Request, Response, ServerMessage, Size, TerminalId,
+    TerminalInfo, View, ViewUpdate, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::keys::{self, Key, Modifiers};
@@ -188,6 +188,10 @@ enum Asked {
 pub struct State {
     pub online: Online,
     pub workspaces: Workspaces,
+    /// The daemon's connections to other machines, as it last said them,
+    /// with no reasons: which machine a workspace, terminal or chat from
+    /// another is on, and how it's reached, its ring (CLACKA-118).
+    pub connections: Vec<Connection>,
     pub chats: Vec<ChatSummary>,
     /// Every terminal, as the daemon last listed them.
     pub terminals: Vec<TerminalInfo>,
@@ -310,6 +314,7 @@ impl Default for State {
         Self {
             online: Online::Connecting,
             workspaces: Workspaces::default(),
+            connections: Vec::new(),
             chats: Vec::new(),
             terminals: Vec::new(),
             open: None,
@@ -357,6 +362,7 @@ impl State {
         self.images_unasked();
         self.request(Request::WatchWorkspaces, Asked::Quiet);
         self.request(Request::WatchChats, Asked::Quiet);
+        self.request(Request::WatchConnections { answer: false }, Asked::Quiet);
         self.list_terminals();
         if let Some(open) = &mut self.open {
             open.history_pending = None;
@@ -470,6 +476,7 @@ impl State {
                 self.dirty.home = true;
                 self.dirty.header = true;
             }
+            (Response::Connections(connections), _) => self.connections_came(connections),
             (Response::Terminals(terminals), _) => {
                 self.terminals = terminals;
                 self.listing = false;
@@ -597,6 +604,7 @@ impl State {
                 self.dirty.home = true;
                 self.dirty.header = true;
             }
+            Event::Connections(connections) => self.connections_came(connections),
             Event::View { terminal, update } => self.view_changed(terminal, update),
             Event::Listening(listening) => self.listening(listening),
             Event::Image(clackatoo_protocol::ImageNews::Scaled { image, fit, .. }) => {
@@ -1001,6 +1009,63 @@ impl State {
                 Asked::Doing("opening the terminal"),
             );
         }
+    }
+
+    /// Takes in the daemon's connections, as it says they are now.
+    fn connections_came(&mut self, connections: Vec<Connection>) {
+        if connections != self.connections {
+            self.connections = connections;
+            self.dirty.home = true;
+            self.dirty.header = true;
+            if let Some(term) = &mut self.term {
+                term.dirty.header = true;
+            }
+        }
+    }
+
+    /// Where machine `home` is, another than the daemon's, and how the
+    /// daemon reaches it, as a window says: see [`Elsewhere::on`].
+    #[must_use]
+    pub fn elsewhere(&self, home: MachineId) -> Elsewhere {
+        Elsewhere::on(home, &self.connections, &self.workspaces.others, true)
+    }
+
+    /// Where workspace `workspace` is, if it's another machine's.
+    #[must_use]
+    pub fn workspace_elsewhere(&self, workspace: Option<WorkspaceId>) -> Option<Elsewhere> {
+        let own = self.workspaces.machine.as_ref().map(|machine| machine.id);
+        let home = workspace
+            .and_then(|workspace| self.workspaces.get(workspace))
+            .and_then(|workspace| workspace.home)
+            .filter(|&home| Some(home) != own)?;
+        Some(self.elsewhere(home))
+    }
+
+    /// Where terminal or chat `terminal` is, if it's on another machine
+    /// than its workspace `workspace` is: one borrowed into a workspace of
+    /// this machine's, or of a third. Workspace's heading says where the
+    /// rest are.
+    #[must_use]
+    pub fn terminal_elsewhere(
+        &self,
+        terminal: TerminalId,
+        workspace: Option<WorkspaceId>,
+    ) -> Option<Elsewhere> {
+        let own = self.workspaces.machine.as_ref().map(|machine| machine.id);
+        let workspace_home = workspace
+            .and_then(|workspace| self.workspaces.get(workspace))
+            .and_then(|workspace| workspace.home)
+            .filter(|&home| Some(home) != own);
+        let home = self.workspaces.machine_of(terminal)?;
+        (Some(home) != workspace_home).then(|| self.elsewhere(home))
+    }
+
+    /// Where terminal or chat `terminal` is, if it's on another machine
+    /// than the daemon's, wherever its workspace is: what its own page's
+    /// heading says.
+    #[must_use]
+    pub fn terminal_away(&self, terminal: TerminalId) -> Option<Elsewhere> {
+        Some(self.elsewhere(self.workspaces.machine_of(terminal)?))
     }
 
     /// How many panes of workspace `workspace`'s tabs are on a machine not
@@ -1958,6 +2023,7 @@ mod tests {
                 },
                 ClientMessage::Request(Request::WatchWorkspaces),
                 ClientMessage::Request(Request::WatchChats),
+                ClientMessage::Request(Request::WatchConnections { answer: false }),
                 ClientMessage::Request(Request::ListTerminals),
             ]
         );
@@ -2086,7 +2152,8 @@ mod tests {
         state.connected_now();
         state.open_chat(TerminalId(4));
         state.chat(ChatAction::Stop, "stopping the agent");
-        for _ in 0..4 {
+        // Workspaces, chats, connections, terminals and the chat's attach.
+        for _ in 0..5 {
             state.receive(ServerMessage::Response(Response::Done));
         }
         state.receive(ServerMessage::Response(Response::Error(

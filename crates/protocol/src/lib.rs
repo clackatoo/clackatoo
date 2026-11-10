@@ -133,7 +133,10 @@ pub use image::{
     ImageAnswer, ImageFormat, ImageFrom, ImageId, ImageInfo, ImageNews, Picture, PictureId,
     PictureState, dropped_words, image_words, plain_path,
 };
-pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
+pub use machines::{
+    BadMachineId, Connection, ConnectionState, Elsewhere, Machine, MachineId, Passed, Reach,
+    Secret, without_reasons,
+};
 pub use mention::{
     MOST_MENTIONS, Mention, lines_suffix, may_mention_files, mention, mention_lines, mentions,
 };
@@ -155,7 +158,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 148;
+pub const PROTOCOL_VERSION: u32 = 149;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -718,6 +721,29 @@ pub enum Event {
         terminal: TerminalId,
         /// What it asked.
         notice: Notice,
+    },
+    /// A pane the daemon lends the client, a daemon relaying that said
+    /// which machine it is ([`Request::RelayAs`]), to show beside one it
+    /// lent it before: as an agent of a chat lent to it opens a file, a
+    /// terminal or a subagent's chat beside the chat (CLACKA-118). The
+    /// daemon has made it already, in a workspace lent to that machine of
+    /// its own, the pane numbered `key` by the daemon, as phase 4's are by
+    /// the borrower ([`Lent::key`]); the client puts a pane borrowed from
+    /// it on the `side` of the one it shows of the pane `beside` is the
+    /// key of, and shows it as it shows that one. Before the workspaces
+    /// that hold it, so the client never takes it for one nothing shows.
+    /// A client that can't is told it in the workspaces, and gives it back
+    /// as it does any lent that nothing shows. Only to a client of protocol
+    /// 149 or later ([`wire::FEDERATION_2`]).
+    LendBeside {
+        /// The new pane's number, as the daemon lending it gave it.
+        key: u64,
+        /// The number of the lent pane it goes beside.
+        beside: u64,
+        /// Which side of it.
+        side: Side,
+        /// What kind of pane it is, to show in its place until it's shown.
+        kind: PaneKind,
     },
 }
 

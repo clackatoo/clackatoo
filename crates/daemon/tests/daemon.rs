@@ -6849,6 +6849,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Image(_)
             | Event::Picture { .. }
             | Event::Notified { .. }
+            | Event::LendBeside { .. }
             | Event::NativeRequest { .. }
             | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {

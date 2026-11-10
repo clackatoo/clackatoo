@@ -1655,6 +1655,14 @@ impl WorkspaceState {
         if trimmed.chars().any(char::is_control) {
             return Err(bad("names can't contain control characters"));
         }
+        // As other machines' names are shown (`shown_name`): nothing that
+        // turns text round, and not too long to show (CLACKA-118).
+        if trimmed.chars().any(crate::machine::is_bidi) {
+            return Err(bad("names can't contain characters that turn text round"));
+        }
+        if trimmed.chars().count() > LONGEST_NAME {
+            return Err(bad(&format!("names are at most {LONGEST_NAME} characters")));
+        }
         if self.name_taken(trimmed, renaming) {
             return Err(Error::NameTaken(trimmed.to_owned()));
         }
@@ -1800,16 +1808,39 @@ impl WorkspaceState {
     }
 
     /// Gives back the lent workspace `workspace`: it becomes one of this
-    /// daemon's own, called `name`, or with a number after it if that's
-    /// taken. Returns what it's called, if it was lent.
+    /// daemon's own, called `name`, or what it was named while parked (see
+    /// [`name_parked`](Self::name_parked)), or with a number after it if
+    /// that's taken. Returns what it's called, if it was lent.
     pub(crate) fn unlend(&mut self, workspace: WorkspaceId, name: &str) -> Option<String> {
         self.lent_of(workspace)?;
-        let named = self.free_name(name, &[]);
+        let parked = &self.workspace_mut(workspace).name;
+        let name = if parked.is_empty() {
+            name.to_owned()
+        } else {
+            parked.clone()
+        };
+        let named = self.free_name(&name, &[]);
         let shown = self.workspace_mut(workspace);
         shown.lent = None;
         shown.name.clone_from(&named);
         self.refresh_lent();
         Some(named)
+    }
+
+    /// Names every workspace lent to `machine` `name`, which the
+    /// workspace their panes are parked in while that machine is away is
+    /// called from then on (CLACKA-118): a lent workspace is called
+    /// nothing otherwise, as nobody else names it. Refused, as any
+    /// workspace's new name is, if it's no name, or one of this daemon's
+    /// own workspaces has it. Returns the name, trimmed.
+    pub(crate) fn name_parked(&mut self, machine: MachineId, name: &str) -> Result<String, Error> {
+        let name = self.check_name(name, None)?;
+        for workspace in &mut self.workspaces.list {
+            if workspace.lent.is_some_and(|lent| lent.to == machine) {
+                workspace.name.clone_from(&name);
+            }
+        }
+        Ok(name)
     }
 
     /// `name`, made a name a workspace may have, as no workspace has, nor
@@ -1870,11 +1901,13 @@ impl WorkspaceState {
     }
 
     /// Makes `workspace`, made again from those kept, lent as `lent` says,
-    /// as it was: with no name.
-    pub(crate) fn set_lent(&mut self, workspace: WorkspaceId, lent: Lent) {
+    /// as it was: called `name`, which is nothing unless it was named
+    /// while parked.
+    pub(crate) fn set_lent(&mut self, workspace: WorkspaceId, lent: Lent, name: &str) {
         if let Some(workspace) = (self.workspaces.list.iter_mut()).find(|w| w.id == workspace) {
             workspace.lent = Some(lent);
-            workspace.name.clear();
+            // Called nothing, unless named while parked (see `name_parked`).
+            name.trim().clone_into(&mut workspace.name);
         }
     }
 
@@ -2170,6 +2203,10 @@ fn unlent(workspace: &Workspace) -> Result<(), Error> {
         None => Ok(()),
     }
 }
+
+/// The longest name a workspace may have, in characters, as another
+/// machine's are cut to (see `shown_name`).
+pub(crate) const LONGEST_NAME: usize = 256;
 
 /// The most background tabs a workspace keeps.
 pub(crate) const MOST_BACKGROUND: usize = 64;
@@ -3231,6 +3268,66 @@ mod tests {
             resumed.unlend(lent_workspace, "again"),
             None,
             "not lent now"
+        );
+    }
+
+    /// Workspaces lent to a machine take the name the one their panes are
+    /// parked in is given, as any workspace's name is checked, keep it
+    /// through an upgrade, and are given back under it (CLACKA-118).
+    #[test]
+    fn a_name_given_to_what_is_parked_is_kept_and_given_back_under() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("notes".into(), TerminalId(1));
+        let lent = |key| Lent {
+            to: MachineId([7; 16]),
+            key,
+            placed: true,
+            background: None,
+        };
+        state.new_lent(lent(1), Content::Terminal(TerminalId(2)));
+        state.new_lent(lent(2), Content::Terminal(TerminalId(3)));
+        let other = Lent {
+            to: MachineId([8; 16]),
+            ..lent(3)
+        };
+        state.new_lent(other, Content::Terminal(TerminalId(4)));
+        assert!(matches!(
+            state.name_parked(lent(1).to, "  "),
+            Err(Error::BadName { .. })
+        ));
+        assert_eq!(
+            state.name_parked(lent(1).to, "notes"),
+            Err(Error::NameTaken("notes".into()))
+        );
+        // As any workspace's: nothing that turns text round, nor too long.
+        assert!(matches!(
+            state.name_parked(lent(1).to, "desk\u{202e}krow"),
+            Err(Error::BadName { .. })
+        ));
+        assert!(matches!(
+            state.name_parked(lent(1).to, &"w".repeat(LONGEST_NAME + 1)),
+            Err(Error::BadName { .. })
+        ));
+        assert!(state.name_for_new(Some(&"w".repeat(LONGEST_NAME))).is_ok());
+        assert_eq!(
+            state.name_parked(lent(1).to, " desk work ").as_deref(),
+            Ok("desk work")
+        );
+        let names: Vec<&str> = (state.get().list.iter())
+            .map(|workspace| workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["notes", "desk work", "desk work", ""]);
+        // It takes no name from this daemon's own.
+        assert_eq!(
+            state.name_for_new(Some("desk work")).as_deref(),
+            Ok("desk work")
+        );
+        let (handed, lent_list) = state.hand_over();
+        let mut resumed = WorkspaceState::resume(&handed, &lent_list).unwrap();
+        let first = resumed.get().list[1].id;
+        assert_eq!(
+            resumed.unlend(first, "from-desk").as_deref(),
+            Some("desk work")
         );
     }
 

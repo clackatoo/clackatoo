@@ -184,6 +184,7 @@ mod chats;
 mod clipboard;
 mod colours;
 mod connecting;
+use connecting::Said as _;
 mod devices;
 mod dragging;
 mod editors;

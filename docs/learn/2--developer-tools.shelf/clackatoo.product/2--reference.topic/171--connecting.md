@@ -96,8 +96,13 @@ connects whenever a window opens.
 8080 to HOST's, through your daemon's connection to it, which keeps listening
 while the connection drops and is made again. `:portforward` there lists the
 forwards and `:portforward! 8080` stops one, as for a window on another
-machine. A window that's itself on another machine than its daemon can't
-forward to HOST.
+machine. A window that's itself on another machine than its daemon, such as
+a `--remote` window, forwards a port of its own machine instead: it listens
+there, as for its daemon's ports, and your daemon passes each connection on
+to HOST through its connection to it, where HOST's daemon connects. While
+your daemon isn't connected to HOST, each such connection is refused, saying
+so, rather than wait; the port stays open. Your daemon needs this release or
+later: an older one is never asked, as it would connect on its own machine.
 
 ## Upgrading your daemon
 
@@ -110,9 +115,11 @@ HOST doesn't answer, the upgrade is refused, saying so, rather than send those
 keys again after it: keys for a terminal are never sent twice.
 
 Only a daemon already on a release that keeps all this can hand it over, so
-the first upgrade onto one doesn't. Connections through
-[forwarded ports](#forwarding-ports), and file operations still waiting for
-HOST, are cut off.
+the first upgrade onto one doesn't. Ports
+[forwarded](#forwarding-ports) to HOST go on listening through the upgrade:
+connections open through them are reset, so a browser knows a page was cut
+short and asks again, and connections made while it upgrades go through once
+HOST is reached again. File operations still waiting for HOST are cut off.
 
 ## Machines passed on
 
@@ -133,7 +140,19 @@ has met the server over ssh.
 A machine reached several ways is shown once, by the shortest.
 `:connect server` on the laptop as well has it go straight there, through desk
 only while ssh can't get there, and back once it can, without its panes
-noticing; trying ssh again never asks for a password. `:disconnect server`
+noticing. Trying ssh again by itself never asks for a password, so a server
+that wants one stays reached through desk, and the mouse over its workspace
+says `:connect server` goes straight there: typed while it goes through desk,
+that tries ssh straight there at once, asking your window ssh's questions, a
+password included. Given it, the connection goes straight there without its
+panes noticing, and the bar says so; turned down, or wrong, it carries on
+through desk and the bar says why. Once a try you asked for has found that ssh
+asks, your daemon stops trying ssh straight there by itself, which would only
+fail a login there every half minute, until you ask again. Your daemon keeps
+the connection as one you
+asked for, so after it restarts it tries ssh straight there first, asking
+again. `clackatoo connect server` does the same, waiting to say how it went.
+`:disconnect server`
 then leaves it reached through desk; one only desk passes on goes when desk
 stops passing it on, or with `:disconnect desk`. Machines connected to each
 other, or in a ring, each show the others once, and never themselves. The
@@ -241,12 +260,21 @@ so does desk once it's connected to your laptop.
 While desk is away, such panes are parked in a workspace of your laptop's
 named after it, `from-desk`, a tab each, so you can go on using them. Once
 desk is back they're back where they were and that workspace goes; nothing is
-moved or lost. Closing `from-desk` closes them all; a new pane beside one
-waits until it's back in desk's workspace. Closing one from your laptop closes
+moved or lost. `:rename NAME` there names it: it's called NAME whenever desk is
+away from then on, after either daemon restarts too, and panes ever given back
+from desk come back under that name. Closing `from-desk` closes them all; a new
+pane beside one waits until it's back in desk's workspace. Closing one from your laptop closes
 it on both. Closed on desk, a shell running nothing closes, and anything else
 comes back as one of your laptop's own workspaces, `from-desk`; so does one
 desk restarted without. Desk needs this release of clackatoo or later: an
 older one says it's too old to show a pane from your machine.
+
+An agent in a chat borrowed from desk opens what it shows you beside the
+chat, as one of your own does: a file, a terminal it runs a command in, or a
+subagent's chat from its card. Desk keeps each, lent to your laptop as the
+chat is, and your laptop shows it beside the chat; while your laptop's daemon
+isn't connected to desk, or runs a release before this one, the agent is told
+why it can't.
 
 `:workspace new@desk NAME` makes a workspace on desk, as does
 `:workspace NAME@desk` if desk has none of that name, and the `+` after your
@@ -313,7 +341,9 @@ rides out network changes as the window does.
 ## From your phone
 
 From a phone, use the web app the daemon serves instead: see
-[Your phone](~clackatoo/reference/phone). The daemon would take an image
+[Your phone](~clackatoo/reference/phone). It shows which machine each workspace,
+chat and terminal from another is on, with the same ring as the bar, though
+never what ssh said; it can't connect, disconnect or give ssh a password. The daemon would take an image
 pasted into a terminal from a phone as its path, within the limits of the
 photos it sends chats, but never onto the desktop's clipboard, which isn't the
 phone's; the web app doesn't offer it.

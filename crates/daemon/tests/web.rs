@@ -16,9 +16,9 @@ use clackatoo_daemon::web::{WebConfig, WebMode};
 use clackatoo_daemon::{AgentConfig, Client, CustomAgent, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    AgentTools, ChatAction, ChatSummary, ClientMessage, Content, Error, Event, GridNode, Item,
-    NewAgent, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Request, Response, ServerMessage, Side,
-    Size, TerminalId, View, ViewUpdate,
+    AgentTools, ChatAction, ChatSummary, ClientMessage, ConnectionState, Content, Error, Event,
+    GridNode, Item, NewAgent, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Request, Response,
+    ServerMessage, Side, Size, TerminalId, View, ViewUpdate,
 };
 use tungstenite::client::IntoClientRequest as _;
 use tungstenite::http::HeaderValue;
@@ -2492,7 +2492,7 @@ fn a_fit_not_asked_for_again_lapses() {
 }
 
 #[test]
-fn a_device_cant_drive_or_watch_the_daemons_connections() {
+fn a_device_cant_drive_the_daemons_connections_and_watches_them_without_reasons() {
     let daemon = TestDaemon::start_daemon(
         |_| {},
         |config| {
@@ -2517,7 +2517,6 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
         Request::Disconnect {
             host: "laptop".into(),
         },
-        Request::WatchConnections { answer: false },
         Request::WatchConnections { answer: true },
     ] {
         let refused = phone.request(request.clone());
@@ -2529,6 +2528,32 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
     // Nor was anything connected for it.
     let mut window = daemon.window();
     assert!(window.watch_connections(false).unwrap().is_empty());
+    // It may watch them, to show which machine a workspace is on and how
+    // it's reached (CLACKA-118), but never hears what ssh said.
+    assert_eq!(
+        phone.request(Request::WatchConnections { answer: false }),
+        Response::Connections(Vec::new())
+    );
+    window.connect_to("laptop", None).unwrap();
+    let down = loop {
+        if let Event::Connections(list) = phone.event()
+            && let [connection] = &list[..]
+            && !matches!(connection.state, ConnectionState::Connecting)
+        {
+            break connection.clone();
+        }
+    };
+    assert_eq!(down.host, "laptop");
+    assert!(
+        matches!(&down.state, ConnectionState::Down { reason } if reason.is_empty()),
+        "{down:?}"
+    );
+    // The machine's own windows are told why.
+    let told = window.watch_connections(false).unwrap();
+    assert!(
+        matches!(&told[0].state, ConnectionState::Down { reason } if !reason.is_empty()),
+        "{told:?}"
+    );
 }
 
 #[test]

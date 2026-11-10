@@ -246,25 +246,9 @@ impl Mark {
 }
 
 /// How the daemon reaches the machine a workspace from another machine
-/// is on, which the workspace's ring shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Reach {
-    /// Connected: the workspace is as it is there.
-    Connected,
-    /// Connecting, and not yet connected.
-    Connecting,
-    /// ssh asks a question, such as for a password, that no window has
-    /// answered.
-    NeedsPassword,
-    /// The connection dropped, for this reason, and is tried again.
-    Down(String),
-    /// Not tried again until `:connect` asks, for this reason.
-    Stopped(String),
-    /// The daemon has no connection to it at all: a pane on it is in a
-    /// workspace another machine put it in, and only a daemon that reaches
-    /// it shows it.
-    Unreachable,
-}
+/// is on, which the workspace's ring shows: the protocol's, which the
+/// phone shows too.
+pub(crate) use clackatoo_protocol::Reach;
 
 /// A workspace from another machine, as the top bar shows it: a ring in
 /// place of its dot, saying how its connection is, and what the mouse

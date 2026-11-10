@@ -996,6 +996,30 @@ impl Workspaces {
             .find(|pane| pane.content == Content::Terminal(terminal))
             .map(|pane| pane.id)
     }
+
+    /// The machine `terminal` (or chat) is on, if it's another than the
+    /// daemon's that says these: its pane's home, else its workspace's
+    /// (CLACKA-118). `None` for the daemon's own, and for one no pane or
+    /// background tab shows.
+    #[must_use]
+    pub fn machine_of(&self, terminal: TerminalId) -> Option<MachineId> {
+        let own = self.machine.as_ref().map(|machine| machine.id);
+        let shows = |pane: &Pane| pane.content == Content::Terminal(terminal);
+        self.list.iter().find_map(|workspace| {
+            let pane = (workspace.tabs.iter())
+                .flat_map(|tab| tab.layout.panes())
+                .chain(
+                    (workspace.background.iter())
+                        .flat_map(|background| background.tab.layout.panes()),
+                )
+                .find(shows)?;
+            Some(
+                pane.home
+                    .or(workspace.home)
+                    .filter(|&home| Some(home) != own),
+            )
+        })?
+    }
 }
 
 impl Workspaces {

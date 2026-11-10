@@ -26,7 +26,9 @@ pub(crate) fn run(
         // The config asks it of every window.
         Forwarding::Config(_) if machine.is_none() => return None,
         Forwarding::Add(spec) | Forwarding::Config(spec) => {
-            let Some(machine) = machine else {
+            // One the daemon passes on is to the machine it names.
+            let on = spec.on.as_ref().map(|on| on.name.clone());
+            let Some(machine) = on.as_deref().or(machine) else {
                 return Some(
                     "This window's daemon is on this machine, so its ports are this \
                      machine's: there's nothing to forward"
@@ -114,6 +116,7 @@ mod tests {
             local,
             host: host.into(),
             port,
+            on: None,
         }
     }
 

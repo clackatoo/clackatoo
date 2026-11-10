@@ -200,6 +200,126 @@ pub enum ConnectionState {
     Other,
 }
 
+/// How a client's daemon reaches the machine something it shows is on,
+/// which a window's ring and the phone's both show (CLACKA-118).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Connected: it's as it is there.
+    Connected,
+    /// Connecting, and not yet connected.
+    Connecting,
+    /// ssh asks a question, such as for a password, that no window has
+    /// answered.
+    NeedsPassword,
+    /// The connection dropped, for this reason, and is tried again. The
+    /// reason is empty where the daemon doesn't say it, as to the phone.
+    Down(String),
+    /// Not tried again until it's asked to connect again, for this
+    /// reason, empty where the daemon doesn't say it.
+    Stopped(String),
+    /// The daemon has no connection to it at all: a pane on it is in a
+    /// workspace another machine put it in, and only a daemon that
+    /// reaches it shows it.
+    Unreachable,
+}
+
+/// Where something from another machine than the client's daemon's is,
+/// and how that daemon reaches it: what a window and the phone show of a
+/// workspace, pane, chat or terminal there, as `notes@desk` and a ring.
+/// Worked out in one place ([`Elsewhere::on`]) for both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elsewhere {
+    /// The machine, as the daemon's connection to it is named, as typed
+    /// after `:connect`: `desk`.
+    pub host: String,
+    /// What the daemon there calls its machine, if it has said:
+    /// `jack-ubuntu-desktop`.
+    pub machine: Option<String>,
+    /// How the connection is.
+    pub reach: Reach,
+    /// The machines the connection goes through, nearest first, by what
+    /// they're called: none while it goes straight there.
+    pub through: Vec<String>,
+}
+
+impl Elsewhere {
+    /// Where the machine `home` is, another than the daemon's, from the
+    /// daemon's `connections` as it last said them, and the `others` its
+    /// workspaces name. A machine the daemon has no connection to is
+    /// named by what the daemon says it's called, or the start of its ID:
+    /// its panes are in a workspace another machine put them in, out of
+    /// reach; or, from a daemon older than `mixed` says, still to come.
+    #[must_use]
+    pub fn on(
+        home: MachineId,
+        connections: &[Connection],
+        others: &[crate::OtherMachine],
+        mixed: bool,
+    ) -> Self {
+        let connection = (connections.iter()).find(|connection| {
+            (connection.machine.as_ref()).is_some_and(|machine| machine.id == home)
+        });
+        let Some(connection) = connection else {
+            let named = (others.iter()).find(|other| other.id == home);
+            return Self {
+                host: named.map_or_else(
+                    || home.to_string()[..8].to_owned(),
+                    |other| other.name.clone(),
+                ),
+                machine: None,
+                reach: if mixed {
+                    Reach::Unreachable
+                } else {
+                    Reach::Connecting
+                },
+                through: Vec::new(),
+            };
+        };
+        Self {
+            host: connection.host.clone(),
+            through: connection.through.clone(),
+            machine: (connection.machine.as_ref()).map(|machine| machine.name.clone()),
+            reach: match &connection.state {
+                ConnectionState::Connected { .. } => Reach::Connected,
+                ConnectionState::Asking | ConnectionState::NeedsPassword => Reach::NeedsPassword,
+                ConnectionState::Down { reason } => Reach::Down(reason.clone()),
+                ConnectionState::Stopped { reason } => Reach::Stopped(reason.clone()),
+                ConnectionState::Connecting | ConnectionState::Other => Reach::Connecting,
+            },
+        }
+    }
+
+    /// Which machine it's on, and the way there: `on jack-desktop (desk)`,
+    /// or `on server, through desk`.
+    #[must_use]
+    pub fn which(&self) -> String {
+        let mut which = match &self.machine {
+            Some(machine) if *machine != self.host => format!("on {machine} ({})", self.host),
+            _ => format!("on {}", self.host),
+        };
+        if !self.through.is_empty() {
+            which = format!("{which}, through {}", self.through.join(" and "));
+        }
+        which
+    }
+}
+
+/// The connections as a device on the web app is told them: what ssh
+/// said, in the reasons a connection is down or stopped, is for the
+/// machine's own windows, so it's left out (CLACKA-118).
+#[must_use]
+pub fn without_reasons(mut connections: Vec<Connection>) -> Vec<Connection> {
+    for connection in &mut connections {
+        match &mut connection.state {
+            ConnectionState::Down { reason } | ConnectionState::Stopped { reason } => {
+                reason.clear();
+            }
+            _ => {}
+        }
+    }
+    connections
+}
+
 /// An answer to a question ssh asked, such as a password. Never shown in
 /// debug output, or logged.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +359,57 @@ mod tests {
                 .parse::<MachineId>()
                 .is_err()
         );
+    }
+
+    /// Where a machine is comes from its connection, else what the
+    /// daemon's workspaces call it; the phone is told no reasons.
+    #[test]
+    fn where_a_machine_is_comes_from_its_connection() {
+        let desk = MachineId([9; 16]);
+        let connection = |state| Connection {
+            host: "desk".into(),
+            machine: Some(Machine {
+                id: desk,
+                name: "jack-desktop".into(),
+                run: 1,
+            }),
+            state,
+            through: vec!["laptop".into()],
+            unshared: false,
+        };
+        let down = connection(ConnectionState::Down {
+            reason: "ssh: Permission denied".into(),
+        });
+        let elsewhere = Elsewhere::on(desk, std::slice::from_ref(&down), &[], true);
+        assert_eq!(elsewhere.host, "desk");
+        assert_eq!(
+            elsewhere.reach,
+            Reach::Down("ssh: Permission denied".into())
+        );
+        assert_eq!(elsewhere.which(), "on jack-desktop (desk), through laptop");
+        let told = without_reasons(vec![down]);
+        assert_eq!(
+            told[0].state,
+            ConnectionState::Down {
+                reason: String::new()
+            }
+        );
+        let asking = connection(ConnectionState::Asking);
+        assert_eq!(
+            Elsewhere::on(desk, &[asking], &[], true).reach,
+            Reach::NeedsPassword
+        );
+        // No connection: named as the workspaces say, out of reach.
+        let others = [crate::OtherMachine {
+            id: desk,
+            name: "desk".into(),
+        }];
+        let unreached = Elsewhere::on(desk, &[], &others, true);
+        assert_eq!(
+            (unreached.host.as_str(), unreached.reach),
+            ("desk", Reach::Unreachable)
+        );
+        assert_eq!(Elsewhere::on(desk, &[], &[], false).host, "09090909");
     }
 
     #[test]

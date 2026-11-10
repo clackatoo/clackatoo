@@ -291,6 +291,12 @@ pub(super) struct Linked {
     pub(super) better_at: Option<Instant>,
     /// The thread trying one, while it does.
     pub(super) bettering: Option<JoinHandle<()>>,
+    /// The client that asked for ssh straight there, which may ask a
+    /// password, while that's tried (see [`Daemon::go_direct`]).
+    pub(super) going_direct: Option<Token>,
+    /// ssh asked a question as it was tried straight there, as a client
+    /// asked, this time.
+    pub(super) direct_asked: bool,
     /// Why a way through another machine was last refused, as said to
     /// every window, until it connects: said once, not at each try.
     pub(super) suspected: Option<String>,
@@ -364,6 +370,11 @@ struct Ask {
     reply: mpsc::Sender<Option<String>>,
     /// The client it was put to, if it has been.
     asked: Option<Token>,
+    /// Asked by ssh trying to go straight there as a client asked, for a
+    /// connection that goes through another machine (see
+    /// [`Daemon::go_direct`]): turned down, or with no window to ask, only
+    /// that try fails, and the connection goes on as it went.
+    probe: bool,
 }
 
 /// What a connection's threads tell the loop.
@@ -390,6 +401,13 @@ enum News {
     Through {
         host: String,
         through: Vec<MachineId>,
+    },
+    /// ssh straight to `host`, tried as a client asked while its
+    /// connection went through another machine, came to this: it goes
+    /// straight there now, or it couldn't, for this reason.
+    Direct {
+        host: String,
+        outcome: Result<(), String>,
     },
 }
 
@@ -442,6 +460,9 @@ pub(super) struct Kept {
     pub(super) unshared: bool,
     /// The machine it was last connected to.
     pub(super) machine: Option<MachineId>,
+    /// ssh straight there was found to ask a question, as a client asked
+    /// for it: it isn't tried in the background (CLACKA-118).
+    pub(super) direct_asks: bool,
 }
 
 impl Kept {
@@ -454,6 +475,7 @@ impl Kept {
                 .to_owned(),
             unshared: connection.unshared,
             machine: (connection.machine.as_deref()).and_then(|machine| machine.parse().ok()),
+            direct_asks: connection.direct_asks,
         }
     }
 
@@ -464,6 +486,7 @@ impl Kept {
             command: (self.command != COMMAND).then_some(self.command),
             unshared: self.unshared,
             machine: self.machine.map(|machine| machine.to_string()),
+            direct_asks: self.direct_asks,
         }
     }
 
@@ -499,6 +522,7 @@ impl Kept {
                     command: connection.command.clone(),
                     unshared: sharing.is_some_and(|sharing| sharing.unshared),
                     machine: (sharing.and_then(|sharing| sharing.machine)).map(MachineId),
+                    direct_asks: state.direct_asks.contains(&connection.host),
                 }
             })
             .collect()
@@ -557,6 +581,21 @@ impl Links {
         let tell = self.tell.clone();
         move |host, through| {
             let _ = tell.send(News::Through { host, through });
+        }
+    }
+
+    /// A way for a thread trying ssh straight to a host, as a client
+    /// asked, to tell the loop how it went, waking it with `waker`.
+    pub(super) fn direct_teller(
+        &self,
+        waker: Arc<mio::Waker>,
+    ) -> impl FnOnce(String, Result<(), String>) + Send + use<> {
+        let tell = self.tell.clone();
+        move |host, outcome| {
+            let _ = tell.send(News::Direct { host, outcome });
+            if let Err(err) = waker.wake() {
+                log::warn!("waking the event loop for a try straight there failed: {err}");
+            }
         }
     }
 
@@ -633,6 +672,7 @@ impl Links {
                 command: linked.remote.command.clone(),
                 unshared: linked.unshared,
                 machine: linked.proved_id(),
+                direct_asks: linked.ways.asks_direct(),
             })
             .collect()
     }
@@ -692,8 +732,12 @@ impl Daemon {
             if !linked.asked {
                 linked.asked = true;
                 self.set_direct(at);
-                // Straight there, as soon as ssh gets there.
-                self.links.list[at].better_at = Some(Instant::now());
+            }
+            // Through another machine, ssh is tried straight there now, as
+            // asked, asking for a password if it needs one.
+            let linked = &self.links.list[at];
+            if linked.connected.is_some() && !linked.through.is_empty() {
+                self.go_direct(at, token);
             }
             let linked = &mut self.links.list[at];
             // Whatever machine's there now is what's asked for.
@@ -776,10 +820,11 @@ impl Daemon {
     /// Answers [`Request::WatchConnections`](clackatoo_protocol::Request::WatchConnections)
     /// from the client at `token`: with `answer`, it answers ssh's
     /// questions from now on, and connections waiting for a window to ask
-    /// through are tried again. Devices on the web app are refused: what
-    /// connections say holds what ssh said, which is for the machine's
-    /// own windows. So are daemons relaying, which would learn of those
-    /// not passed on (CLACKA-118).
+    /// through are tried again. Devices on the web app may watch, to show
+    /// which machine each workspace is on and how it's reached, but are
+    /// told no reasons, which hold what ssh said, for the machine's own
+    /// windows; and never answer (CLACKA-118). Daemons relaying are
+    /// refused, as they would learn of those not passed on.
     pub(super) fn watch_connections(
         &mut self,
         token: Token,
@@ -789,9 +834,15 @@ impl Daemon {
             return Err(Error::Other("no such client".to_owned()));
         };
         if matches!(client.link, Link::Web(_)) {
-            return Err(Error::Other(
-                "a device on the web app can't watch the daemon's connections".to_owned(),
-            ));
+            if answer {
+                return Err(Error::Other(
+                    "a device on the web app can't answer ssh's questions".to_owned(),
+                ));
+            }
+            client.watching_connections = true;
+            return Ok(Response::Connections(clackatoo_protocol::without_reasons(
+                self.connections(),
+            )));
         }
         if client.relays {
             return Err(Error::Other(
@@ -833,7 +884,8 @@ impl Daemon {
         let given = answer.is_some();
         // ssh has given up if this fails, and its try says why.
         let _ = asked.reply.send(answer);
-        if let Some(at) = self.links.find(&asked.host) {
+        // Only the try straight there fails, if it's turned down.
+        if let Some(at) = self.links.find(&asked.host).filter(|_| !asked.probe) {
             self.links.list[at].answered = Some(if given {
                 Answered::Given
             } else {
@@ -890,10 +942,17 @@ impl Daemon {
                     question,
                     reply,
                 } => {
-                    if self.links.find(&host).is_none() {
+                    let Some(at) = self.links.find(&host) else {
                         let _ = reply.send(None);
                         continue;
-                    }
+                    };
+                    // While a try straight there runs, as a client asked,
+                    // its questions are its own: the connection's own tries
+                    // wait a second at least after it drops, by which time
+                    // the try has been stopped (see `link_down`).
+                    let linked = &mut self.links.list[at];
+                    let probe = linked.going_direct.is_some();
+                    linked.direct_asked |= probe;
                     self.links.asked += 1;
                     let id = self.links.asked;
                     self.links.asks.push_back(Ask {
@@ -903,12 +962,14 @@ impl Daemon {
                         question: shown_question(&question),
                         reply,
                         asked: None,
+                        probe,
                     });
                 }
                 News::Withdrawn { host, asking } => {
                     self.take_back_asks_where(|ask| ask.host == host && ask.asking == asking);
                 }
                 News::Through { host, through } => self.link_goes(&host, through),
+                News::Direct { host, outcome } => self.went_direct(&host, outcome),
             }
         }
         if any {
@@ -949,6 +1010,7 @@ impl Daemon {
                 command,
                 unshared,
                 machine,
+                direct_asks,
             } = kept;
             if self.links.find(&host).is_some()
                 || host.trim().is_empty()
@@ -959,6 +1021,7 @@ impl Daemon {
             let mut linked = self.links.new_link(Remote { host, command }, None, true);
             linked.unshared = unshared;
             linked.expected = machine.filter(|&machine| machine != self.machine.id);
+            linked.ways.direct_asks(direct_asks);
             self.links.list.push(linked);
             let at = self.links.list.len() - 1;
             self.set_direct(at);
@@ -1010,6 +1073,15 @@ impl Daemon {
         linked.ways.end();
         if let Some(thread) = linked.bettering.take() {
             self.links.ending.push(thread);
+        }
+        // A try straight there, as a client asked, ends with it, its ssh
+        // stopped above: told now, as nothing finds the connection to tell
+        // it after.
+        if let Some(token) = linked.going_direct.take() {
+            let host = &linked.remote.host;
+            let said =
+                format!("ssh couldn't go straight to ‘{host}’: the connection to it was ended");
+            self.send_event(token, Event::Said(said));
         }
         // What was carried on through it for others goes with it.
         self.abandon_carried_by(&linked.remote.host);
@@ -1784,6 +1856,10 @@ impl Daemon {
                 let Some(at) = self.links.find(&ask.host) else {
                     continue;
                 };
+                // Only the try straight there fails.
+                if ask.probe {
+                    continue;
+                }
                 self.links.list[at].answered = Some(Answered::NoOne);
                 // A new ssh to carry a connection on asked: it would only
                 // ask again, so the connection waits for a window too.
@@ -1853,6 +1929,12 @@ impl Daemon {
         self.take_back_asks_where(|ask| ask.host == host);
     }
 
+    /// Takes back the questions ssh asked trying to go straight to `host`,
+    /// as a client asked, which has come to an end.
+    pub(super) fn take_back_probes(&mut self, host: &str) {
+        self.take_back_asks_where(|ask| ask.host == host && ask.probe);
+    }
+
     /// Takes back each of ssh's questions that `which`: the clients asked
     /// are told, and the askpass gets no answer.
     fn take_back_asks_where(&mut self, which: impl Fn(&Ask) -> bool) {
@@ -1885,8 +1967,13 @@ impl Daemon {
             return;
         }
         let message = ServerMessage::Event(Event::Connections(list.clone()));
+        // Devices on the web app are told them without the reasons.
+        let to_web = ServerMessage::Event(Event::Connections(clackatoo_protocol::without_reasons(
+            list.clone(),
+        )));
         self.links.told = Some(list);
         let mut broadcast = Broadcast::new(&message, "the connections");
+        let mut web = Broadcast::new(&to_web, "the connections");
         let watching: Vec<Token> = (self.sources.iter())
             .filter_map(|(key, source)| match source {
                 Source::Client(client) if client.watching_connections => Some(Token(key)),
@@ -1894,10 +1981,14 @@ impl Daemon {
             })
             .collect();
         for token in watching {
-            if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
-                && let Some(bytes) = broadcast.to(client.wire)
-            {
-                client.outgoing.extend_from_slice(bytes);
+            if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+                let bytes = match client.link {
+                    Link::Web(_) => web.to(client.wire),
+                    Link::Unix(_) | Link::Quic(_) => broadcast.to(client.wire),
+                };
+                if let Some(bytes) = bytes {
+                    client.outgoing.extend_from_slice(bytes);
+                }
             }
             self.flush_client(token);
         }
@@ -1947,6 +2038,8 @@ impl Linked {
             forwarder: None,
             better_at: None,
             bettering: None,
+            going_direct: None,
+            direct_asked: false,
             suspected: None,
             wire: None,
             state: ConnectionState::Connecting,

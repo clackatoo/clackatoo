@@ -371,3 +371,8 @@ img.image-preview.dropped { width: auto; height: auto; border: none; background:
 @media (hover: hover) { .measures-toggle { display: none; } }
 .measures { position: fixed; top: calc(env(safe-area-inset-top) + 60px); right: 4px; z-index: 50; max-width: calc(100% - 8px); margin: 0; padding: 6px 8px; overflow: hidden; white-space: pre; font: 10px/1.35 var(--mono); color: var(--text); background: #000000cc; border: 1px solid var(--line); border-radius: 8px; pointer-events: none; }
 .measures-probe { position: fixed; top: 0; left: 0; width: 1px; visibility: hidden; pointer-events: none; }
+/* Another machine's, as a window's ring says: in the accent while connected, amber while it needs a password, red while it's down. */
+.away { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; font-size: 12px; font-weight: 500; color: var(--muted); white-space: nowrap; vertical-align: middle; }
+.away .ring { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--accent); flex: none; }
+.away.connecting .ring, .away.down .ring { border-color: var(--danger); }
+.away.password .ring { border-color: var(--caution); background: var(--caution); }

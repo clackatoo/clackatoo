@@ -34,7 +34,8 @@ use mio::Waker;
 pub const MOST_EACH: usize = 32;
 
 /// A port to forward: connections to `local` on this machine go to
-/// `port` on `host`, as the daemon's machine finds it.
+/// `port` on `host`, as the daemon's machine finds it, or with `on`, as
+/// that other machine does, which the daemon is connected to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spec {
     /// The port here: 0 for any that's free.
@@ -43,6 +44,19 @@ pub struct Spec {
     pub host: String,
     /// The port there.
     pub port: u16,
+    /// The machine the daemon passes each connection on to, through its
+    /// connection to it, if it isn't the daemon's own (CLACKA-118).
+    pub on: Option<On>,
+}
+
+/// Another machine than the daemon's, which it passes a forward's
+/// connections on to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct On {
+    /// Its ID.
+    pub id: clackatoo_protocol::MachineId,
+    /// What it's called, to say.
+    pub name: String,
 }
 
 impl FromStr for Spec {
@@ -83,6 +97,7 @@ impl FromStr for Spec {
             local,
             host,
             port: remote,
+            on: None,
         })
     }
 }
@@ -109,17 +124,23 @@ fn machine(host: &str) -> Result<String, String> {
 
 impl fmt::Display for Spec {
     /// `8080`, when it's the same port at localhost, and otherwise
-    /// `3000 → somehost:8080`.
+    /// `3000 → somehost:8080`; with `on server` after it for one passed on
+    /// to another machine.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.local == self.port && self.host == "localhost" {
-            return write!(f, "{}", self.local);
-        }
-        let host = if self.host.contains(':') {
-            format!("[{}]", self.host)
+            write!(f, "{}", self.local)?;
         } else {
-            self.host.clone()
-        };
-        write!(f, "{} → {host}:{}", self.local, self.port)
+            let host = if self.host.contains(':') {
+                format!("[{}]", self.host)
+            } else {
+                self.host.clone()
+            };
+            write!(f, "{} → {host}:{}", self.local, self.port)?;
+        }
+        match &self.on {
+            Some(on) => write!(f, " on {}", on.name),
+            None => Ok(()),
+        }
     }
 }
 
@@ -212,7 +233,11 @@ impl Report {
     /// What to tell the user, the daemon's machine being called `machine`.
     #[must_use]
     pub fn describe(&self, machine: &str) -> String {
-        let Spec { local, host, port } = &self.spec;
+        let Spec {
+            local, host, port, ..
+        } = &self.spec;
+        // One passed on to another machine is said to be on it.
+        let machine = (self.spec.on.as_ref()).map_or(machine, |on| on.name.as_str());
         let there = format!("{host}:{port}");
         match &self.problem {
             Problem::Failed(ForwardFailure::Refused) => format!(
@@ -427,6 +452,44 @@ impl Forwards {
         Ok(spec)
     }
 
+    /// Each forward, with a copy of its listening sockets, for the next
+    /// build to go on listening on through an in-place upgrade
+    /// (CLACKA-118): see [`take_over`](Self::take_over).
+    pub(crate) fn hand_over(&self) -> Vec<(Spec, Vec<std::os::fd::OwnedFd>)> {
+        (self.listening.iter())
+            .map(|listening| {
+                let listeners = (listening.listeners.iter())
+                    .filter_map(|listener| {
+                        (listener.try_clone())
+                            .inspect_err(|err| log::warn!("couldn't hand a forward over: {err}"))
+                            .ok()
+                    })
+                    .map(std::os::fd::OwnedFd::from)
+                    .collect();
+                (listening.spec.clone(), listeners)
+            })
+            .collect()
+    }
+
+    /// Forwards a port as `spec` says on `listeners`, listening already,
+    /// as a build before this one handed it over: as
+    /// [`add`](Self::add), but with the sockets that build listened on,
+    /// so connections made meanwhile are taken.
+    pub(crate) fn take_over(&mut self, spec: Spec, listeners: Vec<TcpListener>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let listening = Listening {
+            id,
+            spec,
+            listeners,
+        };
+        if let Some(forwarder) = &self.forwarder {
+            hand(forwarder, &listening, &self.shared);
+        }
+        log::info!("forwarding {} again, as handed over", listening.spec);
+        self.listening.push(listening);
+    }
+
     /// Stops forwarding port `local` here, closing its connections.
     /// Returns what it forwarded, if it was.
     pub fn remove(&mut self, local: u16) -> Option<Spec> {
@@ -517,6 +580,15 @@ impl Drop for Forwards {
 
 /// Hands `listening` to the connection `forwarder` is for.
 fn hand(forwarder: &Forwarder, listening: &Listening, shared: &Arc<Shared>) {
+    // A daemon older than protocol 149 would read past the machine, and
+    // connect to its own port: such a forward waits for one that knows.
+    if listening.spec.on.is_some() && !wire::daemon_has(forwarder.wire, wire::FEDERATION_2) {
+        log::warn!(
+            "not forwarding {}: the daemon is too old to pass it on to another machine",
+            listening.spec
+        );
+        return;
+    }
     let listeners = (listening.listeners.iter())
         .filter_map(|listener| {
             listener
@@ -587,11 +659,43 @@ fn free_port() -> Option<u16> {
 mod tests {
     use super::*;
 
+    /// A forward passed on to another machine is handed only to a
+    /// connection whose daemon knows to: an older one would read past the
+    /// machine and connect on its own (CLACKA-118).
+    #[test]
+    fn a_forward_to_another_machine_waits_for_a_daemon_that_passes_it_on() {
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let mut forwards = Forwards::new(|| {});
+        let on = On {
+            id: clackatoo_protocol::MachineId([3; 16]),
+            name: "server".into(),
+        };
+        let mut passed = spec(0, "localhost", 8080);
+        passed.on = Some(on);
+        let passed = forwards.add(passed).unwrap();
+        assert!(passed.to_string().ends_with(" on server"), "{passed}");
+        forwards.add(spec(0, "localhost", 8081)).unwrap();
+        let mut listened = |wire| {
+            let (commands, told) = mpsc::channel();
+            forwards.attach(Forwarder::new(commands, Arc::clone(&waker), wire));
+            (told.try_iter())
+                .filter_map(|command| match command {
+                    Command::Listen { spec, .. } => Some(spec.port),
+                    _ => None,
+                })
+                .collect::<Vec<u16>>()
+        };
+        assert_eq!(listened(wire::FEDERATION_2 - 1), [8081]);
+        assert_eq!(listened(wire::FEDERATION_2), [8080, 8081]);
+    }
+
     fn spec(local: u16, host: &str, port: u16) -> Spec {
         Spec {
             local,
             host: host.into(),
             port,
+            on: None,
         }
     }
 

@@ -449,6 +449,15 @@ gates! {
     /// shared, where an older peer is sent a pane to come of its kind, as
     /// it was before.
     NOT_SHARED = 148,
+    /// More of federation (CLACKA-118): `Forward`'s `machine`, the
+    /// machine a window's forwarded connection goes on to through its
+    /// daemon, which an older daemon would forward to itself, so it's
+    /// never sent one; `Event::LendBeside`, a pane a machine lends beside
+    /// one it lent, which an older peer is never sent; and the meaning of
+    /// `:connect HOST` again while it goes through another machine, which
+    /// tries ssh straight there, asking for a password, and says how it
+    /// went.
+    FEDERATION_2 = 149,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -800,6 +809,7 @@ impl Since for Event {
             Self::Paired { .. } => PAIRED,
             Self::Image(_) | Self::Picture { .. } => IMAGES,
             Self::Notified { .. } => TERMINAL_STANDARDS_2,
+            Self::LendBeside { .. } => FEDERATION_2,
         }
     }
 }
@@ -1852,6 +1862,7 @@ impl Downgrade for ServerMessage {
                 | Event::Image(_)
                 | Event::Picture { .. }
                 | Event::Notified { .. }
+                | Event::LendBeside { .. }
                 | Event::Files {
                     update:
                         FilesUpdate::Changed { .. }
@@ -2769,6 +2780,7 @@ mod tests {
                     | Event::Image(_)
                     | Event::Picture { .. }
                     | Event::Notified { .. }
+                    | Event::LendBeside { .. }
                     | Event::NativeRequest { .. }
                     | Event::NativeGrantAck { .. }
                     | Event::Exited { .. }

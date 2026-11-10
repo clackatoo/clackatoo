@@ -107,7 +107,8 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
                 )
             });
             rows.extend(chats.into_iter().map(|c| {
-                view::chat_row(c, now).class_if(
+                let elsewhere = state.terminal_elsewhere(c.chat, id);
+                view::chat_row(c, now, elsewhere.as_ref()).class_if(
                     state.open.as_ref().is_some_and(|o| o.id == c.chat),
                     "current",
                 )
@@ -119,6 +120,7 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
         any = true;
         let mut heading = el("h2")
             .text(name)
+            .children(state.workspace_elsewhere(id).as_ref().map(view::away))
             .child(el("span").class("count").text(rows.len().to_string()));
         if let Some(pill) = id.and_then(|id| background_pill(state, id)) {
             heading = heading.child(pill);
@@ -245,7 +247,9 @@ fn terminal_rows(
                 t.cwd.as_deref().unwrap_or_default()
             ))
         })
-        .map(view::terminal_row)
+        .map(|terminal| {
+            view::terminal_row(terminal, state.terminal_elsewhere(terminal.id, id).as_ref())
+        })
         .collect();
     // Its panes on a machine not shared with this one, which say only
     // that.

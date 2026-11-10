@@ -59,13 +59,13 @@ use std::time::Instant;
 use clackatoo_protocol::{
     ClientMessage, ConnectionState, Error, MachineId, Passed, Request, Response, frame, wire,
 };
-use mio::{Interest, Token};
+use mio::Token;
 use quinn_proto::ConnectionHandle;
 
 use super::forwards::Reaching;
 use super::links::{Direct, Linked, Way};
 use super::relay::mirror::shown_name;
-use super::{Client, Daemon, Flood, Link, Source};
+use super::{Daemon, Flood, Link, Source};
 use crate::remote::{Asking, Cancel, Remote};
 
 /// The most machines taken in from what one daemon passes on.
@@ -613,6 +613,9 @@ impl Daemon {
         linked.offerer_gone();
         linked.forwarder = None;
         linked.better_at = None;
+        // A try straight there can be offered to nothing now: its ssh
+        // stops, and it ends, saying so (see `went_direct`).
+        self.stop_going_direct(at);
     }
 
     /// Has a better way for the connection at `at` tried in a while, if
@@ -691,6 +694,142 @@ impl Daemon {
         }
     }
 
+    /// Tries ssh straight to the machine of the connection at `at`, which
+    /// goes through another machine, as the client at `token` asked
+    /// (`:connect HOST` again): asking that client ssh's questions, such
+    /// as a password, which the tries for a better way never ask
+    /// (CLACKA-118). What opens is offered to the connection, which goes
+    /// straight there without its panes noticing, its machine's key met;
+    /// kept as asked for here, from then on a fresh connection to it tries
+    /// ssh straight there first, asking too. The client is told how it
+    /// went. Turned down, or with nobody to ask, only this try fails.
+    pub(super) fn go_direct(&mut self, at: usize, token: Token) {
+        let host = self.links.list[at].remote.host.clone();
+        let used = self.used_for(&host);
+        let tell = self.links.direct_teller(Arc::clone(&self.waker));
+        let linked = &mut self.links.list[at];
+        if linked.going_direct.is_some() {
+            linked.going_direct = Some(token);
+            return;
+        }
+        let Some(offerer) = linked.offerer() else {
+            return;
+        };
+        linked.going_direct = Some(token);
+        linked.direct_asked = false;
+        let ways = Arc::clone(&linked.ways);
+        let outcome = DirectOutcome::new(move |outcome| tell(host, outcome));
+        let spawned = std::thread::Builder::new()
+            .name("direct-way".into())
+            .spawn(move || {
+                let opened = match ways.open_direct() {
+                    None => Err("it's reached only through another machine".to_owned()),
+                    Some(Err(err)) => Err(err.to_string()),
+                    Some(Ok(opened)) => Ok(opened),
+                };
+                let opened = match opened {
+                    Ok(opened) => opened,
+                    Err(why) => return outcome.say(Err(why)),
+                };
+                // Gone straight there once the connection takes it on;
+                // let go, as when it reaches another run there, not.
+                let taking = Taking {
+                    outcome: outcome.clone(),
+                    used: false,
+                };
+                let carrier = super::links::ways::redialed_then(opened, &used, move || {
+                    let mut taking = taking;
+                    taking.used = true;
+                    taking.outcome.say(Ok(()));
+                });
+                match offerer.offer(carrier) {
+                    Ok((certificate, signed)) => {
+                        if let Some(signed) = signed {
+                            ways.met(&certificate, &signed);
+                        }
+                        outcome.offered();
+                    }
+                    Err(err) => outcome.say(Err(err.to_string())),
+                }
+            });
+        match spawned {
+            Ok(thread) => {
+                if let Some(old) = linked.bettering.replace(thread) {
+                    self.links.ending.push(old);
+                }
+            }
+            Err(err) => {
+                linked.going_direct = None;
+                log::warn!("there's no thread to try ssh straight there on: {err}");
+            }
+        }
+    }
+
+    /// Ends a try of ssh straight to the machine of the connection at
+    /// `at`, as a client asked, if one runs: its ssh is stopped, and the
+    /// try says how it went as it ends, which tells that client.
+    pub(super) fn stop_going_direct(&mut self, at: usize) {
+        let linked = &mut self.links.list[at];
+        if linked.going_direct.is_none() {
+            return;
+        }
+        // Its ssh is the connection's, as a carrier it opens becomes: the
+        // connection has ended, so what stops it can stop the try, and
+        // another stops what's opened from now on.
+        let stopped = std::mem::take(&mut linked.cancel);
+        stopped.cancel();
+        if linked.asked {
+            self.set_direct(at);
+        }
+    }
+
+    /// ssh straight to `host`, tried as a client asked, came to `outcome`:
+    /// that client is told. Questions it asked still waiting go.
+    pub(super) fn went_direct(&mut self, host: &str, outcome: Result<(), String>) {
+        let Some(at) = self.links.find(host) else {
+            return;
+        };
+        let Some(token) = self.links.list[at].going_direct.take() else {
+            return;
+        };
+        // One that asked is tried in the background no more: those tries
+        // never ask, so they'd only fail, a login at a time on that
+        // machine, until a client asks again (CLACKA-118).
+        let asked = outcome.is_err() && self.links.list[at].direct_asked;
+        if self.links.list[at].ways.asks_direct() != asked {
+            // Kept, so a restart doesn't try it in the background again.
+            self.keep_soon();
+        }
+        self.links.list[at].ways.direct_asks(asked);
+        if asked {
+            self.links.list[at].better_at = None;
+            self.better_soon(at);
+        }
+        let said = match outcome {
+            Ok(()) => {
+                log::info!("the connection to {host} goes straight there now, as asked");
+                format!("‘{host}’ goes straight there now")
+            }
+            Err(why) => {
+                log::info!("ssh couldn't go straight to {host}, as asked: {why}");
+                let through = self.links.list[at].through.clone();
+                let names: Vec<String> = (through.iter())
+                    .map(|&machine| self.links.called(machine))
+                    .collect();
+                if names.is_empty() {
+                    format!("ssh couldn't go straight to ‘{host}’: {why}")
+                } else {
+                    format!(
+                        "ssh couldn't go straight to ‘{host}’, which still goes through {}: {why}",
+                        names.join(" and ")
+                    )
+                }
+            }
+        };
+        self.take_back_probes(host);
+        self.send_event(token, clackatoo_protocol::Event::Said(said));
+    }
+
     /// Takes over what the connection to `machine` through others showed,
     /// for the connection at `at`, asked for here, which has just reached
     /// that machine straight: that connection ends, and what it relayed
@@ -761,21 +900,12 @@ impl Daemon {
             |err: std::io::Error| Error::Other(format!("the daemon couldn't make a socket: {err}"));
         let impostor = (self.config.links.as_ref()).is_some_and(|config| config.impostor);
         if machine == self.machine.id || impostor {
-            let (ours, theirs) = std::os::unix::net::UnixStream::pair().map_err(io)?;
-            theirs.set_nonblocking(true).map_err(io)?;
-            let mut theirs = mio::net::UnixStream::from_std(theirs);
-            let entry = self.sources.vacant_entry();
-            let token = Token(entry.key());
-            (self.poll.registry())
-                .register(&mut theirs, token, Interest::READABLE)
-                .map_err(io)?;
-            // A client that may only greet this daemon and carry QUIC; or,
-            // as a test's daemon in the way, sign as the machine asked for.
-            let mut client = Client::new(Link::Unix(theirs));
-            client.carrier_only = true;
-            client.carrier_as = (machine != self.machine.id).then_some(machine);
-            entry.insert(Source::Client(client));
-            return Ok(Reaching::Here(ours));
+            // Fed straight to QUIC, which may only greet this daemon and
+            // carry QUIC; or, as a test's daemon in the way, sign as the
+            // machine asked for.
+            return Ok(Reaching::Here {
+                carrier_as: (machine != self.machine.id).then_some(machine),
+            });
         }
         let own = &self.machine.name;
         // Kept from it, it's told nothing of which machine (CLACKA-118).
@@ -864,6 +994,92 @@ fn passed_name(name: &str, machine: MachineId) -> String {
         machine.to_string()[..8].to_owned()
     } else {
         host
+    }
+}
+
+/// Says how a try of ssh straight there, as a client asked, went, once:
+/// the first of the try failing, and, once its carrier was offered, the
+/// connection taking it on or letting it go.
+#[derive(Clone)]
+struct DirectOutcome(Arc<std::sync::Mutex<Outcome>>);
+
+/// What tells how a try straight there went.
+type Tell = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+/// What [`DirectOutcome`] knows.
+struct Outcome {
+    /// Who to tell, until told.
+    tell: Option<Tell>,
+    /// The carrier was offered to the connection.
+    offered: bool,
+    /// The connection let the carrier go without taking it on.
+    let_go: bool,
+}
+
+impl DirectOutcome {
+    fn new(tell: impl FnOnce(Result<(), String>) + Send + 'static) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Outcome {
+            tell: Some(Box::new(tell)),
+            offered: false,
+            let_go: false,
+        })))
+    }
+
+    /// Tells `outcome`, unless something was told already.
+    fn say(&self, outcome: Result<(), String>) {
+        let tell = (self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+        .tell
+        .take();
+        if let Some(tell) = tell {
+            tell(outcome);
+        }
+    }
+
+    /// The carrier was offered: if the connection let it go meanwhile,
+    /// that's told now.
+    fn offered(&self) {
+        let let_go = {
+            let mut outcome = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            outcome.offered = true;
+            outcome.let_go
+        };
+        if let_go {
+            self.say(Err(NOT_TAKEN.to_owned()));
+        }
+    }
+}
+
+/// Why a carrier straight there wasn't taken on.
+const NOT_TAKEN: &str =
+    "it reached another run of clackatoo there, so the connection didn't take it";
+
+/// Goes with a carrier straight there offered to its connection: once
+/// it's let go without being taken on, that's told, if it was offered.
+struct Taking {
+    outcome: DirectOutcome,
+    used: bool,
+}
+
+impl Drop for Taking {
+    fn drop(&mut self) {
+        if self.used {
+            return;
+        }
+        let offered = {
+            let mut outcome =
+                (self.outcome.0.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+            outcome.let_go = true;
+            outcome.offered
+        };
+        if offered {
+            self.outcome.say(Err(NOT_TAKEN.to_owned()));
+        }
     }
 }
 
