@@ -466,7 +466,7 @@ gates! {
     /// under them.
     TERMINAL_IMAGES = 150,
     /// Regions of a terminal's output its program marked private (OSC
-    /// 3008, CLACKA-242): showing what's masked, `Request::Unmask`, which
+    /// 46373, CLACKA-242): showing what's masked, `Request::Unmask`, which
     /// an older daemon, with no masks, is never sent. Lines are masked
     /// for every peer, whatever its protocol.
     SECRET_REGIONS = 151,

@@ -1603,7 +1603,7 @@ impl Emulator {
         }
     }
 
-    /// `OSC 3008 ; forget`: notes, for the terminal's owner, that what it
+    /// `OSC 46373 ; forget`: notes, for the terminal's owner, that what it
     /// kept before the cursor's line is to be forgotten, or behind a
     /// full-screen program, all the main screen holds (see
     /// [`crate::regions`]).
@@ -1617,7 +1617,7 @@ impl Emulator {
         *forget = Some(forget.map_or(line, |before| before.max(line)));
     }
 
-    /// `OSC 3008 ; prompt ; clackatoo=SECRET`: clackatoo's own shell
+    /// `OSC 46373 ; prompt ; clackatoo=SECRET`: clackatoo's own shell
     /// integration says its prompt is here, signed with the terminal's
     /// secret, so it's the shell's, never a program's: every region closes
     /// (see [`crate::regions`]). Unsigned, it's nothing.

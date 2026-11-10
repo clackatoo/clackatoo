@@ -20,9 +20,9 @@ for recording in "$root"/crates/term/tests/fixtures/*.rec; do
     { printf '\117\027\377\021'; tail -n +2 "$recording"; } > "corpus/terminal/$name"
 done
 
-# Regions marked private (OSC 3008), nested, ended by the wrong ID and the
+# Regions marked private (OSC 46373), nested, ended by the wrong ID and the
 # right one, past the most open, and a prompt forged from inside.
-printf '\117\027\077\021before\r\n\033]3008;region;start;a1b2;hide,nosave\033\\secret\r\n\033]3008;region;start;in;noagent\007x\033]3008;region;end;guess\007\033]133;D;0\007\033]133;A\007$ y\r\n\033]3008;region;end;in\007\033]3008;region;end;a1b2\007after\033]3008;forget\007\033]3008;region;start;;private\007z' \
+printf '\117\027\077\021before\r\n\033]46373;region;start;a1b2;hide,nosave\033\\secret\r\n\033]46373;region;start;in;noagent\007x\033]46373;region;end;guess\007\033]133;D;0\007\033]133;A\007$ y\r\n\033]46373;region;end;in\007\033]46373;region;end;a1b2\007after\033]46373;forget\007\033]46373;region;start;;private\007z' \
     > corpus/terminal/regions
 
 # Frames: each protocol fixture, with its version after it.

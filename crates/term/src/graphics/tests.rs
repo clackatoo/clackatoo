@@ -515,7 +515,7 @@ fn a_picture_in_a_private_region_is_hidden_with_its_lines() {
     });
     feed(
         &mut t,
-        b"\x1b]3008;region;start;r;secret\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;r\x07",
+        b"\x1b]46373;region;start;r;secret\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]46373;region;end;r\x07",
         |_| Ok(image(2, 25, 30)),
     );
     let hidden_rows: Vec<Hints> = (t.grid().rows())
@@ -545,7 +545,7 @@ fn pictures_on_private_lines_are_never_said() {
     let mut t = terminal();
     feed(
         &mut t,
-        b"\x1b]3008;region;start;r;private\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;r\x07\r\n",
+        b"\x1b]46373;region;start;r;private\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]46373;region;end;r\x07\r\n",
         |_| Ok(image(2, 25, 30)),
     );
     let (first, last) = t.document_bounds();
@@ -578,7 +578,7 @@ fn a_virtual_placement_made_or_shown_in_a_region_hides_its_image() {
     let mut t = terminal();
     feed(
         &mut t,
-        b"\x1b]3008;region;start;r;secret\x07\x1b_Ga=T,U=1,f=100,i=9,c=1,r=1,q=2;AAAA\x1b\\\x1b]3008;region;end;r\x07",
+        b"\x1b]46373;region;start;r;secret\x07\x1b_Ga=T,U=1,f=100,i=9,c=1,r=1,q=2;AAAA\x1b\\\x1b]46373;region;end;r\x07",
         |_| Ok(image(5, 10, 20)),
     );
     let virtual_ = *t.virtuals().next().unwrap();
@@ -599,7 +599,7 @@ fn a_virtual_placement_made_or_shown_in_a_region_hides_its_image() {
         |_| Ok(image(6, 10, 20)),
     );
     assert!(!t.image_hidden([6; 16], Hints::HIDE));
-    t.advance("\x1b]3008;region;start;r;noagent\x07\x1b[38;5;9m\u{10EEEE}\x1b]3008;region;end;r\x07\x1b[2J".as_bytes());
+    t.advance("\x1b]46373;region;start;r;noagent\x07\x1b[38;5;9m\u{10EEEE}\x1b]46373;region;end;r\x07\x1b[2J".as_bytes());
     assert!(t.image_hidden([6; 16], Hints::NOAGENT));
     assert!(!t.image_hidden([6; 16], Hints::HIDE));
 }
@@ -615,7 +615,7 @@ fn a_main_screen_picture_isnt_hidden_by_the_alternate_screen() {
     });
     // The alternate screen, its first rows hidden.
     t.advance(
-        b"\x1b[?1049h\x1b[H\x1b]3008;region;start;r;hide\x07x\r\ny\x1b]3008;region;end;r\x07",
+        b"\x1b[?1049h\x1b[H\x1b]46373;region;start;r;hide\x07x\r\ny\x1b]46373;region;end;r\x07",
     );
     assert!(!t.image_hidden([1; 16], Hints::HIDE));
 }
@@ -626,7 +626,7 @@ fn a_main_screen_picture_isnt_hidden_by_the_alternate_screen() {
 fn every_row_of_a_picture_gets_its_regions_hints_though_the_cap_closes_it() {
     use crate::Hints;
     let mut t = terminal();
-    t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+    t.advance(b"\x1b]46373;region;start;r;noagent\x07");
     let lines = "x\r\n".repeat(usize::try_from(crate::regions::MOST_LINES).unwrap() - 1);
     t.advance(lines.as_bytes());
     assert!(t.has_regions());

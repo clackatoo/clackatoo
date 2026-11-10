@@ -446,7 +446,7 @@ mod tests {
         let mut pane = pane(
             20,
             3,
-            "one\r\n\x1b]3008;region;start;r;hide\x07pw\r\n\x1b]3008;region;end;r\x07two",
+            "one\r\n\x1b]46373;region;start;r;hide\x07pw\r\n\x1b]46373;region;end;r\x07two",
         );
         press(&mut pane, [0, 1], CTRL);
         assert_eq!(pane.take_unmasking(), None);

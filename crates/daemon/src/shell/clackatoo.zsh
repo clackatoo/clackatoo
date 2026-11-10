@@ -45,7 +45,7 @@ __clackatoo_precmd() {
     # The prompt, signed, first: it closes what a program left open of the
     # regions it marked private (`clackatoo_term::regions`). Never traced,
     # which would print the secret.
-    local mark=${__clackatoo_secret:+$'\e]3008;prompt;clackatoo='$__clackatoo_secret$'\a'}
+    local mark=${__clackatoo_secret:+$'\e]46373;prompt;clackatoo='$__clackatoo_secret$'\a'}
     print -rnu $__clackatoo_fd -- \
         $mark$'\e]133;D;'$ret$'\a\e]7;file://'$HOST${PWD//\%/%25}$'\a'
     __clackatoo_display

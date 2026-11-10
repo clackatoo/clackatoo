@@ -1557,7 +1557,13 @@ pub(crate) const NEWS: &[News] = &[
         id: "secret-regions",
         date: "2026-11-09",
         lesson: "shell",
-        what: "Programs mark output secret with OSC 3008: masked till zv shows it, never saved, kept from agents",
+        what: "Programs mark output secret with OSC 46373: masked till zv shows it, never saved, kept from agents",
+    },
+    News {
+        id: "secret-osc",
+        date: "2026-11-10",
+        lesson: "shell",
+        what: "Secret regions moved to OSC 46373, off systemd's 3008, which isn't read any more",
     },
     News {
         id: "settings-daemon",

@@ -132,7 +132,7 @@ options! {
     /// Whether variation selector 16 widens an emoji to two columns, in
     /// terminals started from then on (see [`clackatoo_term::Widths`]).
     "terminals.vs16" ("Variation selector 16 widens an emoji") in DaemonTerminals live:Kind::Bool => Value::Bool(true);
-    /// Whether lines a program marks `hide` (OSC 3008) are masked until
+    /// Whether lines a program marks `hide` (OSC 46373) are masked until
     /// the user asks to see them, or shown.
     "hints.hide" ("Lines programs mark hidden: mask or show") in DaemonTerminals: Kind::Choice(HIDE_RULES) => Value::Choice("mask");
     /// Whether lines a program marks `nosave` are left out of the history

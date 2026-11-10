@@ -1521,13 +1521,13 @@ fn the_shells_signed_prompt_closes_a_region_left_open() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join(".zshenv"), &zshenv).unwrap();
         let mut user = UserShell::start(&shell, home.path(), &[]);
-        let left = user.run(r"printf '\033]3008;region;start;r;private\007inside\n'");
+        let left = user.run(r"printf '\033]46373;region;start;r;private\007inside\n'");
         assert_eq!(user.output(&left), mask, "{name}");
         let after = user.run("echo after");
         assert_eq!(user.output(&after), "after", "{name}");
         let forged = concat!(
-            r"printf '\033]3008;region;start;s;private\007",
-            r"\033]3008;prompt;clackatoo=0123456789abcdef0123456789abcdef\007",
+            r"printf '\033]46373;region;start;s;private\007",
+            r"\033]46373;prompt;clackatoo=0123456789abcdef0123456789abcdef\007",
             r"\033]133;D;0\007\033]133;A\007st\151ll\n'",
         );
         // Its marks muddle where its output is: what's read is all of it.

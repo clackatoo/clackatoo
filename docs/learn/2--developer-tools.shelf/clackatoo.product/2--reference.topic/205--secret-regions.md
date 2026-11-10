@@ -1,7 +1,7 @@
 ---
 title: Secret Regions
 type: reference
-description: OSC 3008, the escape sequence a program uses to mark what it prints as secret, never to be saved, or kept from agents. The sequence, the rules a terminal keeps, what clackatoo does with each hint, and how to use it from a shell.
+description: OSC 46373, the escape sequence a program uses to mark what it prints as secret, never to be saved, or kept from agents. The sequence, the rules a terminal keeps, what clackatoo does with each hint, and how to use it from a shell.
 related:
   - clackatoo/reference/terminal-emulation
   - clackatoo/reference/workspaces
@@ -21,9 +21,9 @@ adopt it, and what clackatoo does with it.
 ## The sequence
 
 ```
-OSC 3008 ; region ; start ; ID ; FLAGS ST
-OSC 3008 ; region ; end ; ID ST
-OSC 3008 ; forget ST
+OSC 46373 ; region ; start ; ID ; FLAGS ST
+OSC 46373 ; region ; end ; ID ST
+OSC 46373 ; forget ST
 ```
 
 `OSC` is `ESC ]` and `ST` is `ESC \`; `BEL` ends it too, as for any OSC.
@@ -53,16 +53,16 @@ the ID, can end it early.
 
 A flag a terminal doesn't know is ignored, so the list can grow. A region
 with no flag the terminal knows, empty flags or none at all
-(`OSC 3008 ; region ; start ; ID ST`), fails closed: it's `secret`.
+(`OSC 46373 ; region ; start ; ID ST`), fails closed: it's `secret`.
 There's no flag to keep something: a program can never weaken a choice the
 user made about what's kept.
 
 The terminal answers none of these, and nothing is echoed back.
 
-OSC 3008 is also the number of systemd's context signalling
-(`OSC 3008 ; start=…`). The two are told apart by the first field: that one's
-are `key=value`, this one's first is `region` or `forget`, so a terminal can
-read both.
+No other terminal or program we know of uses OSC 46373. clackatoo
+v2026.11.36 alone used OSC 3008 for these; that's systemd's context
+signalling (`OSC 3008 ; start=…`), so it moved, and clackatoo no longer
+reads OSC 3008 at all.
 
 ### Rules a terminal keeps
 
@@ -78,7 +78,7 @@ read both.
    leave one open over the user's later commands. Only the shell's own prompt
    counts, never one a program prints, so a terminal must be sure of it.
    clackatoo's shell integration signs it: it prints
-   `OSC 3008 ; prompt ; clackatoo=SECRET ST` with each prompt, with a secret
+   `OSC 46373 ; prompt ; clackatoo=SECRET ST` with each prompt, with a secret
    only the shell and clackatoo know, never in its environment. Nothing
    else closes a region at a prompt: not OSC 133's marks, which any program,
    or a shell nested in one, as over `ssh`, can print. The shell's next
@@ -219,13 +219,13 @@ function does the same:
 secret() {
     local id rc
     id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    printf '\e]3008;region;start;%s;secret\e\\' "$id"
+    printf '\e]46373;region;start;%s;secret\e\\' "$id"
     # Ctrl+C still ends the region.
-    trap 'printf "\e]3008;region;end;%s\e\\\\" "$id"; trap - INT; return 130' INT
+    trap 'printf "\e]46373;region;end;%s\e\\\\" "$id"; trap - INT; return 130' INT
     "$@"
     rc=$?
     trap - INT
-    printf '\e]3008;region;end;%s\e\\' "$id"
+    printf '\e]46373;region;end;%s\e\\' "$id"
     return $rc
 }
 ```
@@ -233,14 +233,14 @@ secret() {
 ```fish
 function secret
     set -l id (od -An -N16 -tx1 /dev/urandom | string replace -a ' ' '' | string join '')
-    printf '\e]3008;region;start;%s;secret\e\\' $id
+    printf '\e]46373;region;start;%s;secret\e\\' $id
     # Should Ctrl+C stop it here, the shell's next prompt ends the region.
     $argv
     set -l rc $status
-    printf '\e]3008;region;end;%s\e\\' $id
+    printf '\e]46373;region;end;%s\e\\' $id
     return $rc
 end
 ```
 
-A terminal that doesn't know OSC 3008 ignores it, as it ignores any OSC it
+A terminal that doesn't know OSC 46373 ignores it, as it ignores any OSC it
 doesn't know, so these are safe anywhere.

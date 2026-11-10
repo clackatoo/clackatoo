@@ -147,12 +147,12 @@ Agents' own terminals, and the panes showing what an agent's command printed, ar
 
 ## Secrets programs print
 
-A program can mark what it prints as secret, with an escape sequence of clackatoo's own, OSC 3008: it's masked as ●●●● wherever it's shown, the phone too, never written to disk, and agents read `[secret]` in its place. `clackatoo secret -- COMMAND` marks a command's output so. A line you type a password on, where it doesn't show, is kept from agents and the disk by itself.
+A program can mark what it prints as secret, with an escape sequence of clackatoo's own, OSC 46373: it's masked as ●●●● wherever it's shown, the phone too, never written to disk, and agents read `[secret]` in its place. `clackatoo secret -- COMMAND` marks a command's output so. A line you type a password on, where it doesn't show, is kept from agents and the disk by itself.
 
 What you copy or search of a masked line is the mask too. To see it, put the cursor on it in normal mode and press `zv`, or Ctrl+click it: it's shown as it is, in this window, for 30 seconds, and copies see it. `zv` again masks it at once.
 
 ```setup
-run "printf 'token:\\n\\033]3008;region;start;t1;secret\\007hunter2\\n\\033]3008;region;end;t1\\007'"
+run "printf 'token:\\n\\033]46373;region;start;t1;secret\\007hunter2\\n\\033]46373;region;end;t1\\007'"
 ```
 
 Press `zv` on the masked line, then `yy` to copy it.

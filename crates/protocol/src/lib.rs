@@ -1833,7 +1833,7 @@ pub enum Request {
     /// Shows the client, for a while, the run of masked lines of
     /// `terminal` around the document's line `line` (numbered as
     /// [`Request::Text`] numbers them) as they are: lines its program
-    /// marked to be hidden (`OSC 3008`, see `clackatoo_term::regions`).
+    /// marked to be hidden (`OSC 46373`, see `clackatoo_term::regions`).
     /// They come in a fresh [`ViewUpdate::Snapshot`], and what the client
     /// copies or searches of them is as they are, until the daemon masks
     /// them again with another. With `line` `None`, or the line of a run

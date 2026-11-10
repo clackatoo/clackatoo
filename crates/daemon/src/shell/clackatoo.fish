@@ -116,6 +116,6 @@ if set -q __clackatoo_secret; and test "$major" -ge 4 2>/dev/null
     # regions it marked private (`clackatoo_term::regions`).
     function __clackatoo_prompt_mark --on-event fish_prompt
         set -l mark "clackatoo=$__clackatoo_secret"
-        printf '\e]3008;prompt;%s\a' $mark
+        printf '\e]46373;prompt;%s\a' $mark
     end
 end

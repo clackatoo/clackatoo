@@ -1,10 +1,10 @@
 //! Regions of output a program marks as private, with clackatoo's own
-//! escape sequence, OSC 3008 (CLACKA-242):
+//! escape sequence, OSC 46373 (CLACKA-242):
 //!
 //! ```text
-//! OSC 3008 ; region ; start ; ID ; FLAGS ST
-//! OSC 3008 ; region ; end ; ID ST
-//! OSC 3008 ; forget ST
+//! OSC 46373 ; region ; start ; ID ; FLAGS ST
+//! OSC 46373 ; region ; end ; ID ST
+//! OSC 46373 ; forget ST
 //! ```
 //!
 //! Every line printed on while a region is open gets the region's hints
@@ -28,7 +28,7 @@
 //! - **The shell's next prompt closes every region**, so a program can't
 //!   leave one open over the user's later commands. Only a prompt the
 //!   shell signs counts: clackatoo's own integration prints
-//!   `OSC 3008 ; prompt ; clackatoo=SECRET` with each, with the secret
+//!   `OSC 46373 ; prompt ; clackatoo=SECRET` with each, with the secret
 //!   only it and the terminal know (see [`crate::blocks`]). A program
 //!   printing marks of its own, or a shell nested inside one, as over
 //!   ssh, can't close a region early. So does the shell's next command,
@@ -55,9 +55,11 @@ use crate::hints::Hints;
 /// what's printed until the prompt or the cap.
 pub const MOST_OPEN: usize = 16;
 
-/// The number of clackatoo's escape sequence, `OSC 3008`, here alone so
-/// moving it is a change of one line.
-pub const OSC: &str = "3008";
+/// The number of clackatoo's escape sequence, `OSC 46373`, here alone so
+/// moving it is a change of one line. No other terminal or program known
+/// uses it; v2026.11.36 alone used 3008, systemd's context signalling,
+/// which is read as nothing now.
+pub const OSC: &str = "46373";
 
 /// The longest ID, in bytes.
 pub const LONGEST_ID: usize = 64;
@@ -120,7 +122,7 @@ pub struct RegionsSnapshot {
 }
 
 impl Regions {
-    /// Takes in `OSC 3008 ; params…`.
+    /// Takes in `OSC 46373 ; params…`.
     pub(crate) fn osc(&mut self, params: &[&[u8]]) {
         match params {
             [b"region", b"start", id, flags @ ..] => {
@@ -134,7 +136,7 @@ impl Regions {
                 self.start(id, hints);
             }
             [b"region", b"end", id] => self.end(id),
-            _ => log::trace!("unhandled OSC 3008"),
+            _ => log::trace!("unhandled OSC 46373"),
         }
     }
 
@@ -268,7 +270,7 @@ impl crate::Terminal {
     }
 
     /// Whether a program asked, since the last call, for what's kept of
-    /// the terminal across restarts to be forgotten (`OSC 3008 ;
+    /// the terminal across restarts to be forgotten (`OSC 46373 ;
     /// forget`), and if so the line, numbered as in [`crate::document`],
     /// before which it's all forgotten: the cursor's, as it asked, or
     /// behind a full-screen program the line after the main screen.
@@ -333,13 +335,24 @@ mod tests {
     #[test]
     fn lines_printed_on_in_a_region_get_its_hints() {
         let mut t = terminal();
-        t.advance(b"before\r\n\x1b]3008;region;start;a1;hide,nosave\x1b\\token\r\n");
-        t.advance(b"more\x1b]3008;region;end;a1\x07\r\nafter");
+        t.advance(b"before\r\n\x1b]46373;region;start;a1;hide,nosave\x1b\\token\r\n");
+        t.advance(b"more\x1b]46373;region;end;a1\x07\r\nafter");
         assert_eq!(hints_of(&t, "before"), Hints::empty());
         assert_eq!(hints_of(&t, "token"), Hints::HIDE | Hints::NOSAVE);
         assert_eq!(hints_of(&t, "more"), Hints::HIDE | Hints::NOSAVE);
         assert_eq!(hints_of(&t, "after"), Hints::empty());
         assert!(!t.has_regions());
+    }
+
+    /// OSC 3008, the number v2026.11.36 alone used, is systemd's, and
+    /// read as nothing.
+    #[test]
+    fn the_old_number_is_ignored() {
+        let mut t = terminal();
+        t.advance(b"\x1b]3008;region;start;a1;secret\x07token\r\n\x1b]3008;forget\x07");
+        assert_eq!(hints_of(&t, "token"), Hints::empty());
+        assert!(!t.has_regions());
+        assert_eq!(t.take_forget(), None);
     }
 
     #[test]
@@ -357,7 +370,7 @@ mod tests {
             (";keep,kept", all),
         ] {
             let mut t = terminal();
-            t.advance(format!("\x1b]3008;region;start;id{flags}\x07x").as_bytes());
+            t.advance(format!("\x1b]46373;region;start;id{flags}\x07x").as_bytes());
             assert_eq!(hints_of(&t, "x"), hints, "{flags:?}");
         }
     }
@@ -365,13 +378,13 @@ mod tests {
     #[test]
     fn only_the_matching_id_ends_a_region_and_regions_nest() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;outer;noagent\x07");
-        t.advance(b"\x1b]3008;region;start;inner;hide\x07a\r\n");
+        t.advance(b"\x1b]46373;region;start;outer;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;inner;hide\x07a\r\n");
         // An end with another ID, as output inside could print, does
         // nothing.
-        t.advance(b"\x1b]3008;region;end;guess\x07\x1b]3008;region;end;OUTER\x07b\r\n");
-        t.advance(b"\x1b]3008;region;end;inner\x07c\r\n");
-        t.advance(b"\x1b]3008;region;end;outer\x07d");
+        t.advance(b"\x1b]46373;region;end;guess\x07\x1b]46373;region;end;OUTER\x07b\r\n");
+        t.advance(b"\x1b]46373;region;end;inner\x07c\r\n");
+        t.advance(b"\x1b]46373;region;end;outer\x07d");
         assert_eq!(hints_of(&t, "a"), Hints::NOAGENT | Hints::HIDE);
         assert_eq!(hints_of(&t, "b"), Hints::NOAGENT | Hints::HIDE);
         assert_eq!(hints_of(&t, "c"), Hints::NOAGENT);
@@ -387,22 +400,22 @@ mod tests {
         t.expect_secret(Some(SECRET));
         let signed = format!("\x1b]133;C;clackatoo={SECRET}\x07");
         t.advance(format!("\x1b]133;A\x07$ \x1b]133;B\x07ssh\r\n{signed}").as_bytes());
-        t.advance(b"\x1b]3008;region;start;r;private\x07one\r\n");
+        t.advance(b"\x1b]46373;region;start;r;private\x07one\r\n");
         // A shell nested inside, as over ssh, marks its command's end and
         // its prompt, and forges ours.
-        t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]3008;prompt\x07");
-        t.advance(b"\x1b]3008;prompt;clackatoo=0123456789abcdef0123456789abcdee\x07");
+        t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]46373;prompt\x07");
+        t.advance(b"\x1b]46373;prompt;clackatoo=0123456789abcdef0123456789abcdee\x07");
         t.advance(b"remote$ two\r\n");
         assert!(t.has_regions());
         assert_eq!(hints_of(&t, "remote$ two"), Hints::NOSAVE | Hints::NOAGENT);
         // The shell's own.
-        let prompt = format!("\x1b]3008;prompt;clackatoo={SECRET}\x07");
+        let prompt = format!("\x1b]46373;prompt;clackatoo={SECRET}\x07");
         t.advance(format!("\x1b]133;D;0\x07{prompt}\x1b]133;A\x07$ three\r\n").as_bytes());
         assert!(!t.has_regions());
         assert_eq!(hints_of(&t, "$ three"), Hints::empty());
         // What a program forges after the shell's prompt, as one in the
         // background might, closes nothing either.
-        t.advance(b"\x1b]3008;region;start;s;noagent\x07\x1b]133;D;0\x07\x1b]133;A\x07four");
+        t.advance(b"\x1b]46373;region;start;s;noagent\x07\x1b]133;D;0\x07\x1b]133;A\x07four");
         assert!(t.has_regions());
         assert_eq!(hints_of(&t, "four"), Hints::NOAGENT);
     }
@@ -411,7 +424,7 @@ mod tests {
     fn the_shells_signed_command_closes_regions_left_open() {
         let mut t = terminal();
         t.expect_secret(Some(SECRET));
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07one\r\n");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07one\r\n");
         t.advance(format!("\x1b]133;C;clackatoo={SECRET}\x07two").as_bytes());
         assert!(!t.has_regions());
         assert_eq!(hints_of(&t, "two"), Hints::empty());
@@ -420,7 +433,7 @@ mod tests {
     #[test]
     fn without_shell_integration_regions_close_after_a_cap() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         for line in 0..MOST_LINES {
             t.advance(format!("{line}\r\n").as_bytes());
         }
@@ -431,7 +444,7 @@ mod tests {
         // With it, only the prompt closes them.
         let mut t = terminal();
         t.expect_secret(Some(SECRET));
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         for line in 0..=MOST_LINES {
             t.advance(format!("{line}\r\n").as_bytes());
         }
@@ -445,7 +458,7 @@ mod tests {
     fn every_region_closes_after_a_high_cap() {
         let mut t = terminal();
         t.expect_secret(Some(SECRET));
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         let lines = "x\r\n".repeat(usize::try_from(MOST_LINES_EVER).unwrap() - 1);
         t.advance(lines.as_bytes());
         assert!(t.has_regions());
@@ -461,17 +474,17 @@ mod tests {
         let rep = |closing: &str| {
             let mut t = terminal();
             t.expect_secret(Some(SECRET));
-            t.advance(b"\x1b]3008;region;start;r;noagent\x07Z\r\n");
+            t.advance(b"\x1b]46373;region;start;r;noagent\x07Z\r\n");
             t.advance(closing.as_bytes());
             t.advance(b"\x1b[3b");
             !t.screen_text().contains("ZZ")
         };
-        assert!(rep("\x1b]3008;region;end;r\x07"));
+        assert!(rep("\x1b]46373;region;end;r\x07"));
         assert!(rep(&format!("\x1b]133;C;clackatoo={SECRET}\x07")));
-        assert!(rep(&format!("\x1b]3008;prompt;clackatoo={SECRET}\x07")));
+        assert!(rep(&format!("\x1b]46373;prompt;clackatoo={SECRET}\x07")));
         // And the cap, without integration.
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         let lines = "Z\r\n".repeat(usize::try_from(MOST_LINES).unwrap() + 1);
         t.advance(lines.as_bytes());
         assert!(!t.has_regions());
@@ -493,7 +506,7 @@ mod tests {
     #[test]
     fn a_mark_printed_in_a_region_hints_its_line() {
         let mut t = terminal();
-        t.advance("e\x1b]3008;region;start;r;noagent\x07\u{301}".as_bytes());
+        t.advance("e\x1b]46373;region;start;r;noagent\x07\u{301}".as_bytes());
         assert_eq!(hints_of(&t, "e\u{301}"), Hints::NOAGENT);
     }
 
@@ -501,18 +514,18 @@ mod tests {
     fn a_start_is_never_dropped() {
         let mut t = terminal();
         for n in 0..MOST_OPEN {
-            t.advance(format!("\x1b]3008;region;start;r{n};noagent\x07").as_bytes());
+            t.advance(format!("\x1b]46373;region;start;r{n};noagent\x07").as_bytes());
         }
         // Past the most, and with an ID that isn't one.
-        t.advance(b"\x1b]3008;region;start;extra;hide\x07");
-        t.advance(b"\x1b]3008;region;start;no way;nosave\x07");
+        t.advance(b"\x1b]46373;region;start;extra;hide\x07");
+        t.advance(b"\x1b]46373;region;start;no way;nosave\x07");
         for n in 0..MOST_OPEN {
-            t.advance(format!("\x1b]3008;region;end;r{n}\x07").as_bytes());
+            t.advance(format!("\x1b]46373;region;end;r{n}\x07").as_bytes());
         }
-        t.advance(b"\x1b]3008;region;end;extra\x07x");
+        t.advance(b"\x1b]46373;region;end;extra\x07x");
         assert_eq!(hints_of(&t, "x"), Hints::HIDE | Hints::NOSAVE);
         t.expect_secret(Some(SECRET));
-        t.advance(format!("\x1b]3008;prompt;clackatoo={SECRET}\x07y").as_bytes());
+        t.advance(format!("\x1b]46373;prompt;clackatoo={SECRET}\x07y").as_bytes());
         assert!(!t.has_regions());
     }
 
@@ -521,7 +534,7 @@ mod tests {
     #[test]
     fn the_cap_counts_lines_not_moves_between_them() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         for _ in 0..MOST_LINES {
             t.advance(b"\x1b[1Ha\x1b[2Hb");
         }
@@ -533,19 +546,19 @@ mod tests {
     #[test]
     fn a_region_kept_from_agents_names_nothing_and_notifies_no_one() {
         let mut t = terminal();
-        t.advance(b"\x1b]2;before\x07\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]2;before\x07\x1b]46373;region;start;r;noagent\x07");
         t.advance(b"\x1b]2;hunter2\x07\x1b]7;file:///hunter2\x07\x1b]9;hunter2\x07");
         assert_eq!(t.title(), "before");
         assert_eq!(t.cwd(), None);
         assert!(t.take_notice().is_none());
-        t.advance(b"\x1b]3008;region;end;r\x07\x1b]2;after\x07");
+        t.advance(b"\x1b]46373;region;end;r\x07\x1b]2;after\x07");
         assert_eq!(t.title(), "after");
     }
 
     #[test]
     fn nothing_but_an_end_prompt_or_cap_closes_a_region() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+        t.advance(b"\x1b]46373;region;start;r;noagent\x07");
         // A full reset, and the alternate screen and back.
         t.advance(b"\x1bc\x1b[?1049hfull\x1b[?1049l");
         t.advance(b"x");
@@ -556,14 +569,14 @@ mod tests {
     #[test]
     fn regions_come_back_from_a_snapshot_as_a_program_could_set_them() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;region;start;r;hide\x07\x1b]3008;region;start;s;nosave\x07");
+        t.advance(b"\x1b]46373;region;start;r;hide\x07\x1b]46373;region;start;s;nosave\x07");
         let mut snapshot = t.regions().unwrap();
         snapshot.open.push(("u".into(), Hints::KEPT.bits()));
         let mut new = terminal();
         new.restore_regions(&snapshot);
-        new.advance(b"\x1b]3008;region;end;s\x07x");
+        new.advance(b"\x1b]46373;region;end;s\x07x");
         assert_eq!(hints_of(&new, "x"), Hints::HIDE);
-        new.advance(b"\x1b]3008;region;end;r\x07\x1b]3008;region;end;u\x07");
+        new.advance(b"\x1b]46373;region;end;r\x07\x1b]46373;region;end;u\x07");
         assert!(!new.has_regions());
         assert_eq!(terminal().regions(), None);
     }
@@ -571,17 +584,17 @@ mod tests {
     #[test]
     fn forget_is_taken_once_and_nothing_is_answered() {
         let mut t = terminal();
-        t.advance(b"\x1b]3008;forget\x07\x1b]3008;region;start;r\x07\x1b]3008;region;end;r\x07");
+        t.advance(b"\x1b]46373;forget\x07\x1b]46373;region;start;r\x07\x1b]46373;region;end;r\x07");
         assert_eq!(t.take_forget(), Some(0));
         assert_eq!(t.take_forget(), None);
-        t.advance(b"a\r\nb\r\n\x1b]3008;forget\x07c\r\n\x1b[?1049h\x1b]3008;forget\x07");
+        t.advance(b"a\r\nb\r\n\x1b]46373;forget\x07c\r\n\x1b[?1049h\x1b]46373;forget\x07");
         assert_eq!(t.take_forget(), Some(5), "the main screen's 5 rows");
-        t.advance(b"\x1b[?1049l\x1b]3008;forget\x07");
+        t.advance(b"\x1b[?1049l\x1b]46373;forget\x07");
         assert_eq!(t.take_forget(), Some(3));
         assert!(t.take_replies().is_empty());
     }
 
-    /// Bits of what a program might print inside a region: OSC 3008's own
+    /// Bits of what a program might print inside a region: OSC 46373's own
     /// ends and starts with other IDs, prompts it forges, resets, and the
     /// alternate screen.
     fn inside() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
@@ -589,19 +602,19 @@ mod tests {
         let piece = prop_oneof![
             Just(&b"text"[..]),
             Just(&b"\r\n"[..]),
-            Just(&b"\x1b]3008;region;end;guess\x07"[..]),
-            Just(&b"\x1b]3008;region;end;\x07"[..]),
-            Just(&b"\x1b]3008;region;end;Secret0\x07"[..]),
-            Just(&b"\x1b]3008;region;start;other;hide\x07"[..]),
-            Just(&b"\x1b]3008;region;end;other\x07"[..]),
-            Just(&b"\x1b]3008;forget\x1b\\"[..]),
+            Just(&b"\x1b]46373;region;end;guess\x07"[..]),
+            Just(&b"\x1b]46373;region;end;\x07"[..]),
+            Just(&b"\x1b]46373;region;end;Secret0\x07"[..]),
+            Just(&b"\x1b]46373;region;start;other;hide\x07"[..]),
+            Just(&b"\x1b]46373;region;end;other\x07"[..]),
+            Just(&b"\x1b]46373;forget\x1b\\"[..]),
             Just(&b"\x1b]133;D;0\x07\x1b]133;A\x07"[..]),
             Just(&b"\x1b]133;C;clackatoo=guess\x07"[..]),
             Just(&b"\x1bc"[..]),
             Just(&b"\x1b[?1049h"[..]),
             Just(&b"\x1b[?1049l"[..]),
-            Just(&b"\x1b]3008;"[..]),
-            Just(&b"\x1b]3008;prompt;clackatoo=guess\x07"[..]),
+            Just(&b"\x1b]46373;"[..]),
+            Just(&b"\x1b]46373;prompt;clackatoo=guess\x07"[..]),
             Just(&b"\x07"[..]),
         ];
         proptest::collection::vec(piece, 0..40).prop_map(|pieces| pieces.concat())
@@ -615,7 +628,7 @@ mod tests {
         fn only_its_own_end_closes_a_region(inside in inside(), cut in 0usize..64) {
             let mut t = terminal();
             t.expect_secret(Some(SECRET));
-            t.advance(b"\x1b]3008;region;start;secret0;noagent\x07first");
+            t.advance(b"\x1b]46373;region;start;secret0;noagent\x07first");
             let cut = cut.min(inside.len());
             t.advance(&inside[..cut]);
             t.advance(&inside[cut..]);
@@ -628,7 +641,7 @@ mod tests {
                 .map(|row| grid.row(row))
                 .find(|row| row.text() == "after");
             proptest::prop_assert!(after.is_some_and(|row| row.hints().contains(Hints::NOAGENT)));
-            t.advance(b"\x1b]3008;region;end;secret0\x07");
+            t.advance(b"\x1b]46373;region;end;secret0\x07");
             // Unless another region it opened is still open.
             let others_only = t.regions().is_none_or(|open| {
                 open.open.iter().all(|(id, _)| id == "other")
@@ -683,8 +696,8 @@ mod tests {
             rows in 2u16..8,
         ) {
             let mut t = Terminal::new(Size::new(10, 6).unwrap(), &Config::default());
-            t.advance(b"pre\r\n\x1b]3008;region;start;r;noagent\x07ZZZZZZZZZZZZ\r\nZZ");
-            t.advance(b"\x1b]3008;region;end;r\x07\r\npost");
+            t.advance(b"pre\r\n\x1b]46373;region;start;r;noagent\x07ZZZZZZZZZZZZ\r\nZZ");
+            t.advance(b"\x1b]46373;region;end;r\x07\r\npost");
             let cut = cut.min(moves.len());
             t.advance(&moves[..cut]);
             t.resize(Size::new(cols, rows).unwrap());
@@ -700,7 +713,7 @@ mod tests {
     #[test]
     fn hidden_lines_are_masked_in_copies_and_skipped_by_search() {
         let mut t = terminal();
-        t.advance(b"one pw\r\n\x1b]3008;region;start;r;hide\x07pw\r\npw2\x1b]3008;region;end;r\x07\r\nlast pw");
+        t.advance(b"one pw\r\n\x1b]46373;region;start;r;hide\x07pw\r\npw2\x1b]46373;region;end;r\x07\r\nlast pw");
         let at = |line, col| Position { line, col };
         let (first, last) = (t.document_bounds().0, 3);
         assert_eq!(

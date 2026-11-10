@@ -7,7 +7,7 @@
 //! shell's marks; history keeps the few lines that have any on the side,
 //! by number, so the others pay nothing for them.
 //!
-//! Programs set them with clackatoo's own escape sequence, OSC 3008 (see
+//! Programs set them with clackatoo's own escape sequence, OSC 46373 (see
 //! [`crate::regions`]); the terminal's owner can add them too, with
 //! [`Terminal::add_hints`], as for a line a password was typed on.
 //!

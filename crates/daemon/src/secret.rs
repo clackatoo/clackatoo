@@ -1,5 +1,5 @@
 //! `clackatoo secret -- COMMAND`: runs a command with what it prints in a
-//! region marked private (`OSC 3008`, see [`clackatoo_term::regions`]),
+//! region marked private (`OSC 46373`, see [`clackatoo_term::regions`]),
 //! opened with an ID picked at random, which nothing the command prints
 //! can know, and closed as it ends, however it ends. Its output and its
 //! errors are marked, each that goes to a terminal.

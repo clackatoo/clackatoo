@@ -125,8 +125,8 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
         # regions it marked private (`clackatoo_term::regions`): expanded
         # as bash draws it, so the secret is never in a command it traces;
         # its `=` written `\075`, so not even its name is.
-        if [[ -n ${__clackatoo_secret:+1} && $PS1 != *'\e]3008;prompt;'* ]]; then
-            PS1='\[\e]3008;prompt;clackatoo\075${__clackatoo_secret}\a\]'$PS1
+        if [[ -n ${__clackatoo_secret:+1} && $PS1 != *'\e]46373;prompt;'* ]]; then
+            PS1='\[\e]46373;prompt;clackatoo\075${__clackatoo_secret}\a\]'$PS1
         fi
         if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) &&
             [[ $PS1 != *'\e]133;B\a'* ]]; then

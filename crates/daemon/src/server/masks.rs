@@ -1,4 +1,4 @@
-//! Lines a program marked to be hidden (`OSC 3008`, see
+//! Lines a program marked to be hidden (`OSC 46373`, see
 //! [`clackatoo_term::regions`]), masked in everything a client is sent of
 //! a terminal: its view, its history, the text it copies, and where its
 //! searches go. So every client, whatever its protocol, a window on
@@ -250,7 +250,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"one\r\n\x1b]3008;region;start;r1;hide\x07hunter2\r\n\x1b]3008;region;end;r1\x07two",
+            b"one\r\n\x1b]46373;region;start;r1;hide\x07hunter2\r\n\x1b]46373;region;end;r1\x07two",
         );
         let (token, theirs) = window(&mut daemon);
         daemon.attach(token, terminal).unwrap();
@@ -426,7 +426,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"\x1b[2H\x1b]3008;region;start;r2;hide\x07\x1b[2Kswordfish\x1b]3008;region;end;r2\x07",
+            b"\x1b[2H\x1b]46373;region;start;r2;hide\x07\x1b[2Kswordfish\x1b]46373;region;end;r2\x07",
         );
         if let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) {
             client.views.get_mut(&terminal).unwrap().forget_sent();
@@ -447,7 +447,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"\r\n\x1b]3008;region;start;p;private\x07token\x1b]3008;region;end;p\x07",
+            b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
         );
         let all = || Request::Text {
             terminal,
@@ -535,7 +535,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"\r\n\x1b]3008;region;start;s;secret\x07token\x1b]3008;region;end;s\x07",
+            b"\r\n\x1b]46373;region;start;s;secret\x07token\x1b]46373;region;end;s\x07",
         );
         let unmask = |line| Request::Unmask {
             terminal,
@@ -574,7 +574,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"\r\n\x1b]3008;region;start;p;private\x07token\x1b]3008;region;end;p\x07",
+            b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
         );
         let (relay, _theirs) = window(&mut daemon);
         if let Some(Source::Client(client)) = daemon.sources.get_mut(relay.0) {
@@ -634,7 +634,7 @@ mod tests {
         show_image(
             &mut daemon,
             terminal,
-            b"\x1b]3008;region;start;s;hide\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]3008;region;end;s\x07",
+            b"\x1b]46373;region;start;s;hide\x07\x1b_Ga=T,f=100,i=8;iVBORw0K\x1b\\\x1b]46373;region;end;s\x07",
             2,
         );
         let images = |daemon: &mut Daemon| {
@@ -698,7 +698,7 @@ mod tests {
         feed(
             &mut daemon,
             terminal,
-            b"\r\n\x1b]3008;region;start;p;private\x07token\x1b]3008;region;end;p\x07",
+            b"\r\n\x1b]46373;region;start;p;private\x07token\x1b]46373;region;end;p\x07",
         );
         assert_eq!(snapshot(&mut daemon, token, terminal)[3], "token");
         assert_eq!(daemon.respond(Request::Relay, token), Response::Done);
@@ -720,7 +720,7 @@ mod tests {
         show_image(
             &mut daemon,
             terminal,
-            b"\x1b]3008;region;start;s;hide\x07\x1b_Ga=T,U=1,f=100,i=10,c=1,r=1,q=2;AAAA\x1b\\\x1b]3008;region;end;s\x07",
+            b"\x1b]46373;region;start;s;hide\x07\x1b_Ga=T,U=1,f=100,i=10,c=1,r=1,q=2;AAAA\x1b\\\x1b]46373;region;end;s\x07",
             2,
         );
         let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {

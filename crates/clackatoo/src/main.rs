@@ -169,7 +169,7 @@ enum Command {
     Keep(Keep),
     /// Run a command with what it prints marked secret: masked in windows
     /// and on the phone until shown, never written to disk, and kept from
-    /// agents. It's a region of OSC 3008, which clackatoo's terminals read
+    /// agents. It's a region of OSC 46373, which clackatoo's terminals read
     /// and others ignore.
     Secret(Secret),
     /// Trust a folder to run its language servers, which may run its code,
@@ -537,7 +537,7 @@ struct Capture {
     /// Keep colours and attributes, as ANSI escape sequences.
     #[arg(long)]
     ansi: bool,
-    /// Include what programs kept from agents (OSC 3008 `noagent`), as a
+    /// Include what programs kept from agents (OSC 46373 `noagent`), as a
     /// window showing the terminal does. Without it, that's masked, as
     /// any command an agent runs gets it.
     #[arg(long)]

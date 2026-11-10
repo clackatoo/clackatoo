@@ -133,7 +133,7 @@
 //!     kitty's commands keep by ID, and the virtual placements kitty's
 //!     placeholders show, the images' bytes in the store's files. Before,
 //!     terminals showed none.
-//! 54. The regions programs marked private (OSC 3008, CLACKA-242) still
+//! 54. The regions programs marked private (OSC 46373, CLACKA-242) still
 //!     open in each terminal, so what they print after an upgrade is in
 //!     them too. Before, none was open.
 

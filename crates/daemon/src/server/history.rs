@@ -354,7 +354,7 @@ impl Daemon {
     }
 
     /// Forgets what's kept of terminal `id` so far, as `:forget` does, if
-    /// its program asked to (`OSC 3008 ; forget`, see
+    /// its program asked to (`OSC 46373 ; forget`, see
     /// [`clackatoo_term::regions`]): which only ever keeps less.
     pub(super) fn forget_if_asked(&mut self, id: TerminalId) {
         let asked = match (self.terminals.get_mut(&id)).map(|slot| &mut slot.terminal) {
@@ -818,10 +818,10 @@ pub(in crate::server) mod tests {
         let (mut daemon, terminal, _) = keeping(dir.path(), true);
         print(&mut daemon, terminal, "old\r\n");
         assert_eq!(written(&mut daemon, terminal), ["old"]);
-        print(&mut daemon, terminal, "\x1b]3008;forget\x07new\r\n");
+        print(&mut daemon, terminal, "\x1b]46373;forget\x07new\r\n");
         daemon.forget_if_asked(terminal);
         assert_eq!(written(&mut daemon, terminal), ["new"]);
-        let private = "\x1b]3008;region;start;p;private\x07key\r\n\x1b]3008;region;end;p\x07";
+        let private = "\x1b]46373;region;start;p;private\x07key\r\n\x1b]46373;region;end;p\x07";
         print(&mut daemon, terminal, private);
         assert_eq!(
             written(&mut daemon, terminal),
