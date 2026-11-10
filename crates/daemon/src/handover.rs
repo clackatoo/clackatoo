@@ -5010,6 +5010,7 @@ mod tests {
                     open: vec![("4f2a".into(), 0b101)],
                     unending: 0b010,
                     lines: 3,
+                    virtuals: vec![(9, 1, 0b100)],
                 },
             }],
             images: Some(images()),

@@ -268,7 +268,7 @@ impl Pictures {
             pieces.extend(row.pieces().iter().map(|&piece| (line, piece)));
             placeholders |= has_virtuals && clackatoo_term::graphics::has_placeholders(row);
         }
-        Self::with(pieces, terminal, placeholders)
+        Self::with(pieces, terminal, placeholders, hidden)
     }
 
     /// The pictures `terminal`'s history lines numbered from `first` on,
@@ -287,20 +287,26 @@ impl Pictures {
             .filter(|&(line, _)| shown(line))
             .filter_map(|(line, piece)| Some((u16::try_from(line - first).ok()?, piece)))
             .collect();
-        Self::with(pieces, terminal, true)
+        Self::with(pieces, terminal, true, hidden)
     }
 
     /// `pieces`, with the pictures they're of, and the virtual
     /// placements, if `virtuals`.
-    fn with(pieces: Vec<(u16, Piece)>, terminal: &Terminal, virtuals: bool) -> Self {
+    fn with(pieces: Vec<(u16, Piece)>, terminal: &Terminal, virtuals: bool, hidden: Hints) -> Self {
         let mut numbers: Vec<u32> = pieces.iter().map(|(_, piece)| piece.picture).collect();
         numbers.sort_unstable();
         numbers.dedup();
         let pictures = (numbers.into_iter())
             .filter_map(|number| Some((number, *terminal.picture(number)?)))
             .collect();
+        // Never one as private as a region the client has masked.
         let mut virtuals: Vec<Virtual> = if virtuals {
-            terminal.virtuals().copied().collect()
+            (terminal.virtuals())
+                .filter(|virtual_| {
+                    clackatoo_term::graphics::may_show(terminal.virtual_hints(virtual_), hidden)
+                })
+                .copied()
+                .collect()
         } else {
             Vec::new()
         };

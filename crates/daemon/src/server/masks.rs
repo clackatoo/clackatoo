@@ -182,7 +182,8 @@ impl Daemon {
     }
 
     /// Masks what each window shows by what agents may read through it
-    /// now, as it grants a chat native access to itself or takes it back:
+    /// now, as it grants a chat native access to itself or takes it back,
+    /// or starts relaying:
     /// what changed is sent afresh.
     pub(super) fn mask_by_grants(&mut self) {
         let tokens: Vec<usize> = (self.sources.iter())
@@ -686,5 +687,64 @@ mod tests {
             .map(|(_, picture)| picture.image[0])
             .collect();
         assert_eq!(keys, [1]);
+    }
+
+    /// A window that starts relaying has what it followed before masked as
+    /// a daemon relaying's is.
+    #[test]
+    fn a_client_that_starts_relaying_gets_whats_kept_from_agents_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+        feed(
+            &mut daemon,
+            terminal,
+            b"\r\n\x1b]3008;region;start;p;private\x07token\x1b]3008;region;end;p\x07",
+        );
+        assert_eq!(snapshot(&mut daemon, token, terminal)[3], "token");
+        assert_eq!(daemon.respond(Request::Relay, token), Response::Done);
+        assert_eq!(snapshot(&mut daemon, token, terminal)[3], MASK);
+    }
+
+    /// A virtual placement made in a region isn't sent to a client that
+    /// has the region masked, nor is its image.
+    #[test]
+    fn a_virtual_placement_made_in_a_region_is_never_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, token, _theirs) = hidden(dir.path(), true);
+        show_image(
+            &mut daemon,
+            terminal,
+            b"\x1b_Ga=T,U=1,f=100,i=9,c=1,r=1,q=2;AAAA\x1b\\",
+            1,
+        );
+        show_image(
+            &mut daemon,
+            terminal,
+            b"\x1b]3008;region;start;s;hide\x07\x1b_Ga=T,U=1,f=100,i=10,c=1,r=1,q=2;AAAA\x1b\\\x1b]3008;region;end;s\x07",
+            2,
+        );
+        let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {
+            panic!("no window");
+        };
+        let slot = &daemon.terminals[&terminal];
+        let subscription = client.views.get_mut(&terminal).unwrap();
+        let update = subscription.update_from(&slot.terminal, PROTOCOL_VERSION, None);
+        let Some(ViewUpdate::Snapshot(view)) = update else {
+            panic!("not a snapshot");
+        };
+        let ids: Vec<u32> = (view.grid().unwrap().pictures.virtuals.iter())
+            .map(|virtual_| virtual_.id)
+            .collect();
+        assert_eq!(ids, [9]);
+        let fetch = Request::Image {
+            from: clackatoo_protocol::ImageFrom::Terminal(terminal),
+            image: clackatoo_protocol::ImageId([2; 16]),
+            fit: None,
+            at: 0,
+        };
+        assert_eq!(
+            daemon.respond(fetch, token),
+            Response::Image(clackatoo_protocol::ImageAnswer::Missing)
+        );
     }
 }

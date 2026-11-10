@@ -1932,6 +1932,9 @@ impl Daemon {
                     let told = self.chats_told(token);
                     self.send_event(token, Event::Chats(told));
                 }
+                // What it followed before is masked as for a daemon
+                // relaying from now on (see `server/masks.rs`).
+                self.mask_by_grants();
                 Ok(Response::Done)
             }
             _ => Err(Error::Other("only a daemon relays".into())),

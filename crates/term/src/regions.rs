@@ -96,6 +96,11 @@ pub(crate) struct Regions {
     /// The line a program last asked for what's kept of the terminal
     /// before it to be forgotten from, since its owner last took it.
     pub(crate) forget: Option<u64>,
+    /// The hints of kitty's virtual placements, by image ID and
+    /// placement, of those made in a region, or whose placeholders were
+    /// printed in one: their images are as private as the region, wherever
+    /// their placeholders are or go (see [`crate::graphics`]).
+    pub(crate) virtuals: std::collections::HashMap<(u32, u32), Hints>,
 }
 
 /// What a terminal's regions are, to be handed to the next build in an
@@ -109,6 +114,9 @@ pub struct RegionsSnapshot {
     pub unending: u8,
     /// The lines printed on since regions were last all closed.
     pub lines: u32,
+    /// The hints' bits of kitty's virtual placements made or shown in a
+    /// region, by image ID and placement.
+    pub virtuals: Vec<(u32, u32, u8)>,
 }
 
 impl Regions {
@@ -162,8 +170,21 @@ impl Regions {
     pub(crate) fn close_all(&mut self) {
         *self = Self {
             forget: self.forget,
+            virtuals: std::mem::take(&mut self.virtuals),
             ..Self::default()
         };
+    }
+
+    /// Adds `hints` to the virtual placement `key`'s.
+    pub(crate) fn mark_virtual(&mut self, key: (u32, u32), hints: Hints) {
+        if !hints.is_empty() {
+            *self.virtuals.entry(key).or_default() |= hints;
+        }
+    }
+
+    /// The hints of the virtual placement `key`.
+    pub(crate) fn virtual_hints(&self, key: (u32, u32)) -> Hints {
+        self.virtuals.get(&key).copied().unwrap_or_default()
     }
 
     /// Counts line `line` as printed on, once however often, as it's
@@ -184,7 +205,12 @@ impl Regions {
     }
 
     pub(crate) fn snapshot(&self) -> Option<RegionsSnapshot> {
-        (!self.is_closed()).then(|| RegionsSnapshot {
+        let mut virtuals: Vec<(u32, u32, u8)> = (self.virtuals.iter())
+            .map(|(&(id, placement), hints)| (id, placement, hints.bits()))
+            .collect();
+        virtuals.sort_unstable();
+        (!self.is_closed() || !virtuals.is_empty()).then(|| RegionsSnapshot {
+            virtuals,
             open: (self.open.iter())
                 .map(|region| (region.id.to_string(), region.hints.bits()))
                 .collect(),
@@ -196,6 +222,7 @@ impl Regions {
     /// The regions `snapshot` says, checked as a program's would be.
     pub(crate) fn restore(&mut self, snapshot: &RegionsSnapshot) {
         self.close_all();
+        self.virtuals.clear();
         // Only what a program could set: never the user's own mark.
         let hints = |bits| Hints::from_bits_truncate(bits) - Hints::KEPT;
         for (id, bits) in &snapshot.open {
@@ -204,6 +231,10 @@ impl Regions {
         self.unending |= hints(snapshot.unending);
         self.hinting |= self.unending;
         self.lines = snapshot.lines;
+        self.virtuals = (snapshot.virtuals.iter())
+            .map(|&(id, placement, bits)| ((id, placement), hints(bits)))
+            .filter(|(_, hints)| !hints.is_empty())
+            .collect();
     }
 }
 

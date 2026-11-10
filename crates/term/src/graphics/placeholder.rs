@@ -68,7 +68,7 @@ fn number(mark: char) -> Option<u16> {
 }
 
 /// The ID a colour says, without its top byte.
-fn colour_id(colour: Color) -> u32 {
+pub(crate) fn colour_id(colour: Color) -> u32 {
     match colour {
         Color::Default => 0,
         Color::Indexed(index) => u32::from(index),

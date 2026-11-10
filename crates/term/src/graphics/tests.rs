@@ -567,3 +567,81 @@ fn pictures_on_private_lines_are_never_said() {
         kept.texts()
     );
 }
+
+/// A virtual placement made in a region, or whose placeholder is printed
+/// in one, is as private as the region: its image is hidden wherever its
+/// placeholders are, on screen, gone, or not printed yet (CLACKA-242).
+#[test]
+fn a_virtual_placement_made_or_shown_in_a_region_hides_its_image() {
+    use crate::Hints;
+    // Made in a region, with no placeholder anywhere.
+    let mut t = terminal();
+    feed(
+        &mut t,
+        b"\x1b]3008;region;start;r;secret\x07\x1b_Ga=T,U=1,f=100,i=9,c=1,r=1,q=2;AAAA\x1b\\\x1b]3008;region;end;r\x07",
+        |_| Ok(image(5, 10, 20)),
+    );
+    let virtual_ = *t.virtuals().next().unwrap();
+    assert_eq!(
+        t.virtual_hints(&virtual_),
+        Hints::HIDE | Hints::NOSAVE | Hints::NOAGENT
+    );
+    assert!(t.image_hidden([5; 16], Hints::HIDE));
+    // Its placeholder printed outside the region shows nothing more.
+    t.advance("\x1b[38;5;9m\u{10EEEE}\x1b[m".as_bytes());
+    assert!(t.image_hidden([5; 16], Hints::HIDE));
+    assert!(!t.image_hidden([5; 16], Hints::empty()));
+    // Made outside one, but its placeholder printed in one, then cleared.
+    let mut t = terminal();
+    feed(
+        &mut t,
+        b"\x1b_Ga=T,U=1,f=100,i=9,c=1,r=1,q=2;AAAA\x1b\\",
+        |_| Ok(image(6, 10, 20)),
+    );
+    assert!(!t.image_hidden([6; 16], Hints::HIDE));
+    t.advance("\x1b]3008;region;start;r;noagent\x07\x1b[38;5;9m\u{10EEEE}\x1b]3008;region;end;r\x07\x1b[2J".as_bytes());
+    assert!(t.image_hidden([6; 16], Hints::NOAGENT));
+    assert!(!t.image_hidden([6; 16], Hints::HIDE));
+}
+
+/// A picture on the main screen is judged by its own line's hints, not
+/// by the alternate screen's row of the same number.
+#[test]
+fn a_main_screen_picture_isnt_hidden_by_the_alternate_screen() {
+    use crate::Hints;
+    let mut t = terminal();
+    feed(&mut t, b"\x1b_Ga=T,f=100,i=7;iVBORw0K\x1b\\", |_| {
+        Ok(image(1, 25, 30))
+    });
+    // The alternate screen, its first rows hidden.
+    t.advance(
+        b"\x1b[?1049h\x1b[H\x1b]3008;region;start;r;hide\x07x\r\ny\x1b]3008;region;end;r\x07",
+    );
+    assert!(!t.image_hidden([1; 16], Hints::HIDE));
+}
+
+/// A picture laid over rows as the region's cap is reached gets the
+/// region's hints on every one of its rows.
+#[test]
+fn every_row_of_a_picture_gets_its_regions_hints_though_the_cap_closes_it() {
+    use crate::Hints;
+    let mut t = terminal();
+    t.advance(b"\x1b]3008;region;start;r;noagent\x07");
+    let lines = "x\r\n".repeat(usize::try_from(crate::regions::MOST_LINES).unwrap() - 1);
+    t.advance(lines.as_bytes());
+    assert!(t.has_regions());
+    // 30 pixels tall: 2 rows, the second past the cap.
+    feed(&mut t, b"\x1b_Ga=T,f=100,i=7;iVBORw0K\x1b\\", |_| {
+        Ok(image(1, 25, 30))
+    });
+    assert!(!t.has_regions());
+    let rows: Vec<Hints> = (t.grid().rows())
+        .filter(|row| !row.pieces().is_empty())
+        .map(crate::Row::hints)
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|hints| hints.contains(Hints::NOAGENT)),
+        "{rows:?}"
+    );
+}

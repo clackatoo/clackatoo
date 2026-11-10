@@ -1128,6 +1128,12 @@ impl Emulator {
             if let Some(old) = self.graphics.virtuals.insert(key, placement) {
                 self.graphics.unhold(old.image);
             }
+            // Made in a region, its image is as private as the region.
+            let live = &self.graphics.virtuals;
+            self.regions
+                .virtuals
+                .retain(|key, _| live.contains_key(key));
+            self.regions.mark_virtual(key, self.regions.hinting);
             return Ok(());
         }
         // A placement placed again moves.
@@ -1423,6 +1429,9 @@ impl Emulator {
     /// Puts the pieces of picture `number`, `cols` by `rows`, on the rows
     /// from the cursor's down, moving the cursor as `moves` says.
     fn lay_pieces(&mut self, number: u32, cols: u16, rows: u16, moves: Moves) {
+        // The hints of the regions open as it's shown, every row of it,
+        // though a cap closes them partway.
+        let hinting = self.regions.hinting;
         let start = self.cursor.col;
         let col = u16::try_from(start).unwrap_or(u16::MAX);
         let height = self.height();
@@ -1439,8 +1448,8 @@ impl Emulator {
                 }
                 self.grid_mut().row_mut(line).add_piece(piece);
                 // A picture shown in a region is as private as text.
-                if !self.regions.hinting.is_empty() {
-                    self.hint_row(line);
+                if !hinting.is_empty() {
+                    self.hint_row_with(line, hinting);
                 }
                 continue;
             }
@@ -1449,8 +1458,8 @@ impl Emulator {
             }
             let line = self.cursor.line;
             self.grid_mut().row_mut(line).add_piece(piece);
-            if !self.regions.hinting.is_empty() {
-                self.hint_row(line);
+            if !hinting.is_empty() {
+                self.hint_row_with(line, hinting);
             }
         }
         match moves {
@@ -1550,30 +1559,48 @@ impl Emulator {
         let of_image = |number: u32| {
             (self.graphics.picture(number)).is_some_and(|picture| picture.image == image)
         };
-        let placed: Vec<u64> = (self.primary.pieces())
-            .filter(|&(_, piece)| of_image(piece.picture))
-            .map(|(line, _)| line)
-            .chain(self.alternate_pieces(&of_image))
-            .collect();
-        let hints = |line: u64| {
-            let end = self.primary.scrollback_end();
-            match usize::try_from(line.wrapping_sub(end)) {
-                Ok(row) if line >= end && row < self.grid().height() => {
-                    self.grid().row(row).hints()
-                }
-                _ => (self.primary.history_hints(line..line + 1).next())
-                    .map_or(crate::Hints::empty(), |(_, hints)| hints),
-            }
+        // Each piece's line's hints, from the screen it's on.
+        let end = self.primary.scrollback_end();
+        let primary = |line: u64| match usize::try_from(line.wrapping_sub(end)) {
+            Ok(row) if line >= end && row < self.primary.height() => self.primary.row(row).hints(),
+            _ => (self.primary.history_hints(line..line + 1).next())
+                .map_or(crate::Hints::empty(), |(_, hints)| hints),
         };
-        let mut shown = placed.iter().any(|&line| may_show(hints(line), hidden));
+        let alternate = (self.screen == crate::terminal::Screen::Alternate).then(|| self.grid());
+        let placed: Vec<crate::Hints> = (self.primary.pieces())
+            .filter(|&(_, piece)| of_image(piece.picture))
+            .map(|(line, _)| primary(line))
+            .chain(
+                (alternate.into_iter())
+                    .flat_map(|grid| grid.rows())
+                    .filter(|row| row.pieces().iter().any(|piece| of_image(piece.picture)))
+                    .map(crate::Row::hints),
+            )
+            .collect();
+        let mut shown = placed.iter().any(|&hints| may_show(hints, hidden));
         let mut anywhere = !placed.is_empty();
-        let virtual_ = (self.graphics.virtuals.values()).any(|virtual_| virtual_.image == image);
-        if virtual_ {
+        // A virtual placement made or shown in a region is hidden as the
+        // region is, wherever its placeholders are; any other, while a
+        // placeholder of it on screen may be shown.
+        let virtuals: Vec<&Virtual> = (self.graphics.virtuals.values())
+            .filter(|virtual_| virtual_.image == image)
+            .collect();
+        let mut open = Vec::new();
+        for virtual_ in virtuals {
+            let own = self
+                .regions
+                .virtual_hints((virtual_.id, virtual_.placement));
+            if may_show(own, hidden) {
+                open.push(virtual_);
+            } else {
+                anywhere = true;
+            }
+        }
+        if !open.is_empty() {
             for row in self.grid().rows().filter(|row| has_placeholders(row)) {
                 for (_, said) in placeholders(row) {
-                    let of_it = (self.graphics.virtuals.values()).any(|virtual_| {
-                        virtual_.image == image
-                            && virtual_.id == said.image
+                    let of_it = open.iter().any(|virtual_| {
+                        virtual_.id == said.image
                             && (said.placement == 0 || virtual_.placement == said.placement)
                     });
                     if of_it {
@@ -1586,19 +1613,26 @@ impl Emulator {
         anywhere && !shown
     }
 
-    /// The lines of the alternate screen, numbered on from the main
-    /// screen's history, that hold a piece of a picture `of_image` says
-    /// is the image's, while it shows.
-    fn alternate_pieces<'a>(
-        &'a self,
-        of_image: &'a dyn Fn(u32) -> bool,
-    ) -> impl Iterator<Item = u64> + 'a {
-        let end = self.primary.scrollback_end();
-        let alternate = (self.screen == crate::terminal::Screen::Alternate).then(|| self.grid());
-        (alternate.into_iter())
-            .flat_map(|grid| grid.rows().enumerate())
-            .filter(move |(_, row)| row.pieces().iter().any(|piece| of_image(piece.picture)))
-            .map(move |(row, _)| end + row as u64)
+    /// Adds the hints of the regions open to the virtual placements a
+    /// placeholder printed in `style` may name: those whose image IDs'
+    /// low bytes its colour gives, as the third diacritic, which says the
+    /// rest, isn't printed yet.
+    pub(crate) fn hint_virtuals_of(&mut self, style: &crate::Style) {
+        let low = placeholder::colour_id(style.fg) & 0x00FF_FFFF;
+        let keys: Vec<(u32, u32)> = (self.graphics.virtuals.keys())
+            .filter(|&&(id, _)| id & 0x00FF_FFFF == low)
+            .copied()
+            .collect();
+        for key in keys {
+            self.regions.mark_virtual(key, self.regions.hinting);
+        }
+    }
+
+    /// The hints of the virtual placement `virtual_` (see
+    /// [`hint_virtuals_of`](Self::hint_virtuals_of)).
+    pub(crate) fn virtual_hints(&self, virtual_: &Virtual) -> crate::Hints {
+        self.regions
+            .virtual_hints((virtual_.id, virtual_.placement))
     }
 
     /// The images the screen shows, and those Unicode placeholders may.

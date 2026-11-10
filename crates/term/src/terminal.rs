@@ -265,6 +265,13 @@ impl Terminal {
         self.emulator.image_hidden(image, hidden)
     }
 
+    /// The hints of the virtual placement `virtual_`: those of the regions
+    /// it was made in, or its placeholders were printed in.
+    #[must_use]
+    pub fn virtual_hints(&self, virtual_: &Virtual) -> crate::Hints {
+        self.emulator.virtual_hints(virtual_)
+    }
+
     /// The images its screen shows, and those its placeholders may.
     #[must_use]
     pub fn shown_images(&self) -> std::collections::HashSet<ImageKey> {
@@ -1578,6 +1585,10 @@ impl Emulator {
         }
         self.grid_mut().row_mut(line).write(col, ch, wide, &pen);
         self.last_printed = Some(ch);
+        // A placeholder printed in a region makes its image as private.
+        if ch == crate::graphics::PLACEHOLDER && !self.regions.hinting.is_empty() {
+            self.hint_virtuals_of(&pen);
+        }
         // After it's noted, as a cap reached here closes the region, and
         // forgets it.
         if !self.regions.hinting.is_empty() {
@@ -1629,7 +1640,12 @@ impl Emulator {
     /// [`crate::regions`]).
     #[cold]
     pub(crate) fn hint_row(&mut self, line: usize) {
-        let hints = self.regions.hinting;
+        self.hint_row_with(line, self.regions.hinting);
+    }
+
+    /// As [`hint_row`](Self::hint_row), with `hints`, the regions' as
+    /// something began that's printed over several rows.
+    pub(crate) fn hint_row_with(&mut self, line: usize, hints: crate::Hints) {
         self.grid_mut().row_mut(line).add_hints(hints);
         let number = self.primary.scrollback_end() + line as u64;
         let most = if self.secret.is_none() {
