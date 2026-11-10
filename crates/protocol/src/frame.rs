@@ -28,7 +28,7 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const HEADER_LEN: usize = 4;
 
 /// The number of `Event::HintedView` among the events.
-const HINTED_VIEW: u32 = 32;
+const HINTED_VIEW: u32 = 33;
 
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.

@@ -27,7 +27,7 @@
 //! ([`wire::RELAY_HINTS`]) is one of the user's own, so it's sent lines as
 //! they are, with their hints ([`Event::HintedView`]), and masks them for
 //! each of its own clients as this daemon masks its own: what its windows
-//! may see, its phones, agents' commands and windows agents see may not,
+//! and phones may see, agents' commands and windows agents see may not,
 //! and the daemons relaying for it in turn get the hints. It asks for the
 //! lines it can't mask itself, copies, searches, history, captures and
 //! images, masked as one client of its has them ([`Request::Masked`]),
@@ -86,6 +86,22 @@ pub(super) fn hints_of<'a>(
         virtuals,
     };
     (!hints.is_empty()).then_some(hints)
+}
+
+/// Refuses `request` asked masked as a client of a daemon relaying has
+/// the lines ([`Request::Masked`]), unless it asks for a terminal's lines.
+pub(super) fn asked_masked(request: &Request) -> Result<(), Error> {
+    match request {
+        Request::History { .. }
+        | Request::Text { .. }
+        | Request::BlockText { .. }
+        | Request::Search { .. }
+        | Request::Capture { .. }
+        | Request::Image { .. } => Ok(()),
+        _ => Err(Error::Other(
+            "only a terminal's lines are asked for masked".into(),
+        )),
+    }
 }
 
 /// What [`Request::Unmask`](clackatoo_protocol::Request::Unmask) does to
@@ -219,18 +235,8 @@ impl Daemon {
                 "only a daemon relaying asks for lines masked as it says".into(),
             ));
         }
-        if !matches!(
-            request,
-            Request::History { .. }
-                | Request::Text { .. }
-                | Request::BlockText { .. }
-                | Request::Search { .. }
-                | Request::Capture { .. }
-                | Request::Image { .. }
-        ) {
-            return Response::Error(Error::Other(
-                "only a terminal's lines are asked for masked".into(),
-            ));
+        if let Err(err) = asked_masked(&request) {
+            return Response::Error(err);
         }
         let before = self.links.masked_as.replace(masking);
         let response = self.respond(request, token);

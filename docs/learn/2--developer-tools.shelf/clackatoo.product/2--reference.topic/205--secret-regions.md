@@ -174,7 +174,7 @@ clients, by its own config, as it masks its own terminals:
 |---|---|---|
 | A window | Masked until you ask to see them | Shown |
 | A window that has given an agent control of itself | Masked until you ask | Masked |
-| The phone | Masked | Masked |
+| The phone | Masked, and can't ask to see them | Shown, as it's you too |
 | Anything not showing the terminal, as `clackatoo capture` | Masked | Masked |
 | Another daemon relaying through it | Passed on with their hints, to mask the same way | |
 

@@ -39,7 +39,12 @@
 //! they always have. Whether a client is a daemon relaying is its own word
 //! ([`Request::Relay`](clackatoo_protocol::Request::Relay), which a daemon
 //! says before it's told anything): one that never says so, as a daemon
-//! of protocol 91 can't, is a window, with a window's rights.
+//! of protocol 91 can't, is a window, with a window's rights. Saying so
+//! mostly takes rights away, but not only: one of protocol 153 or later
+//! is sent the lines programs marked private as they are, with their
+//! hints, to mask itself (see `server/masks.rs`). That's no more than a
+//! client of the user's could have anyway, as a window that asks to see
+//! them, so it's trusted as one; a window an agent drives can't say it.
 //!
 //! What's kept changes as connections come, go, and are asked not to be
 //! passed on, or are asked for here: each time, the daemons relaying let

@@ -133,7 +133,7 @@ const NOTIFIED: u32 = 30;
 const LEND_BESIDE: u32 = 31;
 
 /// The number of `Event::HintedView` among the events.
-const HINTED_VIEW: u32 = 32;
+const HINTED_VIEW: u32 = 33;
 
 /// Whether a message from another daemon headed `head` is one this
 /// daemon decodes to take in: the workspaces, the chats, and the events
@@ -291,6 +291,12 @@ struct Followed {
     /// last decoded: for its history, for a client from before protocol
     /// 147.
     widths: Option<Widths>,
+    /// This daemon asked for a snapshot of it there, following it again,
+    /// and none has come since. One that comes unasked says the terminal
+    /// there was resized, or its history numbered afresh, and lines
+    /// shown as they are to a client here are named by numbers that may
+    /// be others' now (see [`masked`]).
+    asked: bool,
 }
 
 /// A client following one of another daemon's terminals.
@@ -999,6 +1005,9 @@ impl Daemon {
                 return Routed::Answered(Response::Error(Error::Other(
                     "only a daemon relaying asks for lines masked as it says".into(),
                 )));
+            }
+            if let Err(err) = super::masks::asked_masked(&request) {
+                return Routed::Answered(Response::Error(err));
             }
             let before = self.links.masked_as.replace(masking.clone());
             let routed = self.route_request(token, *request);
@@ -2314,10 +2323,14 @@ impl Daemon {
         }
     }
 
-    fn follow_request(&self, at: usize, local: TerminalId, remote: TerminalId) -> Request {
-        let Some(followed) = self.links.list[at].relayed.followed.get(&local) else {
+    /// The request that has the daemon of the connection at `at` follow
+    /// its terminal `remote`, this daemon's `local`, afresh, from a
+    /// snapshot, which is noted as asked for.
+    fn follow_request(&mut self, at: usize, local: TerminalId, remote: TerminalId) -> Request {
+        let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) else {
             return Request::Attach { terminal: remote };
         };
+        followed.asked = true;
         if followed.viewers.iter().any(|v| !v.recent) {
             Request::Attach { terminal: remote }
         } else {
@@ -2331,7 +2344,7 @@ impl Daemon {
     /// Has the client at `token` follow this daemon's terminal `local`, of
     /// the connection at `at`, from its next snapshot.
     fn follow(&mut self, token: Token, at: usize, local: TerminalId) {
-        let hidden = self.relayed_hidden(token, true);
+        let hidden = self.hidden_for(token, true);
         let followed = self.links.list[at]
             .relayed
             .followed
@@ -3138,6 +3151,9 @@ impl Daemon {
             return;
         };
         followed.owed = true;
+        if snapshot && !std::mem::take(&mut followed.asked) {
+            masked::renumbered(followed);
+        }
         let widths = match unpacked {
             Unpacked::Decoded(Ok(message)) => unpack::widths_of(message),
             Unpacked::PassedOn(_, widths) => *widths,

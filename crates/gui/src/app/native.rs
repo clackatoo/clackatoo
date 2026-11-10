@@ -103,6 +103,9 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         // asking for it masked otherwise, as only a daemon relaying does.
         | Request::Unmask { .. }
         | Request::Masked { .. }
+        // Saying it's a daemon relaying, which is sent what's hidden as
+        // it is, to mask itself.
+        | Request::Relay
         | Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::Forget { .. }
@@ -446,6 +449,8 @@ mod tests {
             terminal: TerminalId(3),
             line: Some(4),
         })));
+        // Nor says it's a daemon relaying, which is sent what's hidden.
+        assert!(changes(&ClientMessage::Request(Request::Relay)));
         // It runs no command, by typing into a terminal or starting one.
         assert!(changes(&ClientMessage::Request(Request::SendInput {
             terminal: TerminalId(3),

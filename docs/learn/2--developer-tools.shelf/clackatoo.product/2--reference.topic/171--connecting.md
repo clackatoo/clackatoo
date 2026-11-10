@@ -95,8 +95,9 @@ connects whenever a window opens.
 What HOST's programs mark private ([secret
 regions](~clackatoo/reference/secret-regions#through-connect)) is masked in
 your windows as in HOST's own: a password prompt there shows here, and `zv`
-shows what's hidden, in that window alone. Your phone and agents here have
-both masked.
+shows what's hidden, in that window alone. Your phone here shows what's
+kept from agents, as it does HOST's own terminals, and agents here have both
+masked.
 
 `:portforward 8080` in one of HOST's workspaces forwards this machine's port
 8080 to HOST's, through your daemon's connection to it, which keeps listening

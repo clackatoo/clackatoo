@@ -6,9 +6,10 @@
 //! one, a machine of the same user's, a terminal's lines as they are, with
 //! their hints ([`Event::HintedView`]), whenever a change to its view has
 //! any. Each client following it here is sent it masked as it would be
-//! were the terminal this daemon's own ([`hinted_frame`]): a window has
-//! what's hidden masked, a phone, a window an agent sees and a client not
-//! showing the terminal what's kept from agents too, and a daemon relaying
+//! were the terminal this daemon's own ([`hinted_frame`]): a window and a
+//! phone, which is the user too, have what's hidden masked, a window an
+//! agent sees and a client not showing the terminal what's kept from
+//! agents too, and a daemon relaying
 //! for this one is passed the hints on, if it masks lines itself, or sent
 //! every line with a hint masked. What a client asks of the lines that
 //! this daemon can't mask itself, a copy, a search, history, a capture or
@@ -77,19 +78,19 @@ pub(super) fn hinted_frame(
     wire::keeping_pixels(relays, || frame::encode(wire, &ServerMessage::Event(event))).ok()
 }
 
-impl Daemon {
-    /// The hints that mask a line of another machine's terminal for the
-    /// client at `token`, following it if `follows`: as for this daemon's
-    /// own, and what's kept from agents for a phone too, as before it was
-    /// sent lines as they are.
-    pub(in crate::server) fn relayed_hidden(&self, token: Token, follows: bool) -> Hints {
-        let mut hidden = self.hidden_for(token, follows);
-        if self.config.hints.noagent && self.is_web_device(token) {
-            hidden |= Hints::NOAGENT;
-        }
-        hidden
+/// Forgets the lines of `followed` shown as they are to any client here,
+/// as a snapshot came that this daemon didn't ask for: the terminal there
+/// was resized, or its history numbered afresh, so their numbers may name
+/// other lines now, as the daemon there forgets them for its own windows.
+pub(super) fn renumbered(followed: &mut super::Followed) {
+    for viewer in &mut followed.viewers {
+        viewer.masking.shown = 0..0;
+        viewer.masking.prints.clear();
+        viewer.shown_until = None;
     }
+}
 
+impl Daemon {
     /// How the lines of this daemon's terminal `local`, of the connection
     /// at `at`, are masked for the client at `token`: as a daemon relaying
     /// asked for one of its own, or as the client's view of it is, or else
@@ -102,11 +103,11 @@ impl Daemon {
             .and_then(|followed| followed.viewers.iter().find(|viewer| viewer.token == token));
         match viewer {
             Some(viewer) => Masking {
-                hidden: self.relayed_hidden(token, true),
+                hidden: self.hidden_for(token, true),
                 ..viewer.masking.clone()
             },
             None => Masking {
-                hidden: self.relayed_hidden(token, false),
+                hidden: self.hidden_for(token, false),
                 ..Masking::NONE
             },
         }
@@ -303,7 +304,7 @@ impl Daemon {
         for (at, linked) in self.links.list.iter().enumerate() {
             for (&local, followed) in &linked.relayed.followed {
                 for viewer in &followed.viewers {
-                    let hidden = self.relayed_hidden(viewer.token, true);
+                    let hidden = self.hidden_for(viewer.token, true);
                     if viewer.masking.hidden != hidden {
                         changed.push((at, local, viewer.token, hidden));
                     }
@@ -468,9 +469,10 @@ mod tests {
     }
 
     /// A window here following a terminal on another machine sees what's
-    /// kept from agents, as one there would; a phone, a window an agent
-    /// sees and a client not showing it have it masked; and what they ask
-    /// of its lines is asked masked as each has them.
+    /// kept from agents, as one there would, and so does a phone, which is
+    /// the user too; a window an agent sees and a client not showing it
+    /// have it masked; and what they ask of its lines is asked masked as
+    /// each has them.
     #[test]
     fn each_client_here_has_another_machines_lines_masked_as_its_own_would_be() {
         let dir = tempfile::tempdir().unwrap();
@@ -493,12 +495,12 @@ mod tests {
         assert_eq!(shown(&mut to_window), ["one", MASK, "two", "token"]);
         assert_eq!(shown(&mut to_granted), ["one", MASK, "two", MASK]);
         // What they copy is asked masked as each has it.
-        daemon.route_request(window, copy(local));
-        assert_eq!(masked_as(&mut there).hidden, Hints::HIDE);
-        for token in [granted, phone] {
+        for token in [window, phone] {
             daemon.route_request(token, copy(local));
-            assert_eq!(masked_as(&mut there).hidden, Hints::HIDE | Hints::NOAGENT);
+            assert_eq!(masked_as(&mut there).hidden, Hints::HIDE);
         }
+        daemon.route_request(granted, copy(local));
+        assert_eq!(masked_as(&mut there).hidden, Hints::HIDE | Hints::NOAGENT);
         // So is a capture by a client not showing it, as an agent's
         // command could ask.
         let (capture, _to_capture) = client(&mut daemon);
@@ -566,6 +568,28 @@ mod tests {
         assert!(heard(&mut there).contains(&attach));
         send_snapshot(&mut daemon, link, &mut there);
         assert_eq!(shown(&mut to_window)[1], MASK);
+        // Shown again, then resized there: a snapshot comes unasked, and
+        // what was shown is masked again, as its number may name another.
+        // What was asked so far is answered first, in order.
+        for _ in 0..4 {
+            say(&mut there, &ServerMessage::Response(Response::Done));
+        }
+        daemon.read_reached(link, Reading::Look);
+        daemon.route_request(window, unmask(Some(1)));
+        say(
+            &mut there,
+            &ServerMessage::Response(Response::HiddenRun {
+                lines: 1..2,
+                prints: vec![print],
+                hints: Hints::HIDE,
+            }),
+        );
+        daemon.read_reached(link, Reading::Look);
+        send_snapshot(&mut daemon, link, &mut there);
+        assert_eq!(shown(&mut to_window)[1], "hunter2");
+        send_snapshot(&mut daemon, link, &mut there);
+        assert_eq!(shown(&mut to_window)[1], MASK);
+        assert_eq!(daemon.next_mask_due(), None);
         // A phone can't ask.
         let (phone, _to_phone) = crate::server::tests::web_reader(&mut daemon);
         daemon.route_request(phone, Request::Attach { terminal: local });
@@ -654,6 +678,21 @@ mod tests {
         };
         daemon.route_request(newer, asked);
         assert_eq!(masked_as(&mut there).hidden, Hints::HIDE);
+        // Nothing but a terminal's lines is asked masked, of this daemon's
+        // or another's.
+        let typed = Request::Masked {
+            masking: Masking::NONE,
+            request: Box::new(Request::SendInput {
+                terminal: local,
+                bytes: b"x".to_vec(),
+            }),
+        };
+        let asked = daemon.route_request(newer, typed);
+        assert!(
+            matches!(asked, Routed::Answered(Response::Error(_))),
+            "{asked:?}"
+        );
+        assert!(heard(&mut there).is_empty());
         // And its window's ask to see hidden lines is asked there.
         let unmask = Request::Unmask {
             terminal: local,
