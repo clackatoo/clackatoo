@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.11.37 (2026-11-10)
+
+### Features
+
+- **settings:** the daemon's settings in :Settings, saved through the daemon, and its config run again as its files change (CLACKA-237) (1e770d74)
+- **gui:** the window's config runs again as its files change, so :reload needn't be (CLACKA-237) (86af7f7c)
+- **settings:** the daemon's restart-only options marked in the menu, its long names their own column, and look's daemon-config (CLACKA-237) (06d99b2c)
+- **settings:** changes made outside clackatoo to agents and limits wait for the user's OK, and a config run again by itself takes only its plain options (CLACKA-237) (16d9ccce)
+
+### Fixes
+
+- **settings:** a rerun that changes nothing is told no one, startup.toml's saves say they're for windows opened after too, and the relay test counts the two new requests (CLACKA-237) (ee8d1dc5)
+- **settings:** what runs programs changes only as the user starts a chat, a config run again by itself starts nothing, and the review's other findings (CLACKA-237) (def5222a)
+- **settings:** staging fails closed, stages the web app and its password, and an agent's input changes nothing that runs programs (CLACKA-237) (3b1e3c2b)
+- **settings:** nothing is ever approved but by the user (CLACKA-237) (918cfe41)
+- **settings:** protocol 152 after CLACKA-242, its hints staged as they loosen, and the relay counts its requests too (CLACKA-237) (49b13555)
+
 ## 2026.11.36 (2026-11-10)
 
 ### Features
