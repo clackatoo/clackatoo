@@ -2122,7 +2122,7 @@ impl Daemon {
         // The daemon's own config, run again as its files change; and
         // windows carried through an upgrade told it as it is now.
         self.watch_config();
-        self.tell_daemon_settings(None, None);
+        self.tell_daemon_settings(None, None, &[]);
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some(upgrade) = self.upgrade_when_ready()? {
                 return Ok(Some(upgrade));
@@ -4085,9 +4085,6 @@ impl Daemon {
             Request::DaemonSettings => self.serve_daemon_settings(token),
             Request::SetDaemonOption { name, value } => {
                 self.serve_set_daemon_option(token, &name, value.as_deref())
-            }
-            Request::DecideDaemonConfig { revision, apply } => {
-                self.serve_decide_daemon_config(token, revision, apply)
             }
             Request::Connect {
                 host,

@@ -78,8 +78,7 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::WatchConnections { .. }
         | Request::Lent
         | Request::DaemonSettings
-        | Request::SetDaemonOption { .. }
-        | Request::DecideDaemonConfig { .. } => return Asked::Own,
+        | Request::SetDaemonOption { .. } => return Asked::Own,
         Request::Review(ref action) => return Asked::Review(action.clone()),
         // Naming nothing of another machine's.
         Request::ListTerminals

@@ -328,11 +328,11 @@ An agent has `name`, `command`, `mode` and `tasks`, and needs its `command`, a
 list of strings. Anything else, or a field of the wrong kind, is a mistake,
 which stops the config at the line that set the agent: the daemon then keeps
 what it last ran, and says so in a window's bar. The daemon runs its config
-again as you save it, but a change to an agent, made outside clackatoo,
-waits for your OK in a window (see
-[Changes made outside clackatoo](~clackatoo/reference/config#changes-made-outside-clackatoo-wait-for-your-ok)).
-Once applied, new chats start with it, while chats already going keep the
-agent they have. A known
+again as you save it, so a new chat you start can start with a change at
+once, while chats already going keep the agent they have; a change made
+outside clackatoo is said in every window's bar (see
+[Changes made outside clackatoo](~clackatoo/reference/config#changes-made-outside-clackatoo-are-said)).
+A known
 agent's name, such as `claude`, runs it with your command, keeping its title
 and what clackatoo knows of it. `CLACKATOO_AGENT` gives Claude Code another
 command, for the daemon it's set for.

@@ -1563,7 +1563,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "settings-daemon",
         date: "2026-11-09",
         lesson: "wrap",
-        what: ":Settings changes the daemon's settings too; agents changed in its files wait for your OK",
+        what: ":Settings changes the daemon's settings too; the bar says what changed them outside clackatoo",
     },
 ];
 

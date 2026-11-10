@@ -4433,8 +4433,10 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::DaemonSettings {
                 settings,
                 saved,
+                outside,
             })) => {
-                if self.desk.daemon_settings_came(&settings, saved) {
+                let came = self.desk.daemon_settings_came(&settings, saved);
+                if self.desk.config_changed_outside(&outside) || came {
                     self.request_redraw();
                 }
             }

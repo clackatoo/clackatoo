@@ -109,10 +109,8 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
             action: clackatoo_protocol::TrustAction::Trust,
             ..
         }
-        // The daemon's config: what it saves of the menu's is approved,
-        // and what's pending the user's to answer (CLACKA-237).
+        // The daemon's config, which says what runs (CLACKA-237).
         | Request::SetDaemonOption { .. }
-        | Request::DecideDaemonConfig { .. }
         | Request::Forward(_) => true,
         _ => false,
     }
@@ -430,17 +428,11 @@ mod tests {
             value: "allow".into(),
         };
         assert!(changes(&chat(TerminalId(1), set)));
-        // Nor saves the daemon's settings, nor answers what's pending.
+        // Nor saves the daemon's settings.
         assert!(changes(&ClientMessage::Request(Request::SetDaemonOption {
             name: "subagents.working".into(),
             value: Some("64".into()),
         })));
-        assert!(changes(&ClientMessage::Request(
-            Request::DecideDaemonConfig {
-                revision: 1,
-                apply: true,
-            }
-        )));
         // It types in its own chat, but speaks for the user in no other.
         let send = ChatAction::Send("go".into());
         assert!(!changes(&chat(TerminalId(1), send.clone())));

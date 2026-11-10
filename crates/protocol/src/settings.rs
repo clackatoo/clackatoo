@@ -26,38 +26,20 @@ pub struct DaemonSettings {
     /// Why its config, as its files are now, didn't run, if it didn't:
     /// the daemon goes by what last ran without a mistake meanwhile.
     pub failure: Option<String>,
-    /// A change to what runs programs that its config says, made outside
-    /// clackatoo, which waits for the user to apply or discard it: the
-    /// daemon goes by what the user approved meanwhile.
-    pub pending: Option<PendingConfig>,
 }
 
-/// A change to what runs programs, made outside clackatoo, which waits for
-/// the user (see [`Request::DecideDaemonConfig`]).
-///
-/// [`Request::DecideDaemonConfig`]: crate::Request::DecideDaemonConfig
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingConfig {
-    /// Which change it is, for the user's answer to name: a hash of all
-    /// it changes, so an answer never applies another.
-    pub revision: u64,
-    /// Why nothing was approved, if nothing was: what was approved was
-    /// missing or unreadable, so all the config says is pending.
-    pub note: Option<String>,
-    /// What changes.
-    pub changes: Vec<ConfigChange>,
-}
-
-/// One thing a [`PendingConfig`] changes.
+/// One thing a run of the daemon's config changed of what runs programs,
+/// lets the web in, or keeps secret lines secret, as its files changed
+/// outside clackatoo: said to every window, for the user to see. Nothing
+/// waits on it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigChange {
     /// What, as config names it: `agents.claude command`,
     /// `subagents.working`.
     pub name: String,
-    /// What the user approved, as config writes it; empty for something
-    /// added.
+    /// What it was, as config writes it; empty for something added.
     pub before: String,
-    /// What the config says now; empty for something taken out.
+    /// What it is now; empty for something taken out.
     pub after: String,
 }
 

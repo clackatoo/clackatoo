@@ -2153,23 +2153,19 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         ],
         failure: Some("daemon/init.lua:3: daemon.web.port is a whole number".into()),
-        pending: Some(crate::PendingConfig {
-            revision: 0x5eed_c0de_0000_0003,
-            note: Some("the approved settings were missing".into()),
-            changes: vec![
-                crate::ConfigChange {
-                    name: "agents.claude command".into(),
-                    before: "{ \"claude-agent-acp\" }".into(),
-                    after: "{ \"other\" }".into(),
-                },
-                crate::ConfigChange {
-                    name: "subagents.working".into(),
-                    before: "16".into(),
-                    after: "64".into(),
-                },
-            ],
-        }),
     };
+    let outside = vec![
+        crate::ConfigChange {
+            name: "agents.claude command".into(),
+            before: "{ \"claude-agent-acp\" }".into(),
+            after: "{ \"other\" }".into(),
+        },
+        crate::ConfigChange {
+            name: "subagents.working".into(),
+            before: "16".into(),
+            after: "64".into(),
+        },
+    ];
     samples.extend(
         [
             Sample::Client(ClientMessage::Request(Request::DaemonSettings)),
@@ -2184,14 +2180,6 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 name: "history.lines".into(),
                 value: None,
             })),
-            Sample::Client(ClientMessage::Request(Request::DecideDaemonConfig {
-                revision: 3,
-                apply: true,
-            })),
-            Sample::Client(ClientMessage::Request(Request::DecideDaemonConfig {
-                revision: 3,
-                apply: false,
-            })),
             Sample::Server(ServerMessage::Event(Event::DaemonSettings {
                 settings: settings.clone(),
                 saved: Some(crate::OptionSaved {
@@ -2199,6 +2187,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     value: Some("20000".into()),
                     refused: None,
                 }),
+                outside: Vec::new(),
             })),
             Sample::Server(ServerMessage::Event(Event::DaemonSettings {
                 settings: crate::DaemonSettings::default(),
@@ -2207,10 +2196,12 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     value: None,
                     refused: Some("it's at most daemon.subagents.working".into()),
                 }),
+                outside: Vec::new(),
             })),
             Sample::Server(ServerMessage::Event(Event::DaemonSettings {
                 settings,
                 saved: None,
+                outside,
             })),
         ]
         .map(|sample| (crate::wire::DAEMON_SETTINGS, sample)),

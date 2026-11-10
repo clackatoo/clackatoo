@@ -928,7 +928,6 @@ fn variant(request: &Request) -> &'static str {
         Request::Unmask { .. } => "Unmask",
         Request::DaemonSettings => "DaemonSettings",
         Request::SetDaemonOption { .. } => "SetDaemonOption",
-        Request::DecideDaemonConfig { .. } => "DecideDaemonConfig",
     }
 }
 
@@ -1235,10 +1234,6 @@ fn own() -> Vec<Request> {
             name: "subagents.working".into(),
             value: Some("8".into()),
         },
-        Request::DecideDaemonConfig {
-            revision: 1,
-            apply: true,
-        },
     ]
 }
 
@@ -1401,7 +1396,7 @@ fn every_kind_of_request_of_a_machine_kept_from_a_daemon_relaying_is_refused() {
         .chain(NOT_ASKED)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(asked, every);
-    assert_eq!(asked.len(), 94, "a kind of request isn't asked: {asked:?}");
+    assert_eq!(asked.len(), 93, "a kind of request isn't asked: {asked:?}");
     // Desk heard nothing of any of it, and nothing told the daemon
     // relaying names desk.
     assert!(heard(&mut world.there).is_empty());

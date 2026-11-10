@@ -26811,12 +26811,29 @@ fn next_daemon_settings(
     clackatoo_protocol::DaemonSettings,
     Option<clackatoo_protocol::OptionSaved>,
 ) {
+    let (settings, saved, _) = next_daemon_notice(client);
+    (settings, saved)
+}
+
+/// The next time `client` is told the daemon's settings, and what the run
+/// changed outside clackatoo that's noticed.
+fn next_daemon_notice(
+    client: &mut Client,
+) -> (
+    clackatoo_protocol::DaemonSettings,
+    Option<clackatoo_protocol::OptionSaved>,
+    Vec<clackatoo_protocol::ConfigChange>,
+) {
     loop {
-        if let Event::DaemonSettings { settings, saved } = client
+        if let Event::DaemonSettings {
+            settings,
+            saved,
+            outside,
+        } = client
             .next_event()
             .unwrap_or_else(starved("the daemon's settings"))
         {
-            return (settings, saved);
+            return (settings, saved, outside);
         }
     }
 }
@@ -26847,14 +26864,10 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
             state: Some(dir.join("config/state")),
         };
         std::fs::create_dir_all(&dirs.daemon).unwrap();
-        let had = settings::staging::Guarded::of(&settings::Settings::default(), None);
-        let (staged, going) = settings::staging::starting(&dirs, &had);
-        config.agents.configured = going.configured;
         config.own_config = Some(settings::Own {
             dirs,
             settings: settings::Settings::default(),
             failure: None,
-            staged,
         });
     });
     let config = daemon.dir.path().join("config");
@@ -26873,19 +26886,16 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     assert!(daemon_option(&settings, "web.mode").restart);
     assert_eq!(settings.dir, config.display().to_string());
 
-    // init.lua made: run again. Its agent, made outside clackatoo, waits
-    // for the user; a limit lowered applies.
+    // init.lua made: run again. Its agent, made outside clackatoo, is new
+    // chats' at once, and noticed; a limit lowered applies, unnoticed.
     std::fs::write(
         config.join("daemon/init.lua"),
         "daemon.subagents.working = 8\ndaemon.agents.mine = { command = { \"mine-acp\" } }\n",
     )
     .unwrap();
-    let (settings, saved) = next_daemon_settings(&mut client);
+    let (settings, saved, outside) = next_daemon_notice(&mut client);
     assert_eq!(saved, None);
-    let pending = settings.pending.clone().expect("pending");
-    let names: Vec<&str> = pending
-        .changes
-        .iter()
+    let names: Vec<&str> = (outside.iter())
         .map(|change| change.name.as_str())
         .collect();
     assert_eq!(names, ["agents.mine"]);
@@ -26901,20 +26911,7 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
         };
         (choices.agents.iter()).any(|agent| agent.agent == "mine")
     };
-    assert!(
-        !agents(&mut client),
-        "a pending agent isn't one a chat starts"
-    );
-    // A stale answer is refused; the user's answer applies it.
-    let decide = |revision, apply| Request::DecideDaemonConfig { revision, apply };
-    let stale = (client.request(&decide(pending.revision.wrapping_add(1), true))).unwrap();
-    assert!(matches!(stale, Response::Error(_)), "{stale:?}");
-    assert_eq!(
-        client.request(&decide(pending.revision, true)).unwrap(),
-        Response::Done
-    );
-    let (settings, _) = next_daemon_settings(&mut client);
-    assert_eq!(settings.pending, None);
+    assert!(agents(&mut client), "it's one a chat starts");
     let working = daemon_option(&settings, "subagents.working");
     assert_eq!(working.value, "8");
     assert_eq!(working.by.source, clackatoo_protocol::OptionSource::Config);
@@ -26923,20 +26920,22 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
         at.file.ends_with("daemon/init.lua") && at.line == 1,
         "{at:?}"
     );
-    assert!(agents(&mut client), "applied, it's one a chat starts");
-    // Changed again outside clackatoo, and discarded: the agent stays as
-    // approved, and the change isn't pending again.
+    // Its command changed: noticed, what it was and what it is.
     std::fs::write(
         config.join("daemon/init.lua"),
         "daemon.subagents.working = 8\ndaemon.agents.mine = { command = { \"other\" } }\n",
     )
     .unwrap();
-    let (settings, _) = next_daemon_settings(&mut client);
-    let pending = settings.pending.expect("pending");
-    assert_eq!(pending.changes[0].name, "agents.mine command");
-    client.request(&decide(pending.revision, false)).unwrap();
-    let (settings, _) = next_daemon_settings(&mut client);
-    assert_eq!(settings.pending, None);
+    let (_, _, outside) = next_daemon_notice(&mut client);
+    let change = &outside[0];
+    assert_eq!(
+        (
+            change.name.as_str(),
+            change.before.as_str(),
+            change.after.as_str()
+        ),
+        ("agents.mine command", "{ \"mine-acp\" }", "{ \"other\" }")
+    );
 
     // A window's menu saves one, as the config runs it.
     let set = |name: &str, value: Option<&str>| Request::SetDaemonOption {

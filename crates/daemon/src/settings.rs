@@ -26,9 +26,9 @@ pub mod file;
 pub mod literal;
 mod lua;
 mod migrate;
+pub mod noticed;
 pub mod options;
 mod saving;
-pub mod staging;
 
 pub use lua::{module_name, read as read_file, read_text};
 
@@ -88,9 +88,6 @@ pub struct Own {
     pub settings: Settings,
     /// Why it didn't run, as the daemon started, if it didn't.
     pub failure: Option<String>,
-    /// What runs programs, as the user approved it, and what the config
-    /// says that waits for the user (see [`staging`]).
-    pub staged: staging::Staged,
 }
 
 /// The file in the state directory the settings that last ran without a

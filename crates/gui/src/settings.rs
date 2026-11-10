@@ -97,9 +97,6 @@ pub(crate) struct DaemonFacts {
     dir: std::path::PathBuf,
     /// Why its config, as its files are now, didn't run, if it didn't.
     pub(crate) failure: Option<String>,
-    /// A change to what runs programs made outside clackatoo, which waits
-    /// for the user to apply or discard it.
-    pub(crate) pending: Option<clackatoo_protocol::PendingConfig>,
     options: Vec<DaemonValue>,
 }
 
@@ -151,35 +148,8 @@ impl DaemonFacts {
             elsewhere: elsewhere.then(|| settings.machine.clone()),
             dir: settings.dir.clone().into(),
             failure: settings.failure.clone(),
-            pending: settings.pending.clone(),
             options,
         }
-    }
-
-    /// What the bar says of what's pending, if anything is: the names of
-    /// what changes.
-    pub(crate) fn pending_said(&self) -> Option<String> {
-        let pending = self.pending.as_ref()?;
-        let names: Vec<&str> = (pending.changes.iter())
-            .map(|change| change.name.as_str())
-            .collect();
-        // With nothing approved, why, kindly: it's not that anything
-        // changed, as after an upgrade to this.
-        let said = match &pending.note {
-            Some(note) => format!(
-                "{note}. Review and Apply in :Settings: {}",
-                names.join(", ")
-            ),
-            None => format!(
-                "Config changed outside clackatoo: {}. :Settings to apply or discard",
-                names.join(", ")
-            ),
-        };
-        // Names an agent's config chose: shown as they'd show, no more.
-        let plain = said
-            .chars()
-            .map(|ch| if ch.is_control() { ' ' } else { ch });
-        Some(clackatoo_term::visible(plain, 400))
     }
 
     fn of(&self, info: &Info) -> Option<&DaemonValue> {
@@ -211,12 +181,6 @@ impl DaemonFacts {
         each.value = value.unwrap_or_else(|| info.default_value());
         each.running = (info.restart && in_force != each.value).then_some(in_force);
     }
-}
-
-/// The change to what runs programs made outside clackatoo that's pending,
-/// if one is.
-fn pending_of<'a>(facts: &Facts<'a>) -> Option<&'a clackatoo_protocol::PendingConfig> {
-    facts.daemon?.pending.as_ref()
 }
 
 /// Whose the daemon's settings are, as the menu's header says, if they're
@@ -405,10 +369,6 @@ pub(crate) enum Outcome {
     Open(Place),
     /// The same, for a line of the daemon's config, on its machine.
     OpenDaemons(Place),
-    /// The change to what runs programs made outside clackatoo that the
-    /// daemon's config says, the one `revision` names, is to be applied,
-    /// or else discarded.
-    Decide { revision: u64, apply: bool },
     /// The fonts installed are wanted, for the font picker: see
     /// [`SettingsMenu::fonts`].
     Fonts,
@@ -467,8 +427,6 @@ pub(crate) struct Set {
 /// A section of the menu, down its side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Section {
-    /// A change to what runs programs made outside clackatoo, first.
-    Pending,
     Options(Category),
     Keys,
     /// The daemon's options, after the window's.
@@ -478,7 +436,6 @@ enum Section {
 impl Section {
     fn title(self) -> &'static str {
         match self {
-            Self::Pending => "Changed outside clackatoo",
             Self::Keys => "Keys",
             Self::Daemon(Category::Agents) => "The daemon's agents",
             Self::Options(category) | Self::Daemon(category) => category.title(),
@@ -531,11 +488,6 @@ impl Bound {
 enum Entry {
     Option(&'static Info),
     Keys(Bound),
-    /// One thing a change to what runs programs made outside clackatoo
-    /// changes, by its place in the daemon's list.
-    Change(usize),
-    /// Applying that change, or discarding it.
-    Decide(bool),
 }
 
 impl Entry {
@@ -544,7 +496,6 @@ impl Entry {
             Self::Option(info) if info.scope == Scope::Daemon => Section::Daemon(info.category),
             Self::Option(info) => Section::Options(info.category),
             Self::Keys(_) => Section::Keys,
-            Self::Change(_) | Self::Decide(_) => Section::Pending,
         }
     }
 }
@@ -647,15 +598,7 @@ pub(crate) struct SettingsMenu {
     agents: Vec<(String, String, bool)>,
     /// The daemon's settings are listed, as it's said them.
     daemon: bool,
-    /// The change to what runs programs listed, by its revision, if one
-    /// is pending.
-    pending: Option<u64>,
 }
-
-/// What a change to what runs programs is said as, until the user answers:
-/// why it waits.
-const PENDING: &str = "Changed outside clackatoo, as by an agent: the daemon runs what you \
-                       approved until you apply or discard it";
 
 /// Why an agent's keys don't change keys, as the window says too.
 const AGENTS_SAVE_NO_KEYS: &str = "an agent's input can't save keys";
@@ -687,7 +630,6 @@ impl SettingsMenu {
             said_saved: None,
             agents: Vec::new(),
             daemon: false,
-            pending: None,
         };
         menu.fill(facts);
         if !query.is_empty() {
@@ -701,11 +643,7 @@ impl SettingsMenu {
     /// made, or the daemon has said its settings, keeping the row picked
     /// where it can.
     pub(crate) fn follow_keys(&mut self, facts: &Facts, keys_seen: u64) {
-        let pending = pending_of(facts).map(|pending| pending.revision);
-        if keys_seen == self.keys_seen
-            && facts.daemon.is_some() == self.daemon
-            && pending == self.pending
-        {
+        if keys_seen == self.keys_seen && facts.daemon.is_some() == self.daemon {
             return;
         }
         self.keys_seen = keys_seen;
@@ -725,19 +663,6 @@ impl SettingsMenu {
         self.items.clear();
         self.entries.clear();
         self.ranking.clear();
-        // A change to what runs programs that waits for the user, first.
-        self.pending = pending_of(facts).map(|pending| pending.revision);
-        if let Some(pending) = pending_of(facts) {
-            for (at, change) in pending.changes.iter().enumerate() {
-                self.items
-                    .push(&format!("{} changed outside clackatoo", change.name));
-                self.entries.push(Entry::Change(at));
-            }
-            self.items.push("apply changed outside clackatoo");
-            self.entries.push(Entry::Decide(true));
-            self.items.push("discard changed outside clackatoo");
-            self.entries.push(Entry::Decide(false));
-        }
         // `ALL` lists options by category, as the menu does.
         for info in ALL {
             self.items.push(&format!(
@@ -782,8 +707,6 @@ impl SettingsMenu {
         Some(match &self.entries[index] {
             Entry::Option(info) => info.name.to_owned(),
             Entry::Keys(bound) => bound.name(),
-            Entry::Change(at) => format!("pending {at}"),
-            Entry::Decide(apply) => format!("decide {apply}"),
         })
     }
 
@@ -1110,20 +1033,7 @@ impl SettingsMenu {
     /// locked row is set in.
     fn act(&mut self, facts: &Facts, history: &mut History) -> Outcome {
         match self.picked() {
-            None | Some(Entry::Change(_)) => Outcome::Nothing,
-            Some(Entry::Decide(apply)) => {
-                // The user's to answer: never an agent's keys.
-                if facts.automating {
-                    return self.refuse("an agent's input can't answer this: it's yours");
-                }
-                match pending_of(facts) {
-                    Some(pending) => Outcome::Decide {
-                        revision: pending.revision,
-                        apply,
-                    },
-                    None => Outcome::Nothing,
-                }
-            }
+            None => Outcome::Nothing,
             Some(Entry::Option(info)) => {
                 if let Some(by) = facts.locked(info) {
                     return self.open_set_by(Some(info), by, facts);
@@ -1196,7 +1106,7 @@ impl SettingsMenu {
                     .find(|by| by.at.is_some())
                     .unwrap_or(SetBy::DEFAULT),
             ),
-            None | Some(Entry::Change(_) | Entry::Decide(_)) => return Outcome::Nothing,
+            None => return Outcome::Nothing,
         };
         if by.at.is_none() {
             return self.refuse("no line of config set it");
@@ -1716,15 +1626,6 @@ impl SettingsMenu {
                     _ => (KeyMode::letters(&bound.modes), Ink::Muted),
                 })
             }
-            entry @ (Entry::Change(_) | Entry::Decide(_)) => {
-                let (shown, tag) = pending_row(entry, facts);
-                if let Some((name, _)) = shown.first() {
-                    lit.extend(matched_in(name, 0));
-                    lit.resize(name.chars().count(), false);
-                }
-                pieces.extend(shown);
-                tag
-            }
         };
         let mut text = String::new();
         let mut inks = Vec::new();
@@ -1977,7 +1878,6 @@ fn detail(picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> Previe
         None => Vec::new(),
         Some(Entry::Option(info)) => option_detail(info, facts),
         Some(Entry::Keys(bound)) => keys_detail(bound, facts),
-        Some(Entry::Change(_) | Entry::Decide(_)) => pending_detail(picked, facts),
     };
     let said: Vec<Vec<(&str, Ink)>> = (said.iter())
         .map(|line| {
@@ -1987,74 +1887,6 @@ fn detail(picked: Option<&Entry>, facts: &Facts, size: (usize, usize)) -> Previe
         })
         .collect();
     lines(&said, size)
-}
-
-/// A piece of a row's text, and how it's drawn.
-type Piece = (String, Ink);
-
-/// What a row of the change made outside clackatoo shows, `entry`'s: its
-/// pieces, the first the one a search matches in, and its tag.
-fn pending_row(entry: &Entry, facts: &Facts) -> (Vec<Piece>, Option<Piece>) {
-    match entry {
-        Entry::Change(at) => {
-            let change = pending_of(facts).and_then(|pending| pending.changes.get(*at));
-            let (name, now) = change.map_or_else(Default::default, |change| {
-                let now = if change.after.is_empty() {
-                    "taken out".to_owned()
-                } else {
-                    change.after.clone()
-                };
-                (change.name.clone(), now)
-            });
-            (
-                vec![(format!("{name}  "), Ink::Bold), (now, Ink::Plain)],
-                Some(("pending".into(), Ink::Caution)),
-            )
-        }
-        Entry::Decide(apply) => {
-            let said = if *apply {
-                "Apply these changes"
-            } else {
-                "Discard them, keeping what you approved"
-            };
-            (vec![(said.into(), Ink::Bold)], None)
-        }
-        Entry::Option(_) | Entry::Keys(_) => (Vec::new(), None),
-    }
-}
-
-/// What the preview says of a change to what runs programs made outside
-/// clackatoo: each thing it changes, what was approved and what's
-/// pending, and how to answer.
-fn pending_detail(picked: Option<&Entry>, facts: &Facts) -> Vec<Said> {
-    let Some(pending) = pending_of(facts) else {
-        return Vec::new();
-    };
-    let mut said = vec![
-        vec![("Changed outside clackatoo".into(), Ink::Bold)],
-        vec![(PENDING.into(), Ink::Caution)],
-        Vec::new(),
-    ];
-    for (at, change) in pending.changes.iter().enumerate() {
-        let ink = if matches!(picked, Some(Entry::Change(each)) if *each == at) {
-            Ink::Bold
-        } else {
-            Ink::Plain
-        };
-        said.push(vec![(change.name.clone(), ink)]);
-        let none = |text: &str| {
-            if text.is_empty() {
-                "none".to_owned()
-            } else {
-                text.to_owned()
-            }
-        };
-        said.push(labelled("Approved", none(&change.before), Ink::Muted));
-        said.push(labelled("Now", none(&change.after), Ink::Caution));
-    }
-    said.push(Vec::new());
-    said.push(key_hints(&[("Enter", "on Apply or Discard, answers")]));
-    said
 }
 
 /// What the preview says of `info`'s option.

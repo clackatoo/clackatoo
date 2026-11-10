@@ -146,8 +146,7 @@ pub use review::{
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
 pub use settings::{
-    ConfigChange, DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy,
-    OptionSource, PendingConfig,
+    ConfigChange, DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy, OptionSource,
 };
 pub use shown::invisible;
 pub use view::{
@@ -762,6 +761,11 @@ pub enum Event {
         settings: DaemonSettings,
         /// What came of this window's change, if this is that.
         saved: Option<OptionSaved>,
+        /// What this run changed of what runs programs, lets the web in,
+        /// or keeps secret lines secret, as the config's files changed
+        /// outside clackatoo, for the window to say: empty for any other
+        /// run, as a window's own change.
+        outside: Vec<ConfigChange>,
     },
 }
 
@@ -1862,18 +1866,6 @@ pub enum Request {
         name: String,
         /// What it's saved as.
         value: Option<String>,
-    },
-    /// The user's answer to a change to what runs programs made outside
-    /// clackatoo ([`PendingConfig`]): apply it, which the daemon then goes
-    /// by, or discard it. Answered with [`Response::Done`], then
-    /// [`Event::DaemonSettings`]; refused if `revision` isn't the change
-    /// pending now, and from a web device or a daemon relaying. Only to a
-    /// daemon of protocol 151 or later ([`wire::DAEMON_SETTINGS`]).
-    DecideDaemonConfig {
-        /// The change, as [`PendingConfig::revision`] names it.
-        revision: u64,
-        /// Apply it, or else discard it.
-        apply: bool,
     },
 }
 

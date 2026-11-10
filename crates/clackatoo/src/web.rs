@@ -63,9 +63,6 @@ pub(crate) fn run(command: &WebCommand) -> anyhow::Result<()> {
     if *unset {
         clackatoo_daemon::settings::set_password(&state, None)
             .with_context(|| format!("couldn't remove {}", path.display()))?;
-        // The user's own doing, so approved (see the daemon's staging).
-        clackatoo_daemon::settings::staging::approve_password(&state, None)
-            .context("couldn't approve having no password")?;
         // An old web.toml not moved yet would bring its password back.
         if let Some(old) =
             clackatoo_daemon::settings::forget_old_password().map_err(anyhow::Error::msg)?
@@ -78,8 +75,6 @@ pub(crate) fn run(command: &WebCommand) -> anyhow::Result<()> {
         let hash = clackatoo_daemon::web::hash_password(&password);
         clackatoo_daemon::settings::set_password(&state, Some(&hash))
             .with_context(|| format!("couldn't write {}", path.display()))?;
-        clackatoo_daemon::settings::staging::approve_password(&state, Some(&hash))
-            .context("couldn't approve the password")?;
         println!("The password's hash is in {}.", path.display());
     }
     println!("The daemon reads it when it next starts: `clackatoo upgrade` restarts it in place.");

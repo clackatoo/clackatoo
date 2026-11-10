@@ -5,8 +5,8 @@
 //! section does.
 
 use clackatoo_protocol::{
-    DaemonSettings, FileLocation, OpenFile, OptionSaved, PaneTerminal, Request, Response, Side,
-    wire,
+    ConfigChange, DaemonSettings, FileLocation, OpenFile, OptionSaved, PaneTerminal, Request,
+    Response, Side, wire,
 };
 
 use super::{Asked, Desk};
@@ -17,6 +17,10 @@ use crate::options::settings_lua::Mapping;
 use crate::options::{Case, Scope, SetBy};
 use crate::settings::view::{EasyView, SettingsHit};
 use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, Set, SettingsMenu};
+
+/// The most characters the bar is given of what the daemon's config
+/// changed outside clackatoo.
+const MOST_NOTICED: usize = 400;
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
@@ -116,7 +120,7 @@ impl Desk {
 
     /// Asks the daemon for its settings, for the menu, if it can say them:
     /// the menu lists them once it has, and as they change after.
-    pub(super) fn ask_daemon_settings(&mut self) {
+    fn ask_daemon_settings(&mut self) {
         if self.connected && self.daemon_has(wire::DAEMON_SETTINGS) {
             self.request(Request::DaemonSettings, Asked::DaemonSettings);
         }
@@ -133,18 +137,6 @@ impl Desk {
             }
             _ => false,
         }
-    }
-
-    /// The daemon's answer to the user's answer to what's pending: refused
-    /// at once, as when another change came meanwhile, the menu says why,
-    /// and what's pending now is asked for.
-    pub(super) fn daemon_decided(&mut self, response: Response) -> bool {
-        let Response::Error(err) = response else {
-            return false;
-        };
-        self.warn_saved(format!("your answer wasn't taken: {err}"));
-        self.ask_daemon_settings();
-        true
     }
 
     /// The daemon's answer to a change to its option `info`: refused at
@@ -213,6 +205,34 @@ impl Desk {
         true
     }
 
+    /// The daemon's config ran as its files changed outside clackatoo, and
+    /// changed `outside` of what runs programs, lets the web in, or keeps
+    /// secret lines secret: the bar says what, what it was and what it is,
+    /// for the user to see; nothing waits on it. Returns whether it said.
+    pub(crate) fn config_changed_outside(&mut self, outside: &[ConfigChange]) -> bool {
+        if outside.is_empty() {
+            return false;
+        }
+        let shown = |text: &str| if text.is_empty() { "none" } else { text }.to_owned();
+        let changes: Vec<String> = (outside.iter())
+            .map(|change| {
+                format!(
+                    "{}: {} → {}",
+                    change.name,
+                    shown(&change.before),
+                    shown(&change.after)
+                )
+            })
+            .collect();
+        let said = format!("config changed outside clackatoo: {}", changes.join("; "));
+        // What an agent's config chose: shown as it would show, no more.
+        let plain = said
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch });
+        self.warn(clackatoo_term::visible(plain, MOST_NOTICED));
+        true
+    }
+
     /// Saves the daemon's option `info` as `value`, or takes it out, as
     /// the daemon does it: the menu shows it so at once, until the daemon
     /// says how it went.
@@ -235,42 +255,6 @@ impl Desk {
             },
             Asked::DaemonOption(info),
         );
-    }
-
-    /// Answers the change to what runs programs made outside clackatoo
-    /// that's pending, the one `revision` names: applies it, or discards
-    /// it. Only the user's own keys answer: never an agent's, nor what a
-    /// chat with Control of the window does.
-    fn decide_daemon_config(&mut self, revision: u64, apply: bool) {
-        if self.automating || self.controlled {
-            return self.warn_saved("an agent's input can't answer this: it's yours".into());
-        }
-        self.request(
-            Request::DecideDaemonConfig { revision, apply },
-            Asked::DaemonDecided,
-        );
-        self.say_saved(if apply {
-            "applying the change made outside clackatoo".into()
-        } else {
-            "discarding the change made outside clackatoo".into()
-        });
-    }
-
-    /// The bar's standing notice of a change to what runs programs made
-    /// outside clackatoo, while one is pending and the command line isn't
-    /// open: it stays until the user answers it.
-    pub(super) fn pending_config_status(&self) -> Option<crate::chrome::Status> {
-        if self.input.is_some() {
-            return None;
-        }
-        let text = self.daemon_settings.as_ref()?.pending_said()?;
-        Some(crate::chrome::Status::Typing {
-            label: None,
-            text,
-            choices: Vec::new(),
-            selected: None,
-            under: None,
-        })
     }
 
     /// A change this window asked the daemon to save of its option called
@@ -480,12 +464,10 @@ impl Desk {
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Close => self.settings = None,
-            Outcome::Decide { revision, apply } => self.decide_daemon_config(revision, apply),
             Outcome::Set(sets) => {
                 // The daemon's, and the window's that run programs, are
                 // the user's to change: never an agent's input, nor what a
-                // chat with Control of the window does. The daemon
-                // approves what the menu saves of its own.
+                // chat with Control of the window does.
                 let theirs = |set: &Set| {
                     set.info.scope == Scope::Daemon || crate::options::runs_programs(set.info)
                 };

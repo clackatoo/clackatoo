@@ -312,9 +312,9 @@ A value outside its range is a mistake in the config, never brought into
 range: the daemon keeps what it last ran, and says so in a window's bar. So
 is a name it doesn't know, or a `default` above `working`. With `working`
 below 6 and no `default`, new chats start at `working`. The daemon takes a
-change in as you save it: lower limits at once, higher ones once you apply
-them in a window (see
-[Changes made outside clackatoo](~clackatoo/reference/config#changes-made-outside-clackatoo-wait-for-your-ok)).
+change in as you save it, for chats started from then on; one raised outside
+clackatoo is said in every window's bar (see
+[Changes made outside clackatoo](~clackatoo/reference/config#changes-made-outside-clackatoo-are-said)).
 The
 [settings menu](~clackatoo/reference/config#the-settings-menu) changes
 `working` too. Lowering `working` lowers any chat's Subagents

@@ -131,9 +131,6 @@ enum Asked {
     DaemonSettings,
     /// A change to one of the daemon's settings the menu asked for.
     DaemonOption(&'static crate::options::Info),
-    /// The user's answer to a change to what runs programs made outside
-    /// clackatoo.
-    DaemonDecided,
     /// The chats, every one, to mark the tabs and workspaces with what
     /// they're doing.
     Chats,
@@ -978,9 +975,6 @@ impl Desk {
         if let Some(status) = self.pairing_status() {
             return status;
         }
-        if let Some(status) = self.pending_config_status() {
-            return status;
-        }
         let view = self.focused_view();
         let bar = view.map_or_else(view::Bar::default, view::PaneView::bar);
         if bar.prompting
@@ -1600,9 +1594,6 @@ impl Desk {
             self.say_present(true);
         }
         self.tell_colours();
-        // Its settings: a change made outside clackatoo, waiting for the
-        // user, stands in the bar from the start.
-        self.ask_daemon_settings();
     }
 
     /// Tells the daemon the colours terminals are drawn in, which it
@@ -1632,11 +1623,6 @@ impl Desk {
         // Its searches went with the connection.
         self.finder = None;
         self.start = None;
-        // What's pending is asked again as it's back: none stands meanwhile,
-        // nor is answered by a revision that may be gone.
-        if let Some(daemon) = &mut self.daemon_settings {
-            daemon.pending = None;
-        }
     }
 
     /// Forgets everything sent on the last connection, which will never be
@@ -1974,7 +1960,6 @@ impl Desk {
             Some(Asker::Window(Asked::DaemonOption(info))) => {
                 self.daemon_option_answered(info, response)
             }
-            Some(Asker::Window(Asked::DaemonDecided)) => self.daemon_decided(response),
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
             Some(Asker::Window(Asked::Reattached(terminal))) => {
                 if let Response::Error(err) = response {

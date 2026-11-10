@@ -567,53 +567,26 @@ impl DaemonConfig {
         let loaded = (dirs.as_ref())
             .map(|dirs| settings::load(dirs, when))
             .unwrap_or_default();
-        let Some(dirs) = dirs else {
-            let mut config = Self::from_settings(&loaded.settings);
-            config.notes.splice(0..0, loaded.notes);
-            return (config, loaded.settings);
-        };
-        // What runs programs and lets the web in is what the user
-        // approved, whatever the files say now: a change made outside
-        // clackatoo waits.
-        let password = (dirs.state.as_deref()).and_then(|state| {
-            settings::password(state)
-                .inspect_err(|why| log::warn!("{why}"))
-                .ok()
-                .flatten()
-        });
-        let fresh = settings::staging::Guarded::of(&loaded.settings, password);
-        let (staged, going) = settings::staging::starting(&dirs, &fresh);
-        let applied = settings::staging::applied(&loaded.settings, &going);
-        let mut config = Self::from_settings_with(&applied, going.password.clone());
-        config.agents.configured = going.configured;
+        let mut config = Self::from_settings(&loaded.settings);
         config.notes.splice(0..0, loaded.notes);
-        config.own_config = Some(settings::Own {
+        config.own_config = dirs.map(|dirs| settings::Own {
             dirs,
             settings: loaded.settings.clone(),
             failure: loaded.failure,
-            staged,
         });
         (config, loaded.settings)
-    }
-
-    /// As [`from_settings_with`](Self::from_settings_with) says, with no
-    /// password for the web app.
-    #[must_use]
-    pub fn from_settings(settings: &settings::Settings) -> Self {
-        Self::from_settings_with(settings, None)
     }
 
     /// As [`from_env`](Self::from_env) says, over what the daemon's config
     /// `settings` sets: the agents it adds and their limits, this
     /// machine's name, the web app, keeping its devices in
-    /// `clackatoo/web` in the data directory, with `password` its
-    /// password's hash, as the user approved it (see
-    /// [`settings::staging`]), how terminals' history is kept and how much
-    /// memory images may take. The environment's `$CLACKATOO_HISTORY*` and
+    /// `clackatoo/web` in the data directory and its password's hash in
+    /// [`state_dir`], how terminals' history is kept and how much memory
+    /// images may take. The environment's `$CLACKATOO_HISTORY*` and
     /// `$CLACKATOO_IMAGE_MEMORY` outdo it, for tests.
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
-    pub fn from_settings_with(settings: &settings::Settings, password: Option<String>) -> Self {
+    pub fn from_settings(settings: &settings::Settings) -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
         // Programs name this machine in `file://` links (see
         // `clackatoo_term::Config::local_host`).
@@ -727,7 +700,7 @@ impl DaemonConfig {
                     idle: DEFAULT_BROWSER_IDLE,
                 }),
             },
-            web: web_from(settings, password, &mut notes),
+            web: web_from(settings, &mut notes),
             machine: match non_empty("CLACKATOO_MACHINE") {
                 Some(off) if off == "off" => None,
                 Some(path) => Some(PathBuf::from(path)),
@@ -837,18 +810,23 @@ fn images_from(
     }
 }
 
-/// The web app, as the daemon's config `settings` says, with `password`
-/// its password's hash, as the user approved it, never read here: why
-/// it's off when it's set to be on goes in `notes`.
-fn web_from(
-    settings: &settings::Settings,
-    password: Option<String>,
-    notes: &mut Vec<String>,
-) -> Option<web::WebConfig> {
+/// The web app, as the daemon's config `settings` says, with the
+/// password's hash in [`state_dir`]: why it's off when it's set to be on
+/// goes in `notes`.
+fn web_from(settings: &settings::Settings, notes: &mut Vec<String>) -> Option<web::WebConfig> {
     if settings.value("web.mode") == schema::Value::Choice("off") {
         return None;
     }
     let data = data_dir()?.join("clackatoo/web");
+    let password = match settings::state_dir().map(|state| settings::password(&state)) {
+        Some(Ok(password)) => password,
+        Some(Err(why)) => {
+            log::error!("{why}; the web app is off");
+            notes.push(format!("the web app is off: {why}"));
+            return None;
+        }
+        None => None,
+    };
     settings
         .web(data, password)
         .inspect_err(|why| {

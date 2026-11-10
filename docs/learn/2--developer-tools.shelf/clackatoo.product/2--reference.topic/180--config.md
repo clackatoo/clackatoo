@@ -841,71 +841,42 @@ modules they require, in `daemon/lua/` and `lua/`. A quarter of a second
 after one changes, it runs the config again, on a thread of its own, never
 holding up the terminals. What can change as the daemon runs does, at once,
 for what it starts from then on: the agents and profiles new chats can start
-with, and the limits on chats agents start, once you've approved them (see
-below), whether agents go on through upgrades, the notification when a long
-command ends, how terminals started
+with, the limits on chats agents start, whether agents go on through
+upgrades, the notification when a long command ends, how terminals started
 then lay out emoji, and how many lines of terminals' history are kept, and
 how often. The rest, as [the daemon's options](#the-daemon-s-options) say,
 is read only as the daemon starts: `clackatoo upgrade`, which keeps every
 terminal and agent running, takes it in.
 
-### Changes made outside clackatoo wait for your OK
+### Changes made outside clackatoo are said
 
-Changes made outside clackatoo to agents and limits wait for your OK, and so
-do changes to the web app. That covers any field of any agent, any profile,
-any limit on chats agents start raised, every `web.` option, the web app's
-password, and any `hints.` option loosened, as `daemon.hints.noagent =
-"show"`: what runs programs, what lets the web in, and what keeps the lines
-programs mark secret from agents, the disk and the screen. A hint made
-stricter applies at once, as a limit lowered does. When the
-config's files say otherwise of those than you last approved, as a file an
-agent wrote would, the daemon goes on by what you approved, and the change is
-*pending*. The rest of the config still applies, and a limit lowered applies
-at once. Saving `daemon/init.lua` yourself is a change made outside clackatoo
-too: the daemon can't tell your editor from an agent's, so an agent you add
-there waits for one OK.
-
-Every window says so in its bar, as `Config changed outside clackatoo:
-agents.claude command, subagents.working`, from the moment it connects, and
-the settings menu's Advanced lists it first, under **Changed outside
-clackatoo**: each thing it changes, what you approved and what it is now,
-then **Apply these changes** and **Discard them**. The password is never
-shown, only whether there's one. Only you can answer, in a window: never an
-agent's keys, a chat with Control of the window, or a web device. A change
-you discard isn't pending again until the files say something else. The web
-app's options, applied, take effect as the daemon next starts, as they always
-do: `clackatoo upgrade`.
-
-What you approved is kept in clackatoo's state directory, as
-`daemon-approved.lua` and the password's hash as `daemon-approved-password`,
-and what you discarded as `daemon-discarded.lua`, so a restart or an upgrade,
-which run the config from its files, never takes in a change you didn't
-approve: it stays pending. `clackatoo web password` is yours, and approves
-the password it sets; so does a change you make in the settings menu, which
-applies at once.
-
-It fails closed, and nothing approves itself. With nothing approved, as on
-a new install, the first start of a clackatoo that asks, the old TOML files
-moving in, or what was approved missing or unreadable, the daemon goes by its
-defaults: Claude Code and the other agents clackatoo knows run as it runs
-them, the limits are as they are by default, and the web app is off.
-Whatever your config adds to those is pending, and the bar says so, as
-`clackatoo now asks before agents, limits and web settings from your config
-files are used. Review and Apply in :Settings: agents.opencode, web.mode`.
-Apply it once, and it's approved from then on. A config that adds none of
-them has nothing pending.
+When the config runs again as its files changed, and not for a change you
+made in the settings menu, every window says what it changed of what runs
+programs, lets the web in, or keeps lines programs mark secret: any field of
+any agent, any profile, a limit on chats agents start raised, any `web.`
+option, and any `hints.` option loosened, as `daemon.hints.noagent =
+"show"`. The bar says each, with what it was and what it is, as `config
+changed outside clackatoo: agents.claude command: { "claude-agent-acp" } →
+{ "other" }`, and the daemon's log says it too. Nothing waits on it: the
+change has applied, as any other does. If it isn't yours, put the file back.
+Saving `daemon/init.lua` yourself is said as well, as the daemon can't tell
+your editor from an agent's.
 
 #### What this guards against
 
-It keeps a file an agent was let write, such as your config, from taking
-effect without you seeing it. It doesn't stand up to an agent that can run
-what it likes as you, with a shell or by writing any file: that agent could
-write clackatoo's state files too, run `clackatoo web password`, or connect
-to the daemon's socket, which any program of yours can. The daemon tells a
-window from an agent by what the connection is, a window's or an agent's
-tools', not by which program opened it. What an agent may run is the agent's
-own permissions' to say, as Claude Code's are: they're the boundary, and this
-is a guard behind them.
+Nothing, on its own: it tells you. An agent that can write your config as
+you can write any other file of yours too, and run what it likes; nothing in
+clackatoo stands in its way once it can. The daemon tells a window from an
+agent by what the connection is, a window's or an agent's tools', not by
+which program opened it: any program of yours can open its socket. What an
+agent may write and run is the agent's own permissions' to say, as Claude
+Code's are: they're the boundary. Keeping agents from writing clackatoo's
+folders is planned.
+
+What clackatoo does keep from an agent is what it does through clackatoo: an
+agent's keys, or a chat with Control of a window, can't change the daemon's
+settings in the settings menu, nor the window's options that run programs or
+reach the network, with `:set`, `:setp` or the menu.
 
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is
@@ -955,9 +926,7 @@ rest still runs. A field an agent or profile never had is left out alone,
 keeping the agent, as before. If any of `web.toml` is left out, so is its
 `mode`: the web app stays off until it's put right, as it did when `web.toml`
 went wrong. Every comment written is a line comment of its own, with nothing
-in it that could end it or open a block comment. The agents, limits and web
-app moved in wait for your OK like any others (see
-[Changes made outside clackatoo](#changes-made-outside-clackatoo-wait-for-your-ok)).
+in it that could end it or open a block comment.
 
 It goes in order, each step only once the one before has worked: the web
 app's password to the state directory (see

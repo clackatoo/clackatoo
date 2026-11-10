@@ -12,12 +12,10 @@
 //! doesn't run changes nothing: the daemon goes on by what it has, and
 //! windows are told why.
 //!
-//! What runs programs and lets the web in, the agents, the profiles,
-//! limits raised, the web app's options and its password, changes only as
-//! the user says (see [`settings::staging`]): a change the files make is
-//! *pending*, which every window shows, for the user to apply or discard
-//! there. A change the user makes in a window's settings menu is theirs,
-//! and applies.
+//! A run as the files changed, not a window's change, that changes what
+//! runs programs, lets the web in, or keeps secret lines secret, is said
+//! to every window, what it was and what it is, and logged (see
+//! [`settings::noticed`]): nothing waits on it.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
@@ -25,14 +23,14 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     ConfigChange, DaemonOption, DaemonSettings, Error, Event, OptionPlace, OptionSaved,
-    OptionSetBy, OptionSource, PendingConfig, Response, wire,
+    OptionSetBy, OptionSource, Response, wire,
 };
 use mio::Token;
 
 use super::{Daemon, Link, Source};
 use crate::DaemonConfig;
 use crate::schema::{self, Info, Place, Value};
-use crate::settings::staging::{self, Discarded, Guarded};
+use crate::settings::noticed::{self, Noticed};
 use crate::settings::{self, Settings, options};
 
 /// How long after the config's files last changed it's run again: an
@@ -55,7 +53,7 @@ pub(super) struct Configuring {
     /// A run under way, off the loop.
     running: Option<Running>,
     /// What windows asked for, in turn, waiting for the run under way.
-    jobs: VecDeque<Job>,
+    jobs: VecDeque<Asked>,
 }
 
 /// A run of the config under way, off the loop.
@@ -63,30 +61,7 @@ pub(super) struct Configuring {
 struct Running {
     answer: mpsc::Receiver<Ran>,
     /// What a window asked, if it's for that.
-    job: Option<Job>,
-}
-
-/// What a window asked of the daemon's config.
-#[derive(Debug, Clone)]
-enum Job {
-    /// To save an option.
-    Change(Asked),
-    /// To apply the change to what runs programs that's pending, or
-    /// discard it.
-    Decide {
-        token: Token,
-        apply: bool,
-        pending: Guarded,
-    },
-}
-
-impl Job {
-    fn token(&self) -> Token {
-        match self {
-            Self::Change(asked) => asked.token,
-            Self::Decide { token, .. } => *token,
-        }
-    }
+    job: Option<Asked>,
 }
 
 /// A change a window's menu asked for.
@@ -97,34 +72,10 @@ struct Asked {
     value: Option<Value>,
 }
 
-/// What a run off the loop came to.
-#[derive(Debug)]
-struct Ran {
-    /// What the config set, and the daemon's config with it, made off the
-    /// loop, to take what changes as it runs from; or why not.
-    outcome: Result<(Settings, Box<DaemonConfig>), String>,
-    /// The web app's password's hash, as the state directory has it now.
-    password: Option<String>,
-    /// What's staged, as the user approved it now, if that changed.
-    approved: Option<Guarded>,
-    /// What the user discarded now, if that changed.
-    discarded: Discarded,
-    /// Why what the user decided couldn't be kept, if it couldn't.
-    unkept: Option<String>,
-}
-
-impl Ran {
-    /// A run that came to `outcome`, keeping nothing the user decided.
-    fn only(outcome: Result<(Settings, Box<DaemonConfig>), String>) -> Self {
-        Self {
-            outcome,
-            password: None,
-            approved: None,
-            discarded: Discarded::Same,
-            unkept: None,
-        }
-    }
-}
+/// What a run off the loop came to: what the config set, and the daemon's
+/// config with it, made off the loop, to take what changes as it runs
+/// from; or why not.
+type Ran = Result<(Settings, Box<DaemonConfig>), String>;
 
 impl Daemon {
     /// Watches the folders of the daemon's own config, if it has one, and
@@ -158,9 +109,9 @@ impl Daemon {
             let ran = match running.answer.try_recv() {
                 Ok(ran) => ran,
                 Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => Ran::only(Err(
-                    "the thread running the daemon's config went away".to_owned(),
-                )),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err("the thread running the daemon's config went away".to_owned())
+                }
             };
             let job = self
                 .configuring
@@ -178,22 +129,20 @@ impl Daemon {
         }
     }
 
-    /// Runs the config again on a thread of its own, doing what a window
-    /// asked first, if one did: saving an option, or keeping what the user
-    /// decided of what runs programs.
-    fn run_config(&mut self, job: Option<Job>) {
+    /// Runs the config again on a thread of its own, saving the option a
+    /// window asked to first, if one did.
+    fn run_config(&mut self, job: Option<Asked>) {
         let Some(own) = &self.config.own_config else {
             return;
         };
         let dirs = own.dirs.clone();
-        let approved = own.staged.approved.clone();
         let waker = Arc::clone(&self.waker);
         let (send, answer) = mpsc::channel();
         let work = job.clone();
         let spawned = std::thread::Builder::new()
             .name("daemon-config".into())
             .spawn(move || {
-                let ran = run_job(&dirs, approved, work);
+                let ran = run_job(&dirs, work);
                 let _ = send.send(ran);
                 if let Err(err) = waker.wake() {
                     log::warn!("waking the daemon after its config ran failed: {err}");
@@ -204,40 +153,22 @@ impl Daemon {
             Err(err) => {
                 let said = format!("the daemon's config couldn't be run: {err}");
                 log::warn!("{said}");
-                self.config_ran(job.as_ref(), Ran::only(Err(said)));
+                self.config_ran(job.as_ref(), Err(said));
             }
         }
     }
 
     /// Takes what a run of the config came to, for `job`, if a window asked
-    /// for one: what changes as the daemon runs changes, what runs
-    /// programs as the user approved it, and windows are told.
-    fn config_ran(&mut self, job: Option<&Job>, ran: Ran) {
-        let Ran {
-            outcome: ran,
-            password,
-            approved,
-            discarded,
-            unkept,
-        } = ran;
-        let told = job.map(Job::token);
-        if let Some(why) = &unkept {
-            log::warn!("{why}");
-            if let Some(told) = told {
-                self.send_event(told, Event::Said(why.clone()));
-            }
-        }
-        let saved = match job {
-            Some(Job::Change(asked)) => Some(OptionSaved {
-                name: asked.info.name.to_owned(),
-                value: asked.value.as_ref().map(Value::text),
-                refused: ran.as_ref().err().cloned(),
-            }),
-            _ => None,
-        };
-        if let Some(own) = &mut self.config.own_config {
-            own.staged.decided(approved, discarded);
-        }
+    /// for one: what changes as the daemon runs changes, and windows are
+    /// told; of a run as the files changed, what it changed that's
+    /// noticed too.
+    fn config_ran(&mut self, job: Option<&Asked>, ran: Ran) {
+        let told = job.map(|asked| asked.token);
+        let saved = job.map(|asked| OptionSaved {
+            name: asked.info.name.to_owned(),
+            value: asked.value.as_ref().map(Value::text),
+            refused: ran.as_ref().err().cloned(),
+        });
         // A run as the files changed that comes to what the daemon has, as
         // the one after a window's change does, is told no one; a folder
         // taken away and made again is watched again.
@@ -245,20 +176,11 @@ impl Daemon {
             self.watch_config();
             return;
         }
+        let mut outside = Vec::new();
         match ran {
-            Ok((settings, mut fresh)) => {
-                if let Some(own) = &mut self.config.own_config {
-                    let pending = own.staged.pending.clone();
-                    // What runs programs, as the user approved it; the web
-                    // app's is read only as the daemon starts.
-                    let staged = Guarded::of(&settings, password);
-                    fresh.agents.configured = own.staged.stage(&staged).configured;
-                    if own.staged.pending != pending && own.staged.pending.is_some() {
-                        log::warn!(
-                            "the daemon's config changes what runs programs, which waits for \
-                             the user"
-                        );
-                    }
+            Ok((settings, fresh)) => {
+                if job.is_none() {
+                    outside = self.noticed(&settings);
                 }
                 self.take_live_config(&fresh);
                 self.configuring.configured = Some(settings);
@@ -274,7 +196,30 @@ impl Daemon {
                 self.configuring.ran = true;
             }
         }
-        self.tell_daemon_settings(told, saved.as_ref());
+        self.tell_daemon_settings(told, saved.as_ref(), &outside);
+    }
+
+    /// What `settings`, a run as the files changed, outside clackatoo,
+    /// changes of what's noticed since the last run: logged, for windows
+    /// to say.
+    fn noticed(&self, settings: &Settings) -> Vec<ConfigChange> {
+        let Some(own) = &self.config.own_config else {
+            return Vec::new();
+        };
+        let before = (self.configuring.configured.as_ref()).unwrap_or(&own.settings);
+        let changes = noticed::changes(&Noticed::of(before), &Noticed::of(settings));
+        (changes.into_iter())
+            .map(|(name, before, after)| {
+                log::warn!(
+                    "the daemon's config changed outside clackatoo: {name}: {before:?} -> {after:?}"
+                );
+                ConfigChange {
+                    name,
+                    before,
+                    after,
+                }
+            })
+            .collect()
     }
 
     /// Whether `ran`, a run as the files changed, comes to what the daemon
@@ -299,8 +244,7 @@ impl Daemon {
     }
 
     /// Takes from `fresh`, the daemon's config as its own config is now,
-    /// with what runs programs as the user approved it, what changes as
-    /// the daemon runs.
+    /// what changes as the daemon runs.
     fn take_live_config(&mut self, fresh: &DaemonConfig) {
         self.config.agents.configured = fresh.agents.configured.clone();
         self.refresh_subagent_limits();
@@ -312,13 +256,15 @@ impl Daemon {
         }
     }
 
-    /// Tells every window of the daemon's settings, and the one at `asker`,
+    /// Tells every window of the daemon's settings, and what the run
+    /// changed `outside` clackatoo that's noticed, and the one at `asker`
     /// what came of its change, `saved`: never a device on the web app, a
     /// daemon relaying, nor what serves agents' tools.
     pub(super) fn tell_daemon_settings(
         &mut self,
         asker: Option<Token>,
         saved: Option<&OptionSaved>,
+        outside: &[ConfigChange],
     ) {
         let windows: Vec<Token> = (self.sources.iter())
             .filter_map(|(at, source)| match source {
@@ -344,6 +290,7 @@ impl Daemon {
                 Event::DaemonSettings {
                     settings: settings.clone(),
                     saved,
+                    outside: outside.to_vec(),
                 },
             );
         }
@@ -378,23 +325,11 @@ impl Daemon {
                 }
             })
             .collect();
-        let pending = own.staged.revision().map(|revision| PendingConfig {
-            revision,
-            note: own.staged.note.clone(),
-            changes: (own.staged.changes().into_iter())
-                .map(|(name, before, after)| ConfigChange {
-                    name,
-                    before,
-                    after,
-                })
-                .collect(),
-        });
         DaemonSettings {
             machine: self.machine.name.clone(),
             dir: own.dirs.config().display().to_string(),
             options,
             failure,
-            pending,
         }
     }
 
@@ -459,39 +394,8 @@ impl Daemon {
             )));
         }
         let asked = Asked { token, info, value };
-        self.configuring.jobs.push_back(Job::Change(asked));
+        self.configuring.jobs.push_back(asked);
         // Started at once, unless a run is under way.
-        self.run_config_if_due();
-        Ok(Response::Done)
-    }
-
-    /// Answers [`Request::DecideDaemonConfig`](clackatoo_protocol::Request):
-    /// the change to what runs programs that's pending, the one `revision`
-    /// names, is applied or discarded as the user says, off the loop, and
-    /// windows told then.
-    pub(super) fn serve_decide_daemon_config(
-        &mut self,
-        token: Token,
-        revision: u64,
-        apply: bool,
-    ) -> Result<Response, Error> {
-        if let Some(refused) = self.not_a_window(token) {
-            return Err(refused);
-        }
-        let pending = (self.config.own_config.as_ref())
-            .filter(|own| own.staged.revision() == Some(revision))
-            .and_then(|own| own.staged.pending.clone())
-            .ok_or_else(|| {
-                Error::Other(
-                    "that change to the daemon's config isn't pending now: look again".to_owned(),
-                )
-            })?;
-        let job = Job::Decide {
-            token,
-            apply,
-            pending,
-        };
-        self.configuring.jobs.push_back(job);
         self.run_config_if_due();
         Ok(Response::Done)
     }
@@ -512,7 +416,7 @@ impl Daemon {
     /// ran; the window that asked, and those whose asks were waiting, are
     /// told theirs weren't done.
     pub(super) fn config_upgrading(&mut self) {
-        let mut refused: Vec<Job> = self.configuring.jobs.drain(..).collect();
+        let mut refused: Vec<Asked> = self.configuring.jobs.drain(..).collect();
         if let Some(job) = self
             .configuring
             .running
@@ -525,87 +429,29 @@ impl Daemon {
             );
             refused.insert(0, job);
         }
-        for job in refused {
-            match job {
-                Job::Change(asked) => {
-                    let saved = OptionSaved {
-                        name: asked.info.name.to_owned(),
-                        value: asked.value.as_ref().map(Value::text),
-                        refused: Some(
-                            "the daemon upgraded before it was saved: try again".to_owned(),
-                        ),
-                    };
-                    self.tell_daemon_settings(Some(asked.token), Some(&saved));
-                }
-                Job::Decide { token, .. } => self.send_event(
-                    token,
-                    Event::Said(
-                        "the daemon upgraded before it took your answer: answer again".to_owned(),
-                    ),
-                ),
-            }
+        for asked in refused {
+            let saved = OptionSaved {
+                name: asked.info.name.to_owned(),
+                value: asked.value.as_ref().map(Value::text),
+                refused: Some("the daemon upgraded before it was saved: try again".to_owned()),
+            };
+            self.tell_daemon_settings(Some(asked.token), Some(&saved), &[]);
         }
     }
 }
 
-/// Does `job`, off the loop, with what runs programs `approved` as the user
-/// approved it, then runs the config: a change saved; the user's answer to
-/// what's pending kept in the state directory.
-fn run_job(dirs: &settings::Dirs, mut approved: Guarded, job: Option<Job>) -> Ran {
-    // What the user's answer, or the menu's change, kept.
-    let mut kept = Ran::only(Err(String::new()));
-    let state = dirs.state.as_deref();
-    // With no state directory, it's kept only as the daemon runs.
-    let approve =
-        |approved: &Guarded| state.map_or(Ok(()), |state| staging::keep_approved(state, approved));
-    let discard = |discarded: Option<&Guarded>| {
-        state.map_or(Ok(()), |state| staging::keep_discarded(state, discarded))
-    };
+/// Saves the option `job` asks to, if a window asked one, off the loop,
+/// then runs the config.
+fn run_job(dirs: &settings::Dirs, job: Option<Asked>) -> Ran {
     let ran = match job {
-        Some(Job::Change(asked)) => {
-            let ran = settings::change(dirs, asked.info, asked.value);
-            // The menu's change is the user's: a limit it raises, or the
-            // web app's option it sets, is approved.
-            let staged = ["subagents.", "web.", "hints."];
-            if let Ok(settings) = &ran
-                && staged
-                    .iter()
-                    .any(|start| asked.info.name.starts_with(start))
-            {
-                staging::approve_option(&mut approved, asked.info.name, settings);
-                match approve(&approved) {
-                    Ok(()) => kept.approved = Some(approved),
-                    Err(why) => kept.unkept = Some(why),
-                }
-            }
-            ran
-        }
-        Some(Job::Decide { apply, pending, .. }) => {
-            let decided = if apply {
-                approve(&pending).and_then(|()| discard(None))
-            } else {
-                discard(Some(&pending))
-            };
-            match decided {
-                Ok(()) if apply => {
-                    kept.approved = Some(pending);
-                    kept.discarded = Discarded::Nothing;
-                }
-                Ok(()) => kept.discarded = Discarded::Now(pending),
-                Err(why) => kept.unkept = Some(format!("your answer couldn't be kept: {why}")),
-            }
-            settings::rerun(dirs)
-        }
+        Some(asked) => settings::change(dirs, asked.info, asked.value),
         None => settings::rerun(dirs),
     };
-    // Made here, off the loop, as it reads files; the password only to
-    // stage, as the web app takes it only as the daemon starts.
-    kept.password = state.and_then(|state| settings::password(state).ok().flatten());
-    kept.outcome = ran.map(|settings| {
+    // Made here, off the loop, as it reads the web app's password.
+    ran.map(|settings| {
         let config = Box::new(DaemonConfig::from_settings(&settings));
         (settings, config)
-    });
-    kept
+    })
 }
 
 /// `by`, as a window's menu is told it.
@@ -638,57 +484,54 @@ mod tests {
     use crate::server::agent_files::tests::daemon_with_chat;
 
     /// A change to what runs programs made outside clackatoo, as an agent
-    /// writing daemon/init.lua makes, waits: every chat, the user's included,
-    /// as one an agent's message wakes connects, runs the agent as approved,
-    /// and no limit is raised; windows are told what's pending; and only a
-    /// window may answer (CLACKA-237 review).
+    /// writing daemon/init.lua makes, applies, as the config says, and is
+    /// noticed: what it was and what it is, for every window to say; and
+    /// only a window changes the daemon's settings (CLACKA-237).
     #[test]
-    fn a_change_outside_clackatoo_waits_and_chats_run_what_was_approved() {
+    fn a_change_outside_clackatoo_applies_and_is_noticed() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, _) = daemon_with_chat(dir.path());
-        let dirs = settings::Dirs {
-            daemon: dir.path().join("config/daemon"),
-            shared: dir.path().join("config/lua"),
-            state: Some(dir.path().join("state")),
-        };
-        let had = Guarded::of(&Settings::default(), None);
-        let (staged, going) = staging::starting(&dirs, &had);
-        daemon.config.agents.configured = going.configured;
         daemon.config.own_config = Some(settings::Own {
-            dirs,
+            dirs: settings::Dirs {
+                daemon: dir.path().join("config/daemon"),
+                shared: dir.path().join("config/lua"),
+                state: Some(dir.path().join("state")),
+            },
             settings: Settings::default(),
             failure: None,
-            staged,
         });
-        let approved = daemon.config.agents.find("claude").unwrap().launch;
-        let limits = daemon.tools.subagent_limits();
         let written = Settings::from_lua(
-            "daemon.agents.claude = { command = { \"evil\" } }\ndaemon.subagents.working = 64\n\
+            "daemon.agents.claude = { command = { \"other\" } }\ndaemon.subagents.working = 64\n\
              daemon.terminals.notify_after = 30",
         )
         .unwrap();
-        let fresh = Box::new(DaemonConfig::from_settings(&written));
-        daemon.config_ran(None, Ran::only(Ok((written, fresh))));
-        // What isn't what runs programs applies...
-        assert_eq!(daemon.config.long_commands, Some(Duration::from_secs(30)));
-        // ...but every chat runs claude as approved, and the limits stay.
-        assert_eq!(
-            daemon.config.agents.find("claude").unwrap().launch,
-            approved
-        );
-        assert_ne!(approved, Launch::Command(vec!["evil".into()]));
-        assert_eq!(daemon.tools.subagent_limits(), limits);
-        let pending = daemon.daemon_settings().pending.expect("pending");
-        let names: Vec<&str> = pending
-            .changes
-            .iter()
+        let noticed = daemon.noticed(&written);
+        let names: Vec<&str> = (noticed.iter())
             .map(|change| change.name.as_str())
             .collect();
         // Claude Code given a command of the config's, which it hadn't.
         assert_eq!(names, ["agents.claude", "subagents.working"]);
-        // Only a window answers: here, no client at all.
+        assert_eq!(
+            (noticed[1].before.as_str(), noticed[1].after.as_str()),
+            ("16", "64")
+        );
+        let fresh = Box::new(DaemonConfig::from_settings(&written));
+        daemon.config_ran(None, Ok((written, fresh)));
+        assert_eq!(daemon.config.long_commands, Some(Duration::from_secs(30)));
+        assert_eq!(
+            daemon.config.agents.find("claude").unwrap().launch,
+            Launch::Command(vec!["other".into()])
+        );
+        // Noticed once: run again the same, nothing is.
+        let again = Settings::from_lua(
+            "daemon.agents.claude = { command = { \"other\" } }\ndaemon.subagents.working = 64\n\
+             daemon.terminals.notify_after = 30",
+        )
+        .unwrap();
+        assert_eq!(daemon.noticed(&again), []);
+        // Only a window changes them: here, no client at all.
         let refused =
-            daemon.serve_decide_daemon_config(Token(usize::MAX - 50), pending.revision, true);
+            daemon.serve_set_daemon_option(Token(usize::MAX - 50), "subagents.working", Some("8"));
         assert!(refused.is_err());
     }
 }

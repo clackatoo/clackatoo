@@ -1030,7 +1030,6 @@ fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
         dir: dir.into(),
         options,
         failure: None,
-        pending: None,
     }
 }
 
@@ -1093,77 +1092,36 @@ fn a_config_changed_on_disk_takes_its_plain_options_and_nothing_else() {
     assert!(client.keypress_handlers(window, None).is_empty());
 }
 
-/// A change to what runs programs made outside clackatoo stands in the bar
-/// and heads the menu, until the user answers it there: an agent's keys
-/// can't (CLACKA-237 review).
+/// What the daemon's config changed outside clackatoo, of what runs
+/// programs, is said in the bar, what it was and what it is, cleaned of
+/// what wouldn't show; nothing waits on it (CLACKA-237).
 #[test]
-fn a_change_outside_clackatoo_stands_until_the_user_answers_it() {
+fn a_change_outside_clackatoo_is_said() {
     let (mut desk, _dir) = configured("");
-    let mut said = daemon_said("desk");
-    said.pending = Some(clackatoo_protocol::PendingConfig {
-        revision: 4,
-        note: None,
-        changes: vec![clackatoo_protocol::ConfigChange {
+    assert!(!desk.config_changed_outside(&[]), "nothing to say");
+    let outside = [
+        clackatoo_protocol::ConfigChange {
             name: "agents.claude command".into(),
             before: "{ \"claude\" }".into(),
-            after: "{ \"other\" }".into(),
-        }],
-    });
-    desk.daemon_settings_came(&said, None);
-    let banner = |desk: &Desk| match desk.pending_config_status() {
-        Some(crate::chrome::Status::Typing { text, .. }) => text,
-        other => panic!("no banner: {other:?}"),
-    };
-    assert!(banner(&desk).contains("agents.claude command"));
-    command(&mut desk, "Settings");
-    answer_all(&mut desk);
-    let (picked, _, preview) = menu(&mut desk);
-    assert!(picked.starts_with("agents.claude command"), "{picked}");
-    assert!(
-        preview.iter().any(|line| line.contains("{ \"other\" }")),
-        "{preview:#?}"
-    );
-    // An agent's keys can't answer it.
-    type_keys(&mut desk, "j");
-    desk.automating = true;
-    named(&mut desk, NamedKey::Enter);
-    assert_eq!(answer_all(&mut desk), []);
-    desk.automating = false;
-    named(&mut desk, NamedKey::Enter);
-    assert_eq!(
-        answer_all(&mut desk),
-        [Request::DecideDaemonConfig {
-            revision: 4,
-            apply: true,
-        }]
-    );
-    // Answered: the bar lets it go.
-    desk.daemon_settings_came(&daemon_said("desk"), None);
-    assert!(desk.pending_config_status().is_none());
-    // Nothing approved: the bar says why. Lost, the daemon's gone: no
-    // banner stands until it's asked again (CLACKA-237 review, L2).
-    let mut said = daemon_said("desk");
-    said.pending = Some(clackatoo_protocol::PendingConfig {
-        revision: 5,
-        note: Some(clackatoo_daemon::settings::staging::ASKS_NOW.into()),
-        changes: vec![clackatoo_protocol::ConfigChange {
-            name: "agents.mine\u{1b}[31m".into(),
+            after: "{ \"other\" }\u{1b}[31m".into(),
+        },
+        clackatoo_protocol::ConfigChange {
+            name: "agents.mine".into(),
             before: String::new(),
             after: "{ command = { \"mine\" } }".into(),
-        }],
-    });
-    desk.daemon_settings_came(&said, None);
-    let text = banner(&desk);
+        },
+    ];
+    assert!(desk.config_changed_outside(&outside));
+    let said = desk.message.clone().unwrap_or_default();
     assert!(
-        text.starts_with(
-            "clackatoo now asks before agents, limits and web settings from your config files \
-             are used. Review and Apply in :Settings: agents.mine"
+        said.starts_with(
+            "config changed outside clackatoo: agents.claude command: { \"claude\" } → \
+             { \"other\" }"
         ),
-        "{text}"
+        "{said}"
     );
-    assert!(!text.contains('\u{1b}'), "{text:?}");
-    desk.lost();
-    assert!(desk.pending_config_status().is_none());
+    assert!(said.contains("agents.mine: none → { command"), "{said}");
+    assert!(!said.contains('\u{1b}'), "{said:?}");
 }
 
 /// An agent's input, or a chat's with Control, never changes the daemon's
