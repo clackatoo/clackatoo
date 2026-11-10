@@ -158,7 +158,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 152;
+pub const PROTOCOL_VERSION: u32 = 151;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1818,7 +1818,7 @@ pub enum Request {
     /// already shown, masks them again at once. Only a user asks this, in
     /// a window: a web device's is refused. Answered with
     /// [`Response::Text`], saying what's shown, or an error if nothing's
-    /// masked there. Only to a daemon of protocol 152 or later
+    /// masked there. Only to a daemon of protocol 151 or later
     /// ([`wire::SECRET_REGIONS`]).
     Unmask {
         /// The terminal.
