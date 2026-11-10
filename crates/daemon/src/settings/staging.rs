@@ -1,7 +1,8 @@
 //! What a change to the daemon's config made outside clackatoo never
-//! changes by itself: what runs programs, and what lets the web in. That's
-//! the agents (every field of every one), the profiles, the limits on
-//! chats agents start, raised, the web app's options, and its password.
+//! changes by itself: what runs programs, what lets the web in, and what
+//! keeps lines programs mark secret. That's the agents (every field of
+//! every one), the profiles, the limits on chats agents start, raised, the
+//! web app's options and its password, and the `hints` loosened.
 //!
 //! The user approves it: what's approved is kept in the state directory
 //! ([`APPROVED`], and the password's hash in [`APPROVED_PASSWORD`]), and
@@ -60,6 +61,10 @@ pub struct Guarded {
     pub configured: Configured,
     /// Each of the web app's options, `web.mode` and the rest.
     pub(crate) web: BTreeMap<&'static str, Value>,
+    /// Each of what keeps lines programs mark secret from agents, the disk
+    /// and the screen, `hints.noagent` and the rest: loosened, it waits,
+    /// as a limit raised does (see [`looser`]).
+    pub(crate) hints: BTreeMap<&'static str, Value>,
     /// The web app's password's hash, if it has one; in what's discarded,
     /// only a mark of it (see [`mark`]).
     pub(crate) password: Option<String>,
@@ -69,13 +74,16 @@ impl Guarded {
     /// As `settings` say, with `password` the web app's password's hash.
     #[must_use]
     pub fn of(settings: &Settings, password: Option<String>) -> Self {
-        let web = (options::ALL.iter())
-            .filter(|info| info.name.starts_with("web."))
-            .map(|info| (info.name, settings.value(info.name)))
-            .collect();
+        let starting = |start: &'static str| -> BTreeMap<&'static str, Value> {
+            (options::ALL.iter())
+                .filter(|info| info.name.starts_with(start))
+                .map(|info| (info.name, settings.value(info.name)))
+                .collect()
+        };
         Self {
             configured: settings.agents(),
-            web,
+            web: starting("web."),
+            hints: starting("hints."),
             password,
         }
     }
@@ -176,6 +184,33 @@ fn same_programs(one: &Configured, other: &Configured) -> bool {
     agents(one) == agents(other) && profiles(one) == profiles(other)
 }
 
+/// Whether `new`, of the hints option `name`, keeps lines programs mark
+/// secret less well than `old` does: shown to agents, written to disk,
+/// shown on screen, or shown longer.
+fn looser(name: &str, new: &Value, old: &Value) -> bool {
+    match (new, old) {
+        (Value::Number(new), Value::Number(old)) => new > old,
+        // The default is the stricter: `hide`, `mask`, true.
+        _ => {
+            new != old && options::find(name).is_some_and(|info| *old == options::default_of(info))
+        }
+    }
+}
+
+/// Each hints option as `fresh` sets it, but as `approved` does where
+/// `fresh` is looser: what the daemon goes by.
+fn strictest(
+    fresh: &BTreeMap<&'static str, Value>,
+    approved: &BTreeMap<&'static str, Value>,
+) -> BTreeMap<&'static str, Value> {
+    (fresh.iter())
+        .map(|(&name, value)| match approved.get(name) {
+            Some(was) if looser(name, value, was) => (name, was.clone()),
+            _ => (name, value.clone()),
+        })
+        .collect()
+}
+
 impl Staged {
     /// As `fresh`, what the config says now, would have it: what the
     /// daemon goes by, which is what's approved but for limits `fresh`
@@ -186,11 +221,13 @@ impl Staged {
         let differs = !same_programs(&fresh.configured, &approved.configured)
             || !lower_or_same(&fresh.configured.subagents, &approved.configured.subagents)
             || fresh.web != approved.web
+            || strictest(&fresh.hints, &approved.hints) != fresh.hints
             || fresh.password != approved.password;
         let discarded = (self.discarded.as_ref()).is_some_and(|discarded| {
             same_programs(&discarded.configured, &fresh.configured)
                 && discarded.configured.subagents == fresh.configured.subagents
                 && discarded.web == fresh.web
+                && discarded.hints == fresh.hints
                 && discarded.password == fresh.password.as_deref().map(mark)
         });
         self.pending = (differs && !discarded).then(|| fresh.clone());
@@ -202,6 +239,7 @@ impl Staged {
                 keep_agents: fresh.configured.keep_agents,
             },
             web: approved.web.clone(),
+            hints: strictest(&fresh.hints, &approved.hints),
             password: approved.password.clone(),
         }
     }
@@ -259,13 +297,17 @@ pub(crate) enum Discarded {
 
 /// Approves, in `approved`, the option `name` as `settings` set it, as
 /// the settings menu changed it: the user's own change. Only a limit on
-/// chats agents start, or one of the web app's, is staged.
+/// chats agents start, one of the web app's, or a hint's, is staged.
 pub(crate) fn approve_option(approved: &mut Guarded, name: &str, settings: &Settings) {
-    if let Some(info) = options::find(name)
-        && info.name.starts_with("web.")
-    {
-        approved.web.insert(info.name, settings.value(info.name));
-        return;
+    if let Some(info) = options::find(name) {
+        if info.name.starts_with("web.") {
+            approved.web.insert(info.name, settings.value(info.name));
+            return;
+        }
+        if info.name.starts_with("hints.") {
+            approved.hints.insert(info.name, settings.value(info.name));
+            return;
+        }
     }
     let fresh = settings.agents().subagents;
     let approved = &mut approved.configured.subagents;
@@ -379,11 +421,26 @@ pub(crate) fn changes(old: &Guarded, new: &Guarded) -> Vec<(String, String, Stri
             ));
         }
     }
+    changes.extend(web_changes(old, new));
+    changes
+}
+
+/// What `new` changes of `old`'s web app, said as [`changes`] says it, and
+/// each hint loosened.
+fn web_changes(old: &Guarded, new: &Guarded) -> Vec<(String, String, String)> {
+    let mut changes = Vec::new();
     for (name, value) in &new.web {
         let before = old.web.get(name);
         if before != Some(value) {
             let was = before.map(Value::text).unwrap_or_default();
             changes.push(((*name).to_owned(), was, value.text()));
+        }
+    }
+    for (name, value) in &new.hints {
+        if let Some(before) = old.hints.get(name)
+            && looser(name, value, before)
+        {
+            changes.push(((*name).to_owned(), before.text(), value.text()));
         }
     }
     if new.password != old.password {
@@ -413,7 +470,7 @@ fn as_lua(guarded: &Guarded, password: bool) -> String {
         let value = Value::Number(u32::try_from(value).unwrap_or(u32::MAX));
         settings.options.insert(info.name, (value, SetBy::DEFAULT));
     }
-    for (name, value) in &guarded.web {
+    for (name, value) in guarded.web.iter().chain(&guarded.hints) {
         settings
             .options
             .insert(name, (value.clone(), SetBy::DEFAULT));
@@ -597,12 +654,12 @@ pub fn starting(dirs: &Dirs, fresh: &Guarded) -> (Staged, Guarded) {
     (staged, going)
 }
 
-/// `settings`, but with the web app's options as `going` has them: what
-/// the daemon starts its web app by.
+/// `settings`, but with the web app's options and the hints as `going`
+/// has them: what the daemon starts by.
 #[must_use]
 pub fn applied(settings: &Settings, going: &Guarded) -> Settings {
     let mut settings = settings.clone();
-    for (name, value) in &going.web {
+    for (name, value) in going.web.iter().chain(&going.hints) {
         let by = (settings.options.get(name)).map_or(SetBy::DEFAULT, |(_, by)| by.clone());
         settings.options.insert(name, (value.clone(), by));
     }
@@ -782,6 +839,34 @@ mod tests {
         assert!(going.configured.agents.is_empty());
         assert_eq!(staged.changes()[0].0, "agents.mine");
         assert_eq!(staged.note.as_deref(), Some(ASKS_NOW));
+    }
+
+    /// What keeps lines programs mark secret, loosened outside clackatoo,
+    /// as an agent wanting to read them would, waits; tightened, it
+    /// applies at once (CLACKA-237, with CLACKA-242's hints).
+    #[test]
+    fn hints_loosened_wait_and_tightened_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = dirs(&temp);
+        approve(&dirs, &Guarded::nothing());
+        let loose = guarded(
+            "daemon.hints.noagent = \"show\"\ndaemon.hints.nosave = false\n\
+             daemon.hints.shown_for = 600",
+        );
+        let (staged, going) = starting(&dirs, &loose);
+        assert_eq!(going.hints, Guarded::nothing().hints, "as approved");
+        let names: Vec<String> = (staged.changes().into_iter())
+            .map(|(name, ..)| name)
+            .collect();
+        assert_eq!(names, ["hints.noagent", "hints.nosave", "hints.shown_for"]);
+        // Approved loose, then tightened: at once, nothing pending.
+        approve(&dirs, &loose);
+        let tight = guarded("daemon.hints.shown_for = 5");
+        let (staged, going) = starting(&dirs, &tight);
+        assert_eq!(staged.pending, None);
+        assert_eq!(going.hints, tight.hints);
+        let settings = applied(&Settings::default(), &going);
+        assert_eq!(settings.value("hints.shown_for"), Value::Number(5));
     }
 
     /// A new install, with no config, has nothing pending: the daemon's

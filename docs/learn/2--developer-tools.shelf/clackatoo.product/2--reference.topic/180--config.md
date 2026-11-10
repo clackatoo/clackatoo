@@ -853,8 +853,11 @@ terminal and agent running, takes it in.
 
 Changes made outside clackatoo to agents and limits wait for your OK, and so
 do changes to the web app. That covers any field of any agent, any profile,
-any limit on chats agents start raised, every `web.` option, and the web
-app's password: what runs programs, and what lets the web in. When the
+any limit on chats agents start raised, every `web.` option, the web app's
+password, and any `hints.` option loosened, as `daemon.hints.noagent =
+"show"`: what runs programs, what lets the web in, and what keeps the lines
+programs mark secret from agents, the disk and the screen. A hint made
+stricter applies at once, as a limit lowered does. When the
 config's files say otherwise of those than you last approved, as a file an
 agent wrote would, the daemon goes on by what you approved, and the change is
 *pending*. The rest of the config still applies, and a limit lowered applies

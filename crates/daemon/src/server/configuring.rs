@@ -566,7 +566,7 @@ fn run_job(dirs: &settings::Dirs, mut approved: Guarded, job: Option<Job>) -> Ra
             let ran = settings::change(dirs, asked.info, asked.value);
             // The menu's change is the user's: a limit it raises, or the
             // web app's option it sets, is approved.
-            let staged = ["subagents.", "web."];
+            let staged = ["subagents.", "web.", "hints."];
             if let Ok(settings) = &ran
                 && staged
                     .iter()
