@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.11.35 (2026-11-10)
+
+### Features
+
+- **images:** images in terminals: kitty graphics, Unicode placeholders, sixel and iTerm2 (CLACKA-239 part 2) (9d07cbfc)
+
+### Fixes
+
+- **images:** readers given up on free their places, sixel images no bigger than the default limit allows, sweeps paid for by lines scrolled or a full table, iTerm2 images given up on and counted, and protocol 150 (CLACKA-239 review) (827aec0f)
+
 ## 2026.11.34 (2026-11-10)
 
 ### Features
