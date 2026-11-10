@@ -1094,6 +1094,16 @@ fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
         "{}",
         view.footer
     );
+    // Another window's change, which this one didn't ask for, isn't said.
+    desk.daemon_settings_came(
+        &daemon_said("desk"),
+        Some(clackatoo_protocol::OptionSaved {
+            name: "history.lines".into(),
+            value: Some("1000".into()),
+            refused: None,
+        }),
+    );
+    assert!(easy(&mut desk).footer.contains("line 4"));
     let (_, keep) = easy_row(&mut desk, "Keep what terminals showed");
     assert_eq!(keep.control, ControlView::Toggle(true));
 

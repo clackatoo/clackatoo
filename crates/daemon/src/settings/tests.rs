@@ -541,3 +541,44 @@ fn the_docs_list_every_daemon_option_as_the_schema_declares_it() {
         .collect();
     assert_eq!(listed, declared);
 }
+
+/// A window's change goes through a settings.lua that's a link, and is put
+/// back through it, the link kept; but a link to nothing is left alone,
+/// and the change refused (CLACKA-237 review, F6).
+#[test]
+fn a_change_goes_through_a_link_but_never_one_to_nothing() {
+    let (temp, dirs) = dirs();
+    let path = dirs.daemon.join("settings.lua");
+    let target = temp.path().join("dotfiles/settings.lua");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let mode = options::find("web.mode").unwrap();
+    let why = change(&dirs, mode, Some(Value::Choice("tailscale"))).unwrap_err();
+    assert!(why.contains("a link to a file that isn't there"), "{why}");
+    assert!(!target.exists());
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // Its file there: written through it, and put back through it when the
+    // config won't run with the change.
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let mine = "daemon.subagents.working = 4\r\n";
+    std::fs::write(&target, mine).unwrap();
+    let default = options::find("subagents.default").unwrap();
+    let why = change(&dirs, default, Some(Value::Number(12))).unwrap_err();
+    assert!(why.contains("put back"), "{why}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), mine);
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    change(&dirs, default, Some(Value::Number(3))).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "daemon.subagents.working = 4\r\ndaemon.subagents.default = 3\r\n"
+    );
+}

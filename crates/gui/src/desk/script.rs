@@ -237,7 +237,7 @@ impl Desk {
         let redraw = !said.is_empty() || followed;
         let guarded = self.controlled;
         for (from, message) in said {
-            self.lua_says(message, guarded || from.guarded);
+            self.lua_heard(from, message, guarded);
         }
         // Settings saved come back the same way.
         self.settings_saved() || redraw
@@ -255,7 +255,7 @@ impl Desk {
         // had it say.
         let guarded = self.automating || self.controlled;
         for (from, message) in said {
-            self.lua_says(message, guarded || from.guarded);
+            self.lua_heard(from, message, guarded);
         }
         stop
     }
@@ -495,23 +495,34 @@ impl Desk {
     pub(super) fn lua_ready(&mut self) {
         let (client, window) = self.client();
         for (from, message) in client.ready(window) {
-            self.lua_says(message, from.guarded);
+            self.lua_heard(from, message, false);
         }
         self.follow_client();
+    }
+
+    /// Does one thing Lua says for the window, `from` where it came from,
+    /// as [`Desk::lua_says`] does; but from a config run again by itself,
+    /// as its files changed, by no key of the user's, what runs commands
+    /// or changes panes or machines isn't done until `:reload`: what a
+    /// file anyone wrote says never starts a program by itself.
+    fn lua_heard(&mut self, from: crate::lua::Origin, message: FromLua, guarded: bool) {
+        if from.unattended && runs(&message) {
+            let why = "the config ran again as its files changed, so what it runs by itself \
+                       waits for :reload";
+            if let FromLua::Split { request, .. } = message {
+                self.answer_lua(request, Err(why.to_owned()));
+            }
+            self.warn(why.to_owned());
+            return;
+        }
+        self.lua_says(message, guarded || from.guarded);
     }
 
     /// Does one thing Lua says for the window, unless `guarded` and it
     /// runs commands or changes panes or machines: then it says why it
     /// didn't (see [`Desk::controlled`]).
     pub(super) fn lua_says(&mut self, message: FromLua, guarded: bool) {
-        if guarded
-            && let FromLua::Split { .. }
-            | FromLua::Close { .. }
-            | FromLua::Command { .. }
-            | FromLua::Forward(_)
-            | FromLua::Connect { .. }
-            | FromLua::Disconnect(_) = message
-        {
+        if guarded && runs(&message) {
             let why = "the config's command wasn't run: an agent controls this window";
             if let FromLua::Split { request, .. } = message {
                 self.answer_lua(request, Err(why.to_owned()));
@@ -581,4 +592,18 @@ impl Desk {
             | FromLua::Decided { .. } => {}
         }
     }
+}
+
+/// Whether `message` runs commands, or changes panes or machines, which
+/// starts programs: a shell, ssh, a language server or an agent.
+fn runs(message: &FromLua) -> bool {
+    matches!(
+        message,
+        FromLua::Split { .. }
+            | FromLua::Close { .. }
+            | FromLua::Command { .. }
+            | FromLua::Forward(_)
+            | FromLua::Connect { .. }
+            | FromLua::Disconnect(_)
+    )
 }

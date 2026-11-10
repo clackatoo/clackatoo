@@ -520,6 +520,9 @@ pub(crate) struct Desk {
     /// The daemon's settings, as it last said them, for the settings
     /// menu: none until the menu has asked, or from an older daemon.
     daemon_settings: Option<crate::settings::DaemonFacts>,
+    /// Changes to the daemon's options this window asked it to save, not
+    /// answered yet, by name: what it's told of others' isn't said here.
+    daemon_saving: std::collections::HashMap<&'static str, u32>,
     /// What the last new chat started from the start page had, for the
     /// next to start with.
     last_chat: crate::start::LastChat,

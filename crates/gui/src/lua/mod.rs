@@ -273,6 +273,9 @@ pub(crate) enum To {
 pub(crate) struct Origin {
     pub(crate) window: Option<u32>,
     pub(crate) guarded: bool,
+    /// It came from a config run again by itself, as its files changed,
+    /// and from no key of the user's: what it runs waits for `:reload`.
+    pub(crate) unattended: bool,
 }
 
 /// Something Lua says, and where it came from.
@@ -393,11 +396,26 @@ impl Lua {
     /// Starts running `source`'s config on a thread of its own, its
     /// `settings.lua` then its `init.lua`, with `options` as the windows
     /// share them and `windows` open, or returns `None` if it has neither.
+    #[cfg(test)]
     pub(crate) fn start(
         source: Source,
         options: Options,
         windows: Vec<u32>,
         wake: Wake,
+    ) -> Option<Self> {
+        Self::start_as(source, options, windows, wake, false)
+    }
+
+    /// Starts running `source`'s config, as `start` does, but `unattended`
+    /// if it's run again by itself, as its files changed: what it runs
+    /// then, but for a key of the user's, waits for `:reload` (see
+    /// [`Origin::unattended`]).
+    pub(crate) fn start_as(
+        source: Source,
+        options: Options,
+        windows: Vec<u32>,
+        wake: Wake,
+        unattended: bool,
     ) -> Option<Self> {
         let chunks = source.chunks();
         if chunks.is_empty() {
@@ -416,6 +434,7 @@ impl Lua {
                     chunks: &chunks,
                     options,
                     windows,
+                    unattended,
                 };
                 runtime::run(start, channels, slice, wake);
             });

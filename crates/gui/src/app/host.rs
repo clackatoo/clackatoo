@@ -755,7 +755,7 @@ impl Host {
             // follow.
             Wake::Config => {
                 if let Some(client) = &self.client {
-                    client.reload();
+                    client.reload_unattended();
                 }
                 let keys: Vec<WindowKey> = self.windows.keys().copied().collect();
                 for key in keys {

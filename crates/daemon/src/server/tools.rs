@@ -584,7 +584,8 @@ impl Daemon {
         let own = self.chat_ref(chat);
         let task = own.is_none_or(crate::chat::HostedChat::task);
         let mut profiles = String::new();
-        for profile in self.config.agents.profiles() {
+        // Those chats it starts can be started as: its tree's.
+        for profile in crate::agents::AgentConfig::profiles_in(self.tree_agents(chat)) {
             let about = if profile.about.is_empty() {
                 "the user's own"
             } else {

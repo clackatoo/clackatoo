@@ -11,11 +11,22 @@
 //! rest is read only as the daemon starts or upgrades, and windows are
 //! told it waits for that. A config that doesn't run changes nothing: the
 //! daemon goes on by what it has, and windows are told why.
+//!
+//! What runs programs takes a change in only as the user starts a chat,
+//! so an agent that can write a file of config can't make itself, or the
+//! chats it starts, run something else. Chats agents start go by the
+//! agents and profiles the config said as the user's own chat at the top
+//! of their tree started; the limits on them change only as the user
+//! starts a chat, but for limits lowered, which apply at once. And a change
+//! to an agent's command, a profile, or a limit raised, made outside a
+//! window's settings menu, is said in every window, to undo if it's not
+//! the user's.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use clackatoo_protocol::TerminalId;
 use clackatoo_protocol::{
     DaemonOption, DaemonSettings, Error, Event, OptionPlace, OptionSaved, OptionSetBy,
     OptionSource, Response, wire,
@@ -24,6 +35,7 @@ use mio::Token;
 
 use super::{Daemon, Link, Source};
 use crate::DaemonConfig;
+use crate::agents::{Configured, SubagentLimits};
 use crate::schema::{self, Info, Place, Value};
 use crate::settings::{self, Settings, options};
 
@@ -48,6 +60,22 @@ pub(super) struct Configuring {
     running: Option<Running>,
     /// Changes windows asked for, in turn, waiting for the run under way.
     asked: VecDeque<Asked>,
+    /// What the config said of agents as each of the user's own chats
+    /// started, by the chat: what chats agents start under it go by.
+    trees: HashMap<TerminalId, Configured>,
+    /// What it said as the daemon started, for chats agents start under a
+    /// chat of the user's from before, or gone.
+    started: Option<Configured>,
+}
+
+impl Configuring {
+    /// As the daemon starts, its config saying `started` of agents.
+    pub(super) fn starting(started: &Configured) -> Self {
+        Self {
+            started: Some(started.clone()),
+            ..Self::default()
+        }
+    }
 }
 
 /// A run of the config under way, off the loop.
@@ -197,10 +225,25 @@ impl Daemon {
                 }
             });
         if unchanged {
+            // A folder taken away and made again is watched again.
+            self.watch_config();
             return;
         }
         match answer {
             Ok((settings, fresh)) => {
+                // What runs programs, changed where no window's menu did.
+                if asked.is_none() {
+                    let changed =
+                        outside_changes(&self.config.agents.configured, &fresh.agents.configured);
+                    if !changed.is_empty() {
+                        let said = format!(
+                            "daemon config changed outside clackatoo: {}",
+                            changed.join(", ")
+                        );
+                        log::warn!("{said}");
+                        self.tell_windows(&Event::Said(said));
+                    }
+                }
                 self.take_live_config(&fresh);
                 self.configuring.configured = Some(settings);
                 self.configuring.failure = None;
@@ -219,9 +262,19 @@ impl Daemon {
     }
 
     /// Takes from `fresh`, the daemon's config as its own config is now,
-    /// what changes as the daemon runs.
+    /// what changes as the daemon runs. The agents and profiles are for
+    /// chats the user starts from now on (see [`Daemon::tree_agents`]),
+    /// and the limits on chats agents start apply at once only if they're
+    /// lower: higher, as the user next starts a chat.
     fn take_live_config(&mut self, fresh: &DaemonConfig) {
+        let lower = lower_or_same(
+            &fresh.agents.configured.subagents,
+            &self.tools.subagent_limits(),
+        );
         self.config.agents.configured = fresh.agents.configured.clone();
+        if lower {
+            self.refresh_subagent_limits();
+        }
         self.config.long_commands = fresh.long_commands;
         self.config.terminal.widths.vs16 = fresh.terminal.widths.vs16;
         if let (Some(history), Some(fresh)) = (&mut self.config.history, &fresh.history) {
@@ -230,10 +283,67 @@ impl Daemon {
         }
     }
 
+    /// Notes, as the user's own chat `chat` starts, what the config says of
+    /// agents now, for chats agents start under it to go by; and forgets
+    /// what it noted of chats gone.
+    pub(super) fn note_tree(&mut self, chat: TerminalId) {
+        let terminals = &self.terminals;
+        (self.configuring.trees).retain(|id, _| terminals.contains_key(id));
+        (self.configuring.trees).insert(chat, self.config.agents.configured.clone());
+    }
+
+    /// What the config said of agents as the user's own chat at the top of
+    /// `chat`'s tree started, which chats agents start under it go by: the
+    /// agents they run and the profiles they start as. If that chat is
+    /// from before the daemon started, or gone, what it said as the daemon
+    /// started.
+    pub(super) fn tree_agents(&self, chat: TerminalId) -> &Configured {
+        let root = (self.chat_ref(chat))
+            .and_then(|chat| chat.relations().root)
+            .unwrap_or(chat);
+        (self.configuring.trees.get(&root))
+            .or(self.configuring.started.as_ref())
+            .unwrap_or(&self.config.agents.configured)
+    }
+
+    /// Whether `chat` is one an agent started, which goes by its tree's
+    /// config (see [`Daemon::tree_agents`]).
+    pub(super) fn agent_started(&self, chat: TerminalId) -> bool {
+        (self.chat_ref(chat)).is_some_and(|chat| chat.relations().root.is_some())
+    }
+
+    /// Every window: never a device on the web app, a daemon relaying, nor
+    /// what serves agents' tools.
+    fn windows(&self) -> Vec<Token> {
+        (self.sources.iter())
+            .filter_map(|(at, source)| match source {
+                Source::Client(client)
+                    if !matches!(client.link, Link::Web(_))
+                        && !client.relays
+                        && client.serving_tools.is_none() =>
+                {
+                    Some(Token(at))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Tells every window `event`.
+    fn tell_windows(&mut self, event: &Event) {
+        for token in self.windows() {
+            self.send_event(token, event.clone());
+        }
+    }
+
     /// Tells every window of the daemon's settings, and the one at `asker`,
     /// what came of its change, `saved`: never a device on the web app, a
     /// daemon relaying, nor what serves agents' tools.
-    fn tell_daemon_settings(&mut self, asker: Option<Token>, saved: Option<&OptionSaved>) {
+    pub(super) fn tell_daemon_settings(
+        &mut self,
+        asker: Option<Token>,
+        saved: Option<&OptionSaved>,
+    ) {
         let windows: Vec<Token> = (self.sources.iter())
             .filter_map(|(at, source)| match source {
                 Source::Client(client)
@@ -364,6 +474,81 @@ impl Daemon {
         now < until
             && (self.configuring.running.as_ref()).is_some_and(|running| running.asked.is_some())
     }
+
+    /// As the upgrade goes ahead: a change still being saved, past the
+    /// time the upgrade waited, is cut off where it is, which the log
+    /// says, and the next build runs the config as the file is then, or
+    /// else what last ran; the window that asked for it, and those whose
+    /// changes were waiting, are told theirs weren't saved.
+    pub(super) fn config_upgrading(&mut self) {
+        let mut refused: Vec<Asked> = self.configuring.asked.drain(..).collect();
+        if let Some(asked) = self
+            .configuring
+            .running
+            .take()
+            .and_then(|running| running.asked)
+        {
+            log::warn!(
+                "upgrading while daemon.{} is still being saved: the next build runs the config \
+                 as daemon/settings.lua is, or else what last ran",
+                asked.info.name
+            );
+            refused.insert(0, asked);
+        }
+        for asked in refused {
+            let saved = OptionSaved {
+                name: asked.info.name.to_owned(),
+                value: asked.value.as_ref().map(Value::text),
+                refused: Some("the daemon upgraded before it was saved: try again".to_owned()),
+            };
+            self.tell_daemon_settings(Some(asked.token), Some(&saved));
+        }
+    }
+}
+
+/// What changed from `old` to `new`, of what runs programs: an agent's
+/// command, or one added; a profile changed or added; a limit on chats
+/// agents start raised. As windows are told it, `agents.claude command`.
+fn outside_changes(old: &Configured, new: &Configured) -> Vec<String> {
+    let mut changed = Vec::new();
+    for agent in &new.agents {
+        let before = old.agents.iter().find(|each| each.name == agent.name);
+        if before.is_none_or(|before| before.command != agent.command) {
+            changed.push(format!("agents.{} command", agent.name));
+        }
+    }
+    for profile in &new.profiles {
+        if !old.profiles.contains(profile) {
+            changed.push(format!("profiles.{}", profile.name));
+        }
+    }
+    let (old, new) = (&old.subagents, &new.subagents);
+    let raised = [
+        ("working", new.working > old.working),
+        ("default", new.default > old.default),
+        ("open", new.open > old.open),
+        ("started", new.started > old.started),
+        ("depth", new.depth > old.depth),
+        ("hops", new.hops > old.hops),
+        ("notice_turns", new.notice_turns > old.notice_turns),
+    ];
+    for (name, raised) in raised {
+        if raised {
+            changed.push(format!("subagents.{name}"));
+        }
+    }
+    changed
+}
+
+/// Whether every one of the limits `new` is at most what it is in `old`.
+pub(super) fn lower_or_same(new: &SubagentLimits, old: &SubagentLimits) -> bool {
+    new.working <= old.working
+        && new.default <= old.default
+        && new.open <= old.open
+        && new.started <= old.started
+        && new.depth <= old.depth
+        && new.hops <= old.hops
+        && new.notice_turns <= old.notice_turns
 }
 
 /// `by`, as a window's menu is told it.
@@ -387,4 +572,76 @@ fn set_by(by: &schema::SetBy) -> OptionSetBy {
 fn shown_place(own: &settings::Own, at: &Place) -> String {
     let config = format!("{}/", own.dirs.config().display());
     format!("{}:{}", at.file.replace(&config, ""), at.line)
+}
+
+#[cfg(test)]
+mod tests {
+    use clackatoo_protocol::{AgentTools, Size};
+
+    use super::*;
+    use crate::agents::Launch;
+    use crate::chat::HostedChat;
+    use crate::server::agent_files::tests::daemon_with_chat;
+
+    /// The daemon's config `text`, as the daemon builds it.
+    fn fresh(text: &str) -> DaemonConfig {
+        DaemonConfig::from_settings(&Settings::from_lua(text).unwrap())
+    }
+
+    /// An agent that can write the daemon's config can't make the chats it
+    /// starts run another command, nor raise their limits: a change made
+    /// as the daemon runs is for chats the user starts, and windows are
+    /// told what changed (CLACKA-237 review, F1).
+    #[test]
+    fn what_runs_programs_changes_only_for_chats_the_user_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        daemon.note_tree(a);
+        let limits = daemon.tools.subagent_limits();
+        let written = "daemon.agents.claude = { command = { \"evil\" } }\n\
+                       daemon.subagents.working = 64\ndaemon.profiles.mine = { about = \"x\" }";
+        let before = daemon.config.agents.configured.clone();
+        daemon.take_live_config(&fresh(written));
+        let evil = Launch::Command(vec!["evil".into()]);
+        // The user's next chat goes by it...
+        assert_eq!(daemon.config.agents.find("claude").unwrap().launch, evil);
+        // ...but not the chats agents start under the user's chat, whose
+        // agent and profiles are as the user's chat began.
+        assert_ne!(daemon.agent_spec_under(a, "claude").launch, evil);
+        let profiles = crate::agents::AgentConfig::profiles_in(daemon.tree_agents(a));
+        assert!(!profiles.iter().any(|profile| profile.name == "mine"));
+        // Nor a chat started under it, by the chat's own tree.
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = Size::new(40, 10).unwrap();
+        let mut kid = HostedChat::new(
+            TerminalId(7),
+            size,
+            "/".into(),
+            &agent,
+            AgentTools::Ask,
+            true,
+            false,
+        );
+        kid.started_by(a, a, 1, None);
+        daemon.start_hosted_chat(kid);
+        assert_ne!(
+            daemon.agent_spec_under(TerminalId(7), "claude").launch,
+            evil
+        );
+        // The limits aren't raised by it, nor by a chat an agent starts.
+        assert_eq!(daemon.tools.subagent_limits(), limits);
+        // What windows are told changed.
+        assert_eq!(
+            outside_changes(&before, &daemon.config.agents.configured),
+            [
+                "agents.claude command",
+                "profiles.mine",
+                "subagents.working"
+            ]
+        );
+        // Lowered, they apply at once.
+        daemon.take_live_config(&fresh("daemon.subagents.working = 2"));
+        assert_eq!(daemon.tools.subagent_limits().working, 2);
+        assert!(outside_changes(&before, &daemon.config.agents.configured).is_empty());
+    }
 }

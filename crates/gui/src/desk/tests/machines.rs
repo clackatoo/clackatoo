@@ -675,6 +675,40 @@ fn connect_no_share_asks_the_daemon_not_to_pass_the_machine_on_if_it_knows_how()
     assert!(note_of(&desk).contains("newer"), "{}", note_of(&desk));
 }
 
+/// A config run again by itself, as its files changed, connects to no
+/// machine and runs no command as it loads: those wait for :reload, which
+/// does them (CLACKA-237).
+#[test]
+fn a_config_run_again_by_itself_starts_nothing_until_reload() {
+    let mut desk = desk(three());
+    desk.lua_from(r#"client.connect("desk") client.cmd("bg make")"#);
+    let asked = answer_all(&mut desk);
+    assert!(asked.contains(&Request::Connect {
+        host: "desk".into(),
+        command: None,
+        share: None,
+    }));
+    // Run again by itself: nothing asked, and the bar says why.
+    let (client, _) = desk.client();
+    assert!(client.reload_unattended());
+    desk.lua_ready();
+    assert_eq!(answer_all(&mut desk), []);
+    assert!(
+        (desk.message.as_deref()).is_some_and(|said| said.contains(":reload")),
+        "{:?}",
+        desk.message
+    );
+    // :reload runs it as the user asked.
+    let (client, _) = desk.client();
+    assert!(client.reload());
+    desk.lua_ready();
+    assert!(
+        answer_all(&mut desk)
+            .iter()
+            .any(|asked| matches!(asked, Request::Connect { .. }))
+    );
+}
+
 #[test]
 fn the_configs_connections_say_whether_to_pass_them_on() {
     let mut desk = desk(three());

@@ -145,6 +145,7 @@ impl Desk {
         let Response::Error(err) = response else {
             return false;
         };
+        self.daemon_saved(info.name);
         self.warn_saved(format!("daemon.{} wasn't saved: {err}", info.name));
         // What the menu counted on goes, as the daemon says it is.
         self.ask_daemon_settings();
@@ -169,6 +170,8 @@ impl Desk {
         // A daemon without a config of its own has no settings to show.
         self.daemon_settings = (!settings.options.is_empty()).then_some(facts);
         self.settings_changed();
+        // Only what this window asked for: another's is its own to say.
+        let saved = saved.filter(|saved| self.daemon_saved(&saved.name));
         match saved {
             Some(OptionSaved {
                 name,
@@ -212,6 +215,7 @@ impl Desk {
         if let Some(daemon) = &mut self.daemon_settings {
             daemon.counting_on(info, value.cloned());
         }
+        *self.daemon_saving.entry(info.name).or_default() += 1;
         self.request(
             Request::SetDaemonOption {
                 name: info.name.to_owned(),
@@ -219,6 +223,19 @@ impl Desk {
             },
             Asked::DaemonOption(info),
         );
+    }
+
+    /// A change this window asked the daemon to save of its option called
+    /// `name` came back, or went: whether one was waiting.
+    fn daemon_saved(&mut self, name: &str) -> bool {
+        let Some(count) = self.daemon_saving.get_mut(name) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.daemon_saving.remove(name);
+        }
+        true
     }
 
     /// The mode the menu was used in last, as the file it's remembered in

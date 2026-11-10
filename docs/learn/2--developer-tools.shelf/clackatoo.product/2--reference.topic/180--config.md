@@ -94,6 +94,14 @@ the config doesn't require yet is picked up once the file that requires it
 changes. If the user's inotify instances are all in use, nothing's watched,
 which the window's log says, and `:reload` still works.
 
+A config run again by itself starts no program by itself: what it runs as it
+loads, or in a handler of something other than your keys, such as a chat's
+turn ending, isn't done (`client.cmd`, `client.connect`, `client.forward`,
+splits and closes), and the bar says it waits for `:reload`. Its bindings
+and handlers of your keys work as soon as it has run, as what they do is
+yours to start. So a file an agent writes never runs a program you didn't
+ask for.
+
 
 ## How a key travels
 
@@ -827,6 +835,16 @@ then lay out emoji, and how many lines of terminals' history are kept, and
 how often. The rest, as [the daemon's options](#the-daemon-s-options) say,
 is read only as the daemon starts: `clackatoo upgrade`, which keeps every
 terminal and agent running, takes it in.
+
+What runs programs changes only as you start a chat, so an agent that can
+write a file of config can't make itself, or the chats it starts, run
+something else. Chats agents start, and the chats those start, go by the
+agents and profiles as they were when your own chat at the top started;
+the limits on chats agents start go up only as you start a chat, though
+limits lowered apply at once. And a change to an agent's command, a profile,
+or a limit raised, made anywhere but the settings menu, is said in every
+window's bar, as `daemon config changed outside clackatoo: agents.claude
+command, subagents.working`, for you to undo if it isn't yours.
 
 It runs in a sandbox. There's no `io` or `os`, nothing that loads code but
 `require`, and `require` reaches only those two folders. Luau's bytecode is

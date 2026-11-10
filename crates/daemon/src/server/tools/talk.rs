@@ -460,7 +460,7 @@ impl Daemon {
                 limits.started
             ));
         }
-        self.unstartable(own.agent(), starts)
+        self.unstartable(chat, own.agent(), starts)
     }
 
     /// The chats agents started, open now.
@@ -877,17 +877,19 @@ impl Daemon {
     /// Why one of `starts`, chats a chat whose agent is `own` asks to
     /// start, can't be, if one can't: its profile or its agent isn't
     /// there.
-    fn unstartable(&self, own: &str, starts: &[NewChat]) -> Option<String> {
+    fn unstartable(&self, chat: TerminalId, own: &str, starts: &[NewChat]) -> Option<String> {
+        // As the config said as `chat`'s tree began.
+        let configured = self.tree_agents(chat);
         for new in starts {
             let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
-            let profile = match self.config.agents.profile(profile) {
+            let profile = match crate::agents::AgentConfig::profile_in(profile, configured) {
                 Ok(profile) => profile,
                 Err(why) => return Some(why),
             };
             let name = (new.agent.as_deref())
                 .or(profile.agent.as_deref())
                 .unwrap_or(own);
-            if let Err(why) = self.config.agents.find(name) {
+            if let Err(why) = self.config.agents.find_in(name, configured) {
                 return Some(format!("there's no agent {name:?} to start: {why}"));
             }
         }

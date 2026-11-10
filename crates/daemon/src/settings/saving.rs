@@ -23,6 +23,10 @@ use crate::schema::{Info, Value};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Model {
     lines: Vec<Line>,
+    /// What ends its lines, as it was read: `\n`, or `\r\n`.
+    newline: &'static str,
+    /// Whether its last line ends as the others do, as it was read.
+    ends: bool,
 }
 
 /// One line of the file.
@@ -30,9 +34,15 @@ pub(crate) struct Model {
 enum Line {
     /// One kept as it is: blank, a comment, or in a block comment.
     Kept(String),
-    /// One of a statement that sets agents or profiles, kept as it is,
-    /// and whether the statement starts on it.
-    Code { line: String, starts: bool },
+    /// One of a statement that sets agents or profiles, kept as it is;
+    /// whether the statement starts on it; and whether another statement
+    /// goes on on it, after the one that started, which clackatoo never
+    /// writes, so the options it might set are never saved.
+    Code {
+        line: String,
+        starts: bool,
+        crowded: bool,
+    },
     /// One that sets an option.
     Sets {
         /// The option's name, as written after `daemon.`: `web.mode`.
@@ -62,12 +72,22 @@ enum Saved {
 struct Scan {
     depth: usize,
     long: Option<String>,
+    /// How many statements have started, as `daemon.` outside brackets,
+    /// strings and comments: more than the first is another statement.
+    statements: usize,
 }
 
 impl Scan {
-    /// Follows `line`, a line of code, from where the last one left it;
-    /// or says why it can't.
-    fn line(&mut self, line: &str) -> Result<(), &'static str> {
+    /// Follows `line`, a line of code, from where the last one left it:
+    /// whether another statement starts on it, after the first; or says
+    /// why it can't.
+    fn line(&mut self, line: &str) -> Result<bool, &'static str> {
+        let before = self.statements;
+        self.follow(line)?;
+        Ok(self.statements > 1 && self.statements > before)
+    }
+
+    fn follow(&mut self, line: &str) -> Result<(), &'static str> {
         let mut rest = line;
         loop {
             if let Some(end) = &self.long {
@@ -80,7 +100,12 @@ impl Scan {
                 }
             }
             let here = rest;
-            let Some(at) = here.find(['-', '"', '\'', '[', ']', '{', '}', '(', ')']) else {
+            let found = here.find(['-', '"', '\'', '[', ']', '{', '}', '(', ')']);
+            // What's between, outside strings and comments.
+            if self.depth == 0 {
+                self.statements += statements_in(&here[..found.unwrap_or(here.len())]);
+            }
+            let Some(at) = found else {
                 return Ok(());
             };
             let (ch, after) = (here.as_bytes()[at], &here[at + 1..]);
@@ -135,6 +160,8 @@ impl Model {
         if text.trim().is_empty() {
             return Ok(Self::new());
         }
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let ends = text.ends_with('\n');
         let mut lines = Vec::new();
         // The comment, or statement, the line is in.
         let mut block: Option<(usize, String)> = None;
@@ -152,13 +179,14 @@ impl Model {
                 continue;
             }
             if let Some((_, scan)) = &mut statement {
-                scan.line(line).map_err(cant)?;
+                let crowded = scan.line(line).map_err(cant)?;
                 if scan.ended() {
                     statement = None;
                 }
                 lines.push(Line::Code {
                     line: line.to_owned(),
                     starts: false,
+                    crowded,
                 });
                 continue;
             }
@@ -180,13 +208,14 @@ impl Model {
             }
             if code(trimmed) {
                 let mut scan = Scan::default();
-                scan.line(line).map_err(cant)?;
+                let crowded = scan.line(line).map_err(cant)?;
                 if !scan.ended() {
                     statement = Some((number, scan));
                 }
                 lines.push(Line::Code {
                     line: line.to_owned(),
                     starts: true,
+                    crowded,
                 });
                 continue;
             }
@@ -211,7 +240,11 @@ impl Model {
                 "statement from line {number} never ends, which clackatoo can't follow"
             ));
         }
-        Ok(Self { lines })
+        Ok(Self {
+            lines,
+            newline,
+            ends,
+        })
     }
 
     /// A new file: the header, and a blank line.
@@ -219,15 +252,30 @@ impl Model {
         let lines = super::HEADER.lines().chain([""]);
         Self {
             lines: lines.map(|line| Line::Kept(line.to_owned())).collect(),
+            newline: "\n",
+            ends: true,
         }
     }
 
     /// Saves `info`'s option as `value`, or with none, saves it no more;
     /// or says why `value` isn't one it can hold. Only the option's own
-    /// lines change.
+    /// lines change. One a line of several statements might set isn't
+    /// saved: which it sets is the user's code's to say.
     pub(crate) fn set(&mut self, info: &Info, value: Option<Value>) -> Result<(), String> {
         if let Some(value) = &value {
             info.check(value)?;
+        }
+        let (group, key) = info.name.split_once('.').unwrap_or((info.name, info.name));
+        let crowded = (self.lines.iter()).position(|line| {
+            matches!(line, Line::Code { line, crowded: true, .. } if line.contains(group) && line.contains(key))
+        });
+        if let Some(at) = crowded {
+            return Err(format!(
+                "daemon/settings.lua's line {} sets daemon.{} among other statements, which \
+                 clackatoo can't change: put each on a line of its own",
+                at + 1,
+                info.name
+            ));
         }
         let mut found: Vec<usize> = (self.lines.iter().enumerate())
             .filter(|(_, line)| matches!(line, Line::Sets { name, .. } if name == info.name))
@@ -294,7 +342,10 @@ impl Model {
     /// were read.
     pub(crate) fn render(&self) -> String {
         let mut text = String::new();
-        for line in &self.lines {
+        for (at, line) in self.lines.iter().enumerate() {
+            if at > 0 {
+                text.push_str(self.newline);
+            }
             match line {
                 Line::Kept(line)
                 | Line::Code { line, .. }
@@ -314,10 +365,25 @@ impl Model {
                     let _ = write!(text, "daemon.{name} = {written}{comment}");
                 }
             }
-            text.push('\n');
+        }
+        if self.ends {
+            text.push_str(self.newline);
         }
         text
     }
+}
+
+/// How many statements start in `code`, a stretch of a line outside
+/// strings, comments and brackets: each `daemon.` or `daemon[`.
+fn statements_in(code: &str) -> usize {
+    (code.match_indices("daemon"))
+        .filter(|&(at, _)| {
+            let before = code[..at].chars().next_back();
+            let after = code[at + "daemon".len()..].chars().next();
+            !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+                && after.is_some_and(|ch| ch == '.' || ch == '[')
+        })
+        .count()
 }
 
 /// Whether `trimmed`, a line of code, starts a statement that sets agents
@@ -489,6 +555,58 @@ daemon.history.lines = 4000
             model.render(),
             format!("daemon.web.mode = \"tailscale\"\n{text}")
         );
+    }
+
+    /// CRLF line ends, and a last line with none, stay as they were.
+    #[test]
+    fn line_ends_stay_as_they_were() {
+        let text = "-- mine\r\ndaemon.history.lines = 2000\r\ndaemon.machine.name = \"desk\"";
+        let mut model = Model::parse(text).unwrap();
+        assert_eq!(model.render(), text);
+        model
+            .set(info("history.lines"), Some(Value::Number(3000)))
+            .unwrap();
+        model
+            .set(info("terminals.vs16"), Some(Value::Bool(false)))
+            .unwrap();
+        assert_eq!(
+            model.render(),
+            "-- mine\r\ndaemon.history.lines = 3000\r\ndaemon.machine.name = \"desk\"\r\n\
+             daemon.terminals.vs16 = false"
+        );
+        let mut model = Model::parse("daemon.history.lines = 2000\n").unwrap();
+        model.set(info("history.lines"), None).unwrap();
+        model
+            .set(info("history.every"), Some(Value::Number(5)))
+            .unwrap();
+        assert_eq!(model.render(), "daemon.history.every = 5\n");
+    }
+
+    /// A line with another statement after an agent's never has the
+    /// options it might set saved, naming it; the rest are.
+    #[test]
+    fn options_a_line_of_several_statements_sets_are_never_saved() {
+        for text in [
+            "daemon.agents.x = { command = { \"x\" } } daemon.web.mode = \"public\"\n",
+            "daemon.agents.x.tasks = false; daemon.web.mode = \"public\"\n",
+            "daemon.agents.x = {\n  command = { \"x\" },\n} daemon.web[\"mode\"] = \"public\"\n",
+        ] {
+            let mut model = Model::parse(text).unwrap();
+            let why = (model.set(info("web.mode"), Some(Value::Choice("tailscale")))).unwrap_err();
+            assert!(
+                why.contains("line ") && why.contains("other statements"),
+                "{why}"
+            );
+            model
+                .set(info("machine.name"), Some(Value::Text("desk".into())))
+                .unwrap();
+        }
+        // An agent's table naming the daemon inside it is one statement.
+        let text = "daemon.agents.x = { command = { daemon.machine.name } }\n";
+        let mut model = Model::parse(text).unwrap();
+        model
+            .set(info("machine.name"), Some(Value::Text("desk".into())))
+            .unwrap();
     }
 
     #[test]

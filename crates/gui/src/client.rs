@@ -77,6 +77,9 @@ struct Inner {
     running: Cell<Option<Instant>>,
     /// How many times the config has been run again from the start.
     reloads: Cell<u64>,
+    /// The config was run again by itself last, as its files changed, not
+    /// by `:reload` (see [`crate::lua::Origin::unattended`]).
+    unattended: Cell<bool>,
     /// What the config asked of each window's daemon, `client.connect`'s
     /// machines and `client.forward`'s ports, for windows that open later.
     hosts: RefCell<Vec<(String, Option<bool>)>>,
@@ -137,7 +140,8 @@ impl Client {
             };
             let options = (**self.options().borrow()).clone();
             let windows = self.0.windows.borrow().keys().copied().collect();
-            Lua::start(source.clone(), options, windows, wake())
+            let unattended = self.0.unattended.get();
+            Lua::start_as(source.clone(), options, windows, wake(), unattended)
         };
         self.0.running.set(lua.as_ref().map(|_| Instant::now()));
         *self.0.lua.borrow_mut() = lua;
@@ -303,7 +307,8 @@ impl Client {
             To::All => {
                 // Kept for windows opened later only if no window refuses
                 // it now, as one a chat has Control of does.
-                let refused = from.guarded || !self.0.guarded.borrow().is_empty();
+                let refused =
+                    from.guarded || from.unattended || !self.0.guarded.borrow().is_empty();
                 match &message {
                     _ if refused => {}
                     FromLua::Connect { host, share } => {
@@ -534,6 +539,20 @@ impl Client {
     /// and the options are as the process started them. Returns whether
     /// there's a config to run.
     pub(crate) fn reload(&self) -> bool {
+        self.0.unattended.set(false);
+        self.run_again()
+    }
+
+    /// Runs the config again, as [`reload`](Self::reload) does, by itself,
+    /// as its files changed: what it runs then, but for keys of the
+    /// user's, waits for `:reload`, as a file anyone wrote never starts a
+    /// program by itself.
+    pub(crate) fn reload_unattended(&self) -> bool {
+        self.0.unattended.set(true);
+        self.run_again()
+    }
+
+    fn run_again(&self) -> bool {
         // Its thread ends once it lets go of its end.
         *self.0.lua.borrow_mut() = None;
         for queue in self.0.windows.borrow_mut().values_mut() {

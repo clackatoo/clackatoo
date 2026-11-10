@@ -1309,6 +1309,7 @@ impl Daemon {
             tutor: tutor::Tutor::default(),
             finds,
             tools: Tools::with_limits(config.agents.subagent_limits()),
+            configuring: configuring::Configuring::starting(&config.agents.configured),
             background: background::Backgrounds::default(),
             keeps: keep::Keeps::default(),
             closed: closed::ClosedList::default(),
@@ -1352,7 +1353,6 @@ impl Daemon {
             recovery: recovery::Recovery::default(),
             keeping,
             histories: history::Histories::default(),
-            configuring: configuring::Configuring::default(),
             machine,
             signer,
             mcp_run: tools::run_key(),
@@ -2119,8 +2119,10 @@ impl Daemon {
     pub fn run(&mut self) -> io::Result<Option<Upgrade>> {
         let mut events = Events::with_capacity(EVENTS);
         let mut waiting = Events::with_capacity(EVENTS);
-        // The daemon's own config, run again as its files change.
+        // The daemon's own config, run again as its files change; and
+        // windows carried through an upgrade told it as it is now.
         self.watch_config();
+        self.tell_daemon_settings(None, None);
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some(upgrade) = self.upgrade_when_ready()? {
                 return Ok(Some(upgrade));
@@ -2423,6 +2425,9 @@ impl Daemon {
                 None => drained = Some(self.agents_to_keep(&upgrading.takes)),
             }
         };
+        // What windows asked of the daemon's config, not done, is said not
+        // to be.
+        self.config_upgrading();
         let Upgrading {
             executable,
             takes,

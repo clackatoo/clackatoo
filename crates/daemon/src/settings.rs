@@ -753,6 +753,16 @@ pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
 pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
     let _lock = file::lock(&dirs.daemon)?;
     let path = dirs.daemon.join("settings.lua");
+    // A link to nothing isn't written through: where it goes is the
+    // user's to say.
+    let link = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if link && std::fs::metadata(&path).is_err() {
+        return Err(
+            "daemon/settings.lua is a link to a file that isn't there, so it wasn't changed: \
+             make that file, or take the link away"
+                .to_owned(),
+        );
+    }
     let before = lua::read(&path)?;
     let mut model = saving::Model::parse(before.as_deref().unwrap_or_default())
         .map_err(|why| format!("daemon/settings.lua's {why}, so it wasn't changed"))?;
@@ -770,6 +780,13 @@ pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings
         Err(said) => {
             let put_back = match &before {
                 Some(before) => file::replace(&path, before, file::PRIVATE),
+                // Made by this change, so no link; but never a link taken
+                // away, whatever made one meanwhile.
+                None if std::fs::symlink_metadata(&path)
+                    .is_ok_and(|meta| meta.file_type().is_symlink()) =>
+                {
+                    Err("it's a link now".to_owned())
+                }
                 None => std::fs::remove_file(&path).map_err(|err| err.to_string()),
             };
             match put_back {
