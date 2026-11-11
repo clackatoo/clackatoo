@@ -818,7 +818,7 @@ pub(crate) fn lay_out(
     let mut right = foot.right() - lay.u(24.0);
     let hints: &[(&str, &str)] = if panel.width < lay.u(700.0) {
         &[("Esc", "close")]
-    } else if view.title == "Specialists" {
+    } else if view.title == "Specialists" || view.title == "MCP Servers" {
         &[("Ctrl+S", "save"), ("Esc", "close")]
     } else if view.fonts.is_some() {
         &[("Enter", "pick"), ("Tab", "every font"), ("Esc", "back")]

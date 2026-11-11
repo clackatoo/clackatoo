@@ -48,6 +48,7 @@
 //! | `m` | Switches to Easy, or back |
 
 mod easy;
+mod mcp;
 mod specialists;
 pub(crate) mod view;
 
@@ -375,6 +376,11 @@ pub(crate) enum Outcome {
     /// The fonts installed are wanted, for the font picker: see
     /// [`SettingsMenu::fonts`].
     Fonts,
+    /// Act on managed MCP configuration or a private credential.
+    Mcp {
+        action: clackatoo_protocol::McpAction,
+        id: u64,
+    },
     /// Save a complete specialist draft.
     SaveSpecialist {
         specialist: clackatoo_protocol::SpecialistDefinition,
@@ -609,6 +615,7 @@ pub(crate) struct SettingsMenu {
     skills: Vec<clackatoo_protocol::Skill>,
     skills_status: String,
     specialists: specialists::Specialists,
+    mcp: mcp::Mcp,
     /// The daemon's settings are listed, as it's said them.
     daemon: bool,
 }
@@ -644,6 +651,7 @@ impl SettingsMenu {
             agents: Vec::new(),
             skills: Vec::new(),
             specialists: specialists::Specialists::new(),
+            mcp: mcp::Mcp::new(),
             skills_status: "Loading skills…".into(),
             daemon: false,
         };
@@ -744,6 +752,24 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
+        if self.mcp_page() {
+            let mut handled = false;
+            let outcome = picker::press(press, |stroke| {
+                if stroke == Stroke::ctrl('s') && self.mcp.editor().is_some() {
+                    handled = true;
+                    self.finish_mcp_field();
+                    self.mcp_act(self.mcp_rows().saturating_sub(2))
+                } else if self.mcp_editing() {
+                    handled = true;
+                    self.mcp_key(stroke)
+                } else {
+                    Outcome::Nothing
+                }
+            });
+            if handled {
+                return outcome;
+            }
+        }
         if self.specialist_page() && self.specialists.draft.is_some() {
             let mut handled = false;
             let outcome = picker::press(press, |stroke| {
@@ -922,6 +948,9 @@ impl SettingsMenu {
 
     /// Types `text`, into the search, or the value being typed.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
+        if self.mcp_editing() {
+            return self.mcp_paste(text);
+        }
         if self.specialist_editing() {
             return self.specialist_paste(text);
         }

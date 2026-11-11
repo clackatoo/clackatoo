@@ -199,6 +199,8 @@ impl Daemon {
             | Response::Picture(_)
             | Response::DaemonSettings(_)
             | Response::Work(_)
+            | Response::Mcp(_)
+            | Response::McpConnection(_)
             | Response::Side(_)
             | Response::Context(_)
             | Response::Skills(_)

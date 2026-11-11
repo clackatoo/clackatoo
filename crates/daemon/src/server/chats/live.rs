@@ -349,8 +349,13 @@ impl Daemon {
                     continue;
                 }
             };
-            if agent.native_plugins() != self.config.agents.configured.native_plugins(&name) {
-                log::info!("agent {name}: restarting to apply native plugin settings");
+            if agent.native_plugins() != self.config.agents.configured.native_plugins(&name)
+                || agent.native_mcp() != self.config.agents.configured.native_mcp(&name)
+                || (!self.config.agents.configured.native_mcp(&name)
+                    && matches!(name.as_str(), "claude" | "codex")
+                    && !agent.managed_mcp_control())
+            {
+                log::info!("agent {name}: restarting to apply native plugin and MCP settings");
                 self.let_agent_go(agent.stop(), &name, End::Gently(KILL_AFTER));
                 continue;
             }

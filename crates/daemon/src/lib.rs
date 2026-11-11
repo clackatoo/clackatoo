@@ -47,6 +47,7 @@ mod known;
 pub mod launch;
 mod lsp;
 mod machine;
+pub mod managed_mcp;
 pub mod mcp;
 mod memory;
 mod outline;

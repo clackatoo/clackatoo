@@ -167,6 +167,15 @@ impl Settings {
         }
     }
 
+    /// A provider override, or the shared native MCP preference.
+    fn native_mcp(&self, name: &str) -> bool {
+        match self.text(name).as_str() {
+            "allow" => true,
+            "off" => false,
+            _ => self.on("mcp.providers"),
+        }
+    }
+
     /// A new chat's Subagents setting: as set, or else the default, as
     /// far as `subagents.working` lets it.
     fn subagents_default(&self) -> u32 {
@@ -294,6 +303,9 @@ impl Settings {
             keep_agents: self.on("upgrade.keep_agents"),
             claude_plugins: self.on("plugins.claude"),
             codex_plugins: self.on("plugins.codex"),
+            claude_mcp: self.native_mcp("mcp.claude"),
+            codex_mcp: self.native_mcp("mcp.codex"),
+            other_mcp: self.on("mcp.providers"),
         }
     }
 

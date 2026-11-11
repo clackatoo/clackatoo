@@ -12,10 +12,11 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-pub(super) const VERSION: &str = "2.2.2+clackatoo.1";
+pub(super) const VERSION: &str = "2.2.2+clackatoo.2";
 const ORIGINAL_SHA256: &str = "6b1bb4e7e9caaf4aeca1042ae4aec2dc2433b0b0e4b1614b38a4d41699902aaa";
 const DIST: &str = "codex-acp/node_modules/@agentclientprotocol/codex-acp/dist";
 const PARSER: &str = include_str!("../../agents/codex/steering-parser.js");
+const MANAGED_MCP: &str = include_str!("../../agents/codex/managed-mcp.js");
 const DELIVER: &str = include_str!("../../agents/codex/steering-deliver.js");
 
 pub(super) fn program(dir: &Path) -> PathBuf {
@@ -55,6 +56,37 @@ fn patch(source: &str) -> io::Result<String> {
         "  /**\n   * Rejects a steering prompt",
         DELIVER,
     )?;
+    let source = replace_method(
+        &source,
+        "  async createSessionConfig(projectPath, additionalDirectories, mcpServers) {",
+        "  async getConfigMcpServerNames(projectPath) {",
+        MANAGED_MCP,
+    )?;
+    let mut source = source;
+    for (from, to, wanted) in [
+        (
+            "this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [])",
+            "this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [], request._meta?.clackatoo?.nativeMcp)",
+            2,
+        ),
+        (
+            "this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers)",
+            "this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers, request._meta?.clackatoo?.nativeMcp)",
+            1,
+        ),
+        (
+            "this.createSessionConfig(cwd, directories, mcpServers)",
+            "this.createSessionConfig(cwd, directories, mcpServers, request._meta?.clackatoo?.nativeMcp)",
+            1,
+        ),
+    ] {
+        if source.matches(from).count() != wanted {
+            return Err(io::Error::other(
+                "Codex MCP session configuration call sites changed",
+            ));
+        }
+        source = source.replace(from, to);
+    }
     let identity = "title: \"Codex\",\n        version: package_default.version";
     if source.matches(identity).count() != 1 {
         return Err(io::Error::other("Codex adapter identity changed"));
@@ -111,6 +143,21 @@ mod tests {
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn managed_mcp_backport_contract() {
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/codex/managed-mcp-test.mjs");
+        let output = std::process::Command::new("node")
+            .arg(script)
+            .output()
+            .expect("node for MCP backport tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

@@ -501,6 +501,8 @@ gates! {
     CONTEXT = 159,
     /// Temporary side questions addressed through a parent chat.
     SIDE_QUESTIONS = 160,
+    /// Managed external MCP servers and their private proxy control channel.
+    MANAGED_MCP = 161,
 }
 
 /// The specialist field's gate. Its historical release name remains in
@@ -934,6 +936,7 @@ pub fn newest(message: &ServerMessage) -> u32 {
             Response::Work(_) => WORK,
             Response::Context(_) => CONTEXT,
             Response::Side(_) => SIDE_QUESTIONS,
+            Response::Mcp(_) | Response::McpConnection(_) => MANAGED_MCP,
             _ => EARLIER,
         },
         ServerMessage::Event(event) => {
@@ -1355,6 +1358,14 @@ impl Downgrade for ClientMessage {
                 Self::Request(
                     crate::Request::DaemonSettings | crate::Request::SetDaemonOption { .. }
                 )
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < MANAGED_MCP
+            && matches!(
+                self,
+                Self::Request(crate::Request::Mcp { .. } | crate::Request::McpProxy { .. })
             )
         {
             return Downgraded::Refused;
@@ -2052,6 +2063,8 @@ impl Downgrade for ServerMessage {
                 Response::HiddenRun { .. }
                 | Response::Context(_)
                 | Response::Side(_)
+                | Response::Mcp(_)
+                | Response::McpConnection(_)
                 | Response::Skills(_)
                 | Response::Specialists(_)
                 | Response::SpecialistSaved

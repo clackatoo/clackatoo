@@ -117,6 +117,7 @@ impl Desk {
         }
         self.ask_daemon_settings();
         self.ask_settings_specialists();
+        self.ask_settings_mcp();
         if self.connected && self.daemon_has(wire::SKILLS) {
             let pane = self.shown.map(|shown| shown.pane);
             self.request(Request::Skills { pane }, Asked::SettingsSkills);
@@ -125,6 +126,57 @@ impl Desk {
                 "Connect to a current daemon to browse shared skills.".into()
             ));
         }
+    }
+
+    fn ask_settings_mcp(&mut self) {
+        let Some(menu) = &mut self.settings else {
+            return;
+        };
+        let id = menu.mcp_id();
+        if self.connected && self.daemon_has(wire::MANAGED_MCP) {
+            if let Some(menu) = &mut self.settings {
+                menu.mcp_loading();
+            }
+            self.request(
+                Request::Mcp {
+                    pane: self.shown.map(|s| s.pane),
+                    action: clackatoo_protocol::McpAction::List,
+                },
+                Asked::SettingsMcp(id),
+            );
+        } else if let Some(menu) = &mut self.settings {
+            menu.mcp_came(
+                id,
+                Err("Connect to a current daemon to manage MCP servers.".into()),
+            );
+        }
+    }
+    pub(super) fn settings_mcp(&mut self, id: u64, response: Response) -> bool {
+        let result = match response {
+            Response::Mcp(reply) => Ok(reply),
+            Response::Error(error) => Err(error.to_string()),
+            _ => return false,
+        };
+        let url = self
+            .settings
+            .as_mut()
+            .and_then(|menu| menu.mcp_came(id, result));
+        if let Some(url) = url {
+            self.open_url(url);
+        }
+        self.settings_changed();
+        true
+    }
+    pub(super) fn tick_mcp_settings(&mut self, now: std::time::Instant) -> bool {
+        if self.connected
+            && self
+                .settings
+                .as_ref()
+                .is_some_and(|menu| menu.mcp_poll_due(now))
+        {
+            self.ask_settings_mcp();
+        }
+        false
     }
 
     fn ask_settings_specialists(&mut self) {
@@ -543,9 +595,29 @@ impl Desk {
     }
 
     /// Carries out what a key or click did to the menu.
+    fn settings_mcp_action(&mut self, action: clackatoo_protocol::McpAction, id: u64) {
+        if self.automating || self.controlled {
+            if let Some(menu) = &mut self.settings {
+                menu.mcp_came(
+                    id,
+                    Err("Only the user may configure MCP servers or store credentials.".into()),
+                );
+            }
+        } else {
+            self.request(
+                Request::Mcp {
+                    pane: self.shown.map(|s| s.pane),
+                    action,
+                },
+                Asked::SettingsMcp(id),
+            );
+        }
+    }
+
     fn settings_did(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
+            Outcome::Mcp { action, id } => self.settings_mcp_action(action, id),
             Outcome::Close => self.settings = None,
             Outcome::Set(sets) => {
                 // The daemon's, and the window's that run programs, are

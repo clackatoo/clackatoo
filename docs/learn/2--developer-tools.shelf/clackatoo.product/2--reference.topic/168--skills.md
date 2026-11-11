@@ -201,3 +201,10 @@ Other ACP agents receive the shared catalogue and tools too. Their native
 skill discovery remains governed by their own runtime; ACP has no universal
 switch for turning it off. Native instruction files such as `AGENTS.md` and
 `CLAUDE.md` continue to belong to the hosted runtime.
+
+## Bundled MCP servers
+
+Skillsets and specialists can contain `mcp.json` beside their manifest. The
+same bundle composition supplies their server definitions; each project or
+bundled definition still needs explicit local review. Manage connections,
+credentials and provider imports in [MCP Servers](~clackatoo/reference/mcp-servers).

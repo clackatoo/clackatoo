@@ -22,6 +22,7 @@ pub(crate) fn definition(specialist: &Specialist) -> SpecialistDefinition {
     for (key, values) in [
         ("skills", &s.extra.skills),
         ("skillsets", &s.extra.skillsets),
+        ("mcp_servers", &s.extra.mcp_servers),
         ("delegates_to", &s.extra.delegates_to),
     ] {
         if let Some(values) = values {

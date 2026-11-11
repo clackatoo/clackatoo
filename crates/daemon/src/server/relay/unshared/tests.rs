@@ -937,6 +937,8 @@ fn variant(request: &Request) -> &'static str {
         Request::SaveSpecialistFile { .. } => "SaveSpecialistFile",
         Request::Context { .. } => "Context",
         Request::Side { .. } => "Side",
+        Request::Mcp { .. } => "Mcp",
+        Request::McpProxy { .. } => "McpProxy",
     }
 }
 

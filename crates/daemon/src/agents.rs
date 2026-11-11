@@ -321,12 +321,19 @@ pub struct AgentConfig {
 /// agents it adds, or gives another command, the limits on chats agents start, and whether agents go on
 /// through upgrades.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent user preferences for each provider"
+)]
 pub struct Configured {
     pub(crate) agents: Vec<CustomAgent>,
     pub(crate) subagents: SubagentLimits,
     pub(crate) keep_agents: bool,
     pub(crate) claude_plugins: bool,
     pub(crate) codex_plugins: bool,
+    pub(crate) claude_mcp: bool,
+    pub(crate) codex_mcp: bool,
+    pub(crate) other_mcp: bool,
 }
 
 impl Default for Configured {
@@ -337,6 +344,9 @@ impl Default for Configured {
             keep_agents: true,
             claude_plugins: false,
             codex_plugins: false,
+            claude_mcp: false,
+            codex_mcp: false,
+            other_mcp: false,
         }
     }
 }
@@ -348,6 +358,14 @@ impl Configured {
             "claude" => self.claude_plugins,
             "codex" => self.codex_plugins,
             _ => false,
+        }
+    }
+
+    pub(crate) fn native_mcp(&self, name: &str) -> bool {
+        match name {
+            "claude" => self.claude_mcp,
+            "codex" => self.codex_mcp,
+            _ => self.other_mcp,
         }
     }
 

@@ -131,6 +131,9 @@ fn programs(old: &Configured, new: &Configured) -> Vec<(String, String, String)>
     for (name, before, after) in [
         ("plugins.claude", old.claude_plugins, new.claude_plugins),
         ("plugins.codex", old.codex_plugins, new.codex_plugins),
+        ("mcp.claude", old.claude_mcp, new.claude_mcp),
+        ("mcp.codex", old.codex_mcp, new.codex_mcp),
+        ("mcp.providers", old.other_mcp, new.other_mcp),
     ] {
         if before != after {
             changes.push((name.into(), before.to_string(), after.to_string()));

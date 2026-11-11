@@ -150,7 +150,7 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 55;
+pub(crate) const VERSION: u32 = 56;
 
 /// The first version written by a build that asks before a folder's
 /// language servers run (CLACKA-224): a build handing over an older one
@@ -161,7 +161,7 @@ pub(crate) const ASKS_TRUST: u32 = 45;
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
-    51, 52, 53, 54, VERSION,
+    51, 52, 53, 54, 55, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -391,6 +391,8 @@ pub(crate) struct State {
     pub(crate) regions: Vec<Regions>,
     /// Captured context for current and retained branches and pending messages. Since version 55.
     pub(crate) context_records: Vec<ChatContext>,
+    /// Managed MCP reconnect and credential generations, since version 56.
+    pub(crate) managed_mcp: Vec<(String, u64)>,
 }
 
 /// The regions programs marked private that are open in terminal
@@ -2035,6 +2037,7 @@ impl State {
             52 => Ok(postcard::from_bytes::<v52::State>(body)?.into()),
             53 => Ok(postcard::from_bytes::<v53::State>(body)?.into()),
             54 => Ok(postcard::from_bytes::<v54::State>(body)?.into()),
+            55 => Ok(postcard::from_bytes::<v55::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         };
@@ -2091,6 +2094,7 @@ mod v31 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2203,6 +2207,7 @@ mod v30 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2314,6 +2319,7 @@ mod v29 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2424,6 +2430,7 @@ mod v28 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2532,6 +2539,7 @@ mod v27 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2643,6 +2651,7 @@ mod v26 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2751,6 +2760,7 @@ mod v25 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2857,6 +2867,7 @@ mod v24 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -2961,6 +2972,7 @@ mod v23 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -3071,6 +3083,7 @@ mod v22 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -3178,6 +3191,7 @@ mod v21 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -3276,6 +3290,7 @@ mod v20 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -3370,6 +3385,7 @@ mod v19 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -3464,6 +3480,7 @@ mod v18 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4023,6 +4040,7 @@ mod v7 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4141,6 +4159,7 @@ mod v8 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4229,6 +4248,7 @@ mod v9 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4319,6 +4339,7 @@ mod v11 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4458,6 +4479,7 @@ mod v15 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4551,6 +4573,7 @@ mod v14 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4642,6 +4665,7 @@ mod v13 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4775,6 +4799,7 @@ mod v12 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -4906,6 +4931,7 @@ mod v10 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -5056,6 +5082,7 @@ mod tests {
     )]
     fn state() -> State {
         State { context_records: Vec::new(),
+                managed_mcp: Vec::new(),
             graphics: vec![Graphics {
                 terminal: 1,
                 graphics: graphics(),
@@ -5761,6 +5788,29 @@ mod tests {
         state().write(&mut file).unwrap();
         let read = State::read(&mut file).unwrap();
         assert_eq!(format!("{read:?}"), format!("{:?}", state()));
+    }
+
+    #[test]
+    fn managed_mcp_generations_survive_and_version_55_still_reads_without_them() {
+        let mut current = state();
+        current.managed_mcp = vec![("server-binding".into(), 7)];
+        let mut file = tempfile::tempfile().unwrap();
+        current.write(&mut file).unwrap();
+        assert_eq!(
+            State::read(&mut file).unwrap().managed_mcp,
+            current.managed_mcp
+        );
+        current.managed_mcp.clear();
+        let mut body = postcard::to_stdvec(&current).unwrap();
+        // Version 56 appends this vector; 55 is the otherwise identical shape.
+        assert_eq!(body.pop(), Some(0));
+        let mut old = MAGIC.to_vec();
+        old.extend_from_slice(&55u32.to_le_bytes());
+        old.extend_from_slice(&body);
+        let (restored, version) = State::from_bytes(&old).unwrap();
+        assert_eq!(version, 55);
+        assert!(restored.managed_mcp.is_empty());
+        assert_eq!(format!("{restored:?}"), format!("{current:?}"));
     }
 
     fn sender() -> ChatSender {
@@ -7317,6 +7367,7 @@ mod v32 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -7494,6 +7545,7 @@ mod v33 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -7674,6 +7726,7 @@ mod v34 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -7857,6 +7910,7 @@ mod v35 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -8043,6 +8097,7 @@ mod v36 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -8232,6 +8287,7 @@ mod v37 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -8421,6 +8477,7 @@ mod v38 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -8610,6 +8667,7 @@ mod v39 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -8801,6 +8859,7 @@ mod v40 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -9024,6 +9083,7 @@ mod v41 {
         fn from(state: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
@@ -9241,6 +9301,7 @@ mod v42 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -9460,6 +9521,7 @@ mod v43 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -9682,6 +9744,7 @@ mod v45 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -9908,6 +9971,7 @@ mod v46 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -10134,6 +10198,7 @@ mod v47 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -10363,6 +10428,7 @@ mod v48 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -10603,6 +10669,7 @@ mod v49 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -10845,6 +10912,7 @@ mod v50 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -11090,6 +11158,7 @@ mod v51 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -11337,6 +11406,7 @@ mod v52 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -11586,6 +11656,7 @@ mod v53 {
         fn from(s: State) -> Self {
             Self {
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
                 listener: s.listener,
                 lock: s.lock,
                 next_terminal: s.next_terminal,
@@ -11918,6 +11989,272 @@ mod v54 {
                 graphics: state.graphics,
                 regions: state.regions,
                 context_records: Vec::new(),
+                managed_mcp: Vec::new(),
+            }
+        }
+    }
+}
+
+// Version 55 has captured context, but no managed MCP generations.
+mod v55 {
+    use super::{
+        AgentCommand, Applied, Asked, Background, Borrower, Buffer, BufferUndo, Chat, ChatBranches,
+        ChatContext, ChatContinuation, ChatDraft, ChatForks, ChatNotices, ChatPreviews, ChatQueue,
+        ChatUids, Connection, Deserialize, EditLog, Exe, Files, Forwarded, Graphics, History,
+        ImageOriginals, Images, Kept, Known, LayoutExtras, Lender, Lent, LentBackground, Live,
+        Marks, Mcp, NestedItem, Process, Regions, Restored, Reviews, Sharing, Shell, Talk,
+        Terminal, ToolPreviews, Trusted, Undelivered, Workspaces, relay,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        pub(crate) listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        pub(crate) lock: Option<u32>,
+        /// The ID the next terminal gets.
+        pub(crate) next_terminal: u32,
+        pub(crate) terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        pub(crate) chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        pub(crate) orphans: Vec<Process>,
+        pub(crate) workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        pub(crate) next_buffer: u32,
+        /// Files being edited.
+        pub(crate) buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        pub(crate) next_files: u32,
+        /// File explorers.
+        pub(crate) explorers: Vec<Files>,
+        /// What agents changed in files.
+        pub(crate) edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        pub(crate) applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        pub(crate) daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        pub(crate) reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        pub(crate) recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        pub(crate) shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        pub(crate) machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        pub(crate) connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        pub(crate) lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        pub(crate) borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        pub(crate) lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        pub(crate) sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        pub(crate) key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        pub(crate) keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        pub(crate) background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        pub(crate) kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        pub(crate) trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        pub(crate) exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        pub(crate) restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        pub(crate) chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        pub(crate) tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        pub(crate) image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        pub(crate) chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        pub(crate) chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        pub(crate) activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34; before, they
+        /// kept nothing, and none changed nothing.
+        pub(crate) undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs of the daemons they're lent
+        /// to, and the failure of each not seen there yet. Since version 35;
+        /// before, none was.
+        pub(crate) lent_background: Vec<LentBackground>,
+        /// Messages chats sent others that waited their turns and were
+        /// dropped as they came, so each sender is still told why. Since
+        /// version 36; before, none was.
+        pub(crate) undelivered: Vec<Undelivered>,
+        /// Where chats stand among the others: see [`Talk`]. Since version
+        /// 37; `None` before, from a build that couldn't hand it over.
+        pub(crate) talk: Option<Talk>,
+        /// The agents' processes that go on through the upgrade, and what
+        /// goes on with them: see [`Live`]. Since version 38; `None` before,
+        /// and from a build that stopped its agents, as it was told to, or as
+        /// the build it upgraded to couldn't take them.
+        pub(crate) live: Option<Live>,
+        /// The items of chats' turns that an agent's own subagents did: see
+        /// [`NestedItem`]. Since version 39; before, none was.
+        pub(crate) nested: Vec<NestedItem>,
+        /// The messages being typed in chats' boxes and not sent yet. Since
+        /// version 40; before, none was kept.
+        pub(crate) drafts: Vec<ChatDraft>,
+        /// The numbers that stay with chats' turns, of the chats whose turns
+        /// aren't each numbered by their index: see [`ChatUids`]. Since
+        /// version 41; before, every turn was.
+        pub(crate) uids: Vec<ChatUids>,
+        /// The branches of chats' conversations, of the chats that have been
+        /// cut back: see [`ChatBranches`]. Since version 41.
+        pub(crate) branches: Vec<ChatBranches>,
+        /// Where chats' agent sessions can be forked: see [`ChatForks`].
+        /// Since version 41; before, none was known.
+        pub(crate) forks: Vec<ChatForks>,
+        /// Command ownership and permanent selection protection, since 42.
+        /// None from older builds: selection history is unknown, so retain all.
+        pub(crate) agent_terminals: Option<Vec<AgentCommand>>,
+        /// Federated views and edit receipts, since version 43.
+        pub(crate) federation: Option<relay::Federation>,
+        /// What the secrets given chats' MCP servers are checked against, and
+        /// which went with which session, since version 44. None from older
+        /// builds, which gave none.
+        pub(crate) mcp: Option<Mcp>,
+        /// What programs asked of the terminals that asked anything beyond
+        /// their modes: see [`Asked`]. Since version 46; before, nothing was
+        /// kept.
+        pub(crate) asked: Vec<Asked>,
+        /// What tabs' layouts keep beside their splits: see [`LayoutExtras`].
+        /// Since version 47; `None` before.
+        pub(crate) layout: Option<LayoutExtras>,
+        /// What notices from clackatoo said of the chats that finished, of the
+        /// chats that have any: see [`ChatNotices`]. Since version 48; before,
+        /// none was kept.
+        pub(crate) notices: Vec<ChatNotices>,
+        /// The image layer's store (see [`Images`]), whose images' bytes are
+        /// in files of their own. Since version 49; `None` before, from a
+        /// build whose chats kept their images themselves.
+        pub(crate) images: Option<Images>,
+        /// What's kept of the terminals' history across a restart beyond
+        /// their lines, of the terminals with anything to say: see
+        /// [`History`]. Since version 50; before, every terminal's was kept,
+        /// no line had hints, and none came from before a restart.
+        pub(crate) histories: Vec<History>,
+        /// What the user marked the terminals with, and what else of them
+        /// isn't in a [`Terminal`]: see [`Marks`]. Since version 51; before,
+        /// nothing was marked.
+        pub(crate) marks: Vec<Marks>,
+        /// The ports forwarded to other machines through the daemon's
+        /// connections to them, listening still: see [`Forwarded`]. Since
+        /// version 52; before, none were kept.
+        pub(crate) forwards: Vec<Forwarded>,
+        /// The connections, by host, whose ssh straight there was found to ask
+        /// a question as a client asked for it, which aren't tried in the
+        /// background (CLACKA-118). Since version 52; before, none.
+        pub(crate) direct_asks: Vec<String>,
+        /// The images of the terminals that show or keep any: see
+        /// [`Graphics`]. Since version 53; before, none did.
+        pub(crate) graphics: Vec<Graphics>,
+        /// The regions programs marked private that are open, of the
+        /// terminals with any: see [`Regions`]. Since version 54; before, none
+        /// was open.
+        pub(crate) regions: Vec<Regions>,
+        pub(crate) context_records: Vec<ChatContext>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: state.chat_continuations,
+                activities: state.activities,
+                undo_states: state.undo_states,
+                lent_background: state.lent_background,
+                undelivered: state.undelivered,
+                talk: state.talk,
+                live: state.live,
+                nested: state.nested,
+                drafts: state.drafts,
+                uids: state.uids,
+                branches: state.branches,
+                forks: state.forks,
+                agent_terminals: state.agent_terminals,
+                federation: state.federation,
+                mcp: state.mcp,
+                asked: state.asked,
+                layout: state.layout,
+                notices: state.notices,
+                images: state.images,
+                histories: state.histories,
+                marks: state.marks,
+                forwards: state.forwards,
+                direct_asks: state.direct_asks,
+                graphics: state.graphics,
+                regions: state.regions,
+                context_records: state.context_records,
+                managed_mcp: Vec::new(),
             }
         }
     }

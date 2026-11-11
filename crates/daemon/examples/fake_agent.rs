@@ -163,9 +163,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if let [_, mcp, chat_flag, chat, socket_flag, socket] = args.as_slice()
+fn relay_mcp(args: &[String]) -> bool {
+    if let [_, mcp, chat_flag, chat, socket_flag, socket, tail @ ..] = args
         && mcp == "mcp"
         && chat_flag == "--chat"
         && socket_flag == "--socket"
@@ -173,12 +172,35 @@ fn main() {
         let chat = clackatoo_protocol::TerminalId(chat.parse().unwrap());
         let (input, output) = (std::io::stdin(), std::io::stdout());
         let token = std::env::var(clackatoo_daemon::mcp::TOKEN_VARIABLE).ok();
-        let relayed =
-            clackatoo_daemon::mcp::relay(socket.as_ref(), chat, token.as_deref(), input, output);
+        let relayed = if let [flag, server] = tail
+            && flag == "--server"
+        {
+            use std::os::fd::AsFd as _;
+            clackatoo_daemon::managed_mcp::relay(
+                socket.as_ref(),
+                chat,
+                server,
+                token.as_deref().unwrap_or_default(),
+                input.as_fd().try_clone_to_owned().unwrap().into(),
+                output.as_fd().try_clone_to_owned().unwrap().into(),
+            )
+            .map_err(|e| e.to_string())
+        } else {
+            clackatoo_daemon::mcp::relay(socket.as_ref(), chat, token.as_deref(), input, output)
+                .map_err(|e| e.to_string())
+        };
         if let Err(err) = relayed {
             eprintln!("fake_agent mcp: {err}");
             std::process::exit(1);
         }
+        return true;
+    }
+    false
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if relay_mcp(&args) {
         return;
     }
     let flag = |name: &str| args.iter().any(|arg| arg == name);
@@ -990,7 +1012,7 @@ impl Fake {
                     },
                 },
                 "agentInfo": if std::env::args().any(|a| a == "--codex-steering") { json!({ "name": "@agentclientprotocol/codex-acp", "version": "2.2.2+clackatoo.1" }) } else if std::env::args().any(|a| a == "--steering") { json!({ "name": "@agentclientprotocol/claude-agent-acp", "version": "0.98.0" }) } else { json!({ "name": "fake-agent", "version": "0" }) },
-                "_meta": { "steering": { "supported": std::env::args().any(|a| a == "--steering" || a == "--codex-steering") } },
+                "_meta": { "clackatoo":{"managedMcp":true}, "steering": { "supported": std::env::args().any(|a| a == "--steering" || a == "--codex-steering") } },
                 "authMethods": [],
             }),
         );
@@ -2220,7 +2242,9 @@ impl Fake {
                 say(&session, &format!("{meta}\n"));
                 done(&id, "end_turn");
             }
-            calls if calls.starts_with("mcp ") => self.call_tools(id, session, calls),
+            calls if calls.starts_with("mcp ") || calls.starts_with("mcp-server ") => {
+                self.call_tools(id, session, calls);
+            }
             asked if asked.starts_with("stream ") => stream(&id, &session, asked),
             "settings" => {
                 let (mode, model) = self.settings.get(&session).cloned().unwrap_or_default();
@@ -2315,10 +2339,14 @@ impl Fake {
     /// Makes each of `calls`, `mcp NAME ARGS`, a line each, in turn,
     /// answering the message `id` in `session` with what each answered.
     fn call_tools(&self, id: Value, session: String, calls: &str) {
+        let (which, calls) = calls
+            .strip_prefix("mcp-server ")
+            .and_then(|s| s.split_once('\n'))
+            .map_or(("clackatoo", calls), |(name, calls)| (name, calls));
         let server = self
             .tools
             .get(&session)
-            .and_then(|tools| tools.get(0))
+            .and_then(|tools| tools.as_array()?.iter().find(|s| s["name"] == which))
             .cloned();
         let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
         // On a thread of its own, as a call may wait for the user.

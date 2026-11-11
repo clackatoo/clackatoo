@@ -276,6 +276,9 @@ struct McpArgs {
     /// The daemon's socket. Defaults to the one in your runtime directory.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
+    /// A managed upstream server; absent serves Clackatoo's built-in tools.
+    #[arg(long, value_name = "NAME")]
+    server: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -709,7 +712,14 @@ fn run(command: Command) -> anyhow::Result<()> {
             // the agent, which only it and the agent know.
             let token = std::env::var(clackatoo_daemon::mcp::TOKEN_VARIABLE).ok();
             let chat = TerminalId(args.chat);
-            clackatoo_daemon::mcp::relay(&socket, chat, token.as_deref(), input, output)?;
+            if let Some(server) = args.server {
+                let token = token.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("Managed MCP proxy requires its session token")
+                })?;
+                clackatoo_daemon::managed_mcp::relay(&socket, chat, &server, token, input, output)?;
+            } else {
+                clackatoo_daemon::mcp::relay(&socket, chat, token.as_deref(), input, output)?;
+            }
             Ok(())
         }
     }

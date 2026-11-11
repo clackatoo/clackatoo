@@ -1152,7 +1152,15 @@ impl Daemon {
 
     /// The user answered the chat's question about the call numbered
     /// `call`: it goes ahead if `allow`, and is refused if not.
+    pub(super) fn next_tool_question(&mut self) -> u64 {
+        let call = self.tools.next_call;
+        self.tools.next_call += 1;
+        call
+    }
     pub(super) fn permitted(&mut self, call: u64, allow: bool) {
+        if self.permitted_mcp(call, allow) {
+            return;
+        }
         let Some(at) = (self.tools.waiting.iter()).position(
             |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
         ) else {

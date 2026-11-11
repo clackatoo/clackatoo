@@ -1,0 +1,28 @@
+# Managed MCP browser, exact configuration review, drafts and private values.
+size 1280x900
+file .agents/mcp.json <<END
+{"servers":{"docs":{"url":"https://mcp.example.org/mcp","headers":{"Authorization":{"secret":"docs-token"}}},"search":{"command":"search-server","args":["--stdio"],"read_only":true}}}
+END
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys }}}}}}}}
+wait-for Add MCP server
+shot mcp-servers
+keys G<CR>
+wait-for Server definition
+shot mcp-review
+keys ggjjjjjj<CR>
+wait-for Command or URL
+shot mcp-editor
+keys ggjjj<CR>
+type --changed
+shot mcp-draft
+size 560x780
+shot mcp-narrow
+keys <Esc>
+keys G<CR>
+keys ggjjjj<CR>
+wait-for Credential value
+keys ggj<CR>
+type never-show-this-private-value
+shot mcp-private-credential

@@ -8,7 +8,7 @@ if (process.argv[2]) {
   const extract = (start, end) => bundle.slice(bundle.indexOf(start), bundle.indexOf(end, bundle.indexOf(start)));
   methods = extract('  parseSessionSteerParams(params) {', '  createSessionConfigOptions(')
     + extract('  async performSteeringRequest(params) {', '  /**\n   * Rejects a steering prompt');
-  assert.ok(bundle.includes('version: "2.2.2+clackatoo.1"'));
+  assert.ok(bundle.includes('version: "2.2.2+clackatoo.2"'));
 }
 const Adapter = new Function('RequestError', `return class {${methods}}`)(RequestError);
 const message = {sessionId: 's', prompt: [{type: 'text', text: 'guidance'}], _meta: {steering: {idleBehavior: 'promptRequired'}}};

@@ -75,6 +75,13 @@ impl Daemon {
             self.hand_answer_with(token, ticket, Response::Error(err));
             return;
         }
+        if self
+            .client_wire(token)
+            .is_some_and(|wire| wire < clackatoo_protocol::wire::MANAGED_MCP)
+        {
+            self.hand_answer_with(token, ticket, Response::Error(Error::Other("Upgrade this window before editing specialists; this daemon supports managed MCP selections.".into())));
+            return;
+        }
         if self.specialist_files.queue.len() >= 16 {
             self.hand_answer_with(
                 token,

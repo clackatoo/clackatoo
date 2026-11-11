@@ -574,16 +574,13 @@ impl Daemon {
             self.collect_damage(id);
             return;
         };
-        let native_plugins = self.config.agents.configured.native_plugins(&name)
-            && self
-                .chat_ref(id)
-                .is_none_or(|chat| chat.side_parent().is_none());
-        if let Some(chat) = self.chat(id) {
-            chat.native_skills = native_plugins;
-        }
+        let native_plugins = self.native_plugins_for(id, &name);
         // Start the runtime while the worker reads the catalogue, and keep
         // missing-agent failures and old-process cleanup immediate.
         if self.reading_skills(id) {
+            return;
+        }
+        if !self.mcp_session_policy(id, agent, &name) {
             return;
         }
         if let Some(chat) = self.chat_ref(id)
@@ -619,7 +616,9 @@ impl Daemon {
             no_tools: chat.side_parent().is_some(),
             budget: chat.specialist_budget(),
             native_plugins,
+            native_mcp: self.config.agents.configured.native_mcp(&name),
             tools: self.tools_server(id),
+            managed_servers: self.managed_server_entries(id),
             task,
             limits,
         };
@@ -652,6 +651,41 @@ impl Daemon {
 
     /// Starts the agent called `name` for the chat in `id`, unless it
     /// can't be: then the chat hears why, or is offered to install it.
+    fn native_plugins_for(&mut self, id: TerminalId, name: &str) -> bool {
+        let native_plugins = self.config.agents.configured.native_plugins(name)
+            && self
+                .chat_ref(id)
+                .is_none_or(|chat| chat.side_parent().is_none());
+        if let Some(chat) = self.chat(id) {
+            chat.native_skills = native_plugins;
+        }
+        native_plugins
+    }
+
+    fn mcp_session_policy(&mut self, id: TerminalId, agent: AgentId, name: &str) -> bool {
+        if !self.config.agents.configured.native_mcp(name)
+            && matches!(name, "claude" | "codex")
+            && self
+                .agents
+                .running
+                .get(&agent)
+                .is_some_and(|slot| slot.agent.started() && !slot.agent.managed_mcp_control())
+        {
+            if let Some(chat) = self.chat(id) {
+                chat.failed_to_connect("This adapter cannot disable provider-managed MCP servers. Install Clackatoo's current bundled adapter, or allow provider-managed MCP in Settings and upgrade the daemon.");
+            }
+            self.collect_damage(id);
+            return false;
+        }
+        if !self.config.agents.configured.native_mcp(name)
+            && !matches!(name, "claude" | "codex")
+            && let Some(chat) = self.chat(id)
+        {
+            chat.notify("This adapter does not have verified provider-managed MCP suppression. Its own servers may still load; managed Clackatoo servers remain separate.".into());
+        }
+        true
+    }
+
     fn start_agent_for(&mut self, id: TerminalId, name: &str) -> Option<AgentId> {
         let spec = match self.config.agents.find(name) {
             Ok(spec) => spec,
@@ -734,6 +768,7 @@ impl Daemon {
             (display.as_deref(), self.config.agents.trace.as_deref()),
             spec.tasks,
             self.config.agents.configured.native_plugins(&spec.name),
+            self.config.agents.configured.native_mcp(&spec.name),
             &self.parser,
         )?;
         let id = AgentId(self.agents.next);
@@ -2176,6 +2211,17 @@ impl Daemon {
                     }
                 }
             };
+            if matches!(name.as_str(), "claude" | "codex")
+                && self
+                    .agents
+                    .running
+                    .get(&agent)
+                    .is_some_and(|slot| slot.agent.started() && !slot.agent.managed_mcp_control())
+            {
+                self.agents.unlearned.insert(name,("Install the bundled adapter to probe models without provider-managed MCP servers.".into(),Instant::now()));
+                asked = true;
+                continue;
+            }
             log::info!("asking {name} for its models");
             if let Some(slot) = self.agents.running.get_mut(&agent) {
                 slot.agent

@@ -47,6 +47,8 @@ pub(crate) struct Catalogue {
     pub(crate) specialist_includes: BTreeMap<String, Vec<String>>,
     sets: BTreeMap<String, Option<Vec<PathBuf>>>,
     directories: BTreeMap<PathBuf, Arc<Directory>>,
+    /// All file IO happens during discovery; selecting a session is in-memory.
+    pub(crate) managed_mcp: crate::managed_mcp::config::Registry,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -67,6 +69,7 @@ impl Catalogue {
             specialist_includes: self.specialist_includes.clone(),
             sets: self.sets.clone(),
             directories: self.directories.clone(),
+            managed_mcp: self.managed_mcp.clone(),
             ..Self::default()
         };
         let source = format!("Specialist {}", specialist.name);
@@ -129,7 +132,82 @@ impl Catalogue {
                 scoped.invalid.push(info);
             }
         }
+        scoped.scope_mcp(specialist)?;
         Ok(scoped)
+    }
+
+    fn scope_mcp(&mut self, specialist: &crate::specialists::Specialist) -> Result<(), String> {
+        if let Some(names) = &specialist.extra.mcp_servers {
+            for name in names {
+                if !self.managed_mcp.servers.contains_key(name) {
+                    return Err(format!(
+                        "specialist {} needs missing MCP server {name}",
+                        specialist.name
+                    ));
+                }
+            }
+            self.managed_mcp
+                .servers
+                .retain(|name, _| names.contains(name));
+        } else if specialist.extra.skillsets.is_some() || !specialist.extra.directories.is_empty() {
+            let mut directories = specialist.extra.directories.clone();
+            for name in specialist.extra.skillsets.iter().flatten() {
+                directories.extend(self.sets.get(name).into_iter().flatten().flatten().cloned());
+            }
+            self.managed_mcp.servers.retain(|_, bound| {
+                bound.editable
+                    || directories.iter().any(|dir| {
+                        dir.parent()
+                            .is_some_and(|root| bound.path == root.join("mcp.json"))
+                    })
+            });
+        }
+        if specialist.extra.mcp_servers.is_none()
+            && specialist.extra.skillsets.is_none()
+            && specialist.extra.directories.is_empty()
+        {
+            self.managed_mcp
+                .servers
+                .retain(|_, bound| bound.available_by_default);
+        }
+        for bound in self.managed_mcp.servers.values_mut() {
+            bound.available_by_default = true;
+        }
+        Ok(())
+    }
+
+    fn discover_mcp(&mut self, roots: &Roots, packages: &skillsets::Packages) {
+        let bundle_roots = packages
+            .sets
+            .values()
+            .flatten()
+            .flatten()
+            .chain(
+                packages
+                    .specialists
+                    .values()
+                    .flat_map(|s| &s.extra.directories),
+            )
+            .filter_map(|dir| dir.parent().map(Path::to_owned))
+            .collect();
+        self.managed_mcp = crate::managed_mcp::config::Registry::discover(roots, &bundle_roots);
+        let public_bundles: std::collections::BTreeSet<_> = packages
+            .directories
+            .values()
+            .flatten()
+            .filter_map(|(dir, _)| dir.parent().map(Path::to_owned))
+            .collect();
+        for bound in self.managed_mcp.servers.values_mut() {
+            if !bound.editable
+                && !bound
+                    .path
+                    .parent()
+                    .is_some_and(|root| public_bundles.contains(root))
+            {
+                bound.available_by_default = false;
+                bound.source = bound.source.replacen("Skillset", "Specialist", 1);
+            }
+        }
     }
 
     pub(crate) fn discover(roots: &Roots) -> Self {
@@ -179,6 +257,8 @@ impl Catalogue {
         found.specialist_texts = packages.texts.clone();
         found.specialist_includes = packages.includes.clone();
         found.sets = packages.sets.clone();
+        found.discover_mcp(roots, &packages);
+
         let mut budget = MOST_ENTRIES;
         for (folder, source, bundles) in folders {
             if bundles {

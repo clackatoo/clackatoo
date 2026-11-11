@@ -398,6 +398,7 @@ pub(super) fn parse_specialist(
             "delegates_to",
             "skills",
             "skillsets",
+            "mcp_servers",
             "limits",
         ]
         .contains(&key.as_str())

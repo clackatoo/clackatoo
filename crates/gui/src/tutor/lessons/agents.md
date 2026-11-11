@@ -444,3 +444,15 @@ conversation while its main agent keeps working. The side sheet has its own
 composer and follows up from the context captured when it opened. Esc hides
 it; `/btw` reopens it. Copy an answer, attach it to the main draft with
 **Send to main**, or **Keep as chat** to continue in a normal tab.
+
+## Shared MCP servers
+
+Open `:Settings`, then **MCP Servers** under **Agents** to add a command or
+Streamable HTTP server. Test its connection, inspect its tools, store private
+credentials, sign in through a browser, or review a Claude/Codex import.
+Project and bundled definitions require local review before they run.
+With Tools set to Ask, each external call asks for permission before it is
+forwarded. Servers stay separate from Clackatoo's built-in tools. Specialists
+can bundle servers and select them with `mcp_servers` in `SPECIALIST.md`.
+Provider-managed MCP is off by default; its global switch and provider
+overrides take effect after a daemon restart or upgrade.

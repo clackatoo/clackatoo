@@ -67,6 +67,7 @@ mod forward;
 pub mod frame;
 mod image;
 mod machines;
+mod mcp;
 mod mention;
 mod native;
 mod review;
@@ -91,6 +92,9 @@ pub use activity::{Activity, ActivityState};
 pub use context::{
     ContextAction, ContextCandidate, ContextKind, ContextMode, ContextRef, ContextReply,
     ContextSelection, ContextSnapshot,
+};
+pub use mcp::{
+    McpAction, McpImport, McpProxyAction, McpReply, McpScope, McpServerInfo, McpState, McpToolInfo,
 };
 pub use native::{NativeAccess, NativeAction, NativeReply};
 pub use side::{SideAction, SideReply};
@@ -173,7 +177,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 160;
+pub const PROTOCOL_VERSION: u32 = 161;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1961,6 +1965,24 @@ pub enum Request {
         /// Open, read, or control the side conversation.
         action: SideAction,
     },
+    /// Manage the daemon's MCP servers from a trusted window.
+    Mcp {
+        /// Working project; None uses the daemon's home.
+        pane: Option<PaneId>,
+        /// Settings action.
+        action: McpAction,
+    },
+    /// Private control channel used by a managed server's proxy.
+    McpProxy {
+        /// Owning chat.
+        chat: TerminalId,
+        /// Configured upstream name.
+        server: String,
+        /// Secret issued to this session, supplied through its environment.
+        token: String,
+        /// Open, check authorization, or report state.
+        action: McpProxyAction,
+    },
 }
 
 /// What [`Request::KeepHistory`] changes.
@@ -2228,6 +2250,10 @@ pub enum Response {
     Context(ContextReply),
     /// The current temporary side conversation.
     Side(SideReply),
+    /// Answers a managed MCP Settings action.
+    Mcp(McpReply),
+    /// Private configuration granted to an authenticated local MCP proxy.
+    McpConnection(String),
 }
 
 /// Where a specialist file is discovered or created.

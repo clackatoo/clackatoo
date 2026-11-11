@@ -129,6 +129,7 @@ enum Asked {
     SettingsAgents,
     /// The shared skill catalogue for Settings.
     SettingsSkills,
+    SettingsMcp(u64),
     Work,
     SettingsSpecialists,
     SettingsSpecialistSaved(clackatoo_protocol::SpecialistDefinition),
@@ -705,13 +706,23 @@ impl Desk {
     /// Settles the terminals' guesses at the echo of what's typed whose
     /// time is up at `now`. Returns whether the window must be redrawn.
     pub(crate) fn tick_panes(&mut self, now: std::time::Instant) -> bool {
-        (self.panes.values_mut()).fold(false, |redraw, pane| pane.tick(now) | redraw)
+        self.tick_mcp_settings(now)
+            | (self.panes.values_mut()).fold(false, |redraw, pane| pane.tick(now) | redraw)
     }
 
     /// When a terminal's guess at the echo of what's typed is next due to
     /// be settled, the soonest of them, for [`tick_panes`](Self::tick_panes).
     pub(crate) fn pane_wakes(&self) -> Option<std::time::Instant> {
-        self.panes.values().filter_map(Pane::wakes).min()
+        self.panes
+            .values()
+            .filter_map(Pane::wakes)
+            .chain(
+                self.settings
+                    .as_ref()
+                    .filter(|_| self.connected)
+                    .and_then(crate::settings::SettingsMenu::mcp_wake),
+            )
+            .min()
     }
 
     /// When a pane's highlight on text just copied goes, the soonest of
@@ -1976,6 +1987,7 @@ impl Desk {
             Some(Asker::Window(Asked::SettingsAgents)) => self.settings_agents(response),
             Some(Asker::Window(Asked::Work)) => self.work_answered(response),
             Some(Asker::Window(Asked::SettingsSkills)) => self.settings_skills(response),
+            Some(Asker::Window(Asked::SettingsMcp(id))) => self.settings_mcp(id, response),
             Some(Asker::Window(Asked::SettingsSpecialists)) => self.settings_specialists(response),
             Some(Asker::Window(Asked::SettingsSpecialistSaved(edit))) => {
                 self.settings_specialist_saved(&edit, response)

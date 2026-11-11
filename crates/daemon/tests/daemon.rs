@@ -4574,7 +4574,15 @@ fn a_chat_whose_agent_is_going_waits_with_its_message_then_starts_it_again() {
         last_outcome(node).is_some()
     });
     assert_eq!(last_words(&node), "echo: back\n");
-    assert_eq!(node.notice, None);
+    // A custom adapter may retain the provider-MCP policy warning, but
+    // the stale notice about waiting for its old process must be gone.
+    assert!(
+        node.notice
+            .as_deref()
+            .is_none_or(|notice| !notice.contains("stopping")),
+        "{:?}",
+        node.notice
+    );
 }
 
 #[test]
@@ -5317,7 +5325,7 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
     // Installed, as if npm had put the adapter where clackatoo looks for
     // it: the next message runs it from there.
     let program =
-        (daemon.dir.path()).join("agents/codex-2.2.2+clackatoo.1/codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/clackatoo.js");
+        (daemon.dir.path()).join("agents/codex-2.2.2+clackatoo.2/codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/clackatoo.js");
     script(
         &program,
         &format!("exec {} --codex", fake_agent().display()),
@@ -28236,3 +28244,6 @@ fn stopping_a_side_answer_leaves_the_parent_working_and_slashes_are_literal_ques
     side_reply(&mut client, parent, S::Discard);
     client.chat(parent, ChatAction::Stop).unwrap();
 }
+
+#[path = "daemon/managed_mcp.rs"]
+mod managed_mcp;

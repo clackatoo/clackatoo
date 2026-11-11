@@ -266,6 +266,29 @@ impl Daemon {
         self.update_skill_catalogues(roots, &Ok(catalogue), &Purpose::Refresh);
     }
 
+    /// Polling MCP Settings only invalidates an outstanding discovery if
+    /// the effective server configuration actually changed.
+    pub(super) fn refresh_mcp_catalogue(&mut self, roots: &Roots, catalogue: Catalogue) {
+        let changed = self.terminals.keys().any(|id| {
+            let Some(chat) = self.chat_ref(*id).filter(|c| c.real_cwd() == roots.cwd) else {
+                return false;
+            };
+            let next = chat
+                .specialist_definition()
+                .map_or_else(|| Ok(catalogue.clone()), |s| catalogue.scoped(s));
+            next.is_ok_and(|next| {
+                self.skills
+                    .catalogues
+                    .get(id)
+                    .is_none_or(|old| old.managed_mcp != next.managed_mcp)
+            })
+        });
+        if changed {
+            self.skills.epoch += 1;
+        }
+        self.update_skill_catalogues(roots, &Ok(catalogue), &Purpose::Refresh);
+    }
+
     pub(super) fn skill_tool(
         &mut self,
         token: Token,

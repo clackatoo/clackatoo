@@ -62,6 +62,8 @@ pub(crate) const NOAGENT_RULES: &[&str] = &["hide", "show"];
 /// The ways the web app is reached, as `web.mode` says.
 pub(crate) const WEB_MODES: &[&str] = &["off", "tailscale", "public"];
 
+pub(crate) const MCP_POLICIES: &[&str] = &["inherit", "off", "allow"];
+
 options! {
     /// The name other machines show this machine's daemon by. Empty is
     /// the machine's hostname.
@@ -77,6 +79,12 @@ options! {
     /// Allow Codex to load its own plugins and skill catalogue.
     /// Applied when the daemon starts or upgrades.
     "plugins.codex" ("Allow Codex's native plugins") in Agents: Kind::Bool => Value::Bool(false);
+    /// Allow servers configured directly in providers. Managed servers are separate.
+    "mcp.providers" ("Allow provider-managed MCP servers") in Agents: Kind::Bool => Value::Bool(false);
+    /// Override provider-managed MCP for Claude Code.
+    "mcp.claude" ("Claude Code's provider-managed MCP servers") in Agents: Kind::Choice(MCP_POLICIES) => Value::Choice("inherit");
+    /// Override provider-managed MCP for the bundled Codex adapter.
+    "mcp.codex" ("Codex's provider-managed MCP servers") in Agents: Kind::Choice(MCP_POLICIES) => Value::Choice("inherit");
     /// The most chats agents started that may work at once, in all.
     "subagents.working" ("Chats agents started working at once, in all") in Subagents live:number(1, 64) => Value::Number(16);
     /// The Subagents setting a chat of the user's starts with: at most
@@ -228,6 +236,7 @@ mod tests {
                 "machine",
                 "upgrade",
                 "plugins",
+                "mcp",
                 "subagents",
                 "web",
                 "history",

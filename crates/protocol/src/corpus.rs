@@ -554,6 +554,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::SIDE_QUESTIONS, sample)),
     );
+    samples.extend(
+        managed_mcp_samples()
+            .into_iter()
+            .map(|sample| (crate::wire::MANAGED_MCP, sample)),
+    );
     samples.extend(more().into_iter().map(|sample| (FIRST, sample)));
     // The fallbacks a newer daemon sends in place of what's newer.
     samples.extend([
@@ -5173,6 +5178,130 @@ fn side_samples() -> Vec<Sample> {
             }))
         }),
     );
+    samples
+}
+
+fn managed_mcp_samples() -> Vec<Sample> {
+    use crate::{McpAction, McpProxyAction, McpScope, McpState};
+    let mut samples = Vec::new();
+    for action in [
+        McpAction::List,
+        McpAction::Save {
+            name: "docs".into(),
+            settings: r#"{"url":"https://example.com/mcp"}"#.into(),
+            scope: McpScope::Project,
+            expected: Some("previous".into()),
+        },
+        McpAction::Remove {
+            name: "docs".into(),
+            expected: "previous".into(),
+        },
+        McpAction::Test {
+            name: "docs".into(),
+        },
+        McpAction::Reconnect {
+            name: "docs".into(),
+        },
+        McpAction::Authenticate {
+            name: "docs".into(),
+        },
+        McpAction::ForgetAuth {
+            name: "docs".into(),
+        },
+        McpAction::Import {
+            provider: "claude".into(),
+            names: vec!["docs".into()],
+        },
+        McpAction::Secret {
+            name: "docs-token".into(),
+            value: "fixture-value".into(),
+        },
+        McpAction::Trust {
+            name: "docs".into(),
+            expected: "previous".into(),
+        },
+        McpAction::CompleteLogin {
+            name: "docs".into(),
+            url: "http://127.0.0.1/callback?code=fixture".into(),
+        },
+    ] {
+        samples.push(Sample::Client(ClientMessage::Request(Request::Mcp {
+            pane: Some(PaneId(1)),
+            action,
+        })));
+    }
+    for action in [
+        McpProxyAction::Open,
+        McpProxyAction::Check {
+            revision: "revision".into(),
+            method: "tools/call".into(),
+            request: r#"{"name":"lookup"}"#.into(),
+        },
+        McpProxyAction::Heartbeat {
+            revision: "revision".into(),
+            state: McpState::Connected,
+        },
+        McpProxyAction::Report {
+            revision: "revision".into(),
+            state: McpState::Connected,
+            detail: "Ready".into(),
+            tools: vec![],
+        },
+    ] {
+        samples.push(Sample::Client(ClientMessage::Request(Request::McpProxy {
+            chat: TerminalId(2),
+            server: "docs".into(),
+            token: "fixture".into(),
+            action,
+        })));
+    }
+    samples.extend(managed_mcp_replies());
+    samples
+}
+
+fn managed_mcp_replies() -> Vec<Sample> {
+    use crate::{McpImport, McpReply, McpScope, McpServerInfo, McpState, McpToolInfo};
+    let mut samples = Vec::new();
+    for state in [
+        McpState::Disabled,
+        McpState::Disconnected,
+        McpState::Starting,
+        McpState::Connected,
+        McpState::NeedsLogin,
+        McpState::Error,
+        McpState::Ready,
+    ] {
+        samples.push(Sample::Server(ServerMessage::Response(Response::Mcp(
+            McpReply {
+                servers: vec![McpServerInfo {
+                    name: "docs".into(),
+                    settings: "{}".into(),
+                    source: "Personal".into(),
+                    path: "mcp.json".into(),
+                    revision: "revision".into(),
+                    editable: true,
+                    scope: McpScope::Personal,
+                    trusted: true,
+                    enabled: true,
+                    state,
+                    detail: "Ready".into(),
+                    tools: vec![McpToolInfo {
+                        name: "lookup".into(),
+                        description: "Find a document".into(),
+                    }],
+                }],
+                imports: vec![McpImport {
+                    name: "other".into(),
+                    description: "HTTP server".into(),
+                }],
+                login_url: Some("https://example.com/authorize".into()),
+                notice: "fixture".into(),
+            },
+        ))));
+    }
+    samples.push(Sample::Server(ServerMessage::Response(
+        Response::McpConnection("fixture-grant".into()),
+    )));
     samples
 }
 

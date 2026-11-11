@@ -80,6 +80,8 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::Lent
         | Request::DaemonSettings
         | Request::Work(_)
+        | Request::Mcp { .. }
+        | Request::McpProxy { .. }
         | Request::Skills { .. }
         | Request::Specialists {..}
         | Request::SaveSpecialist {..}

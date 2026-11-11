@@ -520,10 +520,11 @@ impl Agent {
         (display, trace): (Option<&crate::display::Env>, Option<&std::path::Path>),
         tasks: bool,
         native_plugins: bool,
+        native_mcp: bool,
         parser: &Parser,
     ) -> io::Result<Self> {
         let logged = format!("agent {name}");
-        let environment = if name == "codex" {
+        let mut environment = if name == "codex" {
             vec![(
                 "CODEX_CONFIG",
                 shared_skill_config(
@@ -534,6 +535,21 @@ impl Agent {
         } else {
             Vec::new()
         };
+        if name == "codex" && !native_mcp {
+            let entry = &mut environment[0].1;
+            let mut config: Value = serde_json::from_str(entry.to_str().expect("generated JSON"))
+                .expect("generated JSON");
+            config["features.apps"] = json!(false);
+            *entry = config.to_string().into();
+        }
+        environment.push((
+            "CLACKATOO_NATIVE_MCP",
+            if native_mcp {
+                "allow".into()
+            } else {
+                "off".into()
+            },
+        ));
         let mut peer = Peer::start_with_env(
             &logged,
             command,
@@ -566,6 +582,8 @@ impl Agent {
         if native_plugins {
             capabilities["_meta"]["clackatoo"]["native_plugins"] = json!(true);
         }
+        capabilities["_meta"]["clackatoo"]["native_mcp"] = json!(native_mcp);
+        capabilities["_meta"]["clackatoo"]["agent"] = json!(name);
         agent.client = capabilities.clone();
         agent.request(
             Pending::Initialize,
@@ -1184,6 +1202,24 @@ impl Agent {
         // detached turn on an idle race. Only this pinned, verified adapter
         // implements promptRequired and leaves completion with session/prompt.
         self.can_steer = result.as_ref().is_ok_and(safe_steering);
+        self.client["_meta"]["clackatoo"]["mcp_control"] = json!(result.as_ref().is_ok_and(|r| {
+            r.pointer("/_meta/clackatoo/managedMcp")
+                .and_then(Value::as_bool)
+                == Some(true)
+                || matches!(
+                    (
+                        r.pointer("/agentInfo/name").and_then(Value::as_str),
+                        r.pointer("/agentInfo/version").and_then(Value::as_str)
+                    ),
+                    (
+                        Some("@agentclientprotocol/claude-agent-acp"),
+                        Some("0.98.0")
+                    ) | (
+                        Some("@agentclientprotocol/codex-acp"),
+                        Some("2.2.2+clackatoo.2")
+                    )
+                )
+        }));
         self.can_close = result.as_ref().is_ok_and(|result| {
             result
                 .pointer("/agentCapabilities/sessionCapabilities/close")
@@ -1212,6 +1248,16 @@ impl Agent {
         self.can_list = Some(can_list);
         self.forking = result.as_ref().map(Forking::said).unwrap_or_default();
         for mut message in self.held.take().unwrap_or_default() {
+            if self.mcp_policy_refuses(&message) {
+                if let Some(pending) = message
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| self.answered_request(id))
+                {
+                    self.answered(pending,Err(RpcError{code:-32600,message:"This adapter cannot disable provider-managed MCP servers. Install the current bundled adapter, or allow provider-managed MCP in Settings and upgrade the daemon.".into(),data:None}),incoming);
+                }
+                continue;
+            }
             if !self.can_load && message["method"] == "session/load" {
                 self.cannot_load(&mut message);
             }
@@ -1558,6 +1604,36 @@ impl Agent {
             .unwrap_or(false)
     }
 
+    pub(crate) fn native_mcp(&self) -> bool {
+        self.client
+            .pointer("/_meta/clackatoo/native_mcp")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+    fn mcp_policy_refuses(&self, message: &Value) -> bool {
+        matches!(
+            message.get("method").and_then(Value::as_str),
+            Some("session/new" | "session/load" | "session/fork" | "session/resume")
+        ) && message
+            .pointer("/params/_meta/clackatoo/nativeMcp")
+            .and_then(Value::as_bool)
+            == Some(false)
+            && matches!(
+                self.client
+                    .pointer("/_meta/clackatoo/agent")
+                    .and_then(Value::as_str),
+                Some("claude" | "codex")
+            )
+            && !self.managed_mcp_control()
+    }
+
+    pub(crate) fn managed_mcp_control(&self) -> bool {
+        self.client
+            .pointer("/_meta/clackatoo/mcp_control")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// The client capabilities clackatoo declared as the agent started.
     pub(crate) fn declared(&self) -> &Value {
         &self.client
@@ -1648,12 +1724,18 @@ impl Pending {
 
 /// What a chat's session opens with, beside its working directory.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent session capabilities and provider policies"
+)]
 pub(crate) struct Opening {
     /// Context-only side question: remove built-in tools where supported.
     pub(crate) no_tools: bool,
     pub(crate) budget: crate::specialists::Budget,
     /// Opt in to the hosted runtime's own plugins and skill mechanism.
     pub(crate) native_plugins: bool,
+    pub(crate) native_mcp: bool,
+    pub(crate) managed_servers: Vec<Value>,
     /// The MCP server that gives it clackatoo's tools, if it gets them.
     pub(crate) tools: Option<Value>,
     /// Whether Claude Code keeps its own Task tool.
@@ -1668,6 +1750,8 @@ impl Default for Opening {
             no_tools: false,
             budget: crate::specialists::Budget::default(),
             native_plugins: false,
+            native_mcp: false,
+            managed_servers: Vec::new(),
             tools: None,
             task: true,
             limits: Limits::None,
@@ -1689,6 +1773,8 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
         no_tools,
         budget,
         native_plugins,
+        native_mcp,
+        managed_servers,
         tools,
         task,
         limits,
@@ -1759,15 +1845,20 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
         options.insert("strictMcpConfig".into(), json!(true));
         options.insert("plugins".into(), json!([]));
     }
+    if !native_mcp {
+        options.insert("strictMcpConfig".into(), json!(true));
+    }
     let servers = if no_tools {
         Vec::new()
     } else {
-        Vec::from_iter(tools)
+        tools.into_iter().chain(managed_servers).collect::<Vec<_>>()
     };
     let mut params = json!({ "cwd": cwd, "mcpServers": servers });
     if !options.is_empty() {
         params["_meta"] = json!({ "claudeCode": { "options": options } });
     }
+    params["_meta"]["clackatoo"]["nativeMcp"] =
+        json!(native_mcp && !no_tools && !limits.no_commands());
     params
 }
 
@@ -2331,7 +2422,7 @@ fn forks_at_messages(result: &Value) -> bool {
             Some("0.98.0")
         ) | (
             Some("@agentclientprotocol/codex-acp"),
-            Some("2.2.2" | "2.2.2+clackatoo.1")
+            Some("2.2.2" | "2.2.2+clackatoo.1" | "2.2.2+clackatoo.2")
         )
     )
 }
@@ -2351,7 +2442,7 @@ fn safe_steering(result: &Value) -> bool {
                 Some("0.98.0")
             ) | (
                 Some("@agentclientprotocol/codex-acp"),
-                Some("2.2.2+clackatoo.1")
+                Some("2.2.2+clackatoo.1" | "2.2.2+clackatoo.2")
             )
         )
 }
@@ -2435,7 +2526,8 @@ mod fork_tests {
     fn agent() -> Agent {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), false, false, &parser).unwrap();
+        let mut agent =
+            Agent::start("cat", &command, (None, None), false, false, false, &parser).unwrap();
         agent.held = Some(Vec::new());
         agent.pending.clear();
         agent
@@ -2582,7 +2674,8 @@ mod handover_tests {
     fn a_request_left_unanswered_is_still_seen_to_be_after_an_upgrade() {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), false, false, &parser).unwrap();
+        let mut agent =
+            Agent::start("cat", &command, (None, None), false, false, false, &parser).unwrap();
         agent.held = None;
         agent.pending.clear();
         agent.asked_at.clear();
@@ -2622,7 +2715,8 @@ mod handover_tests {
     fn an_agent_handed_over_keeps_what_it_waits_for_and_what_it_can_do() {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), true, true, &parser).unwrap();
+        let mut agent =
+            Agent::start("cat", &command, (None, None), true, true, true, &parser).unwrap();
         // As if it had answered `initialize`, saying what it can do.
         agent.held = None;
         (agent.can_close, agent.can_steer, agent.can_list) = (true, true, Some(false));
@@ -2656,6 +2750,8 @@ mod handover_tests {
         // What it was told as it started goes with it, as it was.
         let mut declared = client_capabilities(true, true);
         declared["_meta"]["clackatoo"]["native_plugins"] = json!(true);
+        declared["_meta"]["clackatoo"]["native_mcp"] = json!(true);
+        declared["_meta"]["clackatoo"]["agent"] = json!("cat");
         assert_eq!(agent.declared(), &declared);
         assert!(agent.native_plugins());
         let pending: Vec<String> = (agent.pending.iter())

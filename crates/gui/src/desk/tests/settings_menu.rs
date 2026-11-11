@@ -767,7 +767,7 @@ fn easy_pages_go_by_tab_braces_and_clicks_and_the_keys_page_records_keys() {
     type_keys(&mut desk, "}");
     assert_eq!(easy(&mut desk).title, "Editor");
     type_keys(&mut desk, "{{");
-    assert_eq!(easy(&mut desk).title, "Skills");
+    assert_eq!(easy(&mut desk).title, "MCP Servers");
     desk.settings_pointer(SettingsHit::Page(3));
     let view = easy(&mut desk);
     assert_eq!(view.title, "Keys");

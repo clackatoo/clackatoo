@@ -1631,6 +1631,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "/btw asks a side question; keep the chat or attach its answer to the main draft",
     },
+    News {
+        id: "managed-mcp",
+        date: "2026-11-11",
+        lesson: "agents",
+        what: "Shared MCP servers in Settings, with private credentials and browser sign-in",
+    },
 ];
 
 impl News {

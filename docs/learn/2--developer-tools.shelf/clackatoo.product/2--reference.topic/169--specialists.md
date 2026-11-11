@@ -37,7 +37,7 @@ Open **Settings → Agents → Specialists**, or click the cog beside
 **Edit** beside an existing role. The form includes instructions,
 description, when-to-use guidance, optional provider, model and effort
 defaults, skills and skillsets, delegation targets, invocation controls,
-and access, time, turn and cost limits.
+managed MCP server selections, and access, time, turn and cost limits.
 
 Instructions accept multiline paste. While editing, <kbd>Ctrl+J</kbd>
 inserts a line, <kbd>Enter</kbd> finishes the field, and <kbd>Esc</kbd>
@@ -182,3 +182,10 @@ session opens. A provider change cannot silently drop an unsupported budget.
 
 Custom tool and path permissions, memory, Action Prompts and execution
 location defaults remain separate future features.
+
+## Managed MCP servers
+
+A specialist can bundle `mcp.json` and select configured servers with
+`mcp_servers: [docs, search]`, or `[]` for none. Its source approval, the chat's
+Tools setting and access limits still apply. See [MCP servers](~clackatoo/reference/mcp-servers)
+for discovery, bundle composition, credentials and permissions.

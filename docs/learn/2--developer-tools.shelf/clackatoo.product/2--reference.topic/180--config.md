@@ -986,6 +986,9 @@ config runs again (see [When it runs](#when-it-runs)). The
 | `daemon.upgrade.keep_agents` | Agents go on through an upgrade, with what they run, rather than being stopped and started again (see [agents through upgrades](~clackatoo/reference/agents-lasting)). | on |
 | `daemon.plugins.claude` | Allow Claude Code's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
 | `daemon.plugins.codex` | Allow Codex's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
+| `daemon.mcp.providers` | Allow provider-managed MCP servers alongside clackatoo's managed servers. Takes effect after a daemon restart or upgrade. | off |
+| `daemon.mcp.claude` | Claude Code override: `inherit`, `off`, or `allow`. Takes effect after a daemon restart or upgrade. | `inherit` |
+| `daemon.mcp.codex` | Codex override: `inherit`, `off`, or `allow`. Takes effect after a daemon restart or upgrade. | `inherit` |
 
 ### Chats agents start
 

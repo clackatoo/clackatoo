@@ -93,6 +93,8 @@ pollster = "1.0"
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "log"] }
 # A self-signed certificate for each daemon's QUIC endpoint.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# Literal credential matching, without rescanning replacement markers.
+aho-corasick = "1.1"
 # The finder's grep, over a whole file at a time, as ripgrep's engine, and
 # editors' patterns, for `/`, `:s` and `:g`, translated from Vim's.
 regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
@@ -112,6 +114,11 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # Checks the files of language packs downloaded (SHA-256). Already built
 # for rustls.
 ring = "0.17"
+# External MCP transports and OAuth live in isolated managed proxy processes.
+rmcp = { version = "3.9.0", default-features = false, features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+tokio = { version = "1.54", features = ["rt", "macros", "io-std", "io-util", "net", "process", "sync", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
+async-trait = "0.1"
 # Disk-backed code symbols; bundled SQLite keeps installations self-contained.
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 # TLS for QUIC: the same version and backend as quinn-proto's.

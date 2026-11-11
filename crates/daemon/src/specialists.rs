@@ -29,6 +29,7 @@ pub(crate) struct Extras {
     pub(crate) delegates_to: Option<Vec<String>>,
     pub(crate) skills: Option<Vec<String>>,
     pub(crate) skillsets: Option<Vec<String>>,
+    pub(crate) mcp_servers: Option<Vec<String>>,
     pub(crate) budget: Budget,
     pub(crate) directories: Vec<std::path::PathBuf>,
 }
@@ -42,6 +43,7 @@ impl Default for Extras {
             delegates_to: None,
             skills: None,
             skillsets: None,
+            mcp_servers: None,
             budget: Budget::default(),
             directories: Vec::new(),
         }
@@ -103,6 +105,7 @@ impl Extras {
             ("delegates_to", &mut extra.delegates_to),
             ("skills", &mut extra.skills),
             ("skillsets", &mut extra.skillsets),
+            ("mcp_servers", &mut extra.mcp_servers),
         ] {
             if let Some(value) = value.get(name) {
                 let values = value

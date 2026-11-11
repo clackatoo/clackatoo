@@ -83,6 +83,7 @@ mod language;
 mod lending;
 mod lent_background;
 mod links;
+mod managed_mcp;
 mod masks;
 mod mentions;
 mod notices;
@@ -1131,6 +1132,7 @@ pub struct Daemon {
     /// read, and what's held behind them.
     mentioning: mentions::Mentioning,
     skills: skills::Skills,
+    managed_mcp: managed_mcp::ManagedMcp,
     specialist_files: specialist_files::Saving,
     work: work::Work,
     outlines: outline::Outlines,
@@ -1383,6 +1385,7 @@ impl Daemon {
             agents: chats::Agents::default(),
             mentioning: mentions::Mentioning::default(),
             skills: skills::Skills::default(),
+            managed_mcp: managed_mcp::ManagedMcp::default(),
             specialist_files: specialist_files::Saving::default(),
             work: work::Work::new(Arc::clone(&waker)),
             outlines: outline::Outlines::default(),
@@ -1514,6 +1517,7 @@ impl Daemon {
             daemon.resume_closed(&layout.closed);
         }
         daemon.resume_machines(state);
+        daemon.resume_managed_mcp(&state.managed_mcp);
         if let Some(images) = images {
             daemon.resume_images(images);
         }
@@ -1859,6 +1863,7 @@ impl Daemon {
         self.finish_outlines_for_upgrade();
         self.finish_contexts_for_upgrade();
         self.finish_specialist_files();
+        self.finish_managed_mcp();
         // Capture before ending links or dropping their client receipts.
         let federation = Some(self.hand_over_federation()?);
         // And the ports forwarded through them, still listening.
@@ -2076,6 +2081,7 @@ impl Daemon {
                 image_originals,
                 chat_queues,
                 context_records,
+                managed_mcp: self.hand_over_managed_mcp(),
                 drafts,
                 uids,
                 branches,
@@ -2277,6 +2283,7 @@ impl Daemon {
                     .chain(self.work.due)
                     .chain(self.next_outline_due())
                     .chain(self.next_context_due())
+                    .chain(self.next_managed_mcp_due())
                     .chain(self.next_paste_due())
                     .chain(self.next_grace_due())
                     .chain(self.held_until())
@@ -2334,6 +2341,7 @@ impl Daemon {
             self.take_outlines();
             self.take_contexts();
             self.take_specialist_files();
+            self.take_managed_mcp();
             self.take_specialist_limits();
             self.take_renames();
             self.take_pastes();
@@ -3623,6 +3631,20 @@ impl Daemon {
                 }
                 Some(ClientMessage::Request(request)) => match self.route_request(token, request) {
                     relay::Routed::Here(request) => {
+                        if let Request::Mcp { pane, action } = request {
+                            self.request_mcp(token, pane, action);
+                            continue;
+                        }
+                        if let Request::McpProxy {
+                            chat,
+                            server,
+                            token: shown,
+                            action,
+                        } = request
+                        {
+                            self.request_mcp_proxy(token, chat, server, shown, action);
+                            continue;
+                        }
                         if let Request::Side { chat, action } = request {
                             self.request_side(token, chat, action);
                             continue;
@@ -3977,6 +3999,8 @@ impl Daemon {
         let response = match request {
             Request::Work(action) => self.serve_work(token, action),
             Request::Side { .. }
+            | Request::Mcp { .. }
+            | Request::McpProxy { .. }
             | Request::Context { .. }
             | Request::Skills { .. }
             | Request::Specialists { .. }

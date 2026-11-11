@@ -28,13 +28,14 @@ pub(crate) enum Page {
     Agents,
     Skills,
     Specialists,
+    Mcp,
     Keys,
     Machines,
 }
 
 impl Page {
     /// Every page, in the order the side lists them.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Editor,
         Self::Terminals,
@@ -43,12 +44,13 @@ impl Page {
         Self::Agents,
         Self::Specialists,
         Self::Skills,
+        Self::Mcp,
     ];
 
     /// Settings pages are grouped by what they configure.
     pub(crate) fn group(self) -> &'static str {
         match self {
-            Self::Agents | Self::Skills | Self::Specialists => "Agents",
+            Self::Agents | Self::Skills | Self::Specialists | Self::Mcp => "Agents",
             _ => "General",
         }
     }
@@ -60,6 +62,7 @@ impl Page {
             Self::Terminals => "Terminals",
             Self::Agents => "Agents",
             Self::Skills => "Skills",
+            Self::Mcp => "MCP Servers",
             Self::Specialists => "Specialists",
             Self::Keys => "Keys",
             Self::Machines => "Phone & other machines",
@@ -74,6 +77,7 @@ impl Page {
             Self::Terminals => "Marks, what's kept after a restart, and pasting.",
             Self::Agents => "Which agent a new chat starts with, and what it may do.",
             Self::Specialists => "Create and customize reusable agent roles.",
+            Self::Mcp => "Manage server connections, credentials and provider configuration.",
             Self::Skills => "Shared skills and skillsets available to every agent in this project.",
             Self::Keys => "Keys for what you do most, recorded as you press them.",
             Self::Machines => "Working on other machines, and how they show here.",
@@ -99,6 +103,9 @@ impl Page {
                 "The phone app and the web's password are the daemon's: clackatoo web sets them \
                  up.",
             ),
+            Self::Mcp => Some(
+                "Managed servers use Clackatoo proxies. Claude Code and the bundled Codex adapter support provider-server suppression; other adapters must explicitly support it. Provider policy changes apply after a daemon upgrade or restart.",
+            ),
             Self::Specialists => Some(
                 "Specialists are SPECIALIST.md files. Create personal or project roles, or copy a packaged role to customize it. Existing chats keep their current role.",
             ),
@@ -109,7 +116,7 @@ impl Page {
     pub(crate) fn icon(self) -> Icon {
         match self {
             Self::Appearance => Icon::Appearance,
-            Self::Editor | Self::Skills => Icon::Code,
+            Self::Editor | Self::Skills | Self::Mcp => Icon::Code,
             Self::Terminals => Icon::Terminal,
             Self::Agents | Self::Specialists => Icon::Star,
             Self::Keys => Icon::Keyboard,
@@ -278,7 +285,7 @@ const fn keys(label: &'static str, action: Action) -> Entry {
     }
 }
 
-use Page::{Agents, Appearance, Editor, Keys, Machines, Terminals};
+use Page::{Agents, Appearance, Editor, Keys, Machines, Mcp, Terminals};
 
 /// Every entry, page by page, in the order each page shows them.
 pub(crate) const ENTRIES: &[Entry] = &[
@@ -692,6 +699,41 @@ pub(crate) const ENTRIES: &[Entry] = &[
         "Allow Codex plugins",
         "Use Codex's plugins and native skill catalogue alongside shared skills. Takes effect after a daemon restart or upgrade.",
         "plugins.codex",
+    ),
+    toggle(
+        Mcp,
+        "Provider-managed MCP",
+        "Allow provider-managed MCP servers",
+        "Allow additional servers from the agent's own configuration. Managed servers remain available independently.",
+        "mcp.providers",
+    ),
+    choices(
+        Mcp,
+        "Provider-managed MCP",
+        (
+            "Claude Code override",
+            "Uses strict MCP configuration when off.",
+        ),
+        &["mcp.claude"],
+        &[
+            choice("Default", &["inherit"]),
+            choice("Off", &["off"]),
+            choice("Allow", &["allow"]),
+        ],
+    ),
+    choices(
+        Mcp,
+        "Provider-managed MCP",
+        (
+            "Codex override",
+            "Requires Clackatoo's bundled Codex adapter to suppress every configured layer.",
+        ),
+        &["mcp.codex"],
+        &[
+            choice("Default", &["inherit"]),
+            choice("Off", &["off"]),
+            choice("Allow", &["allow"]),
+        ],
     ),
     // Keys.
     keys("New tab", Action::NewTab),

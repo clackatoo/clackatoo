@@ -36,7 +36,7 @@ struct Text {
 
 // Each field retains the provider-independent schema; map-valued model/effort
 // defaults can be edited as JSON without losing another provider's defaults.
-const FIELDS: [(&str, &str, &str); 19] = [
+const FIELDS: [(&str, &str, &str); 20] = [
     (
         "Name",
         "name",
@@ -132,6 +132,11 @@ const FIELDS: [(&str, &str, &str); 19] = [
         "scope",
         "Personal applies across projects. Project saves .agents/specialists in this repository. Existing files keep their location.",
     ),
+    (
+        "MCP servers",
+        "mcp_servers",
+        "Comma-separated managed server names. Blank inherits; [] selects none. Skillsets may bundle server definitions.",
+    ),
 ];
 
 impl Specialists {
@@ -160,7 +165,10 @@ impl SettingsMenu {
     }
     pub(super) fn specialist_field(&self, row: usize) -> usize {
         if self.specialists.draft.is_some() {
-            if row == 0 { 18 } else { row - 1 }
+            const ORDER: &[usize] = &[
+                18, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 19, 13, 14, 15, 16, 17,
+            ];
+            ORDER[row]
         } else {
             row
         }
@@ -623,6 +631,20 @@ impl Draft {
                 v[key] = value;
             }
         }
+        let names = self.fields[19].trim();
+        if !names.is_empty() {
+            v["mcp_servers"] = if names == "[]" {
+                json!([])
+            } else {
+                json!(
+                    names
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                )
+            };
+        }
         Ok(SpecialistDefinition {
             name,
             settings: v.to_string(),
@@ -632,7 +654,7 @@ impl Draft {
     }
 }
 
-fn vertical_cursor(text: &str, cursor: usize, up: bool) -> usize {
+pub(super) fn vertical_cursor(text: &str, cursor: usize, up: bool) -> usize {
     let start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
     let column = text[start..cursor].chars().count();
     let target = if up {

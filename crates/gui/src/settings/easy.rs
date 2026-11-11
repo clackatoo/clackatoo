@@ -69,6 +69,7 @@ enum Shown {
     Advanced(usize),
     Skill(usize),
     Specialist(usize),
+    Mcp(usize),
 }
 
 /// How many of what only Advanced has a search shows.
@@ -139,7 +140,7 @@ impl Easy {
         self.reveal = false;
     }
 
-    fn page(&self) -> Page {
+    pub(super) fn page(&self) -> Page {
         Page::ALL[self.page.min(Page::ALL.len() - 1)]
     }
 }
@@ -191,7 +192,7 @@ impl SettingsMenu {
     }
 
     /// Whether a search shows what it found in place of a page.
-    fn searching(&self) -> bool {
+    pub(super) fn searching(&self) -> bool {
         !self.picker.query().is_empty()
     }
 
@@ -202,6 +203,22 @@ impl SettingsMenu {
         let daemon = self.daemon;
         let shown = |entry: &Entry| daemon || !entry.daemons();
         if !self.searching() {
+            if self.easy.page() == Page::Mcp {
+                let provider = easy::on(Page::Mcp)
+                    .filter(|_| self.mcp_browser())
+                    .filter(|entry| shown(entry))
+                    .map(Shown::Entry)
+                    .collect();
+                let mut sections = Vec::new();
+                if self.mcp_browser() {
+                    sections.push(("Provider-managed MCP".into(), provider));
+                }
+                sections.push((
+                    "Managed MCP servers".into(),
+                    (0..self.mcp_rows()).map(Shown::Mcp).collect(),
+                ));
+                return sections;
+            }
             if self.easy.page() == Page::Specialists {
                 return vec![(
                     if self.specialists.draft.is_some() {
@@ -396,7 +413,7 @@ impl SettingsMenu {
                             ),
                         })
                     }
-                    None | Some(Shown::Skill(_) | Shown::Specialist(_)) => None,
+                    None | Some(Shown::Skill(_) | Shown::Specialist(_) | Shown::Mcp(_)) => None,
                 };
                 self.mode = Mode::Advanced;
                 if let Some(index) = picked
@@ -445,6 +462,7 @@ impl SettingsMenu {
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
             Some(Shown::Skill(at)) => self.open_skill(at),
             Some(Shown::Specialist(at)) => self.specialist_act(at),
+            Some(Shown::Mcp(at)) => self.mcp_act(at),
         }
     }
 
@@ -797,6 +815,7 @@ impl SettingsMenu {
                 | SettingsHit::Search
         ) {
             self.finish_specialist_field();
+            self.finish_mcp_field();
         }
         self.easy.keys = false;
         match hit {
@@ -840,6 +859,10 @@ impl SettingsMenu {
                         self.specialist_scope(at == 1)
                     }
                     (Shown::Specialist(at), _) => self.specialist_act(at),
+                    (Shown::Mcp(at), SettingsHit::Control(_, part)) => {
+                        self.mcp_act_part(at, Some(part))
+                    }
+                    (Shown::Mcp(at), _) => self.mcp_act(at),
                     (Shown::Advanced(index), SettingsHit::Control(..)) => {
                         self.go_to_advanced(index)
                     }
@@ -941,13 +964,19 @@ impl SettingsMenu {
             ("Search".to_owned(), subtitle)
         } else {
             (
-                page.title().to_owned(),
+                if page == Page::Mcp {
+                    self.mcp_title()
+                } else {
+                    page.title().to_owned()
+                },
                 if page == Page::Specialists {
                     if self.specialists.draft.is_some() {
                         "Edit the draft, then Save. Esc cancels a field edit.".into()
                     } else {
                         self.specialists.status.clone()
                     }
+                } else if page == Page::Mcp {
+                    self.mcp_subtitle()
                 } else if page == Page::Skills {
                     self.skills_status.clone()
                 } else {
@@ -967,6 +996,7 @@ impl SettingsMenu {
         };
         // Whether a row shows the daemon's settings.
         let daemons = page == Page::Specialists
+            || page == Page::Mcp
             || (sections.iter().flat_map(|(_, rows)| rows))
                 .any(|shown| matches!(shown, Shown::Entry(entry) if entry.daemons()));
         let mut drawn = Vec::new();
@@ -987,6 +1017,9 @@ impl SettingsMenu {
         // What's being typed or recorded says how, unless something more
         // was said.
         let editing = match &self.editing {
+            _ if self.mcp_editing() => Some(
+                "Enter finishes the field · Ctrl+J inserts a line in JSON · Esc undoes this field edit",
+            ),
             _ if self.specialist_editing() => Some(
                 "Enter finishes the field · Ctrl+J inserts a line · Esc undoes this field edit",
             ),
@@ -1023,6 +1056,14 @@ impl SettingsMenu {
             } else {
                 "Create a specialist or choose an existing role to customize".into()
             }
+        } else if page == Page::Mcp
+            && !searching
+            && self.mcp.editor().is_some()
+            && editing.is_none()
+            && self.said.is_none()
+            && self.said_saved.is_none()
+        {
+            "Save or Ctrl+S applies this draft · Cancel discards it".into()
         } else if page == Page::Skills && !searching {
             "Skills are read from files on the workspace's machine".into()
         } else {
@@ -1043,7 +1084,7 @@ impl SettingsMenu {
                 .flatten(),
             focus: (self.easy.keys && !self.easy.on_side && found > 0).then_some(self.easy.focus),
             top: self.easy.top,
-            reveal: self.easy.reveal,
+            reveal: self.easy.reveal || self.mcp_editing(),
             footer,
             warning,
             fonts,
@@ -1056,6 +1097,7 @@ impl SettingsMenu {
     fn row_view(&mut self, shown: Shown, searching: bool, facts: &Facts, all: &[Bound]) -> RowView {
         let entry = match shown {
             Shown::Specialist(at) => return self.specialist_row(at),
+            Shown::Mcp(at) => return self.mcp_row(at),
             Shown::Skill(at) => {
                 let skill = &self.skills[at];
                 let status = match &skill.problem {
