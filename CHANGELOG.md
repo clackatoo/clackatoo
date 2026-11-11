@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.39 (2026-11-11)
+
+### Features
+
+- **mcp:** manage shared servers, credentials and provider isolation (1e3b31b5)
+
 ## 2026.11.38 (2026-11-11)
 
 ### Features
